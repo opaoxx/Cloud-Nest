@@ -1,5 +1,26 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-04：Trae 提示 MySQL 驱动无法导入
+
+### 问题现象
+
+Trae 打开 cmd/database/main.go 时提示 could not import github.com/go-sql-driver/mysql，原因显示 no required module provides package。当前根 go.mod 已声明 v1.9.2，项目根目录的 go test ./cmd/database 可以通过，首次验证重新下载了当前 GOPATH 中的驱动依赖。
+
+### 排查结果
+
+- 项目根目录与 Trae 工作区均为 F:\CloudNest，根 go.mod 已直接声明 MySQL 驱动 v1.9.2。
+- 当前 Go 工具为 E:\Go\bin\go.exe，GOPATH 为 E:\Go\gopath。首次验证在此缓存重新下载了 MySQL 驱动及 edwards25519 依赖。
+- Trae 的 gopls v0.24.0 日志出现 no package data for import github.com/go-sql-driver/mysql，确认编辑器曾未取得该包数据。
+- 补齐缓存后，go list 和独立 gopls 检查均正常。缓存缺失与旧包加载状态是当前判断，编辑器内是否消除提示需刷新语言服务器后确认。
+
+### 处理与验证
+
+- 已通过 go test ./cmd/database 补齐当前缓存，模块版本沿用 go.mod。
+- go list github.com/go-sql-driver/mysql 成功，go list -e -json ./cmd/database 的 Error 和 DepsErrors 为空。
+- gopls check cmd/database/main.go 通过，未输出诊断。
+- Trae 如仍显示旧错误，执行 Go: Restart Language Server，必要时 Developer: Reload Window 后复核。
+- 另一次完整 go mod verify 报告 mimetype v1.4.12、go-urn v1.4.0、x/arch v0.22.0 三个间接依赖的本机缓存内容变化，作为独立环境问题保留记录。
+
 ## 2026-11-04：SQL 迁移文件换行稳定性
 
 ### 问题现象
