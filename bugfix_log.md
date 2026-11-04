@@ -19,6 +19,7 @@ Trae 打开 cmd/database/main.go 时提示 could not import github.com/go-sql-dr
 - go list github.com/go-sql-driver/mysql 成功，go list -e -json ./cmd/database 的 Error 和 DepsErrors 为空。
 - gopls check cmd/database/main.go 通过，未输出诊断。
 - Trae 如仍显示旧错误，执行 Go: Restart Language Server，必要时 Developer: Reload Window 后复核。
+- 用户后续确认 Trae 已正常，驱动导入提示已消除。
 - 另一次完整 go mod verify 报告 mimetype v1.4.12、go-urn v1.4.0、x/arch v0.22.0 三个间接依赖的本机缓存内容变化，作为独立环境问题保留记录。
 
 ## 2026-11-04：SQL 迁移文件换行稳定性
