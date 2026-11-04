@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端目前提供 /ping，支持监听地址校验与统一的 JSON 启动日志，数据库访问与文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端目前提供 /ping，支持 HTTP/MySQL 配置读取校验与统一的 JSON 启动日志，数据库连接与文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -37,6 +37,8 @@ go run ./cmd/server
 ~~~
 
 Enter-Dev.ps1 为当前 PowerShell 加载现有 Android SDK、ADB、Wails CLI 和后端地址；默认 SDK 为 F:\Android\Sdk，不修改系统级环境变量。
+
+后端读取 CLOUDNEST_DB_ADDRESS、CLOUDNEST_DB_NAME、CLOUDNEST_DB_USER、CLOUDNEST_DB_PASSWORD，未设置时分别采用 127.0.0.1:13309、cloudnest、root、root。当前只完成配置读取与格式校验，启动成功及 /ping 可响应尚不表示数据库已连接。配置说明与验证方法见 [第 003 步学习记录](docs/开发学习记录.md#第-003-步读取并校验-mysql-连接配置)。
 
 Start-Infra.ps1 会先校验所有容器（包括已停止容器）的端口预留、主机端口绑定和子网，再按校验通过的官方源码构建本地 MinIO 并启动 CloudNest 容器。首次构建需要下载依赖。
 
