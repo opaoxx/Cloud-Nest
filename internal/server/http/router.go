@@ -17,7 +17,7 @@ func NewRouter(logger *slog.Logger, checkReadiness func(context.Context) bool) *
 	router := gin.New()
 
 	// 2. 先分配 ID，再记录处理结果；Recovery 在内层处理异常且不转储原始请求。
-	router.Use(middleware.RequestID(), middleware.RequestLog(logger), gin.RecoveryWithWriter(nil))
+	router.Use(middleware.RequestID(), middleware.RequestLog(logger), middleware.Recovery(handler.InternalError))
 
 	// 3. 注册系统探测接口，就绪检查绑定调用方提供的检查能力。
 	router.GET("/ping", handler.Ping)

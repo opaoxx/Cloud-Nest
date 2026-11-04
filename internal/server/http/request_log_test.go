@@ -84,7 +84,16 @@ func TestRequestLogStatusAndPrivacy(t *testing.T) {
 			if response.Code != testCase.status || record["status"] != float64(testCase.status) || record["level"] != testCase.level || record["request_id"] != response.Header().Get("X-Request-ID") || record["request_id"] != "28ee758a-0727-42de-ae7d-3bb33155e148" {
 				t.Fatal("日志与最终响应的状态、级别或 ID 不一致")
 			}
-			if record["method"] != "GET" || record["path"] != "/test" || record["msg"] != "HTTP 请求完成" || record["service"] != "cloudnest-api" || record["time"] == nil || len(record) != 9 {
+			wantFieldCount := 9
+			if testCase.panic {
+				wantFieldCount = 10
+				if record["recovered_panic"] != true {
+					t.Fatal("异常完成日志缺少布尔标记")
+				}
+			} else if _, exists := record["recovered_panic"]; exists {
+				t.Fatal("普通请求被错误标记为异常")
+			}
+			if record["method"] != "GET" || record["path"] != "/test" || record["msg"] != "HTTP 请求完成" || record["service"] != "cloudnest-api" || record["time"] == nil || len(record) != wantFieldCount {
 				t.Fatal("日志字段不符合约定")
 			}
 			if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {
@@ -104,26 +113,36 @@ func TestRequestLogStatusAndPrivacy(t *testing.T) {
 }
 
 func TestRequestLogConcurrentCorrelation(t *testing.T) {
-	// 1. 多个并发请求共用同一个日志对象，检查每个响应与日志的一一对应。
+	// 1. 正常与异常请求并发共用日志对象，检查响应对应关系及异常标记隔离。
 	var output bytes.Buffer
 	router := NewRouter(logging.New(&output), func(ctx context.Context) bool { return true })
+	router.GET("/test-concurrent-error", func(requestContext *gin.Context) { panic("private-concurrent-panic") })
 	const requestCount = 32
 	responses := make(chan *httptest.ResponseRecorder, requestCount)
-	for range requestCount {
-		go func() {
+	for requestIndex := range requestCount {
+		path := "/health/live"
+		if requestIndex%2 != 0 {
+			path = "/test-concurrent-error"
+		}
+		go func(path string) {
 			response := httptest.NewRecorder()
-			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/live", nil))
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 			responses <- response
-		}()
+		}(path)
 	}
-	responseIDs := make(map[string]bool)
+	responseIDs := make(map[string]int)
+	statusCounts := make(map[int]int)
 	for range requestCount {
 		response := <-responses
 		requestID := response.Header().Get("X-Request-ID")
-		if response.Code != 200 || requestID == "" || responseIDs[requestID] {
+		if (response.Code != 200 && response.Code != 500) || requestID == "" || responseIDs[requestID] != 0 {
 			t.Fatal("并发响应缺少唯一请求 ID")
 		}
-		responseIDs[requestID] = true
+		responseIDs[requestID] = response.Code
+		statusCounts[response.Code]++
+	}
+	if statusCounts[200] != requestCount/2 || statusCounts[500] != requestCount/2 {
+		t.Fatal("并发正常与异常请求没有按预期处理")
 	}
 
 	// 2. 所有请求完成后读取日志；同一个 ID 只能出现一次，不能串到其他请求。
@@ -134,8 +153,16 @@ func TestRequestLogConcurrentCorrelation(t *testing.T) {
 			t.Fatal(err)
 		}
 		requestID, _ := record["request_id"].(string)
-		if !responseIDs[requestID] || record["status"] != float64(200) || record["path"] != "/health/live" {
+		expectedStatus := responseIDs[requestID]
+		if expectedStatus == 0 || record["status"] != float64(expectedStatus) {
 			t.Fatal("并发日志重复、串号或结果错误")
+		}
+		if expectedStatus == 500 {
+			if record["level"] != "ERROR" || record["recovered_panic"] != true || record["path"] != "/test-concurrent-error" {
+				t.Fatal("并发异常日志缺少正确标记或路径")
+			}
+		} else if record["level"] != "INFO" || record["recovered_panic"] != nil || record["path"] != "/health/live" {
+			t.Fatal("并发正常请求受到其他异常请求影响")
 		}
 		delete(responseIDs, requestID)
 	}
