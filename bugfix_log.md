@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-05：默认异常转储可能输出 Cookie 和查询参数
+
+### 问题现象
+
+第 012 步核对请求日志时发现，现有 gin.Default 附带的 Recovery 在调试模式发生 panic 时会输出请求转储。使用仅含假数据的独立程序复现，日志同时包含测试 Cookie 和 URL 查询参数；当前版本只对 Authorization 请求头进行遮盖，不能满足项目排除会话凭证和签名查询参数的日志约定。
+
+### 根因与修复方案
+
+Gin v1.12.0 的 secureRequestDump 只遮盖 Authorization，调试异常转储仍包含请求 URI 与其他请求头。改为 gin.New，显式装配 RequestID → RequestLog → gin.RecoveryWithWriter(nil)。Recovery 仍恢复异常并返回 500，但不输出原始请求或 panic 转储；RequestLog 在恢复之后只记录最终 ID、方法、URL.Path、状态与耗时。
+
+### 验证结果
+
+9 种响应场景（含正常响应、提前终止、取消和 panic 恢复）均只输出一条 JSON 完成日志，最终状态、级别和 ID 与响应一致。测试同时捕获默认异常输出，确认查询、Cookie、其他请求头、正文、c.Errors 和 panic 原始载荷均未回显。32 个并发请求的响应与日志一一对应。真实服务验证三个系统接口与 404，JSON 正文保持原样，日志不含测试敏感标记，也没有旧 Gin 文本访问日志；正常退出顺序和退出码 0 通过。go test ./...、go vet ./... 与 git diff --check 通过。
+
 ## 2026-11-04：第 004 步连接器初始化的字符集设置失败
 
 ### 问题现象

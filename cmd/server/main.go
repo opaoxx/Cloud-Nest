@@ -104,7 +104,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 7. 将现有依赖的检查方法交给服务层，再把就绪检查能力绑定到路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
-	router := serverhttp.NewRouter(healthService.Ready)
+	router := serverhttp.NewRouter(logger, healthService.Ready)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,

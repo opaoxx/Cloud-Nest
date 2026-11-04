@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
@@ -32,7 +34,7 @@ func TestReadinessRouteReflectsDependencyChanges(t *testing.T) {
 		}
 		return nil
 	})
-	router := NewRouter(healthService.Ready)
+	router := NewRouter(logging.New(io.Discard), healthService.Ready)
 	testCases := []struct {
 		name           string
 		databaseFailed bool
@@ -90,7 +92,7 @@ func TestReadinessRouteReflectsDependencyChanges(t *testing.T) {
 
 func TestRouterRequestIDOnSuccessAndErrors(t *testing.T) {
 	// 1. 使用生产路由和 Recovery，覆盖成功、依赖故障、未注册路径与处理异常。
-	router := NewRouter(func(ctx context.Context) bool { return false })
+	router := NewRouter(logging.New(io.Discard), func(ctx context.Context) bool { return false })
 	panicRequestID := ""
 	router.GET("/test-panic", func(requestContext *gin.Context) {
 		panicRequestID = requestcontext.RequestID(requestContext.Request.Context())
