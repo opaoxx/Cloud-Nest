@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
@@ -12,17 +17,25 @@ import (
 )
 
 func main() {
-	// 1. 初始化固定格式的启动日志，再执行可返回错误的启动流程。
+	// 1. 将退出信号转换为取消通知，让启动检查和 HTTP 服务共用。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 2. 初始化日志并执行启动流程，普通取消正常退出，真实错误使用非零退出码。
 	logger := logging.New(os.Stdout)
-	if err := run(logger); err != nil {
-		// 2. run 已记录错误并执行资源清理，此处只设置失败退出码。
+	if err := run(ctx, logger); err != nil {
+		if errors.Is(err, context.Canceled) {
+			logger.Info("服务启动已取消")
+			return
+		}
 		os.Exit(1)
 	}
+	logger.Info("服务已退出")
 }
 
 // run 装配服务所需资源并启动 HTTP，返回前关闭已创建的数据库连接池。
 // 各失败环节在此记录原因，main 在清理完成后设置进程退出码。
-func run(logger *slog.Logger) error {
+func run(ctx context.Context, logger *slog.Logger) error {
 	// 1. 读取并校验监听配置，失败时记录原因并停止启动。
 	listenAddress, err := config.LoadHTTPAddress()
 	if err != nil {
@@ -40,32 +53,45 @@ func run(logger *slog.Logger) error {
 	logger.Info("MySQL 连接配置读取成功", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
 	// 3. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
-	connectionPool, err := repository.OpenMySQL(context.Background(), databaseConfig)
+	connectionPool, err := repository.OpenMySQL(ctx, databaseConfig)
 	if err != nil {
-		logger.Error("MySQL 连接失败", "stage", "database", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName, "error", err)
+		if !errors.Is(err, context.Canceled) {
+			logger.Error("MySQL 连接失败", "stage", "database", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName, "error", err)
+		}
 		return err
 	}
 	defer func() {
 		if err := connectionPool.Close(); err != nil {
 			logger.Error("关闭 MySQL 连接池失败", "stage", "database", "error", err)
+			return
 		}
+		logger.Info("MySQL 连接池已关闭")
 	}()
 	logger.Info("MySQL 连接检查通过", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
 	// 4. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
-	if err := repository.CheckSchema(context.Background(), connectionPool); err != nil {
-		logger.Error("数据库迁移检查失败", "stage", "schema", "database", databaseConfig.DatabaseName, "error", err)
+	if err := repository.CheckSchema(ctx, connectionPool); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			logger.Error("数据库迁移检查失败", "stage", "schema", "database", databaseConfig.DatabaseName, "error", err)
+		}
 		return err
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
 	// 5. 由 HTTP 层创建路由，启动入口只负责装配与监听。
 	router := serverhttp.NewRouter()
+	httpServer := &http.Server{
+		Addr:              listenAddress,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 
-	// 6. 记录监听尝试；实际启动失败时记录地址和原因，再结束进程。
+	// 6. 启动 HTTP 并处理退出通知；返回后再由 defer 关闭数据库连接池。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
-	if err := router.Run(listenAddress); err != nil {
-		logger.Error("HTTP 服务启动失败", "stage", "http", "address", listenAddress, "error", err)
+	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			logger.Error("HTTP 服务运行或退出失败", "stage", "http", "address", listenAddress, "error", err)
+		}
 		return err
 	}
 	return nil
