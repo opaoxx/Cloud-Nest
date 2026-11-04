@@ -24,6 +24,9 @@ func NewRouter(logger *slog.Logger, checkReadiness func(context.Context) bool) *
 	router.GET("/health/live", handler.Live)
 	router.GET("/health/ready", handler.Ready(checkReadiness))
 
-	// 4. 返回路由器，交给启动入口监听。
+	// 4. 接管未匹配请求，继续沿用前面的请求 ID 和完成日志中间件。
+	router.NoRoute(handler.NotFound)
+
+	// 5. 返回路由器，交给启动入口监听。
 	return router
 }

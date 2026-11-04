@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: CloudNest API
   version: 0.1.0
-  description: 当前契约包含开发探测、存活和就绪检查接口，业务接口随后续教学步骤补充。
+  description: 当前契约包含开发探测、存活和就绪检查接口，业务接口随后续教学步骤补充。全局未匹配路由的 404 结构见 components.responses.RouteNotFound；路径列表不为此增加虚构的通配端点。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -118,6 +118,53 @@ paths:
               example:
                 status: not_ready
 components:
+  schemas:
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [code, message, details]
+      properties:
+        code:
+          type: string
+          description: 稳定的错误类别码。
+        message:
+          type: string
+          description: 可向客户端公开的错误提示。
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: 可公开的补充信息，未提供时为 null。
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, request_id]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+  responses:
+    RouteNotFound:
+      description: 未匹配到请求方法与路径，HTTP 404；不是文件或其他业务资源不存在。当前未注册方法沿用此响应，自动重定向仍按框架原有行为处理。HEAD 按 HTTP 语义不返回正文。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          description: 错误及其请求 ID 不应缓存。
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: ROUTE_NOT_FOUND
+              message: 未找到匹配的接口
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
     RequestID:
       name: X-Request-ID
