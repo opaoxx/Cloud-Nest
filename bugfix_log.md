@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-04：第 004 步连接器初始化的字符集设置失败
+
+### 问题现象
+
+连接池的取消与超时测试通过；第一次真实 MySQL 集成检查失败，返回 Error 1193 (HY000): Unknown system variable 'charset'。当前通过 mysql.NewConnector 直接传入 Config，将 charset 放入 Params 后，驱动将其当作普通会话系统变量处理。
+
+### 根因与修复方案
+
+当前 v1.9.2 驱动在 ParseDSN 时特殊处理 charset，将其保存到内部字符集字段；直接 NewConnector 不会经过此解析，将 Params 中的 charset 当作 SET 系统变量执行，因此报错。改为 driverConfig.Apply(mysql.Charset("utf8mb4", "")) 设置字符集，Params 仅保留会话 time_zone。连接池的只读集成用例保留为回归检查。
+
+### 验证结果
+
+真实 MySQL 集成检查已通过：连接可用、目标库正确、会话时区为 +00:00、字符集为 utf8mb4、DATETIME 解析为 UTC；连接池关闭后连接归零且不能继续使用。取消、100 毫秒调用方期限与默认 5 秒超时检查通过，超时连接在服务端确认已关闭。全项目 Go 测试、go vet 和 git diff --check 通过。真实服务启动后 /ping 返回 200；错误密码、不存在的数据库、不可达端口和 HTTP 端口占用均按预期失败，错误密码未出现在日志中。
+
 ## 2026-11-04：Trae 提示 MySQL 驱动无法导入
 
 ### 问题现象
