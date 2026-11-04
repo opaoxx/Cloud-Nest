@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -82,5 +85,38 @@ func TestReadinessRouteReflectsDependencyChanges(t *testing.T) {
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready", nil).WithContext(ctx))
 	if response.Code != http.StatusServiceUnavailable || checkCount != previousCount {
 		t.Fatal("已取消的请求仍被当作就绪或继续检查依赖")
+	}
+}
+
+func TestRouterRequestIDOnSuccessAndErrors(t *testing.T) {
+	// 1. 使用生产路由和 Recovery，覆盖成功、依赖故障、未注册路径与处理异常。
+	router := NewRouter(func(ctx context.Context) bool { return false })
+	panicRequestID := ""
+	router.GET("/test-panic", func(requestContext *gin.Context) {
+		panicRequestID = requestcontext.RequestID(requestContext.Request.Context())
+		panic("expected middleware recovery test")
+	})
+	testCases := []struct {
+		path     string
+		wantCode int
+	}{
+		{path: "/ping", wantCode: http.StatusOK},
+		{path: "/health/ready", wantCode: http.StatusServiceUnavailable},
+		{path: "/not-registered", wantCode: http.StatusNotFound},
+		{path: "/test-panic", wantCode: http.StatusInternalServerError},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, testCase.path, nil))
+			requestID := response.Header().Get("X-Request-ID")
+			parsedID, err := uuid.Parse(requestID)
+			if response.Code != testCase.wantCode || len(requestID) != 36 || err != nil || parsedID.Version() != 4 {
+				t.Fatal("正常或错误响应未保留预期状态与请求 ID")
+			}
+			if testCase.wantCode == http.StatusInternalServerError && requestID != panicRequestID {
+				t.Fatal("恢复处理后的 ID 与发生异常时的上下文不一致")
+			}
+		})
 	}
 }

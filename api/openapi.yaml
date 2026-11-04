@@ -16,9 +16,14 @@ paths:
       summary: 开发探测
       description: 保留原有响应，供本地开发工具确认 HTTP 服务可响应。
       security: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
       responses:
         '200':
           description: HTTP 服务可响应。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
           content:
             application/json:
               schema:
@@ -38,9 +43,14 @@ paths:
       summary: 进程存活检查
       description: 表示 HTTP 服务可响应，请求处理不查询 MySQL 或存储；依赖可用性由后续就绪检查提供。
       security: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
       responses:
         '200':
           description: HTTP 服务可响应。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
           content:
             application/json:
               schema:
@@ -60,10 +70,14 @@ paths:
       summary: 依赖就绪检查
       description: 每次请求重新检查 MySQL 连接和已有 MinIO 桶访问，两项检查共享最多 5 秒，任一失败立即返回未就绪。只读检查，不返回底层错误或凭证。
       security: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
       responses:
         '200':
           description: 两项依赖检查均通过。
           headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
             Cache-Control:
               description: 不缓存就绪结果。
               schema:
@@ -84,6 +98,8 @@ paths:
         '503':
           description: 任一依赖检查失败、超时或请求取消，当前未就绪。
           headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
             Cache-Control:
               description: 不缓存就绪结果，恢复后下次请求重新检查。
               schema:
@@ -101,3 +117,23 @@ paths:
                     enum: [not_ready]
               example:
                 status: not_ready
+components:
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: 单个标准 36 字符 UUID v4，大小写均可，合法值规范为小写；缺失、无效或重复时生成新值，不导致请求失败。用于关联请求，不作为身份或幂等凭证。
+      schema:
+        type: string
+      example: 28ee758a-0727-42de-ae7d-3bb33155e148
+  headers:
+    RequestID:
+      description: 本次请求最终使用的 UUID v4，与请求上下文保持一致。
+      schema:
+        type: string
+        format: uuid
+        minLength: 36
+        maxLength: 36
+        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+      example: 28ee758a-0727-42de-ae7d-3bb33155e148
