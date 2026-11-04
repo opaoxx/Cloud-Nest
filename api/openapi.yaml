@@ -1,0 +1,55 @@
+openapi: 3.0.3
+info:
+  title: CloudNest API
+  version: 0.1.0
+  description: 当前契约仅包含已实现的开发探测与存活检查接口，业务接口随后续教学步骤补充。
+servers:
+  - url: http://127.0.0.1:18081
+tags:
+  - name: System
+    description: 无需登录的开发探测与进程存活检查。
+paths:
+  /ping:
+    get:
+      tags: [System]
+      operationId: getPing
+      summary: 开发探测
+      description: 保留原有响应，供本地开发工具确认 HTTP 服务可响应。
+      security: []
+      responses:
+        '200':
+          description: HTTP 服务可响应。
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [message]
+                properties:
+                  message:
+                    type: string
+                    enum: [CloudNest API is running]
+              example:
+                message: CloudNest API is running
+  /health/live:
+    get:
+      tags: [System]
+      operationId: getLiveness
+      summary: 进程存活检查
+      description: 表示 HTTP 服务可响应，请求处理不查询 MySQL 或存储；依赖可用性由后续就绪检查提供。
+      security: []
+      responses:
+        '200':
+          description: HTTP 服务可响应。
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+              example:
+                status: ok

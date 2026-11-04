@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 )
@@ -59,14 +59,8 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
-	// 5. 创建路由，注册用于确认服务可用的 /ping 接口。
-	router := gin.Default()
-
-	router.GET("/ping", func(requestContext *gin.Context) {
-		requestContext.JSON(200, gin.H{
-			"message": "CloudNest API is running",
-		})
-	})
+	// 5. 由 HTTP 层创建路由，启动入口只负责装配与监听。
+	router := serverhttp.NewRouter()
 
 	// 6. 记录监听尝试；实际启动失败时记录地址和原因，再结束进程。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)

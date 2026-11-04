@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端目前提供 /ping，支持 HTTP/MySQL 配置读取校验、统一的 JSON 启动日志与 MySQL 连接池。启动时检查数据库连接与迁移记录，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端目前提供 /ping 和 /health/live，支持 HTTP/MySQL 配置读取校验、统一的 JSON 启动日志与 MySQL 连接池。启动时检查数据库连接与迁移记录，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -44,6 +44,8 @@ Enter-Dev.ps1 为当前 PowerShell 加载现有 Android SDK、ADB、Wails CLI �
 
 连接通过后，还会在最多 5 秒内核对 schema_migrations 的版本、dirty 状态和迁移 SQL 摘要；当前只接受版本 1 的完整记录。检查失败则停止启动，迁移仍由独立命令执行。检查范围及自动清理隔离库的测试方法见 [第 005 步学习记录](docs/开发学习记录.md#第-005-步启动时检查数据库迁移记录)。
 
+启动成功后，GET /health/live 无需登录，返回 {"status":"ok"}，表示 HTTP 服务能够响应。这个请求不检查数据库或存储的持续可用性；接口契约见 [OpenAPI](api/openapi.yaml)，路由和处理函数的调用过程见 [第 006 步学习记录](docs/开发学习记录.md#第-006-步提供存活检查并拆分-http-路由)。
+
 Start-Infra.ps1 会先校验所有容器（包括已停止容器）的端口预留、主机端口绑定和子网，再按校验通过的官方源码构建本地 MinIO 并启动 CloudNest 容器。首次构建需要下载依赖。
 
 ## 本地连接信息
@@ -54,7 +56,7 @@ Start-Infra.ps1 会先校验所有容器（包括已停止容器）的端口预�
 | Redis 7.4.12 | 127.0.0.1:16380，数据库 0 | root（ACL 用户） | root |
 | MinIO S3 API | http://127.0.0.1:19000，私有桶 cloudnest | root | rootroot |
 | MinIO 控制台 | [打开控制台](http://127.0.0.1:19001) | root | rootroot |
-| Go API | [检查 /ping](http://127.0.0.1:18081/ping) | — | — |
+| Go API | [检查 /ping](http://127.0.0.1:18081/ping)、[存活检查](http://127.0.0.1:18081/health/live) | — | — |
 
 按本项目约定，后续本地开发组件的账号、密码默认使用 root。MinIO 密码存在至少 8 位的硬性限制，因此使用 rootroot；此例外同时适用于控制台和 S3 secret key。
 
@@ -86,6 +88,7 @@ go vet ./...
 
 - [教学开发约定](AGENTS.md)
 - [开发学习记录](docs/开发学习记录.md)
+- [当前 HTTP 接口契约](api/openapi.yaml)
 
 - [技术方案书](<云盘 SaaS 项目技术方案书（混合架构版）.md>)
 - [数据库设计方案书（已批准）](docs/数据库设计方案书.md)
