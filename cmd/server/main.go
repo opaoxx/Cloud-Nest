@@ -14,6 +14,7 @@ import (
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
@@ -101,8 +102,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MinIO 桶访问检查通过", "bucket", storageConfig.Bucket)
 
-	// 7. 由 HTTP 层创建路由，启动入口只负责装配与监听。
-	router := serverhttp.NewRouter()
+	// 7. 将现有依赖的检查方法交给服务层，再把就绪检查能力绑定到路由。
+	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
+	router := serverhttp.NewRouter(healthService.Ready)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,

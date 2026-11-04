@@ -2,12 +2,12 @@ openapi: 3.0.3
 info:
   title: CloudNest API
   version: 0.1.0
-  description: 当前契约仅包含已实现的开发探测与存活检查接口，业务接口随后续教学步骤补充。
+  description: 当前契约包含开发探测、存活和就绪检查接口，业务接口随后续教学步骤补充。
 servers:
   - url: http://127.0.0.1:18081
 tags:
   - name: System
-    description: 无需登录的开发探测与进程存活检查。
+    description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
   /ping:
     get:
@@ -53,3 +53,51 @@ paths:
                     enum: [ok]
               example:
                 status: ok
+  /health/ready:
+    get:
+      tags: [System]
+      operationId: getReadiness
+      summary: 依赖就绪检查
+      description: 每次请求重新检查 MySQL 连接和已有 MinIO 桶访问，两项检查共享最多 5 秒，任一失败立即返回未就绪。只读检查，不返回底层错误或凭证。
+      security: []
+      responses:
+        '200':
+          description: 两项依赖检查均通过。
+          headers:
+            Cache-Control:
+              description: 不缓存就绪结果。
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+              example:
+                status: ready
+        '503':
+          description: 任一依赖检查失败、超时或请求取消，当前未就绪。
+          headers:
+            Cache-Control:
+              description: 不缓存就绪结果，恢复后下次请求重新检查。
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [not_ready]
+              example:
+                status: not_ready

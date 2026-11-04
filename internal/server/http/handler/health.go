@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -21,4 +22,22 @@ func Live(requestContext *gin.Context) {
 	requestContext.JSON(http.StatusOK, gin.H{
 		"status": "ok",
 	})
+}
+
+// Ready 将就绪检查函数绑定为 Gin 处理函数，每次请求都重新执行检查。
+// 检查使用当前请求上下文，只返回状态，不向调用方暴露底层错误。
+func Ready(checkReadiness func(context.Context) bool) gin.HandlerFunc {
+	return func(requestContext *gin.Context) {
+		// 1. 禁止缓存结果，让依赖恢复后下次请求能够重新检查。
+		requestContext.Header("Cache-Control", "no-store")
+
+		// 2. 调用服务层检查，失败、超时或取消时统一返回 503。
+		if !checkReadiness(requestContext.Request.Context()) {
+			requestContext.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
+			return
+		}
+
+		// 3. 所有依赖检查通过时返回 200，表示当前就绪。
+		requestContext.JSON(http.StatusOK, gin.H{"status": "ready"})
+	}
 }
