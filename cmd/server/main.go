@@ -14,6 +14,7 @@ import (
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
+	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
 func main() {
@@ -86,7 +87,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
-	// 6. 由 HTTP 层创建路由，启动入口只负责装配与监听。
+	// 6. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
+	storageClient, err := storage.NewClient(ctx, storageConfig)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			logger.Error("MinIO 桶访问检查失败", "stage", "storage", "bucket", storageConfig.Bucket, "error", err)
+		}
+		return err
+	}
+	defer func() {
+		storageClient.Close()
+		logger.Info("MinIO 空闲连接已释放")
+	}()
+	logger.Info("MinIO 桶访问检查通过", "bucket", storageConfig.Bucket)
+
+	// 7. 由 HTTP 层创建路由，启动入口只负责装配与监听。
 	router := serverhttp.NewRouter()
 	httpServer := &http.Server{
 		Addr:              listenAddress,
@@ -94,7 +109,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 7. 启动 HTTP 并处理退出通知；返回后再由 defer 关闭数据库连接池。
+	// 8. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
