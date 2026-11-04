@@ -52,7 +52,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("MySQL 连接配置读取成功", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
-	// 3. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
+	// 3. 读取存储配置，只记录地址与桶等非凭证字段。
+	storageConfig, err := config.LoadStorageConfig()
+	if err != nil {
+		logger.Error("读取对象存储配置失败", "stage", "config", "error", err)
+		return err
+	}
+	logger.Info("对象存储配置读取成功", "provider", storageConfig.Provider, "endpoint", storageConfig.EndpointURL.String(), "public_endpoint", storageConfig.PublicEndpointURL.String(), "bucket", storageConfig.Bucket)
+
+	// 4. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
 	connectionPool, err := repository.OpenMySQL(ctx, databaseConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -69,7 +77,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MySQL 连接检查通过", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
-	// 4. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
+	// 5. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
 	if err := repository.CheckSchema(ctx, connectionPool); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			logger.Error("数据库迁移检查失败", "stage", "schema", "database", databaseConfig.DatabaseName, "error", err)
@@ -78,7 +86,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
-	// 5. 由 HTTP 层创建路由，启动入口只负责装配与监听。
+	// 6. 由 HTTP 层创建路由，启动入口只负责装配与监听。
 	router := serverhttp.NewRouter()
 	httpServer := &http.Server{
 		Addr:              listenAddress,
@@ -86,7 +94,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 6. 启动 HTTP 并处理退出通知；返回后再由 defer 关闭数据库连接池。
+	// 7. 启动 HTTP 并处理退出通知；返回后再由 defer 关闭数据库连接池。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
