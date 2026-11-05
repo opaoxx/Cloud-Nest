@@ -62,7 +62,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("对象存储配置读取成功", "provider", storageConfig.Provider, "endpoint", storageConfig.EndpointURL.String(), "public_endpoint", storageConfig.PublicEndpointURL.String(), "bucket", storageConfig.Bucket)
 
-	// 4. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
+	// 4. 读取前端来源白名单；本步只校验配置，跨域行为随后接入。
+	allowedOrigins, err := config.LoadAllowedOrigins()
+	if err != nil {
+		logger.Error("读取前端来源白名单失败", "stage", "config", "error", err)
+		return err
+	}
+	logger.Info("前端来源白名单读取成功", "allowed_origins", allowedOrigins)
+
+	// 5. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
 	connectionPool, err := repository.OpenMySQL(ctx, databaseConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -79,7 +87,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MySQL 连接检查通过", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
-	// 5. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
+	// 6. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
 	if err := repository.CheckSchema(ctx, connectionPool); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			logger.Error("数据库迁移检查失败", "stage", "schema", "database", databaseConfig.DatabaseName, "error", err)
@@ -88,7 +96,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
-	// 6. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
+	// 7. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
 	storageClient, err := storage.NewClient(ctx, storageConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -102,7 +110,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MinIO 桶访问检查通过", "bucket", storageConfig.Bucket)
 
-	// 7. 将现有依赖的检查方法交给服务层，再把就绪检查能力绑定到路由。
+	// 8. 将现有依赖的检查方法交给服务层，再把就绪检查能力绑定到路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, healthService.Ready)
 	httpServer := &http.Server{
@@ -111,7 +119,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 8. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 9. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
