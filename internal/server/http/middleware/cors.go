@@ -89,7 +89,7 @@ func allowedPreflightHeaders(headerLines []string) bool {
 	return true
 }
 
-// addVary 合并缓存区分字段，保留既有值并按大小写不敏感规则去重。
+// addVary 合并缓存，区分字段，保留既有值，并按大小写不敏感规则去重。
 func addVary(headers http.Header, names ...string) {
 	// 1. 收集已有字段；通配符已覆盖全部请求头，不再追加。
 	seen := make(map[string]bool)

@@ -13,6 +13,8 @@ info:
     预检不校验具体路由是否已实现，不带预检方法头的 OPTIONS 仍按普通路由匹配。
     未匹配路由的 404 见 components.responses.RouteNotFound；可恢复且响应未提交的异常见 InternalError。
     关闭自动尾斜杠跳转，例如 /ping/ 先检查来源再返回 404。路径列表不增加虚构通配或测试端点。
+    JSON 读取器的共享错误见 InvalidJSONRequest、RequestBodyTooLarge、UnsupportedMediaType；
+    仅供后续显式调用读取器的 JSON 操作引用，当前三个 GET 不读取正文，不适用这些输入错误。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -167,6 +169,63 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    InvalidJSONRequest:
+      description: 显式调用 ReadJSON 的操作返回 HTTP 400，错误码 INVALID_ARGUMENT。正文必须是有效 UTF-8、单个 JSON 对象，字段和类型符合请求 DTO；拒绝未知字段、第二段 JSON 和尾随非空白内容。读取失败也返回固定公开提示，不回显原始输入。必填及业务规则另行校验。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_ARGUMENT
+              message: JSON 格式、字段或字段类型不正确
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RequestBodyTooLarge:
+      description: 显式调用 ReadJSON 的操作，实际 JSON 正文超过 1048576 字节（1 MiB）时返回 HTTP 413，包含尾随空白。按实际读取量限制，不只依赖 Content-Length；读取超限优先于 JSON 格式判断。不用于文件上传流。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: REQUEST_BODY_TOO_LARGE
+              message: JSON 请求正文不能超过 1 MiB
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UnsupportedMediaType:
+      description: 显式调用 ReadJSON 的操作，仅接受单个 application/json Content-Type，charset 可省略或为 UTF-8，Content-Encoding 可省略或为单个 identity；其他格式、重复或空头、压缩正文返回 HTTP 415。媒体类型检查先于正文读取。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UNSUPPORTED_MEDIA_TYPE
+              message: 请求必须使用 application/json，字符集为 UTF-8，且不压缩正文
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CORSPreflight:
       description: 全局 OPTIONS 预检成功，HTTP 204 且无正文；支持的目标方法及头仅表示跨域策略许可，不意味着业务接口已实现。方法大小写敏感，头名称大小写不敏感，未声明请求头时可通过，显式空项和未知项拒绝。不设置 Access-Control-Max-Age，不执行 Handler 或依赖检查。
       headers:
