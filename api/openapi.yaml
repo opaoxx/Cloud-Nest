@@ -16,6 +16,9 @@ info:
     JSON 读取器的共享错误见 InvalidJSONRequest、RequestBodyTooLarge、UnsupportedMediaType；
     仅供后续显式调用读取器的 JSON 操作引用，当前三个 GET 不读取正文，不适用这些输入错误。
     LoginRequest 与 InvalidLoginArgument 记录已实现的登录字段格式及校验错误，登录操作尚未注册。
+    登录来源策略已实现：两种模式均要求单个 X-CloudNest-Client，与正文 client_type 精确一致；
+    web 必须携带单个白名单 Origin，native 必须不带 Origin。来源不合规见 ClientSourceForbidden；
+    LoginClient 与 LoginOrigin 记录后续登录操作的头契约，不应用到当前 GET 或 CORS 预检。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -148,7 +151,7 @@ components:
       type: object
       additionalProperties: false
       required: [username, password, installation_id, device_name, platform, client_type]
-      description: 登录输入字段，校验不修改原文，不查询账号或验证密码；客户端安装标识与类型不作为身份凭证。Web Origin 与客户端头检查随后端登录操作接入。
+      description: 登录输入字段，校验不修改原文，不查询账号或验证密码；客户端安装标识与类型不作为身份凭证。字段合格后，登录来源策略要求客户端头与 client_type 一致；web 另需白名单 Origin，native 不得带 Origin。当前尚未注册登录操作。
       properties:
         username:
           type: string
@@ -184,6 +187,7 @@ components:
         client_type:
           type: string
           enum: [web, native]
+          description: 必须与单个 X-CloudNest-Client 头精确一致；本声明不证明调用者身份。
       oneOf:
         - properties:
             client_type:
@@ -221,6 +225,25 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    ClientSourceForbidden:
+      description: 登录字段合格后，客户端声明/来源不符合规则时返回 HTTP 403，不查询凭证。错误固定，不回显请求头或正文。允许的 Web 来源保留 CORS 放行头，因此页面可读取拒绝响应；未知 Origin 可能被外层 CORS 先拒绝为 CORS_FORBIDDEN。此组件只供后续登录操作引用，不作用于当前系统 GET 或预检。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: CLIENT_SOURCE_FORBIDDEN
+              message: 客户端类型或请求来源不被允许
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     InvalidLoginArgument:
       description: 登录 DTO 字段规则不满足时返回 HTTP 400 INVALID_ARGUMENT，details.field 指向首个错误字段，提示只含固定规则。顺序为 username、password、installation_id、device_name、platform、client_type，随后检查平台与类型组合（定位 platform）。字段缺失/null 在解析为空值后被拒绝；非字符串等解析错误仍用 InvalidJSONRequest。此响应不表示账号存在性或密码验证结果。
       headers:
@@ -387,6 +410,23 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    LoginClient:
+      name: X-CloudNest-Client
+      in: header
+      required: true
+      description: 单个精确的 web 或 native，必须与已解析正文的 client_type 一致；不去空白或转换大小写，重复/列表/空值拒绝。仅供登录操作使用。
+      schema:
+        type: string
+        enum: [web, native]
+      example: web
+    LoginOrigin:
+      name: Origin
+      in: header
+      required: false
+      description: 条件规则：web 必须提供单个与白名单精确一致的来源，native 必须不带此头（显式空值/null 也拒绝）。不进行请求来源规范化或 Referer 回退，不能只凭客户端类型声明绕过规则。仅供登录操作使用。
+      schema:
+        type: string
+      example: http://127.0.0.1:5173
     RequestID:
       name: X-Request-ID
       in: header
