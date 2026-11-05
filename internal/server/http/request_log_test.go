@@ -43,7 +43,7 @@ func TestRequestLogStatusAndPrivacy(t *testing.T) {
 			previousErrorWriter := gin.DefaultErrorWriter
 			gin.DefaultErrorWriter = &output
 			t.Cleanup(func() { gin.DefaultErrorWriter = previousErrorWriter })
-			router := NewRouter(logging.New(&output), func(ctx context.Context) bool { return false })
+			router := NewRouter(logging.New(&output), nil, func(ctx context.Context) bool { return false })
 			router.GET("/test", func(requestContext *gin.Context) {
 				_, _ = io.ReadAll(requestContext.Request.Body)
 				_ = requestContext.Error(errors.New("private-context-error"))
@@ -115,7 +115,7 @@ func TestRequestLogStatusAndPrivacy(t *testing.T) {
 func TestRequestLogConcurrentCorrelation(t *testing.T) {
 	// 1. 正常与异常请求并发共用日志对象，检查响应对应关系及异常标记隔离。
 	var output bytes.Buffer
-	router := NewRouter(logging.New(&output), func(ctx context.Context) bool { return true })
+	router := NewRouter(logging.New(&output), nil, func(ctx context.Context) bool { return true })
 	router.GET("/test-concurrent-error", func(requestContext *gin.Context) { panic("private-concurrent-panic") })
 	const requestCount = 32
 	responses := make(chan *httptest.ResponseRecorder, requestCount)

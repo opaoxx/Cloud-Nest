@@ -62,7 +62,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("对象存储配置读取成功", "provider", storageConfig.Provider, "endpoint", storageConfig.EndpointURL.String(), "public_endpoint", storageConfig.PublicEndpointURL.String(), "bucket", storageConfig.Bucket)
 
-	// 4. 读取前端来源白名单；本步只校验配置，跨域行为随后接入。
+	// 4. 读取并校验前端来源白名单，随后显式传给路由器。
 	allowedOrigins, err := config.LoadAllowedOrigins()
 	if err != nil {
 		logger.Error("读取前端来源白名单失败", "stage", "config", "error", err)
@@ -112,7 +112,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 8. 将现有依赖的检查方法交给服务层，再把就绪检查能力绑定到路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
-	router := serverhttp.NewRouter(logger, healthService.Ready)
+	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,

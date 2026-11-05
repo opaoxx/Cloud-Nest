@@ -34,7 +34,7 @@ func TestReadinessRouteReflectsDependencyChanges(t *testing.T) {
 		}
 		return nil
 	})
-	router := NewRouter(logging.New(io.Discard), healthService.Ready)
+	router := NewRouter(logging.New(io.Discard), nil, healthService.Ready)
 	testCases := []struct {
 		name           string
 		databaseFailed bool
@@ -92,7 +92,7 @@ func TestReadinessRouteReflectsDependencyChanges(t *testing.T) {
 
 func TestRouterRequestIDOnSuccessAndErrors(t *testing.T) {
 	// 1. 使用生产路由和 Recovery，覆盖成功、依赖故障、未注册路径与处理异常。
-	router := NewRouter(logging.New(io.Discard), func(ctx context.Context) bool { return false })
+	router := NewRouter(logging.New(io.Discard), nil, func(ctx context.Context) bool { return false })
 	panicRequestID := ""
 	router.GET("/test-panic", func(requestContext *gin.Context) {
 		panicRequestID = requestcontext.RequestID(requestContext.Request.Context())

@@ -2,7 +2,17 @@ openapi: 3.0.3
 info:
   title: CloudNest API
   version: 0.1.0
-  description: 当前契约包含开发探测、存活和就绪检查接口，业务接口随后续教学步骤补充。全局未匹配路由的 404 结构见 components.responses.RouteNotFound；可恢复异常且尚未提交响应时返回统一 500，见 components.responses.InternalError。路径列表不增加虚构的通配或异常测试端点。
+  description: |
+    当前契约包含开发探测、存活和就绪检查接口，业务接口随后续教学步骤补充。
+    无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
+    允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
+    Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID。
+    所有响应含 Vary: Origin；OPTIONS 还区分 Access-Control-Request-Method 和 Access-Control-Request-Headers。
+    OPTIONS 携带 Origin 和 Access-Control-Request-Method 时执行全局预检，不调用接口；成功响应见
+    components.responses.CORSPreflight，非法来源或预检见 components.responses.CORSForbidden。
+    预检不校验具体路由是否已实现，不带预检方法头的 OPTIONS 仍按普通路由匹配。
+    未匹配路由的 404 见 components.responses.RouteNotFound；可恢复且响应未提交的异常见 InternalError。
+    关闭自动尾斜杠跳转，例如 /ping/ 先检查来源再返回 404。路径列表不增加虚构通配或测试端点。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -36,6 +46,8 @@ paths:
                     enum: [CloudNest API is running]
               example:
                 message: CloudNest API is running
+        '403':
+          $ref: '#/components/responses/CORSForbidden'
         '500':
           $ref: '#/components/responses/InternalError'
   /health/live:
@@ -65,6 +77,8 @@ paths:
                     enum: [ok]
               example:
                 status: ok
+        '403':
+          $ref: '#/components/responses/CORSForbidden'
         '500':
           $ref: '#/components/responses/InternalError'
   /health/ready:
@@ -121,6 +135,8 @@ paths:
                     enum: [not_ready]
               example:
                 status: not_ready
+        '403':
+          $ref: '#/components/responses/CORSForbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 components:
@@ -151,6 +167,55 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    CORSPreflight:
+      description: 全局 OPTIONS 预检成功，HTTP 204 且无正文；支持的目标方法及头仅表示跨域策略许可，不意味着业务接口已实现。方法大小写敏感，头名称大小写不敏感，未声明请求头时可通过，显式空项和未知项拒绝。不设置 Access-Control-Max-Age，不执行 Handler 或依赖检查。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Access-Control-Allow-Origin:
+          description: 与白名单完全匹配的单个请求来源，永远不使用通配符。
+          schema:
+            type: string
+          example: http://127.0.0.1:5173
+        Access-Control-Allow-Credentials:
+          schema:
+            type: string
+            enum: ['true']
+        Access-Control-Allow-Methods:
+          schema:
+            type: string
+            enum: ['GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS']
+        Access-Control-Allow-Headers:
+          schema:
+            type: string
+            enum: ['Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-Request-ID']
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Vary:
+          description: 至少包含 Origin、Access-Control-Request-Method、Access-Control-Request-Headers，保留其他已有区分条件；可能为多个头行。
+          schema:
+            type: string
+    CORSForbidden:
+      description: 来源或预检不被允许，HTTP 403；不返回 Access-Control 放行头，不回显原始来源、方法或头。浏览器脚本无法读取被拒响应，可在开发者工具核对状态和请求 ID。HEAD 不返回正文。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: CORS_FORBIDDEN
+              message: 请求来源或跨域预检不被允许
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     InternalError:
       description: 普通 panic 被恢复且响应尚未提交时返回 HTTP 500，不包含原始异常。若状态或正文已发送，则不覆盖或追加错误 JSON，仅中止后续处理；HEAD 不返回正文。
       headers:
@@ -171,7 +236,7 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RouteNotFound:
-      description: 未匹配到请求方法与路径，HTTP 404；不是文件或其他业务资源不存在。当前未注册方法沿用此响应，自动重定向仍按框架原有行为处理。HEAD 按 HTTP 语义不返回正文。
+      description: 未匹配到请求方法与路径，HTTP 404；不是文件或其他业务资源不存在。无 Origin 或已允许来源的普通未注册方法沿用此响应；合法预检返回 204，来源或预检非法时优先返回 403。不自动跳转尾斜杠路径。HEAD 按 HTTP 语义不返回正文。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

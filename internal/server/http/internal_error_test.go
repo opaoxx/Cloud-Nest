@@ -36,7 +36,7 @@ func TestRecoveredPanicJSONAndPrivacy(t *testing.T) {
 			previousErrorWriter := gin.DefaultErrorWriter
 			gin.DefaultErrorWriter = &output
 			t.Cleanup(func() { gin.DefaultErrorWriter = previousErrorWriter })
-			router := NewRouter(logging.New(&output), func(ctx context.Context) bool { return true })
+			router := NewRouter(logging.New(&output), nil, func(ctx context.Context) bool { return true })
 			router.GET("/test-error", func(requestContext *gin.Context) {
 				if testCase.pendingHeaders {
 					requestContext.Status(http.StatusCreated)
@@ -102,7 +102,7 @@ func TestRecoveredPanicPreservesCommittedResponse(t *testing.T) {
 			if headersOnly {
 				wantStatus = http.StatusAccepted
 			}
-			router := NewRouter(logging.New(&output), func(ctx context.Context) bool { return true })
+			router := NewRouter(logging.New(&output), nil, func(ctx context.Context) bool { return true })
 			router.GET("/test-partial", func(requestContext *gin.Context) {
 				requestContext.Header("Content-Type", "text/plain")
 				requestContext.Header("Cache-Control", "max-age=60")
@@ -139,7 +139,7 @@ func TestRecoveredPanicPreservesCommittedResponse(t *testing.T) {
 func TestRecoveredPanicOverRealHTTP(t *testing.T) {
 	// 1. 用生产路由的就绪回调注入异常，真实 TCP 服务不需要业务数据库。
 	var output bytes.Buffer
-	router := NewRouter(logging.New(&output), func(ctx context.Context) bool {
+	router := NewRouter(logging.New(&output), nil, func(ctx context.Context) bool {
 		panic("private-wire-panic")
 	})
 	router.HEAD("/test-error", func(requestContext *gin.Context) { panic("private-head-panic") })

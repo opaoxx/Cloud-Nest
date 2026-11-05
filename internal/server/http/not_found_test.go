@@ -34,7 +34,7 @@ func TestRouteNotFoundResponseAndCorrelation(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			router := NewRouter(logging.New(&logs), func(ctx context.Context) bool {
+			router := NewRouter(logging.New(&logs), nil, func(ctx context.Context) bool {
 				t.Error("未匹配请求不应调用依赖检查")
 				return true
 			})
