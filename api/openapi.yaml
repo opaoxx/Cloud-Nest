@@ -15,6 +15,7 @@ info:
     关闭自动尾斜杠跳转，例如 /ping/ 先检查来源再返回 404。路径列表不增加虚构通配或测试端点。
     JSON 读取器的共享错误见 InvalidJSONRequest、RequestBodyTooLarge、UnsupportedMediaType；
     仅供后续显式调用读取器的 JSON 操作引用，当前三个 GET 不读取正文，不适用这些输入错误。
+    LoginRequest 与 InvalidLoginArgument 记录已实现的登录字段格式及校验错误，登录操作尚未注册。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -143,6 +144,57 @@ paths:
           $ref: '#/components/responses/InternalError'
 components:
   schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password, installation_id, device_name, platform, client_type]
+      description: 登录输入字段，校验不修改原文，不查询账号或验证密码；客户端安装标识与类型不作为身份凭证。Web Origin 与客户端头检查随后端登录操作接入。
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[a-z0-9_]{1,64}$'
+          description: 与数据库一致的小写 ASCII 登录名，不自动去空白或转小写。
+          example: root
+        password:
+          type: string
+          minLength: 1
+          maxLength: 72
+          writeOnly: true
+          x-max-utf8-bytes: 72
+          description: 有效 UTF-8，实际长度 1～72 字节；maxLength 是字符级上界，服务端另按 UTF-8 字节复核。保留空白，不归一化；不在登录处强制注册密码强度。
+        installation_id:
+          type: string
+          format: uuid
+          minLength: 36
+          maxLength: 36
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          description: 客户端生成并持久保存的标准小写 UUID v4，不接受其他版本或替代写法。
+          example: 28ee758a-0727-42de-ae7d-3bb33155e148
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 1～100 个 Unicode 码点，不能全为空白或包含控制字符；允许中文和 emoji，保留原文。
+          example: 学习用浏览器
+        platform:
+          type: string
+          enum: [WEB, WINDOWS, ANDROID]
+        client_type:
+          type: string
+          enum: [web, native]
+      oneOf:
+        - properties:
+            client_type:
+              enum: [web]
+            platform:
+              enum: [WEB]
+        - properties:
+            client_type:
+              enum: [native]
+            platform:
+              enum: [WINDOWS, ANDROID]
     ErrorDetail:
       type: object
       additionalProperties: false
@@ -169,6 +221,26 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    InvalidLoginArgument:
+      description: 登录 DTO 字段规则不满足时返回 HTTP 400 INVALID_ARGUMENT，details.field 指向首个错误字段，提示只含固定规则。顺序为 username、password、installation_id、device_name、platform、client_type，随后检查平台与类型组合（定位 platform）。字段缺失/null 在解析为空值后被拒绝；非字符串等解析错误仍用 InvalidJSONRequest。此响应不表示账号存在性或密码验证结果。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_ARGUMENT
+              message: 用户名须为 1～64 个小写字母、数字或下划线
+              details:
+                field: username
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     InvalidJSONRequest:
       description: 显式调用 ReadJSON 的操作返回 HTTP 400，错误码 INVALID_ARGUMENT。正文必须是有效 UTF-8、单个 JSON 对象，字段和类型符合请求 DTO；拒绝未知字段、第二段 JSON 和尾随非空白内容。读取失败也返回固定公开提示，不回显原始输入。必填及业务规则另行校验。
       headers:
