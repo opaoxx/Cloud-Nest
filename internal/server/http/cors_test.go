@@ -115,7 +115,7 @@ func TestCORSRequestPolicy(t *testing.T) {
 					if response.Body.Len() != 0 || response.Header().Get("Access-Control-Allow-Methods") != "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS" || response.Header().Get("Access-Control-Allow-Headers") != "Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-Request-ID" || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Access-Control-Max-Age") != "" {
 						t.Fatal("预检正文、允许列表或缓存策略错误")
 					}
-				} else if response.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID" {
+				} else if response.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID, Retry-After" {
 					t.Fatal("浏览器不能读取请求 ID")
 				}
 			} else {

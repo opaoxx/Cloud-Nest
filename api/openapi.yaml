@@ -6,7 +6,7 @@ info:
     当前契约包含开发探测、存活和就绪检查接口，业务接口随后续教学步骤补充。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
-    Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID。
+    Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
     所有响应含 Vary: Origin；OPTIONS 还区分 Access-Control-Request-Method 和 Access-Control-Request-Headers。
     OPTIONS 携带 Origin 和 Access-Control-Request-Method 时执行全局预检，不调用接口；成功响应见
     components.responses.CORSPreflight，非法来源或预检见 components.responses.CORSForbidden。
@@ -19,6 +19,8 @@ info:
     登录来源策略已实现：两种模式均要求单个 X-CloudNest-Client，与正文 client_type 精确一致；
     web 必须携带单个白名单 Origin，native 必须不带 Origin。来源不合规见 ClientSourceForbidden；
     LoginClient 与 LoginOrigin 记录后续登录操作的头契约，不应用到当前 GET 或 CORS 预检。
+    HTTP 登录限流适配器已实现；受限响应见 RateLimited/RetryAfter 共享组件。
+    当前未注册登录操作，系统 GET 不受此登录限流，也不声明 429 响应。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -225,6 +227,27 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    RateLimited:
+      description: 登录限流准入被拒绝时返回 HTTP 429，凭证查询尚未执行。Retry-After 给出建议等待秒数，不保证等待后一定放行；IP/用户名分别累计失败与在途预留。此组件供后续登录操作使用，当前系统 GET 不引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: RATE_LIMITED
+              message: 登录尝试过于频繁，请稍后重试
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     ClientSourceForbidden:
       description: 登录字段合格后，客户端声明/来源不符合规则时返回 HTTP 403，不查询凭证。错误固定，不回显请求头或正文。允许的 Web 来源保留 CORS 放行头，因此页面可读取拒绝响应；未知 Origin 可能被外层 CORS 先拒绝为 CORS_FORBIDDEN。此组件只供后续登录操作引用，不作用于当前系统 GET 或预检。
       headers:
@@ -436,6 +459,13 @@ components:
         type: string
       example: 28ee758a-0727-42de-ae7d-3bb33155e148
   headers:
+    RetryAfter:
+      description: delta-seconds 十进制等待秒数，由正 duration 向上取整且至少为 1；防御性处理非正值时也返回 1，不采用 HTTP 日期。允许来源的普通 CORS 响应显式暴露此头。当前限流核心通常给出不超过 60 秒的建议，在途或总容量变化时不承诺到期一定放行。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 60
     RequestID:
       description: 本次请求最终使用的 UUID v4，与请求上下文保持一致。
       schema:

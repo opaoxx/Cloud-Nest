@@ -54,10 +54,10 @@ func CORS(allowedOrigins []string, reject gin.HandlerFunc) gin.HandlerFunc {
 			return
 		}
 
-		// 4. 普通请求添加明确来源、凭证许可与可读取的请求 ID 头，再继续处理。
+		// 4. 普通请求添加明确来源、凭证许可，暴露请求 ID 和重试等待头，再继续处理。
 		requestContext.Header("Access-Control-Allow-Origin", origins[0])
 		requestContext.Header("Access-Control-Allow-Credentials", "true")
-		requestContext.Header("Access-Control-Expose-Headers", RequestIDHeader)
+		requestContext.Header("Access-Control-Expose-Headers", RequestIDHeader+", Retry-After")
 		requestContext.Next()
 	}
 }

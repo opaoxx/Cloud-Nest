@@ -112,7 +112,7 @@ func TestReadJSONInputPolicy(t *testing.T) {
 				t.Fatalf("解析后的 DTO 不正确: %+v", received)
 			}
 			requestID := response.Header().Get("X-Request-ID")
-			if requestID != "28ee758a-0727-42de-ae7d-3bb33155e148" || response.Header().Get("Access-Control-Allow-Origin") != "http://127.0.0.1:5173" || response.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID" {
+			if requestID != "28ee758a-0727-42de-ae7d-3bb33155e148" || response.Header().Get("Access-Control-Allow-Origin") != "http://127.0.0.1:5173" || response.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID, Retry-After" {
 				t.Fatal("请求 ID 或 CORS 约定丢失")
 			}
 			if !called {
