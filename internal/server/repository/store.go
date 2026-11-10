@@ -13,6 +13,8 @@ import (
 type Store struct {
 	// database 只在 Repository 内部使用，不向 HTTP 或 Service 暴露 ORM 操作。
 	database *gorm.DB
+	// loginUserID 仅在登录事务锁定并复查用户后设置，限定设备写入归属。
+	loginUserID uint64
 }
 
 // NewStore 用现有连接池装配 GORM，不创建连接池、不执行探测或迁移，也不接管关闭操作。

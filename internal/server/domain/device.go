@@ -8,7 +8,10 @@ import (
 // ErrDeviceNotFound 表示该用户与安装标识组合未找到设备，不表示数据库故障。
 var ErrDeviceNotFound = errors.New("设备不存在")
 
-// LoginDevice 保存定位已有登录设备所需的信息，不作为 HTTP 响应使用。
+// ErrDeviceAlreadyExists 表示设备插入触发唯一键冲突，不允许静默覆盖已有设备。
+var ErrDeviceAlreadyExists = errors.New("该用户的安装设备已存在")
+
+// LoginDevice 保存登录设备所需的信息，不作为 HTTP 响应使用。
 type LoginDevice struct {
 	// ID 是设备记录的无符号主键。
 	ID uint64

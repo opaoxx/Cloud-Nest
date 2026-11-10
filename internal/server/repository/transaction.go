@@ -73,7 +73,7 @@ func (store *Store) WithLoginUserTransaction(
 	}
 
 	// 3. 调用事务内的 Repository 回调，失败时保留错误原因。
-	if callbackError := action(transactionContext, &Store{database: transaction}); callbackError != nil {
+	if callbackError := action(transactionContext, &Store{database: transaction, loginUserID: userID}); callbackError != nil {
 		return fmt.Errorf("执行登录用户事务失败: %w", callbackError)
 	}
 

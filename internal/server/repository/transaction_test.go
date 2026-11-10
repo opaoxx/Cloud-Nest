@@ -23,6 +23,7 @@ type loginTransactionScript struct {
 	beginError, queryError, commitError, rollbackError error
 	beforeQuery                                        func(context.Context)
 	deviceQueryError                                   func(context.Context) error
+	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
 	rollbackOnce                                       sync.Once
 }
@@ -54,6 +55,14 @@ func (connector *loginTransactionConnector) Connect(ctx context.Context) (driver
 type loginTransactionConnection struct {
 	*deviceConnection
 	script *loginTransactionScript
+}
+
+func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	connection.script.record("insert")
+	if connection.script.insert == nil {
+		return nil, errors.New("测试未登记插入操作")
+	}
+	return connection.script.insert(ctx, statement, arguments)
 }
 
 func (connection *loginTransactionConnection) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
