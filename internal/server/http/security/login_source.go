@@ -1,4 +1,4 @@
-// Package security 提供 HTTP 层的请求来源约束，不负责用户身份认证。
+// Package security 提供 HTTP 层的请求来源约束、凭证提取与登录限流适配。
 package security
 
 import "net/http"
