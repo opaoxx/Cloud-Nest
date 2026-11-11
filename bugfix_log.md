@@ -1,5 +1,21 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-12——登录交付测试的长度头与 Secure Cookie 断言失败
+
+### 问题现象
+
+第 048 步首轮定向测试中，五组成功交付在组合响应头断言处失败，失败输入与已提交响应用例通过。HTTPS Cookie Jar 用例中，将本机回环 URL 改为 HTTP 后仍读到 Cookie，原断言未通过。修复前记录于此，接下来核对本机 Gin 渲染和 Go Cookie Jar 的实际行为。
+
+### 根因与修复方案
+
+本机 Gin v1.12.0 的 Data.Render 会按编码正文设置新的 Content-Length，原测试错误地要求该头为空。断言改为与实际正文的字节长度一致，继续检查旧长度和编码已被正确处理。
+
+本机 Go 1.27 Cookie Jar 将 localhost 与回环 IP 视为安全来源，因此本机 HTTP 的行为无法证明普通主机的 Secure 限制。保留真实 HTTP/HTTPS 收取 Cookie 的验证，另用内存中的 cloudnest.example HTTPS/HTTP URL 核对普通主机的 Secure 范围，无外部网络请求。
+
+### 验证结果
+
+修正后五组成功交付、八组失败输入、已提交响应及 HTTP/HTTPS Cookie Jar 用例通过，普通主机的 Secure 限制也已验证。go test -count=1 ./...、go vet ./... 与 git diff --check 均通过。
+
 ## 2026-11-12——启动测试的用户配置目录隔离需要按系统选择
 
 ### 问题现象

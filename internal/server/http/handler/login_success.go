@@ -1,0 +1,79 @@
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
+)
+
+// RefreshCookieName 是 CloudNest 的 Web 刷新凭证 Cookie 名称。
+const RefreshCookieName = "cloudnest_refresh_token"
+
+// RefreshCookiePath 限定刷新 Cookie 发送给认证接口的路径范围。
+const RefreshCookiePath = "/api/v1/auth"
+
+// LoginSuccess 交付已完成凭证验证、来源校验及登录服务调用后的成功结果。
+// secureCookie 由可信启动配置提供，HTTP 开发环境为 false，HTTPS 部署为 true。
+func LoginSuccess(requestContext *gin.Context, result *domain.LoginTokenResult, profile *domain.UserProfile, clientType string, secureCookie bool) {
+	// 1. 检查响应状态和请求取消。
+	if requestContext.Writer.Written() {
+		requestContext.Abort()
+		return
+	}
+	requestContext.Header("Cache-Control", "no-store")
+	requestContext.Header("Pragma", "no-cache")
+	ctx := requestContext.Request.Context()
+	if ctx.Err() != nil {
+		InternalError(requestContext, nil)
+		return
+	}
+
+	// 2. 转换并编码登录成功数据。
+	data, err := dto.NewLoginData(result, profile, clientType, time.Now())
+	if err != nil {
+		InternalError(requestContext, nil)
+		return
+	}
+	responseBytes, err := json.Marshal(dto.LoginResponse{Data: *data, RequestID: requestcontext.RequestID(ctx)})
+	if err != nil {
+		InternalError(requestContext, nil)
+		return
+	}
+
+	// 3. 按客户端模式准备刷新 Cookie。
+	var refreshCookie *http.Cookie
+	if clientType == "web" {
+		refreshCookie = &http.Cookie{
+			Name:     RefreshCookieName,
+			Value:    result.RefreshToken,
+			Path:     RefreshCookiePath,
+			Expires:  data.Session.ExpiresAt.Truncate(time.Second),
+			HttpOnly: true,
+			Secure:   secureCookie,
+			SameSite: http.SameSiteStrictMode,
+		}
+		if err := refreshCookie.Valid(); err != nil {
+			InternalError(requestContext, nil)
+			return
+		}
+	}
+
+	// 4. 复查取消，写入响应头、Cookie 和 JSON。
+	if ctx.Err() != nil {
+		InternalError(requestContext, nil)
+		return
+	}
+	requestContext.Writer.Header().Del("Content-Length")
+	requestContext.Writer.Header().Del("Content-Encoding")
+	requestContext.Header("Content-Type", "application/json; charset=utf-8")
+	if refreshCookie != nil {
+		http.SetCookie(requestContext.Writer, refreshCookie)
+	}
+	requestContext.Abort()
+	requestContext.Data(http.StatusOK, "application/json; charset=utf-8", responseBytes)
+}
