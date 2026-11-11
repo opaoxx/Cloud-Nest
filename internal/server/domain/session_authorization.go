@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ErrSessionNotFound 表示指定用户下没有具备完整归属关联的会话记录。
+// ErrSessionNotFound 表示查询未找到具备完整用户、设备归属关联的会话记录。
 var ErrSessionNotFound = errors.New("会话不存在")
 
 // SessionAuthorization 保存普通请求授权判断所需的数据库状态。

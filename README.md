@@ -134,6 +134,8 @@ GET /api/v1/me 已接入生产启动流程，校验 Bearer JWT 并查询数据�
 
 POST /api/v1/auth/login 已接入真实启动流程，支持 Web Cookie 和原生 JSON 刷新凭证交付，登录后的 access_token 可用于 GET /api/v1/me。CLOUDNEST_COOKIE_SECURE 默认 false，HTTPS 部署配置为 true。完整隔离库验证与可复制的登录示例见 [第 050 步学习记录](docs/开发学习记录.md#第-050-步启动装配并注册真实登录接口)。
 
+已提供 FindRefreshSession，按固定 32 字节 SHA256 摘要读取会话标识、刷新代次和授权状态快照。查询保留禁用、撤销及到期事实，供后续刷新服务判断，轮换写入会在事务内复查。字段、参数绑定和真实 MySQL 验证见 [第 051 步学习记录](docs/开发学习记录.md#第-051-步按刷新摘要只读定位会话状态)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
