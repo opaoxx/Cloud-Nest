@@ -16,6 +16,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/security"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
+	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -66,8 +67,17 @@ func TestBearerTokenHTTPAuthorization(t *testing.T) {
 			requestContext.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-		if actor.UserID != session.UserID || actor.SessionID != session.ID || actor.DeviceID != session.DeviceID {
+		ctx := requestcontext.WithActor(requestContext.Request.Context(), *actor)
+		requestContext.Request = requestContext.Request.WithContext(ctx)
+		requestContext.Next()
+	}, func(requestContext *gin.Context) {
+		// 下游处理函数从请求上下文读取授权结果。
+		actor, exists := requestcontext.Actor(requestContext.Request.Context())
+		if !exists || actor.UserID != session.UserID || actor.SessionID != session.ID || actor.DeviceID != session.DeviceID {
 			t.Error("HTTP 授权结果标识不一致")
+		}
+		if requestcontext.RequestID(requestContext.Request.Context()) != requestContext.Writer.Header().Get("X-Request-ID") {
+			t.Error("保存请求身份丢失了请求 ID")
 		}
 		requestContext.Status(http.StatusNoContent)
 	})
