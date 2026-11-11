@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
-	"github.com/opaoxx/cloud-nest/internal/server/http/security"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
@@ -52,25 +55,14 @@ func TestBearerTokenHTTPAuthorization(t *testing.T) {
 			}, nil
 		})
 
-	// 2. 在生产公共中间件内增加测试专用入口，验证提取结果能够交给授权服务。
+	// 2. 挂载认证中间件，验证真实授权结果能够传递给下游处理函数。
 	var logs bytes.Buffer
 	router := NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
-	router.GET("/test-bearer", func(requestContext *gin.Context) {
-		tokenText, parseError := security.BearerToken(requestContext.Request)
-		if parseError != nil {
-			requestContext.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
+	protected := middleware.RequireAuthorization(func(ctx context.Context, tokenText string) (*domain.Actor, error) {
 		authorizeCalls.Add(1)
-		actor, authorizationError := authorizationService.Authorize(requestContext.Request.Context(), tokenText)
-		if authorizationError != nil {
-			requestContext.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
-		ctx := requestcontext.WithActor(requestContext.Request.Context(), *actor)
-		requestContext.Request = requestContext.Request.WithContext(ctx)
-		requestContext.Next()
-	}, func(requestContext *gin.Context) {
+		return authorizationService.Authorize(ctx, tokenText)
+	}, handler.AuthorizationFailure)
+	router.GET("/test-bearer", protected, func(requestContext *gin.Context) {
 		// 下游处理函数从请求上下文读取授权结果。
 		actor, exists := requestcontext.Actor(requestContext.Request.Context())
 		if !exists || actor.UserID != session.UserID || actor.SessionID != session.ID || actor.DeviceID != session.DeviceID {
@@ -118,8 +110,19 @@ func TestBearerTokenHTTPAuthorization(t *testing.T) {
 			}
 			body, readError := io.ReadAll(response.Body)
 			closeError := response.Body.Close()
-			if readError != nil || closeError != nil || len(body) != 0 || response.StatusCode != testCase.status {
+			if readError != nil || closeError != nil || response.StatusCode != testCase.status {
 				t.Fatal("测试入口响应异常")
+			}
+			if testCase.status == http.StatusNoContent {
+				if len(body) != 0 {
+					t.Fatal("成功响应应为空正文")
+				}
+			} else {
+				var failure dto.ErrorResponse
+				if err := json.Unmarshal(body, &failure); err != nil || failure.Error.Code != "AUTH_REQUIRED" ||
+					failure.Error.Details != nil || failure.RequestID != response.Header.Get("X-Request-ID") {
+					t.Fatal("认证拒绝响应不符合统一契约")
+				}
 			}
 			if authorizeCalls.Load() != testCase.authorizations || queryCalls.Load() != testCase.queries {
 				t.Fatal("异常凭证未在对应阶段结束处理")

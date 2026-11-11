@@ -21,6 +21,8 @@ info:
     LoginClient 与 LoginOrigin 记录后续登录操作的头契约，不应用到当前 GET 或 CORS 预检。
     HTTP 登录限流适配器已实现；受限响应见 RateLimited/RetryAfter 共享组件。
     当前未注册登录操作，系统 GET 不受此登录限流，也不声明 429 响应。
+    受保护路由可挂载认证中间件，使用 BearerAuth；共享失败响应见 AuthorizationRejected 和 AccountDisabled。
+    认证中间件当前通过测试入口验证，后续业务操作按需引用这些组件。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -148,6 +150,12 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
     LoginRequest:
       type: object
@@ -227,6 +235,53 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    AuthorizationRejected:
+      description: |
+        HTTP 401，统一错误正文，details 为 null。凭证缺失、格式错误或 JWT 无效使用 AUTH_REQUIRED；
+        Access Token 过期使用 TOKEN_EXPIRED；会话未找到、会话到期、会话或设备撤销使用 SESSION_REVOKED。
+        此共享组件供后续受保护业务操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        WWW-Authenticate:
+          $ref: '#/components/headers/BearerChallenge'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            required:
+              value:
+                error: {code: AUTH_REQUIRED, message: 请登录后重试, details: null}
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            expired:
+              value:
+                error: {code: TOKEN_EXPIRED, message: 访问令牌已过期，请刷新后重试, details: null}
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            revoked:
+              value:
+                error: {code: SESSION_REVOKED, message: 登录会话已失效，请重新登录, details: null}
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    AccountDisabled:
+      description: 授权服务确认账号已禁用时返回 HTTP 403，details 为 null，供后续受保护操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: {code: ACCOUNT_DISABLED, message: 账号已被禁用, details: null}
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RateLimited:
       description: 登录限流准入被拒绝时返回 HTTP 429，凭证查询尚未执行。Retry-After 给出建议等待秒数，不保证等待后一定放行；IP/用户名分别累计失败与在途预留。此组件供后续登录操作使用，当前系统 GET 不引用。
       headers:
@@ -394,7 +449,7 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     InternalError:
-      description: 普通 panic 被恢复且响应尚未提交时返回 HTTP 500，不包含原始异常。若状态或正文已发送，则不覆盖或追加错误 JSON，仅中止后续处理；HEAD 不返回正文。
+      description: 普通 panic 被恢复，或认证中间件遇到未分类内部故障、异常身份结果、取消或超时时返回 HTTP 500，不包含原始异常。响应已提交时仅中止后续处理。HEAD 响应无正文。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -459,6 +514,11 @@ components:
         type: string
       example: 28ee758a-0727-42de-ae7d-3bb33155e148
   headers:
+    BearerChallenge:
+      description: 认证拒绝的 401 响应附带 Bearer 认证提示。
+      schema:
+        type: string
+        enum: ['Bearer realm="cloudnest"']
     RetryAfter:
       description: delta-seconds 十进制等待秒数，由正 duration 向上取整且至少为 1；防御性处理非正值时也返回 1，不采用 HTTP 日期。允许来源的普通 CORS 响应显式暴露此头。当前限流核心通常给出不超过 60 秒的建议，在途或总容量变化时不承诺到期一定放行。
       schema:
