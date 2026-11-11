@@ -5,7 +5,7 @@ import "errors"
 // ErrInvalidCredentials 统一表示账号不存在或密码错误，不区分具体失败原因。
 var ErrInvalidCredentials = errors.New("用户名或密码错误")
 
-// ErrAccountDisabled 仅在密码匹配后表示账号已被禁用。
+// ErrAccountDisabled 在可信身份检查后表示账号已被禁用。
 var ErrAccountDisabled = errors.New("账号已被禁用")
 
 // ErrInvalidAccountData 表示查询返回了缺失或不符合预期的账号数据，属于内部故障。

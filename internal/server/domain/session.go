@@ -11,8 +11,11 @@ var ErrRefreshTokenConflict = errors.New("刷新令牌摘要冲突")
 // ErrInvalidSessionData 表示会话标识无效，或写入没有得到一条有效记录和非零主键。
 var ErrInvalidSessionData = errors.New("登录会话数据异常")
 
-// ErrSessionExpired 表示会话已经到期，无法为它签发有效的访问令牌。
+// ErrSessionExpired 表示会话已经到期，无法继续用于授权或令牌签发。
 var ErrSessionExpired = errors.New("登录会话已到期")
+
+// ErrSessionRevoked 表示会话已被撤销，当前请求应结束授权流程。
+var ErrSessionRevoked = errors.New("登录会话已撤销")
 
 // LoginSession 保存创建会话后供登录流程使用的身份与到期信息。
 type LoginSession struct {
