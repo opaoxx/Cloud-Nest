@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端目前提供 /ping、/health/live 和 /health/ready，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一 404/500。启动时检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready 和受保护的 GET /api/v1/me，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -123,6 +123,8 @@ Start-Infra.ps1 会先校验所有容器（包括已停止容器）的端口预�
 已提供 UserSummary、UserProfileData 与转换方法，将用户和根目录 ID 映射为十进制字符串，三项字节计数映射为安全整数范围内的 JSON 数字，零值明确返回。字段示例、越界处理和测试入口见 [第 044 步学习记录](docs/开发学习记录.md#第-044-步映射用户资料响应-dto)。
 
 已提供 CurrentUser HTTP 处理函数，从 Actor 取得用户 ID，调用资料服务与 DTO，返回带 request_id 的 200 资料响应并设置 no-store。账号未找到使用 AUTH_REQUIRED 401，禁用使用 403，缺少 Actor 等内部异常使用 500。测试路由、真实 JWT 联测与装配说明见 [第 045 步学习记录](docs/开发学习记录.md#第-045-步实现当前用户-http-处理函数)。
+
+GET /api/v1/me 已接入生产启动流程，校验 Bearer JWT 并查询数据库状态，成功返回真实用户、根目录和配额。环境变量 CLOUDNEST_JWT_SECRET 优先，本地密钥默认位于 os.UserConfigDir()/CloudNest/jwt-secret，Windows 对应 %APPDATA%\CloudNest\jwt-secret。启动及完整隔离库验证见 [第 046 步学习记录](docs/开发学习记录.md#第-046-步启动装配并注册当前用户接口)。
 
 ## 本地连接信息
 

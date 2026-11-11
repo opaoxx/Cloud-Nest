@@ -70,7 +70,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("前端来源白名单读取成功", "allowed_origins", allowedOrigins)
 
-	// 5. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
+	// 5. 加载环境密钥或本地持久化 JWT 配置。
+	jwtConfig, err := config.LoadServerJWTConfig()
+	if err != nil {
+		logger.Error("读取 JWT 配置失败", "stage", "config", "error", err)
+		return err
+	}
+	logger.Info("JWT 配置读取成功", "issuer", jwtConfig.Issuer, "audience", jwtConfig.Audience)
+
+	// 6. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
 	connectionPool, err := repository.OpenMySQL(ctx, databaseConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -87,7 +95,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MySQL 连接检查通过", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
-	// 6. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
+	// 7. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
 	if err := repository.CheckSchema(ctx, connectionPool); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			logger.Error("数据库迁移检查失败", "stage", "schema", "database", databaseConfig.DatabaseName, "error", err)
@@ -96,7 +104,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
-	// 7. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
+	// 8. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
 	storageClient, err := storage.NewClient(ctx, storageConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -110,16 +118,31 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MinIO 桶访问检查通过", "bucket", storageConfig.Bucket)
 
-	// 8. 将现有依赖的检查方法交给服务层，再把就绪检查能力绑定到路由。
+	// 9. 复用连接池，构造访问令牌校验、请求授权和用户资料服务。
+	store, err := repository.NewStore(connectionPool)
+	if err != nil {
+		logger.Error("装配数据访问入口失败", "stage", "application", "error", err)
+		return err
+	}
+	verifier, err := service.NewAccessTokenVerifier(jwtConfig)
+	if err != nil {
+		logger.Error("装配访问令牌校验器失败", "stage", "application", "error", err)
+		return err
+	}
+	authorizationService := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
+	profileService := service.NewUserProfileService(store.FindUserProfile)
+
+	// 10. 注册系统检查与受保护的当前用户接口，再交给 HTTP 服务监听。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
+	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 9. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 11. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

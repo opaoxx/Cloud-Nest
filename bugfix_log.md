@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-12——启动测试的用户配置目录隔离需要按系统选择
+
+### 问题现象
+
+第 046 步自检发现，新增测试只为 Windows 设置 APPDATA、为其他系统设置 XDG_CONFIG_HOME。Go 在 macOS/iOS 使用 HOME 下的 Library/Application Support，原测试写法在这些系统上无法确保密钥位于临时目录。
+
+### 根因与修复方案
+
+按本机 Go 的 os.UserConfigDir 系统分支设置测试环境，并使用该方法返回的实际配置目录断言文件路径。环境改动由 t.Setenv 在测试结束时恢复。
+
+### 验证结果
+
+Windows 下配置测试、两次完整启动与重启测试通过，密钥位于临时配置目录，测试库已删除并复核。其他系统分支仅与本机 Go 源码核对。go test -count=1 ./...、go vet ./... 与 git diff --check 均通过。
+
 ## 2026-11-12——当前用户测试在正文解码后检查空缓冲区
 
 ### 问题现象
