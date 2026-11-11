@@ -26,6 +26,7 @@ info:
     UserSummary 与 UserProfileData 定义用户资料的共享响应数据，用户和根目录 ID 使用十进制字符串，
     三项字节计数使用 0 到 9007199254740991 的 JSON 整数。后续登录和当前用户操作按需引用。
     当前用户接口共享成功响应见 CurrentUserProfile，响应使用 no-store。
+    LoginData/LoginResponse 记录后续登录成功响应，Web JSON 省略 refresh_token，原生响应包含刷新原文。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -192,6 +193,97 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    LoginDeviceSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, platform]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 20
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 完整非零 uint64 设备 ID 的十进制字符串。
+        name:
+          type: string
+          description: 数据库中实际保留的设备名称。
+        platform:
+          type: string
+          enum: [WEB, WINDOWS, ANDROID]
+    LoginSessionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, device_id, expires_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 20
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 完整非零 uint64 会话 ID 的十进制字符串。
+        device_id:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/id'
+        expires_at:
+          type: string
+          format: date-time
+          description: UTC 会话截止时间，最多六位小数，同时约束刷新凭证期限。
+    LoginData:
+      type: object
+      additionalProperties: false
+      required: [user, root_entry_id, quota_bytes, used_bytes, reserved_bytes, access_token, expires_in, device, session]
+      description: |
+        登录服务及资料服务成功后的响应数据。Web JSON 省略 refresh_token，原生模式输出该字段。
+        expires_in 为响应计算时刻到访问令牌截止时刻的完整剩余秒数，向下取整，未来不足一秒时为 0。
+        Web 刷新 Cookie 由后续 HTTP 交付层设置，客户端类型须通过登录字段及来源策略校验。
+      properties:
+        user:
+          $ref: '#/components/schemas/UserSummary'
+        root_entry_id:
+          $ref: '#/components/schemas/UserProfileData/properties/root_entry_id'
+        quota_bytes:
+          $ref: '#/components/schemas/UserProfileData/properties/quota_bytes'
+        used_bytes:
+          $ref: '#/components/schemas/UserProfileData/properties/used_bytes'
+        reserved_bytes:
+          $ref: '#/components/schemas/UserProfileData/properties/reserved_bytes'
+        access_token:
+          type: string
+          minLength: 1
+          description: 访问令牌原文，按敏感凭证交付。
+        expires_in:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+        device:
+          $ref: '#/components/schemas/LoginDeviceSummary'
+        session:
+          $ref: '#/components/schemas/LoginSessionSummary'
+        refresh_token:
+          type: string
+          minLength: 1
+          description: 仅原生模式在 JSON 中交付，Web 模式省略。
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/LoginData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          user: {id: '1', username: root, display_name: 学习用户}
+          root_entry_id: '1'
+          quota_bytes: 107374182400
+          used_bytes: 0
+          reserved_bytes: 0
+          access_token: example.access.token
+          expires_in: 899
+          device: {id: '3', name: 学习设备, platform: WEB}
+          session: {id: '5', device_id: '3', expires_at: '2026-12-12T08:00:00Z'}
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UserProfileResponse:
       type: object
       additionalProperties: false

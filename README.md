@@ -126,6 +126,8 @@ Start-Infra.ps1 会先校验所有容器（包括已停止容器）的端口预�
 
 GET /api/v1/me 已接入生产启动流程，校验 Bearer JWT 并查询数据库状态，成功返回真实用户、根目录和配额。环境变量 CLOUDNEST_JWT_SECRET 优先，本地密钥默认位于 os.UserConfigDir()/CloudNest/jwt-secret，Windows 对应 %APPDATA%\CloudNest\jwt-secret。启动及完整隔离库验证见 [第 046 步学习记录](docs/开发学习记录.md#第-046-步启动装配并注册当前用户接口)。
 
+已提供 LoginData/LoginResponse 与转换方法，复用用户资料 DTO，组合访问令牌、剩余秒数和设备/会话摘要。Web JSON 省略刷新原文，原生 JSON 明确交付刷新原文。字段、取整边界与复验方法见 [第 047 步学习记录](docs/开发学习记录.md#第-047-步映射登录成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
