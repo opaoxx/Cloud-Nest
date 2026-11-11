@@ -14,6 +14,9 @@ var ErrDeviceAlreadyExists = errors.New("该用户的安装设备已存在")
 // ErrInvalidDeviceData 表示设备数据或写入结果违反登录设备的归属及状态约定。
 var ErrInvalidDeviceData = errors.New("登录设备数据异常")
 
+// ErrDeviceRevoked 表示设备仍处于撤销状态，当前不能建立会话。
+var ErrDeviceRevoked = errors.New("设备已撤销")
+
 // LoginDevice 保存登录设备所需的信息，不作为 HTTP 响应使用。
 type LoginDevice struct {
 	// ID 是设备记录的无符号主键。

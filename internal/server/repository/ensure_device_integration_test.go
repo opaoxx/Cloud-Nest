@@ -14,8 +14,9 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestEnsureLoginDeviceIntegration(t *testing.T) {
-	// 1. 在独占库中使用真实设备和会话表，旧会话只由测试建立虚构记录。
+// loginSessionDatabase 安装正式会话表，复用独占设备测试库的生命周期。
+func loginSessionDatabase(t *testing.T) *sql.DB {
+	t.Helper()
 	pool := loginDeviceDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -30,6 +31,14 @@ func TestEnsureLoginDeviceIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:start+end]); err != nil {
 		t.Fatal(err)
 	}
+	return pool
+}
+
+func TestEnsureLoginDeviceIntegration(t *testing.T) {
+	// 1. 在独占库中使用真实设备和会话表，旧会话只由测试建立虚构记录。
+	pool := loginSessionDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
