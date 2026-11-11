@@ -40,12 +40,6 @@ func LoadJWTConfig(localSecret string) (JWTConfig, error) {
 	}
 
 	// 3. 校验 issuer、audience 和两类令牌有效期。
-	if err := validateJWTIdentity("CLOUDNEST_JWT_ISSUER", jwtConfig.Issuer); err != nil {
-		return JWTConfig{}, err
-	}
-	if err := validateJWTIdentity("CLOUDNEST_JWT_AUDIENCE", jwtConfig.Audience); err != nil {
-		return JWTConfig{}, err
-	}
 	accessTTL, err := parseTokenTTL("ACCESS_TOKEN_TTL", envOrDefault("ACCESS_TOKEN_TTL", "15m"))
 	if err != nil {
 		return JWTConfig{}, err
@@ -55,11 +49,38 @@ func LoadJWTConfig(localSecret string) (JWTConfig, error) {
 		return JWTConfig{}, err
 	}
 
-	// 4. 返回配置，供后续令牌签发使用。
 	jwtConfig.SigningKey = signingKey
 	jwtConfig.AccessTokenTTL = accessTTL
 	jwtConfig.RefreshTokenTTL = refreshTTL
+	if err := jwtConfig.Validate(); err != nil {
+		return JWTConfig{}, err
+	}
+
+	// 4. 返回配置，供后续令牌签发使用。
 	return jwtConfig, nil
+}
+
+// Validate 检查解码后的配置，供配置加载与令牌组件构造共用。
+func (jwtConfig JWTConfig) Validate() error {
+	// 1. 检查签名密钥与两个需要准确匹配的身份字段。
+	if len(jwtConfig.SigningKey) < 32 {
+		return fmt.Errorf("CLOUDNEST_JWT_SECRET 解码后须至少 32 字节")
+	}
+	if err := validateJWTIdentity("CLOUDNEST_JWT_ISSUER", jwtConfig.Issuer); err != nil {
+		return err
+	}
+	if err := validateJWTIdentity("CLOUDNEST_JWT_AUDIENCE", jwtConfig.Audience); err != nil {
+		return err
+	}
+
+	// 2. 检查两类令牌的有效期都是正整数秒。
+	if jwtConfig.AccessTokenTTL <= 0 || jwtConfig.AccessTokenTTL%time.Second != 0 {
+		return fmt.Errorf("ACCESS_TOKEN_TTL 须为正整数秒时长")
+	}
+	if jwtConfig.RefreshTokenTTL <= 0 || jwtConfig.RefreshTokenTTL%time.Second != 0 {
+		return fmt.Errorf("REFRESH_TOKEN_TTL 须为正整数秒时长")
+	}
+	return nil
 }
 
 // validateJWTIdentity 检查可准确匹配的身份配置，保留大小写及内部文字。
@@ -70,10 +91,10 @@ func validateJWTIdentity(variableName, value string) error {
 	return nil
 }
 
-// parseTokenTTL 将带单位的时长转换为供令牌使用的正整数秒时长。
+// parseTokenTTL 解析带单位的时长，取值范围由 JWTConfig.Validate 统一检查。
 func parseTokenTTL(variableName, value string) (time.Duration, error) {
 	duration, err := time.ParseDuration(value)
-	if err != nil || duration <= 0 || duration%time.Second != 0 {
+	if err != nil {
 		return 0, fmt.Errorf("%s 须为带单位的正整数秒时长，例如 15m 或 720h", variableName)
 	}
 	return duration, nil

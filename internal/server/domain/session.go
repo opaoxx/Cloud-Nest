@@ -8,8 +8,11 @@ import (
 // ErrRefreshTokenConflict 表示刷新摘要已被其他会话使用，调用方应结束本次事务。
 var ErrRefreshTokenConflict = errors.New("刷新令牌摘要冲突")
 
-// ErrInvalidSessionData 表示会话写入没有得到一条有效记录和非零主键。
+// ErrInvalidSessionData 表示会话标识无效，或写入没有得到一条有效记录和非零主键。
 var ErrInvalidSessionData = errors.New("登录会话数据异常")
+
+// ErrSessionExpired 表示会话已经到期，无法为它签发有效的访问令牌。
+var ErrSessionExpired = errors.New("登录会话已到期")
 
 // LoginSession 保存创建会话后供登录流程使用的身份与到期信息。
 type LoginSession struct {
