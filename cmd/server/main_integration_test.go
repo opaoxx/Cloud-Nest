@@ -27,6 +27,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestServerCurrentUserIntegration(t *testing.T) {
@@ -104,6 +105,13 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("fixture-password"), 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, "UPDATE users SET password_hash=? WHERE id=1", string(passwordHash)); err != nil {
+		t.Fatal(err)
+	}
 	session := domain.LoginSession{ID: 17, UserID: 1, DeviceID: 13, ExpiresAt: time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)}
 	hash := sha256.Sum256([]byte("fixture-refresh"))
 	if _, err := pool.ExecContext(ctx, "INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(17,1,13,?,?)", hash[:], session.ExpiresAt); err != nil {
@@ -133,6 +141,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		}
 	}
 	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
+	t.Setenv("CLOUDNEST_COOKIE_SECURE", "false")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -225,6 +234,88 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		}
 	}
 	checkProfile(t)
+	// 正式登录接口从密码验证开始，创建的令牌再访问当前用户接口。
+	var loginSecrets []string
+	expectedSecureCookie := false
+	login := func(t *testing.T, clientType, installationID, password string, status int) (dto.LoginResponse, []*http.Cookie) {
+		t.Helper()
+		platform := "WEB"
+		if clientType == "native" {
+			platform = "ANDROID"
+		}
+		input := dto.LoginRequest{Username: "fixture_one", Password: password, InstallationID: installationID, DeviceName: "集成登录设备", Platform: platform, ClientType: clientType}
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loginRequest, err := http.NewRequest(http.MethodPost, "http://"+address+"/api/v1/auth/login", bytes.NewReader(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		loginRequest.Header.Set("Content-Type", "application/json")
+		loginRequest.Header.Set("X-CloudNest-Client", clientType)
+		if clientType == "web" {
+			loginRequest.Header.Set("Origin", "http://127.0.0.1:5173")
+		}
+		response, err := client.Do(loginRequest)
+		if err != nil {
+			t.Fatal("正式登录网络请求失败")
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" {
+			t.Fatal("正式登录响应状态或缓存错误")
+		}
+		var payload dto.LoginResponse
+		if status != 200 {
+			var failure dto.ErrorResponse
+			if json.Unmarshal(body, &failure) != nil || len(response.Cookies()) != 0 {
+				t.Fatal("错误登录响应异常")
+			}
+			return payload, nil
+		}
+		if json.Unmarshal(body, &payload) != nil || payload.Data.User.ID != "1" || payload.Data.RootEntryID != "11" || payload.RequestID != response.Header.Get("X-Request-ID") {
+			t.Fatal("正式登录资料不一致")
+		}
+		cookies := response.Cookies()
+		refresh := payload.Data.RefreshToken
+		if clientType == "web" {
+			if refresh != "" || len(cookies) != 1 || cookies[0].Secure != expectedSecureCookie || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].Path != "/api/v1/auth" {
+				t.Fatal("正式 Web 登录 Cookie 属性错误")
+			}
+			refresh = cookies[0].Value
+		} else if refresh == "" || len(cookies) != 0 {
+			t.Fatal("正式原生登录刷新原文交付错误")
+		}
+		var storedHash []byte
+		if err := pool.QueryRowContext(ctx, "SELECT refresh_token_hash FROM auth_sessions WHERE user_id=1 AND id=?", payload.Data.Session.ID).Scan(&storedHash); err != nil {
+			t.Fatal("登录会话未持久化")
+		}
+		expected := sha256.Sum256([]byte(refresh))
+		if !bytes.Equal(storedHash, expected[:]) {
+			t.Fatal("登录返回的刷新原文与入库摘要不一致")
+		}
+		loginSecrets = append(loginSecrets, payload.Data.AccessToken, refresh)
+		var me dto.UserProfileResponse
+		if json.Unmarshal(request(t, "/api/v1/me", payload.Data.AccessToken, 200), &me) != nil || me.Data.User.ID != "1" || me.Data.RootEntryID != "11" {
+			t.Fatal("登录令牌无法访问当前用户资料")
+		}
+		return payload, cookies
+	}
+	const webInstallation = "28ee758a-0727-42de-ae7d-3bb33155e148"
+	login(t, "web", webInstallation, "wrong-password", 401)
+	webLogin, _ := login(t, "web", webInstallation, "fixture-password", 200)
+	if webLogin.Data.Device.ID != "13" || webLogin.Data.Device.Name != "启动测试设备" {
+		t.Fatal("正式登录没有复用现有设备")
+	}
+	nativeLogin, _ := login(t, "native", "edbf7e35-36ea-45a5-bdb9-58e76b46fd5e", "fixture-password", 200)
+	if nativeLogin.Data.Device.ID == "13" {
+		t.Fatal("新安装复用了其他设备")
+	}
+	repeatedLogin, _ := login(t, "web", webInstallation, "fixture-password", 200)
+	if repeatedLogin.Data.Device.ID != "13" || repeatedLogin.Data.Session.ID == webLogin.Data.Session.ID {
+		t.Fatal("重新登录的设备复用或独立会话错误")
+	}
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -233,8 +324,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopFirst()
+	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
+	expectedSecureCookie = true
 	stopSecond := start()
 	checkProfile(t)
+	request(t, "/api/v1/me", webLogin.Data.AccessToken, 200)
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +340,28 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", token.Token, 401)
+	// 设备撤销后重新登录复用设备 ID，旧会话保持撤销。
+	if _, err := pool.ExecContext(ctx, "UPDATE user_devices SET revoked_at=UTC_TIMESTAMP(6) WHERE id=13"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(6) WHERE device_id=13 AND revoked_at IS NULL"); err != nil {
+		t.Fatal(err)
+	}
+	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
+	restoredLogin, _ := login(t, "web", webInstallation, "fixture-password", 200)
+	if restoredLogin.Data.Device.ID != "13" {
+		t.Fatal("撤销设备重新登录没有复用 ID")
+	}
+	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
+	request(t, "/api/v1/me", nativeLogin.Data.AccessToken, 200)
+	for attempt := 1; attempt <= 11; attempt++ {
+		status := 401
+		if attempt == 11 {
+			status = 429
+		}
+		login(t, "web", webInstallation, "wrong-password", status)
+	}
+	request(t, "/api/v1/me", restoredLogin.Data.AccessToken, 200)
 	stopSecond()
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {
@@ -253,5 +369,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), token.Token) || strings.Contains(logs.String(), "fixture-refresh") {
 		t.Fatal("启动或访问日志泄漏了凭证")
+	}
+	for _, secret := range loginSecrets {
+		if strings.Contains(logs.String(), secret) {
+			t.Error("正式登录日志泄漏凭证")
+		}
 	}
 }

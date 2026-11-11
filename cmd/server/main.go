@@ -12,6 +12,7 @@ import (
 
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
+	"github.com/opaoxx/cloud-nest/internal/server/http/security"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
@@ -77,6 +78,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 	logger.Info("JWT 配置读取成功", "issuer", jwtConfig.Issuer, "audience", jwtConfig.Audience)
+	secureCookie, err := config.LoadRefreshCookieSecure()
+	if err != nil {
+		logger.Error("读取刷新 Cookie 配置失败", "stage", "config", "error", err)
+		return err
+	}
 
 	// 6. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
 	connectionPool, err := repository.OpenMySQL(ctx, databaseConfig)
@@ -132,17 +138,39 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	authorizationService := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
 	profileService := service.NewUserProfileService(store.FindUserProfile)
 
-	// 10. 注册系统检查与受保护的当前用户接口，再交给 HTTP 服务监听。
+	// 10. 装配真实凭证、共享失败限流及登录会话、令牌服务。
+	credentialService := service.NewCredentialService(store.FindLoginAccountByUsername)
+	loginLimiter := service.NewLoginFailureLimiter()
+	loginGate := security.NewLoginAttemptGate(loginLimiter.Begin, credentialService.Authenticate)
+	signer, err := service.NewAccessTokenSigner(jwtConfig)
+	if err != nil {
+		logger.Error("装配访问令牌签发器失败", "stage", "application", "error", err)
+		return err
+	}
+	sessionService, err := service.NewLoginSessionService(jwtConfig,
+		func(ctx context.Context, userID uint64, action func(context.Context, service.LoginSessionTransaction) error) error {
+			return store.WithLoginUserTransaction(ctx, userID, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		})
+	if err != nil {
+		logger.Error("装配登录会话服务失败", "stage", "application", "error", err)
+		return err
+	}
+	loginTokens := service.NewLoginTokenService(sessionService.Create, signer.Issue)
+
+	// 11. 注册系统检查、受保护的当前用户接口与登录接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
+	serverhttp.RegisterLoginRoute(router, allowedOrigins, loginGate.Authenticate, loginTokens.Create, profileService.Get, secureCookie)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 11. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 12. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
