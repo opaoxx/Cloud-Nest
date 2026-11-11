@@ -130,6 +130,8 @@ GET /api/v1/me 已接入生产启动流程，校验 Bearer JWT 并查询数据�
 
 已提供 LoginSuccess HTTP 交付方法，完成 DTO 编码后返回 200、no-store 和 Pragma no-cache。Web 使用 cloudnest_refresh_token Cookie，路径为 /api/v1/auth，设置 HttpOnly、SameSite=Strict，并按调用配置选择 Secure；原生模式通过 JSON 交付刷新原文。属性与真实 HTTP/HTTPS Cookie Jar 验证见 [第 048 步学习记录](docs/开发学习记录.md#第-048-步交付登录成功响应与刷新-cookie)。
 
+已提供 Login HTTP 处理函数，串联 JSON/字段及来源检查、共享限流凭证适配器、资料检查、会话令牌创建和成功交付。错误凭证统一返回 AUTH_REQUIRED 401，资料准备成功后再创建会话。测试入口与真实 bcrypt/JWT 组件验证见 [第 049 步学习记录](docs/开发学习记录.md#第-049-步组合登录-http-处理流程)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

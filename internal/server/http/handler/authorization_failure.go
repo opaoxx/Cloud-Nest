@@ -17,6 +17,8 @@ func AuthorizationFailure(requestContext *gin.Context, authorizationError error)
 	status := http.StatusUnauthorized
 	code, message := "AUTH_REQUIRED", "请登录后重试"
 	switch {
+	case errors.Is(authorizationError, domain.ErrInvalidCredentials):
+		message = "用户名或密码错误"
 	case errors.Is(authorizationError, security.ErrInvalidAuthorizationHeader),
 		errors.Is(authorizationError, domain.ErrInvalidAccessToken),
 		errors.Is(authorizationError, domain.ErrAccountNotFound):
