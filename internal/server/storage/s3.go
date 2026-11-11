@@ -3,7 +3,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -76,6 +78,11 @@ func (client *Client) CheckBucket(ctx context.Context) error {
 	if err != nil {
 		if contextError := checkContext.Err(); contextError != nil {
 			return fmt.Errorf("MinIO 桶访问检查已取消或超时: %w", contextError)
+		}
+		// 传输层可先于上下文计时器返回超时，统一保留可判断的超时原因。
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			return fmt.Errorf("MinIO 桶访问检查已超时: %w", context.DeadlineExceeded)
 		}
 		errorResponse := minio.ToErrorResponse(err)
 		if errorResponse.StatusCode != 0 {

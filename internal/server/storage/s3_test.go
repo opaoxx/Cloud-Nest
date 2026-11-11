@@ -156,6 +156,45 @@ func TestNewClientTimeoutAndCancellation(t *testing.T) {
 	}
 }
 
+func TestCheckBucketTransportTimeout(t *testing.T) {
+	// 1. 先建立可用客户端，再让模拟服务停止返回响应头。
+	var stall atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if stall.Load() {
+			<-request.Context().Done()
+			return
+		}
+		if request.URL.Query().Has("location") {
+			_, _ = io.WriteString(response, "<LocationConstraint>us-east-1</LocationConstraint>")
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := NewClient(context.Background(), storageTestConfig(t, server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	// 当前没有在途调用，缩短本用例的传输层期限，稳定复现先于上下文到期的路径。
+	client.transport.ResponseHeaderTimeout = 20 * time.Millisecond
+	stall.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	// 2. 传输层超时也要保留统一超时类型，错误文本使用固定本地提示。
+	err = client.CheckBucket(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("未在调用方期限前复现传输层超时")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("传输层超时类型丢失 error=%v", err)
+	}
+	if strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "credential-must-not-be-logged") {
+		t.Fatal("超时错误回显了地址或凭证")
+	}
+}
+
 func TestMinIOIntegration(t *testing.T) {
 	// 1. 仅在显式启用时访问配置中的已有桶，不创建桶或对象。
 	if os.Getenv("CLOUDNEST_MINIO_TEST") != "1" {
