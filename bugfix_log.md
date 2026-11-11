@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-11——JWT 配置测试输入与 Windows 环境变量不兼容
+
+### 问题现象
+
+第 031 步首轮定向测试中，invalid_utf8 用例没有按预期进入无效 UTF-8 分支，audience_control 用例在 t.Setenv 阶段报 invalid argument。两条用例分别尝试把无效 UTF-8 字节和含 NUL 的字符串传入 Windows 环境变量，测试在校验预期或环境设置阶段失败。修复前记录于此，继续检查平台输入表示与测试边界。
+
+### 根因与修复方案
+
+本机 Go 的 syscall/env_windows.go 使用 UTF16PtrFromString 设置环境变量。无效 UTF-8 转换后无法保持原始字节，NUL 则被环境变量接口拒绝，因此这两项数据无法通过该测试路径原样抵达应用校验函数。将无效 UTF-8/NUL 改为直接调用 validateJWTIdentity，环境变量控制字符用例改用可表示的制表符，继续验证完整 LoadJWTConfig 路径。
+
+### 验证结果
+
+修正后的 JWT 配置定向测试全部通过，覆盖环境变量覆盖、配置错误及校验函数的原始异常文本，正常中文标识也通过。gofmt、go test -count=1 ./...、go vet ./... 与 git diff --check 均通过。
+
 ## 2026-11-05：响应已提交后的 panic 在完成日志中被当作普通成功
 
 ### 问题现象
