@@ -23,6 +23,8 @@ info:
     当前未注册登录操作，系统 GET 不受此登录限流，也不声明 429 响应。
     受保护路由可挂载认证中间件，使用 BearerAuth；共享失败响应见 AuthorizationRejected 和 AccountDisabled。
     认证中间件当前通过测试入口验证，后续业务操作按需引用这些组件。
+    UserSummary 与 UserProfileData 定义用户资料的共享响应数据，用户和根目录 ID 使用十进制字符串，
+    三项字节计数使用 0 到 9007199254740991 的 JSON 整数。后续登录和当前用户操作按需引用。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -157,6 +159,68 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    UserSummary:
+      type: object
+      additionalProperties: false
+      required: [id, username, display_name]
+      description: 用户资料服务返回的用户展示信息，账号状态由服务复查。
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 20
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 完整非零 uint64 用户 ID 的十进制字符串。
+          example: '1'
+        username:
+          type: string
+          description: 数据库中的用户登录名，按原文返回。
+          example: root
+        display_name:
+          type: string
+          description: 按原文返回，空字符串也明确输出。
+          example: 学习用户
+    UserProfileData:
+      type: object
+      additionalProperties: false
+      required: [user, root_entry_id, quota_bytes, used_bytes, reserved_bytes]
+      description: |
+        供后续登录资料和当前用户响应复用的数据对象，外层由具体响应提供 data 与 request_id。
+        DTO 转换检查非零 ID 与各项字节数的安全范围，状态和配额一致性由资料服务及 Repository 检查。
+      properties:
+        user:
+          $ref: '#/components/schemas/UserSummary'
+        root_entry_id:
+          type: string
+          minLength: 1
+          maxLength: 20
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 完整非零 uint64 根目录 ID 的十进制字符串。
+          example: '1'
+        quota_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          example: 107374182400
+        used_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          example: 0
+        reserved_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          example: 0
+      example:
+        user: {id: '1', username: root, display_name: 学习用户}
+        root_entry_id: '1'
+        quota_bytes: 107374182400
+        used_bytes: 0
+        reserved_bytes: 0
     LoginRequest:
       type: object
       additionalProperties: false
