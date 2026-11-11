@@ -8,13 +8,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
-	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
 	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
-	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -42,28 +39,7 @@ func TestUserProfileDataHTTP(t *testing.T) {
 			protected := middleware.RequireAuthorization(func(context.Context, string) (*domain.Actor, error) {
 				return &domain.Actor{UserID: ^uint64(0), SessionID: 11, DeviceID: 13}, nil
 			}, handler.AuthorizationFailure)
-			router.GET("/test-profile-data", protected, func(requestContext *gin.Context) {
-				actor, exists := requestcontext.Actor(requestContext.Request.Context())
-				if !exists {
-					t.Error("资料测试入口缺少 Actor")
-					handler.InternalError(requestContext, nil)
-					return
-				}
-				profile, err := profileService.Get(requestContext.Request.Context(), actor.UserID)
-				if err != nil {
-					handler.AuthorizationFailure(requestContext, err)
-					return
-				}
-				data, err := dto.NewUserProfileData(profile)
-				if err != nil {
-					handler.InternalError(requestContext, nil)
-					return
-				}
-				requestContext.JSON(http.StatusOK, struct {
-					Data      *dto.UserProfileData `json:"data"`
-					RequestID string               `json:"request_id"`
-				}{Data: data, RequestID: requestcontext.RequestID(requestContext.Request.Context())})
-			})
+			router.GET("/test-profile-data", protected, handler.CurrentUser(profileService.Get))
 			server := httptest.NewServer(router)
 			t.Cleanup(server.Close)
 			request, err := http.NewRequest(http.MethodGet, server.URL+"/test-profile-data", nil)

@@ -34,6 +34,14 @@ type UserProfileData struct {
 	ReservedBytes uint64 `json:"reserved_bytes"`
 }
 
+// UserProfileResponse 是当前用户资料的成功响应，关联本次请求标识。
+type UserProfileResponse struct {
+	// Data 保存已转换为客户端字段的用户资料。
+	Data UserProfileData `json:"data"`
+	// RequestID 与本次响应头和完成日志中的请求 ID 一致。
+	RequestID string `json:"request_id"`
+}
+
 // NewUserProfileData 将服务返回的资料映射为响应数据，失败返回 nil。
 // 账号状态、根目录归属及配额一致性由资料服务与 Repository 检查。
 func NewUserProfileData(profile *domain.UserProfile) (*UserProfileData, error) {

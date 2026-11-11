@@ -39,6 +39,7 @@ func TestRequireAuthorizationResponses(t *testing.T) {
 		{name: "duplicate header", headers: []string{"Bearer private-token", "Bearer private-token"}, status: 401, code: "AUTH_REQUIRED", message: "请登录后重试"},
 		{name: "malformed header", headers: []string{"Basic private-token"}, status: 401, code: "AUTH_REQUIRED", message: "请登录后重试"},
 		{name: "invalid token", err: domain.ErrInvalidAccessToken, status: 401, code: "AUTH_REQUIRED", message: "请登录后重试", calls: 1},
+		{name: "missing current account", err: domain.ErrAccountNotFound, status: 401, code: "AUTH_REQUIRED", message: "请登录后重试", calls: 1},
 		{name: "expired token", err: domain.ErrAccessTokenExpired, status: 401, code: "TOKEN_EXPIRED", message: "访问令牌已过期，请刷新后重试", calls: 1},
 		{name: "missing session", err: domain.ErrSessionNotFound, status: 401, code: "SESSION_REVOKED", message: "登录会话已失效，请重新登录", calls: 1},
 		{name: "expired session", err: domain.ErrSessionExpired, status: 401, code: "SESSION_REVOKED", message: "登录会话已失效，请重新登录", calls: 1},

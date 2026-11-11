@@ -25,6 +25,7 @@ info:
     认证中间件当前通过测试入口验证，后续业务操作按需引用这些组件。
     UserSummary 与 UserProfileData 定义用户资料的共享响应数据，用户和根目录 ID 使用十进制字符串，
     三项字节计数使用 0 到 9007199254740991 的 JSON 整数。后续登录和当前用户操作按需引用。
+    当前用户处理函数已通过测试路由验证，共享成功响应见 CurrentUserProfile，响应使用 no-store。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -159,6 +160,16 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    UserProfileResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      description: 当前用户资料的成功响应，request_id 与响应头一致。
+      properties:
+        data:
+          $ref: '#/components/schemas/UserProfileData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
     UserSummary:
       type: object
       additionalProperties: false
@@ -299,9 +310,30 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    CurrentUserProfile:
+      description: 当前用户资料处理函数成功时返回 HTTP 200，禁止缓存，供后续当前用户操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UserProfileResponse'
+          example:
+            data:
+              user: {id: '1', username: root, display_name: 学习用户}
+              root_entry_id: '1'
+              quota_bytes: 107374182400
+              used_bytes: 0
+              reserved_bytes: 0
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     AuthorizationRejected:
       description: |
-        HTTP 401，统一错误正文，details 为 null。凭证缺失、格式错误或 JWT 无效使用 AUTH_REQUIRED；
+        HTTP 401，统一错误正文，details 为 null。凭证缺失、格式错误、JWT 无效或当前账号未找到使用 AUTH_REQUIRED；
         Access Token 过期使用 TOKEN_EXPIRED；会话未找到、会话到期、会话或设备撤销使用 SESSION_REVOKED。
         此共享组件供后续受保护业务操作引用。
       headers:
