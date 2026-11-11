@@ -16,8 +16,9 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestCreateLoginDeviceIntegration(t *testing.T) {
-	// 1. 复用独占测试库及自动清理，仅替换该库的设备测试表为正式迁移中的原始定义。
+// loginDeviceDatabase 在独占事务库中安装正式设备表结构，供设备写入用例共用。
+func loginDeviceDatabase(t *testing.T) *sql.DB {
+	t.Helper()
 	pool := loginTransactionDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -34,6 +35,14 @@ func TestCreateLoginDeviceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	return pool
+}
+
+func TestCreateLoginDeviceIntegration(t *testing.T) {
+	// 1. 使用独占库与正式设备表，自动清理沿用事务验证机制。
+	pool := loginDeviceDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)

@@ -23,7 +23,9 @@ type loginTransactionScript struct {
 	beginError, queryError, commitError, rollbackError error
 	beforeQuery                                        func(context.Context)
 	deviceQueryError                                   func(context.Context) error
+	deviceQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	restore                                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
 	rollbackOnce                                       sync.Once
 }
@@ -58,6 +60,13 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE user_devices ") {
+		connection.script.record("restore")
+		if connection.script.restore == nil {
+			return nil, errors.New("测试未登记设备恢复操作")
+		}
+		return connection.script.restore(ctx, statement, arguments)
+	}
 	connection.script.record("insert")
 	if connection.script.insert == nil {
 		return nil, errors.New("测试未登记插入操作")
@@ -108,6 +117,9 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 	connector.deviceConnector.accountConnector.query = func(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
 		if strings.Contains(query, "user_devices") {
 			script.record("device")
+			if script.deviceQuery != nil {
+				return script.deviceQuery(ctx, query, arguments)
+			}
 			if script.deviceQueryError != nil {
 				if err := script.deviceQueryError(ctx); err != nil {
 					return nil, err
