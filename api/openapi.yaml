@@ -37,6 +37,7 @@ info:
     POST /api/v1/auth/refresh 已由启动入口装配真实服务，使用共享 JWT 签发器、来源配置及 Cookie 配置。
     LogoutData/LogoutResponse 定义退出成功数据，将已确认提交的撤销结果映射为 revoked=true 和请求 ID。
     退出成功交付方法已通过测试入口验证，共享响应见 LogoutSucceeded，Web 使用相同名称及认证路径清理刷新 Cookie。
+    LogoutRequest 定义退出 JSON 输入，client_type 精确选择 web/native，供后续来源检查及交付选择使用。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -289,6 +290,20 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    LogoutRequest:
+      type: object
+      additionalProperties: false
+      required: [client_type]
+      description: |
+        退出请求 DTO。client_type 精确选择 web/native，后续与单个 X-CloudNest-Client 请求头核对并检查来源。
+        当前会话身份由认证流程提供的 Actor 确定。
+      properties:
+        client_type:
+          type: string
+          enum: [web, native]
+          description: 请求客户端类型，使用准确小写值。
+      example:
+        client_type: web
     LogoutData:
       type: object
       additionalProperties: false

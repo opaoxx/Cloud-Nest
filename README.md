@@ -168,6 +168,8 @@ POST /api/v1/auth/refresh 已接入生产启动装配，复用已有连接池、
 
 已提供 LogoutSuccess，先校验并编码退出成功数据，再交付统一 200 JSON 和禁止缓存头。Web 复用原名称与认证路径，以空值、过去期限及 Max-Age=0 清理刷新 Cookie。测试路由、HTTP/HTTPS Cookie Jar、取消边界与调用方式见 [第 067 步学习记录](docs/开发学习记录.md#第-067-步交付退出成功的-http-响应与-cookie-清理)。
 
+已提供 LogoutRequest，正文包含精确取值为 web/native 的 client_type。字段校验复用统一 400，JSON 读取继续使用已有正文上限和类型检查。请求示例、字段规则及测试入口验证见 [第 068 步学习记录](docs/开发学习记录.md#第-068-步定义退出请求-dto-与字段校验)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
