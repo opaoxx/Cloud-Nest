@@ -29,6 +29,7 @@ info:
     LoginData/LoginResponse 记录后续登录成功响应，Web JSON 省略 refresh_token，原生响应包含刷新原文。
     登录成功交付方法已通过测试入口验证，共享响应见 LoginSucceeded，Web 使用受限路径的刷新 Cookie。
     登录处理函数已在启动时绑定真实查询、共享限流凭证适配器、资料及令牌服务。
+    RefreshData/RefreshResponse 定义刷新成功的数据结构，Web JSON 包含访问令牌与剩余秒数，原生模式增加刷新原文。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -237,6 +238,36 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    RefreshData:
+      type: object
+      additionalProperties: false
+      required: [access_token, expires_in]
+      description: |
+        已提交且签发成功的刷新结果转换后的响应数据。
+        Web 模式由后续 HTTP 交付层设置刷新 Cookie，原生模式在 JSON 中交付 refresh_token。
+        expires_in 按响应计算时刻取剩余完整秒数，向下取整，未来不足一秒时为 0。
+        client_type 须经请求及来源校验。
+      properties:
+        access_token:
+          $ref: '#/components/schemas/LoginData/properties/access_token'
+        expires_in:
+          $ref: '#/components/schemas/LoginData/properties/expires_in'
+        refresh_token:
+          $ref: '#/components/schemas/LoginData/properties/refresh_token'
+    RefreshResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RefreshData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          access_token: example.access.token
+          expires_in: 899
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     LoginDeviceSummary:
       type: object
       additionalProperties: false

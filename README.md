@@ -146,6 +146,8 @@ POST /api/v1/auth/login 已接入真实启动流程，支持 Web Cookie 和原�
 
 已提供 RefreshTokenService，将刷新会话提交与 Access Token 签发串联，成功返回会话、代次及两类凭证的内部结果。签发失败或提交后取消时返回空结果，已提交轮换继续生效。代码职责、真实 JWT/数据库授权联测和失败边界见 [第 056 步学习记录](docs/开发学习记录.md#第-056-步组合刷新会话与访问令牌签发)。
 
+已提供 NewRefreshData，将刷新结果转换为 data/request_id 响应结构。Web 数据包含 access_token 与 expires_in，原生数据增加 refresh_token；剩余完整秒数按响应计算时刻向下取整。字段、期限边界、真实 JWT 转换和 OpenAPI 共享结构见 [第 057 步学习记录](docs/开发学习记录.md#第-057-步定义刷新成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
