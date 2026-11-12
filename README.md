@@ -150,6 +150,8 @@ POST /api/v1/auth/login 已接入真实启动流程，支持 Web Cookie 和原�
 
 已提供 RefreshSuccess，先转换并编码刷新响应，再按 Web Cookie 或原生 JSON 交付凭证，使用 no-store 与 Pragma no-cache。登录和刷新共用 Cookie 构造方法，HTTP/HTTPS Cookie Jar、新值替换、取消及已提交响应验证见 [第 058 步学习记录](docs/开发学习记录.md#第-058-步交付刷新成功的-http-响应与-cookie)。
 
+已提供 RefreshRequest，校验 client_type 与 refresh_token 的组合。Web 正文字段可省略或为空，后续从 Cookie 取得凭证；原生须提供非空原文，交给凭证服务继续校验。字段错误复用统一 400，读取联测和 OpenAPI 输入分支见 [第 059 步学习记录](docs/开发学习记录.md#第-059-步定义刷新请求-dto-与字段校验)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

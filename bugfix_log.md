@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-12——刷新输入测试对静态 map 字段使用类型断言
+
+### 问题现象
+
+第 059 步首轮测试中，RefreshRequest 单元测试通过，HTTP 测试因对 body.Error.Details 使用类型断言而编译失败，提示 map[string]any 不是接口类型。修复前记录于此，接下来按现有 ErrorDetail 字段定义修正断言。
+
+### 根因与修复方案
+
+ErrorDetail.Details 已声明为 map[string]any，原测试按动态接口值处理并再次断言为 map。改为直接取得该 map，再检查长度及 field 值。
+
+### 验证结果
+
+修正后 17 组 HTTP JSON 读取与字段校验用例通过，DTO 校验及凭证格式边界用例通过。go test -count=1 ./...、go vet ./...、gofmt 检查及 git diff --check 均通过。
+
 ## 2026-11-12——刷新事务的到期测试未进入预期拒绝分支
 
 ### 问题现象

@@ -31,6 +31,7 @@ info:
     登录处理函数已在启动时绑定真实查询、共享限流凭证适配器、资料及令牌服务。
     RefreshData/RefreshResponse 定义刷新成功的数据结构，Web JSON 包含访问令牌与剩余秒数，原生模式增加刷新原文。
     刷新成功交付方法已通过测试入口验证，共享响应见 RefreshSucceeded，Web 沿用认证路径的刷新 Cookie。
+    RefreshRequest 定义刷新 JSON 输入，client_type 精确选择 web/native，原生模式提交非空刷新原文。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -239,6 +240,40 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    RefreshRequest:
+      description: |
+        刷新请求 DTO。Web 通过后续 Cookie 提取步骤取得凭证，正文 refresh_token 可省略、为空字符串或 null。
+        原生模式须在正文提供非空 refresh_token，原文交给凭证服务继续校验格式及有效性。
+        client_type 后续须与单个 X-CloudNest-Client 请求头一致，并经过来源检查。
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [client_type]
+          properties:
+            client_type:
+              type: string
+              enum: [web]
+            refresh_token:
+              type: string
+              nullable: true
+              maxLength: 0
+              writeOnly: true
+          example:
+            client_type: web
+        - type: object
+          additionalProperties: false
+          required: [client_type, refresh_token]
+          properties:
+            client_type:
+              type: string
+              enum: [native]
+            refresh_token:
+              type: string
+              minLength: 1
+              writeOnly: true
+          example:
+            client_type: native
+            refresh_token: example.refresh.token
     RefreshData:
       type: object
       additionalProperties: false
