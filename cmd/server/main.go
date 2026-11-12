@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/config"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/security"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
@@ -159,18 +160,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	loginTokens := service.NewLoginTokenService(sessionService.Create, signer.Issue)
 
-	// 11. 注册系统检查、受保护的当前用户接口与登录接口。
+	// 11. 复用已有 Store、刷新用户事务和签发器，装配刷新凭证服务。
+	refreshCredentials := service.NewRefreshCredentialService(store.FindRefreshSession)
+	refreshSessions := service.NewRefreshSessionService(refreshCredentials.Verify,
+		func(ctx context.Context, verified domain.VerifiedRefreshSession, action func(context.Context, service.RefreshSessionTransaction, domain.VerifiedRefreshSession) error) error {
+			return store.WithRefreshUserTransaction(ctx, verified, func(txContext context.Context, txStore *repository.Store, current domain.VerifiedRefreshSession) error {
+				return action(txContext, txStore, current)
+			})
+		})
+	refreshTokens := service.NewRefreshTokenService(refreshSessions.Refresh, signer.Issue)
+
+	// 12. 注册系统检查、当前用户、登录与刷新接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterLoginRoute(router, allowedOrigins, loginGate.Authenticate, loginTokens.Create, profileService.Get, secureCookie)
+	serverhttp.RegisterRefreshRoute(router, allowedOrigins, refreshTokens.Refresh, secureCookie)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 12. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 13. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

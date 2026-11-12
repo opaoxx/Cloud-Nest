@@ -23,6 +23,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/security"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
@@ -302,9 +303,80 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		}
 		return payload, cookies
 	}
+	// 正式刷新接口使用登录所得原文，核对摘要、代次及新 JWT 的 /me 授权。
+	refresh := func(t *testing.T, clientType, rawToken, sessionID string, status int, generation uint64) (dto.RefreshResponse, string) {
+		t.Helper()
+		input := dto.RefreshRequest{ClientType: clientType}
+		if clientType == "native" {
+			input.RefreshToken = rawToken
+		}
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refreshRequest, err := http.NewRequest(http.MethodPost, "http://"+address+"/api/v1/auth/refresh", bytes.NewReader(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		refreshRequest.Header.Set("Content-Type", "application/json")
+		refreshRequest.Header.Set(security.ClientHeader, clientType)
+		if clientType == "web" {
+			refreshRequest.Header.Set("Origin", "http://127.0.0.1:5173")
+			refreshRequest.AddCookie(&http.Cookie{Name: security.RefreshCookieName, Value: rawToken})
+		}
+		response, err := client.Do(refreshRequest)
+		if err != nil {
+			t.Fatal("正式刷新网络请求失败", err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Pragma") != "no-cache" {
+			t.Fatal("正式刷新状态或缓存头错误", response.StatusCode, err)
+		}
+		var payload dto.RefreshResponse
+		if status != 200 {
+			var rejected dto.ErrorResponse
+			if json.Unmarshal(body, &rejected) != nil || rejected.Error.Code == "" || rejected.Error.Details != nil || rejected.RequestID != response.Header.Get("X-Request-ID") || len(response.Cookies()) != 0 {
+				t.Fatal("正式刷新错误结构异常")
+			}
+			return payload, ""
+		}
+		if json.Unmarshal(body, &payload) != nil || payload.Data.AccessToken == "" || payload.Data.ExpiresIn < 0 || payload.RequestID == "" || payload.RequestID != response.Header.Get("X-Request-ID") {
+			t.Fatal("正式刷新成功结构异常")
+		}
+		newRaw := payload.Data.RefreshToken
+		cookies := response.Cookies()
+		if clientType == "web" {
+			if newRaw != "" || len(cookies) != 1 || cookies[0].Name != security.RefreshCookieName || cookies[0].Secure != expectedSecureCookie || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].Path != "/api/v1/auth" {
+				t.Fatal("正式刷新 Cookie 属性错误")
+			}
+			newRaw = cookies[0].Value
+		} else if newRaw == "" || len(cookies) != 0 {
+			t.Fatal("正式原生刷新交付异常")
+		}
+		var storedHash []byte
+		var storedGeneration uint64
+		var expiresAt time.Time
+		if err := pool.QueryRowContext(ctx, "SELECT refresh_token_hash,token_generation,expires_at FROM auth_sessions WHERE user_id=1 AND id=?", sessionID).Scan(&storedHash, &storedGeneration, &expiresAt); err != nil {
+			t.Fatal(err)
+		}
+		expectedHash := sha256.Sum256([]byte(newRaw))
+		if !bytes.Equal(storedHash, expectedHash[:]) || storedGeneration != generation {
+			t.Fatal("正式刷新摘要或代次不一致")
+		}
+		if clientType == "web" && !cookies[0].Expires.Equal(expiresAt.UTC().Truncate(time.Second)) {
+			t.Fatal("正式刷新 Cookie 期限错误")
+		}
+		var profile dto.UserProfileResponse
+		if json.Unmarshal(request(t, "/api/v1/me", payload.Data.AccessToken, 200), &profile) != nil || profile.Data.User.ID != "1" || profile.Data.RootEntryID != "11" {
+			t.Fatal("正式刷新 JWT 无法访问当前用户资料")
+		}
+		loginSecrets = append(loginSecrets, payload.Data.AccessToken, newRaw)
+		return payload, newRaw
+	}
 	const webInstallation = "28ee758a-0727-42de-ae7d-3bb33155e148"
 	login(t, "web", webInstallation, "wrong-password", 401)
-	webLogin, _ := login(t, "web", webInstallation, "fixture-password", 200)
+	webLogin, webCookies := login(t, "web", webInstallation, "fixture-password", 200)
 	if webLogin.Data.Device.ID != "13" || webLogin.Data.Device.Name != "启动测试设备" {
 		t.Fatal("正式登录没有复用现有设备")
 	}
@@ -316,6 +388,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if repeatedLogin.Data.Device.ID != "13" || repeatedLogin.Data.Session.ID == webLogin.Data.Session.ID {
 		t.Fatal("重新登录的设备复用或独立会话错误")
 	}
+	webRefreshed, webRaw := refresh(t, "web", webCookies[0].Value, webLogin.Data.Session.ID, 200, 2)
+	refresh(t, "web", webCookies[0].Value, webLogin.Data.Session.ID, 401, 0)
+	nativeRefreshed, nativeRaw := refresh(t, "native", nativeLogin.Data.RefreshToken, nativeLogin.Data.Session.ID, 200, 2)
+	refresh(t, "native", nativeLogin.Data.RefreshToken, nativeLogin.Data.Session.ID, 401, 0)
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -329,10 +405,15 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	stopSecond := start()
 	checkProfile(t)
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 200)
+	request(t, "/api/v1/me", webRefreshed.Data.AccessToken, 200)
+	request(t, "/api/v1/me", nativeRefreshed.Data.AccessToken, 200)
+	_, webRaw = refresh(t, "web", webRaw, webLogin.Data.Session.ID, 200, 3)
+	_, nativeRaw = refresh(t, "native", nativeRaw, nativeLogin.Data.Session.ID, 200, 3)
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", token.Token, 403)
+	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 403, 0)
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
@@ -348,12 +429,16 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
-	restoredLogin, _ := login(t, "web", webInstallation, "fixture-password", 200)
+	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
+	restoredLogin, restoredCookies := login(t, "web", webInstallation, "fixture-password", 200)
 	if restoredLogin.Data.Device.ID != "13" {
 		t.Fatal("撤销设备重新登录没有复用 ID")
 	}
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	request(t, "/api/v1/me", nativeLogin.Data.AccessToken, 200)
+	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
+	refresh(t, "web", restoredCookies[0].Value, restoredLogin.Data.Session.ID, 200, 2)
+	refresh(t, "native", nativeRaw, nativeLogin.Data.Session.ID, 200, 4)
 	for attempt := 1; attempt <= 11; attempt++ {
 		status := 401
 		if attempt == 11 {
@@ -372,7 +457,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	for _, secret := range loginSecrets {
 		if strings.Contains(logs.String(), secret) {
-			t.Error("正式登录日志泄漏凭证")
+			t.Error("正式认证日志泄漏凭证")
 		}
 	}
 }

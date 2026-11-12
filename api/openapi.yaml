@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料接口与登录操作。
+    当前契约包含系统检查、受保护的当前用户资料接口、登录及刷新操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -18,7 +18,7 @@ info:
     POST /api/v1/auth/login 使用 LoginRequest 与共享输入、来源、限流及凭证错误响应。
     登录来源策略已实现：两种模式均要求单个 X-CloudNest-Client，与正文 client_type 精确一致；
     web 必须携带单个白名单 Origin，native 必须不带 Origin。来源不合规见 ClientSourceForbidden；
-    LoginClient 与 LoginOrigin 记录登录操作的头契约。
+    LoginClient 与 LoginOrigin 记录登录及刷新操作共用的头契约。
     HTTP 登录限流适配器已实现；受限响应见 RateLimited/RetryAfter 共享组件。
     登录操作共用单进程失败限流器，系统检查与当前用户 GET 使用各自处理链。
     受保护路由可挂载认证中间件，使用 BearerAuth；共享失败响应见 AuthorizationRejected 和 AccountDisabled。
@@ -34,6 +34,7 @@ info:
     RefreshRequest 定义刷新 JSON 输入，client_type 精确选择 web/native，原生模式提交非空刷新原文。
     刷新提取按模式取得原文，Web 要求单个非空 cloudnest_refresh_token Cookie，原生使用正文值。
     刷新处理函数已组合 JSON/字段/来源检查、原文提取、刷新凭证服务与成功交付，并通过测试路由验证。
+    POST /api/v1/auth/refresh 已由启动入口装配真实服务，使用共享 JWT 签发器、来源配置及 Cookie 配置。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -42,6 +43,50 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/auth/refresh:
+    post:
+      tags: [Account]
+      operationId: refreshTokens
+      summary: 轮换刷新凭证并签发访问令牌
+      description: |
+        使用刷新凭证及数据库会话状态完成本次认证，按 JSON/字段/来源检查、凭证提取、事务轮换和签发的顺序处理。
+        Web 通过单个刷新 Cookie 提交原文，原生通过 JSON refresh_token 提交原文。
+        每次成功轮换后旧刷新原文失效，客户端对刷新执行 single-flight。交付失败时按重新登录流程恢复。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/LoginClient'
+        - $ref: '#/components/parameters/LoginOrigin'
+        - $ref: '#/components/parameters/WebRefreshCookie'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/RefreshSucceeded'
+        '400':
+          description: JSON 读取或刷新字段校验失败，INVALID_ARGUMENT，字段错误包含 details.field。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 使用 ACCOUNT_DISABLED、CLIENT_SOURCE_FORBIDDEN 或 CORS_FORBIDDEN 表达具体拒绝原因。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/auth/login:
     post:
       tags: [Account]
@@ -244,7 +289,7 @@ components:
   schemas:
     RefreshRequest:
       description: |
-        刷新请求 DTO。Web 通过后续 Cookie 提取步骤取得凭证，正文 refresh_token 可省略、为空字符串或 null。
+        刷新请求 DTO。Web 从 Cookie 取得凭证，正文 refresh_token 可省略、为空字符串或 null。
         原生模式须在正文提供非空 refresh_token，原文交给凭证服务继续校验格式及有效性。
         client_type 后续须与单个 X-CloudNest-Client 请求头一致，并经过来源检查。
       oneOf:
@@ -867,11 +912,19 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    WebRefreshCookie:
+      name: cloudnest_refresh_token
+      in: cookie
+      required: false
+      description: Web 模式须携带单个非空刷新 Cookie，原文作为敏感凭证处理。原生模式使用正文 refresh_token。
+      schema:
+        type: string
+        minLength: 1
     LoginClient:
       name: X-CloudNest-Client
       in: header
       required: true
-      description: 单个精确的 web 或 native，必须与已解析正文的 client_type 一致；不去空白或转换大小写，重复/列表/空值拒绝。仅供登录操作使用。
+      description: 单个精确的 web 或 native，必须与已解析正文的 client_type 一致；不去空白或转换大小写，重复/列表/空值拒绝。供登录和刷新操作共用。
       schema:
         type: string
         enum: [web, native]
@@ -880,7 +933,7 @@ components:
       name: Origin
       in: header
       required: false
-      description: 条件规则：web 必须提供单个与白名单精确一致的来源，native 必须不带此头（显式空值/null 也拒绝）。不进行请求来源规范化或 Referer 回退，不能只凭客户端类型声明绕过规则。仅供登录操作使用。
+      description: 条件规则：web 必须提供单个与白名单精确一致的来源，native 必须不带此头（显式空值/null 也拒绝）。不进行请求来源规范化或 Referer 回退，不能只凭客户端类型声明绕过规则。供登录和刷新操作共用。
       schema:
         type: string
       example: http://127.0.0.1:5173
