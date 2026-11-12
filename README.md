@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、POST /api/v1/auth/login 和 POST /api/v1/auth/refresh，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -171,6 +171,8 @@ POST /api/v1/auth/refresh 已接入生产启动装配，复用已有连接池、
 已提供 LogoutRequest，正文包含精确取值为 web/native 的 client_type。字段校验复用统一 400，JSON 读取继续使用已有正文上限和类型检查。请求示例、字段规则及测试入口验证见 [第 068 步学习记录](docs/开发学习记录.md#第-068-步定义退出请求-dto-与字段校验)。
 
 已提供 handler.Logout，读取认证 Actor，组合退出输入、来源检查、会话撤销及成功交付。带认证中间件的测试路由已验证真实 MySQL/JWT 退出、凭证失效、其他会话范围及回滚。调用方式、取消边界和验证命令见 [第 069 步学习记录](docs/开发学习记录.md#第-069-步组合退出-http-处理函数)。
+
+POST /api/v1/auth/logout 已接入正式启动流程，使用 Bearer 认证和 client_type 请求正文撤销当前会话。Web 成功响应清理刷新 Cookie，原生客户端根据成功 JSON 清理本地凭证。正式接口、重启后撤销状态和本地登录/退出示例见 [第 070 步学习记录](docs/开发学习记录.md#第-070-步接入正式退出接口与启动装配)。
 
 ## 本地连接信息
 

@@ -374,17 +374,72 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		loginSecrets = append(loginSecrets, payload.Data.AccessToken, newRaw)
 		return payload, newRaw
 	}
+	// 正式退出接口使用访问令牌定位会话，确认撤销提交及客户端交付。
+	logout := func(t *testing.T, clientType, accessToken, sessionID string, status int, code string) {
+		t.Helper()
+		encoded, err := json.Marshal(dto.LogoutRequest{ClientType: clientType})
+		if err != nil {
+			t.Fatal(err)
+		}
+		logoutRequest, err := http.NewRequest(http.MethodPost, "http://"+address+"/api/v1/auth/logout", bytes.NewReader(encoded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		logoutRequest.Header.Set("Content-Type", "application/json")
+		logoutRequest.Header.Set(security.ClientHeader, clientType)
+		if accessToken != "" {
+			logoutRequest.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		if clientType == "web" {
+			logoutRequest.Header.Set("Origin", "http://127.0.0.1:5173")
+		}
+		response, err := client.Do(logoutRequest)
+		if err != nil {
+			t.Fatal("正式退出网络请求失败", err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Request-ID") == "" {
+			t.Fatal("正式退出响应状态或缓存错误", response.StatusCode, err)
+		}
+		if status != 200 {
+			var rejected dto.ErrorResponse
+			if json.Unmarshal(body, &rejected) != nil || rejected.Error.Code != code || rejected.Error.Details != nil || rejected.RequestID != response.Header.Get("X-Request-ID") || len(response.Cookies()) != 0 {
+				t.Fatal("正式退出错误结构异常")
+			}
+			return
+		}
+		var payload dto.LogoutResponse
+		if json.Unmarshal(body, &payload) != nil || !payload.Data.Revoked || payload.RequestID != response.Header.Get("X-Request-ID") || response.Header.Get("Pragma") != "no-cache" {
+			t.Fatal("正式退出成功结构异常")
+		}
+		cookies := response.Cookies()
+		if clientType == "web" {
+			if len(cookies) != 1 || cookies[0].Name != security.RefreshCookieName || cookies[0].Value != "" || cookies[0].Path != "/api/v1/auth" || cookies[0].Domain != "" ||
+				cookies[0].Secure != expectedSecureCookie || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].MaxAge != -1 || !cookies[0].Expires.Equal(time.Unix(1, 0)) {
+				t.Fatal("正式退出的清理 Cookie 属性错误")
+			}
+		} else if len(cookies) != 0 {
+			t.Fatal("正式原生退出修改了 Web Cookie")
+		}
+		var committed bool
+		if err := pool.QueryRowContext(ctx, "SELECT revoked_at IS NOT NULL AND revoked_at=updated_at FROM auth_sessions WHERE user_id=1 AND id=?", sessionID).Scan(&committed); err != nil || !committed {
+			t.Fatal("正式退出返回成功时撤销尚未确认入库", err)
+		}
+	}
 	const webInstallation = "28ee758a-0727-42de-ae7d-3bb33155e148"
+	const nativeInstallation = "edbf7e35-36ea-45a5-bdb9-58e76b46fd5e"
+	logout(t, "web", "", "", 401, "AUTH_REQUIRED")
 	login(t, "web", webInstallation, "wrong-password", 401)
 	webLogin, webCookies := login(t, "web", webInstallation, "fixture-password", 200)
 	if webLogin.Data.Device.ID != "13" || webLogin.Data.Device.Name != "启动测试设备" {
 		t.Fatal("正式登录没有复用现有设备")
 	}
-	nativeLogin, _ := login(t, "native", "edbf7e35-36ea-45a5-bdb9-58e76b46fd5e", "fixture-password", 200)
+	nativeLogin, _ := login(t, "native", nativeInstallation, "fixture-password", 200)
 	if nativeLogin.Data.Device.ID == "13" {
 		t.Fatal("新安装复用了其他设备")
 	}
-	repeatedLogin, _ := login(t, "web", webInstallation, "fixture-password", 200)
+	repeatedLogin, repeatedCookies := login(t, "web", webInstallation, "fixture-password", 200)
 	if repeatedLogin.Data.Device.ID != "13" || repeatedLogin.Data.Session.ID == webLogin.Data.Session.ID {
 		t.Fatal("重新登录的设备复用或独立会话错误")
 	}
@@ -392,6 +447,19 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	refresh(t, "web", webCookies[0].Value, webLogin.Data.Session.ID, 401, 0)
 	nativeRefreshed, nativeRaw := refresh(t, "native", nativeLogin.Data.RefreshToken, nativeLogin.Data.Session.ID, 200, 2)
 	refresh(t, "native", nativeLogin.Data.RefreshToken, nativeLogin.Data.Session.ID, 401, 0)
+	// 第一轮启动中分别退出独立会话，原有会话继续用于刷新及重启验证。
+	logout(t, "web", repeatedLogin.Data.AccessToken, repeatedLogin.Data.Session.ID, 200, "")
+	request(t, "/api/v1/me", repeatedLogin.Data.AccessToken, 401)
+	refresh(t, "web", repeatedCookies[0].Value, repeatedLogin.Data.Session.ID, 401, 0)
+	request(t, "/api/v1/me", webRefreshed.Data.AccessToken, 200)
+	nativeExited, _ := login(t, "native", nativeInstallation, "fixture-password", 200)
+	if nativeExited.Data.Device.ID != nativeLogin.Data.Device.ID {
+		t.Fatal("正式退出测试未建立同设备独立会话")
+	}
+	logout(t, "native", nativeExited.Data.AccessToken, nativeExited.Data.Session.ID, 200, "")
+	request(t, "/api/v1/me", nativeExited.Data.AccessToken, 401)
+	refresh(t, "native", nativeExited.Data.RefreshToken, nativeExited.Data.Session.ID, 401, 0)
+	request(t, "/api/v1/me", nativeRefreshed.Data.AccessToken, 200)
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -404,6 +472,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	expectedSecureCookie = true
 	stopSecond := start()
 	checkProfile(t)
+	logout(t, "web", repeatedLogin.Data.AccessToken, repeatedLogin.Data.Session.ID, 401, "SESSION_REVOKED")
+	request(t, "/api/v1/me", nativeExited.Data.AccessToken, 401)
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 200)
 	request(t, "/api/v1/me", webRefreshed.Data.AccessToken, 200)
 	request(t, "/api/v1/me", nativeRefreshed.Data.AccessToken, 200)
@@ -437,8 +507,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	request(t, "/api/v1/me", nativeLogin.Data.AccessToken, 200)
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
-	refresh(t, "web", restoredCookies[0].Value, restoredLogin.Data.Session.ID, 200, 2)
-	refresh(t, "native", nativeRaw, nativeLogin.Data.Session.ID, 200, 4)
+	restoredRefreshed, restoredRaw := refresh(t, "web", restoredCookies[0].Value, restoredLogin.Data.Session.ID, 200, 2)
+	nativeFinal, nativeFinalRaw := refresh(t, "native", nativeRaw, nativeLogin.Data.Session.ID, 200, 4)
 	for attempt := 1; attempt <= 11; attempt++ {
 		status := 401
 		if attempt == 11 {
@@ -447,6 +517,17 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		login(t, "web", webInstallation, "wrong-password", status)
 	}
 	request(t, "/api/v1/me", restoredLogin.Data.AccessToken, 200)
+	// 第二轮启动沿用 Secure 配置，刷新后的最新凭证也受当前会话撤销控制。
+	logout(t, "web", restoredRefreshed.Data.AccessToken, restoredLogin.Data.Session.ID, 200, "")
+	request(t, "/api/v1/me", restoredLogin.Data.AccessToken, 401)
+	request(t, "/api/v1/me", restoredRefreshed.Data.AccessToken, 401)
+	refresh(t, "web", restoredRaw, restoredLogin.Data.Session.ID, 401, 0)
+	logout(t, "web", restoredRefreshed.Data.AccessToken, restoredLogin.Data.Session.ID, 401, "SESSION_REVOKED")
+	request(t, "/api/v1/me", nativeFinal.Data.AccessToken, 200)
+	logout(t, "native", nativeFinal.Data.AccessToken, nativeLogin.Data.Session.ID, 200, "")
+	request(t, "/api/v1/me", nativeLogin.Data.AccessToken, 401)
+	request(t, "/api/v1/me", nativeFinal.Data.AccessToken, 401)
+	refresh(t, "native", nativeFinalRaw, nativeLogin.Data.Session.ID, 401, 0)
 	stopSecond()
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {

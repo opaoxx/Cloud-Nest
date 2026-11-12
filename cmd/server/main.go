@@ -170,19 +170,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	refreshTokens := service.NewRefreshTokenService(refreshSessions.Refresh, signer.Issue)
 
-	// 12. 注册系统检查、当前用户、登录与刷新接口。
+	// 12. 复用已认证用户事务，装配当前会话退出服务。
+	logoutService := service.NewLogoutService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.LogoutTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		})
+
+	// 13. 注册系统检查、当前用户、登录、刷新与退出接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterLoginRoute(router, allowedOrigins, loginGate.Authenticate, loginTokens.Create, profileService.Get, secureCookie)
 	serverhttp.RegisterRefreshRoute(router, allowedOrigins, refreshTokens.Refresh, secureCookie)
+	serverhttp.RegisterLogoutRoute(router, allowedOrigins, authorizationService.Authorize, logoutService.Logout, secureCookie)
 	httpServer := &http.Server{
 		Addr:              listenAddress,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 13. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 14. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
