@@ -30,6 +30,7 @@ info:
     登录成功交付方法已通过测试入口验证，共享响应见 LoginSucceeded，Web 使用受限路径的刷新 Cookie。
     登录处理函数已在启动时绑定真实查询、共享限流凭证适配器、资料及令牌服务。
     RefreshData/RefreshResponse 定义刷新成功的数据结构，Web JSON 包含访问令牌与剩余秒数，原生模式增加刷新原文。
+    刷新成功交付方法已通过测试入口验证，共享响应见 RefreshSucceeded，Web 沿用认证路径的刷新 Cookie。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -509,6 +510,27 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    RefreshSucceeded:
+      description: |
+        刷新成功 HTTP 200，供后续刷新操作引用。Web 通过 Set-Cookie 交付轮换后的刷新原文。
+        原生模式在 JSON 中交付 refresh_token。两种模式均使用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+        Set-Cookie:
+          $ref: '#/components/headers/RefreshCookie'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RefreshResponse'
     LoginSucceeded:
       description: |
         登录成功 HTTP 200，由正式登录操作引用。Web 模式通过 Set-Cookie 交付刷新原文，JSON 省略该字段。

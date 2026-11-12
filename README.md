@@ -148,6 +148,8 @@ POST /api/v1/auth/login 已接入真实启动流程，支持 Web Cookie 和原�
 
 已提供 NewRefreshData，将刷新结果转换为 data/request_id 响应结构。Web 数据包含 access_token 与 expires_in，原生数据增加 refresh_token；剩余完整秒数按响应计算时刻向下取整。字段、期限边界、真实 JWT 转换和 OpenAPI 共享结构见 [第 057 步学习记录](docs/开发学习记录.md#第-057-步定义刷新成功响应-dto)。
 
+已提供 RefreshSuccess，先转换并编码刷新响应，再按 Web Cookie 或原生 JSON 交付凭证，使用 no-store 与 Pragma no-cache。登录和刷新共用 Cookie 构造方法，HTTP/HTTPS Cookie Jar、新值替换、取消及已提交响应验证见 [第 058 步学习记录](docs/开发学习记录.md#第-058-步交付刷新成功的-http-响应与-cookie)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

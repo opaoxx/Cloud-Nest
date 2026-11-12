@@ -11,12 +11,6 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 )
 
-// RefreshCookieName 是 CloudNest 的 Web 刷新凭证 Cookie 名称。
-const RefreshCookieName = "cloudnest_refresh_token"
-
-// RefreshCookiePath 限定刷新 Cookie 发送给认证接口的路径范围。
-const RefreshCookiePath = "/api/v1/auth"
-
 // LoginSuccess 交付已完成凭证验证、来源校验及登录服务调用后的成功结果。
 // secureCookie 由可信启动配置提供，HTTP 开发环境为 false，HTTPS 部署为 true。
 func LoginSuccess(requestContext *gin.Context, result *domain.LoginTokenResult, profile *domain.UserProfile, clientType string, secureCookie bool) {
@@ -48,16 +42,8 @@ func LoginSuccess(requestContext *gin.Context, result *domain.LoginTokenResult, 
 	// 3. 按客户端模式准备刷新 Cookie。
 	var refreshCookie *http.Cookie
 	if clientType == "web" {
-		refreshCookie = &http.Cookie{
-			Name:     RefreshCookieName,
-			Value:    result.RefreshToken,
-			Path:     RefreshCookiePath,
-			Expires:  data.Session.ExpiresAt.Truncate(time.Second),
-			HttpOnly: true,
-			Secure:   secureCookie,
-			SameSite: http.SameSiteStrictMode,
-		}
-		if err := refreshCookie.Valid(); err != nil {
+		refreshCookie, err = newRefreshCookie(result.RefreshToken, data.Session.ExpiresAt, secureCookie)
+		if err != nil {
 			InternalError(requestContext, nil)
 			return
 		}
