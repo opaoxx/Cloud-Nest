@@ -38,6 +38,7 @@ info:
     LogoutData/LogoutResponse 定义退出成功数据，将已确认提交的撤销结果映射为 revoked=true 和请求 ID。
     退出成功交付方法已通过测试入口验证，共享响应见 LogoutSucceeded，Web 使用相同名称及认证路径清理刷新 Cookie。
     LogoutRequest 定义退出 JSON 输入，client_type 精确选择 web/native，供后续来源检查及交付选择使用。
+    退出处理函数已组合 Actor、JSON/字段/来源检查、退出服务与成功交付，并通过带认证中间件的测试路由验证。
 servers:
   - url: http://127.0.0.1:18081
 tags:
