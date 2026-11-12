@@ -154,6 +154,8 @@ POST /api/v1/auth/login 已接入真实启动流程，支持 Web Cookie 和原�
 
 已提供 security.RefreshToken，Web 按单个非空刷新 Cookie 提取原文，原生直接取得正文值。同名 Cookie 在解析前计数，提取失败使用固定刷新错误并映射为 AUTH_REQUIRED 401。共用 Cookie 名称、来源链路和凭证校验联测见 [第 060 步学习记录](docs/开发学习记录.md#第-060-步按客户端模式提取刷新凭证)。
 
+已提供 handler.Refresh，组合 JSON/字段校验、来源检查、原文提取、刷新服务与成功交付，并在服务调用前后检查取消。测试路由的 Web/原生交付、真实 MySQL 轮换与 JWT 授权联测见 [第 061 步学习记录](docs/开发学习记录.md#第-061-步组合刷新-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

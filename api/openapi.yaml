@@ -33,6 +33,7 @@ info:
     刷新成功交付方法已通过测试入口验证，共享响应见 RefreshSucceeded，Web 沿用认证路径的刷新 Cookie。
     RefreshRequest 定义刷新 JSON 输入，client_type 精确选择 web/native，原生模式提交非空刷新原文。
     刷新提取按模式取得原文，Web 要求单个非空 cloudnest_refresh_token Cookie，原生使用正文值。
+    刷新处理函数已组合 JSON/字段/来源检查、原文提取、刷新凭证服务与成功交付，并通过测试路由验证。
 servers:
   - url: http://127.0.0.1:18081
 tags:
