@@ -36,6 +36,7 @@ info:
     刷新处理函数已组合 JSON/字段/来源检查、原文提取、刷新凭证服务与成功交付，并通过测试路由验证。
     POST /api/v1/auth/refresh 已由启动入口装配真实服务，使用共享 JWT 签发器、来源配置及 Cookie 配置。
     LogoutData/LogoutResponse 定义退出成功数据，将已确认提交的撤销结果映射为 revoked=true 和请求 ID。
+    退出成功交付方法已通过测试入口验证，共享响应见 LogoutSucceeded，Web 使用相同名称及认证路径清理刷新 Cookie。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -616,6 +617,28 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    LogoutSucceeded:
+      description: |
+        退出成功 HTTP 200，供后续退出操作引用。两种客户端共用 revoked=true 和请求 ID。
+        Web 使用空值、过去期限及 Max-Age=0 清理刷新 Cookie，原生客户端收到成功响应后清理本地凭证。
+        两种模式均使用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+        Set-Cookie:
+          $ref: '#/components/headers/ClearedRefreshCookie'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LogoutResponse'
     RefreshSucceeded:
       description: |
         刷新成功 HTTP 200，供后续刷新操作引用。Web 通过 Set-Cookie 交付轮换后的刷新原文。
@@ -970,6 +993,14 @@ components:
         type: string
       example: 28ee758a-0727-42de-ae7d-3bb33155e148
   headers:
+    ClearedRefreshCookie:
+      description: |
+        Web 模式退出成功时清理 cloudnest_refresh_token。值为空，Path=/api/v1/auth，省略 Domain。
+        Expires 为 Thu, 01 Jan 1970 00:00:01 GMT，Max-Age=0，HttpOnly，SameSite=Strict。
+        Secure 沿用可信 CLOUDNEST_COOKIE_SECURE 配置。原生模式交付成功 JSON。
+      schema:
+        type: string
+      example: 'cloudnest_refresh_token=; Path=/api/v1/auth; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0; HttpOnly; SameSite=Strict'
     RefreshCookie:
       description: |
         Web 模式成功响应设置 cloudnest_refresh_token，原文与内部结果一致。

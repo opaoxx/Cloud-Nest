@@ -166,6 +166,8 @@ POST /api/v1/auth/refresh 已接入生产启动装配，复用已有连接池、
 
 已提供 NewLogoutData，将确认提交后的退出结果转换为 revoked=true，LogoutResponse 使用统一 data/request_id 结构。Web 与原生客户端共用该 JSON 契约，转换规则、服务结果衔接及验证见 [第 066 步学习记录](docs/开发学习记录.md#第-066-步定义退出成功响应-dto)。
 
+已提供 LogoutSuccess，先校验并编码退出成功数据，再交付统一 200 JSON 和禁止缓存头。Web 复用原名称与认证路径，以空值、过去期限及 Max-Age=0 清理刷新 Cookie。测试路由、HTTP/HTTPS Cookie Jar、取消边界与调用方式见 [第 067 步学习记录](docs/开发学习记录.md#第-067-步交付退出成功的-http-响应与-cookie-清理)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
