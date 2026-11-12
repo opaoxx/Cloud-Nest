@@ -21,6 +21,7 @@ func AuthorizationFailure(requestContext *gin.Context, authorizationError error)
 		message = "用户名或密码错误"
 	case errors.Is(authorizationError, security.ErrInvalidAuthorizationHeader),
 		errors.Is(authorizationError, domain.ErrInvalidAccessToken),
+		errors.Is(authorizationError, domain.ErrInvalidRefreshToken),
 		errors.Is(authorizationError, domain.ErrAccountNotFound):
 	case errors.Is(authorizationError, domain.ErrAccessTokenExpired):
 		code, message = "TOKEN_EXPIRED", "访问令牌已过期，请刷新后重试"

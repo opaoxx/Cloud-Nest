@@ -32,6 +32,7 @@ info:
     RefreshData/RefreshResponse 定义刷新成功的数据结构，Web JSON 包含访问令牌与剩余秒数，原生模式增加刷新原文。
     刷新成功交付方法已通过测试入口验证，共享响应见 RefreshSucceeded，Web 沿用认证路径的刷新 Cookie。
     RefreshRequest 定义刷新 JSON 输入，client_type 精确选择 web/native，原生模式提交非空刷新原文。
+    刷新提取按模式取得原文，Web 要求单个非空 cloudnest_refresh_token Cookie，原生使用正文值。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -610,7 +611,7 @@ components:
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     AuthorizationRejected:
       description: |
-        HTTP 401，统一错误正文，details 为 null。凭证缺失、格式错误、JWT 无效、错误登录凭证或当前账号未找到使用 AUTH_REQUIRED；
+        HTTP 401，统一错误正文，details 为 null。凭证缺失、格式错误、JWT 或刷新凭证无效、错误登录凭证或当前账号未找到使用 AUTH_REQUIRED；
         Access Token 过期使用 TOKEN_EXPIRED；会话未找到、会话到期、会话或设备撤销使用 SESSION_REVOKED。
         此共享组件供后续受保护业务操作引用。
       headers:

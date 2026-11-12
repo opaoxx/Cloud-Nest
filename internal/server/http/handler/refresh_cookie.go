@@ -3,10 +3,12 @@ package handler
 import (
 	"net/http"
 	"time"
+
+	"github.com/opaoxx/cloud-nest/internal/server/http/security"
 )
 
 // RefreshCookieName 是 CloudNest 的 Web 刷新凭证 Cookie 名称。
-const RefreshCookieName = "cloudnest_refresh_token"
+const RefreshCookieName = security.RefreshCookieName
 
 // RefreshCookiePath 限定刷新 Cookie 发送给认证接口的路径范围。
 const RefreshCookiePath = "/api/v1/auth"
