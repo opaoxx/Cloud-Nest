@@ -94,6 +94,11 @@ func (store *Store) WithRefreshUserTransaction(
 			TokenGeneration: session.TokenGeneration,
 			TokenHash:       verified.TokenHash,
 		}
-		return action(txContext, txStore, current)
+		refreshStore := &Store{
+			database:       txStore.database,
+			loginUserID:    txStore.loginUserID,
+			refreshSession: &current,
+		}
+		return action(txContext, refreshStore, current)
 	})
 }
