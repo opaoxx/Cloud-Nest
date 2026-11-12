@@ -24,6 +24,7 @@ type loginTransactionScript struct {
 	beforeQuery                                        func(context.Context)
 	deviceQueryError                                   func(context.Context) error
 	deviceQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	sessionQuery                                       func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	restore                                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
@@ -115,6 +116,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 	script.rolledBack = make(chan struct{})
 	connector := &loginTransactionConnector{script: script}
 	connector.deviceConnector.accountConnector.query = func(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
+		if strings.Contains(query, "auth_sessions") && script.sessionQuery != nil {
+			script.record("session")
+			return script.sessionQuery(ctx, query, arguments)
+		}
 		if strings.Contains(query, "user_devices") {
 			script.record("device")
 			if script.deviceQuery != nil {

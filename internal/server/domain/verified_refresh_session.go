@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-// ErrInvalidRefreshToken 表示刷新原文格式无效或当前摘要未命中。
+// ErrInvalidRefreshToken 表示刷新原文格式无效、摘要未命中或锁内摘要/代次已改变。
 var ErrInvalidRefreshToken = errors.New("刷新凭证无效")
 
 // VerifiedRefreshSession 保存初次刷新凭证校验通过后供事务复查的最小资料。
