@@ -35,6 +35,7 @@ info:
     刷新提取按模式取得原文，Web 要求单个非空 cloudnest_refresh_token Cookie，原生使用正文值。
     刷新处理函数已组合 JSON/字段/来源检查、原文提取、刷新凭证服务与成功交付，并通过测试路由验证。
     POST /api/v1/auth/refresh 已由启动入口装配真实服务，使用共享 JWT 签发器、来源配置及 Cookie 配置。
+    LogoutData/LogoutResponse 定义退出成功数据，将已确认提交的撤销结果映射为 revoked=true 和请求 ID。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -287,6 +288,29 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    LogoutData:
+      type: object
+      additionalProperties: false
+      required: [revoked]
+      description: 当前会话撤销确认提交后的成功数据，Web 与原生客户端共用。
+      properties:
+        revoked:
+          type: boolean
+          enum: [true]
+          description: 本次会话撤销已确认提交。
+    LogoutResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/LogoutData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          revoked: true
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RefreshRequest:
       description: |
         刷新请求 DTO。Web 从 Cookie 取得凭证，正文 refresh_token 可省略、为空字符串或 null。

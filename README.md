@@ -164,6 +164,8 @@ POST /api/v1/auth/refresh 已接入生产启动装配，复用已有连接池、
 
 已提供 LogoutService，接收已认证 Actor，在用户事务中撤销当前会话，确认提交后返回 Revoked=true。错误、取消、提交边界和真实 MySQL 联测见 [第 065 步学习记录](docs/开发学习记录.md#第-065-步组合退出登录服务)。
 
+已提供 NewLogoutData，将确认提交后的退出结果转换为 revoked=true，LogoutResponse 使用统一 data/request_id 结构。Web 与原生客户端共用该 JSON 契约，转换规则、服务结果衔接及验证见 [第 066 步学习记录](docs/开发学习记录.md#第-066-步定义退出成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
