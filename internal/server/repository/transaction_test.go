@@ -26,6 +26,7 @@ type loginTransactionScript struct {
 	deviceQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	sessionQuery                                       func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	rotate                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	revoke                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	restore                                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
@@ -62,6 +63,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE auth_sessions SET revoked_at ") && connection.script.revoke != nil {
+		connection.script.record("revoke")
+		return connection.script.revoke(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "UPDATE auth_sessions ") && connection.script.rotate != nil {
 		connection.script.record("rotate")
 		return connection.script.rotate(ctx, statement, arguments)

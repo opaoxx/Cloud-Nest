@@ -18,6 +18,8 @@ type Store struct {
 	loginUserID uint64
 	// refreshSession 仅由刷新事务入口绑定，保存已锁定并复查的会话副本。
 	refreshSession *domain.VerifiedRefreshSession
+	// authenticatedActor 由已认证用户事务入口绑定，限定当前会话写入归属。
+	authenticatedActor *domain.Actor
 }
 
 // NewStore 用现有连接池装配 GORM，不创建连接池、不执行探测或迁移，也不接管关闭操作。

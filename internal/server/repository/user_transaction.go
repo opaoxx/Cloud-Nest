@@ -73,6 +73,11 @@ func (store *Store) WithUserTransaction(ctx context.Context, actor domain.Actor,
 		}
 
 		// 4. 执行同一事务中的回调，交由外层提交或回滚。
-		return action(txContext, txStore)
+		authenticatedStore := &Store{
+			database:           txStore.database,
+			loginUserID:        txStore.loginUserID,
+			authenticatedActor: &actor,
+		}
+		return action(txContext, authenticatedStore)
 	})
 }
