@@ -206,6 +206,8 @@ DELETE /api/v1/sessions/{id} 已接入正式路由及启动流程，使用共享
 
 已提供 NewUserDeviceListData，将设备服务结果转换为 items/has_more，完整响应采用 data/request_id。设备 ID 使用字符串，时间使用 UTC 微秒值，current=false、NULL 时间及空数组明确交付。转换复用设备摘要与共用时间方法，字段、边界和服务衔接验证见 [第 086 步学习记录](docs/开发学习记录.md#第-086-步定义设备列表响应-dto)。
 
+已提供 ParseUserDeviceListQuery，将 before_id/limit 转为设备服务的 BeforeDeviceID/PageSize，默认首页和每页 50 条，显式 0 表示首页。设备与会话共用分页校验，各自保留固定字段提示；查询格式、数字边界、HTTP 错误及服务衔接验证见 [第 087 步学习记录](docs/开发学习记录.md#第-087-步定义设备列表查询参数-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

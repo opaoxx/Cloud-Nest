@@ -51,6 +51,8 @@ info:
     指定会话撤销处理函数已组合认证 Actor、路径解析、服务及成功交付，目标不存在的共享 404 见 TargetSessionNotFound。
     DELETE /api/v1/sessions/{id} 已由启动入口绑定共享授权及已认证用户事务，支持指定当前或其他会话及重复撤销。
     UserDeviceSummary/UserDeviceListData/UserDeviceListResponse 定义后续设备列表响应，使用字符串 ID、UTC 微秒时间、current 及分页字段。
+    UserDeviceBeforeID/UserDeviceLimit 定义设备列表查询参数，默认首页和每页 50 条，额外字段采用忽略策略。
+    设备与会话查询共用完整 RawQuery 解析及数字校验，整体格式错误定位 query，其后依次检查 before_id、limit。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1325,6 +1327,35 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    UserDeviceBeforeID:
+      name: before_id
+      in: query
+      required: false
+      description: |
+        单个标准十进制边界值，范围为 0～18446744073709551615。省略或显式 0 表示首页。
+        后续页使用上一页末项设备 ID，查询读取 ID 小于该值的记录。
+        使用准确的十进制写法，重复值、空值、前导零、符号或空白按 before_id 字段错误处理。
+        最多 20 位的数字仍须满足上述 uint64 上限，服务端执行范围检查。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 20
+        pattern: '^(0|[1-9][0-9]{0,19})$'
+        default: '0'
+      example: '13'
+    UserDeviceLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        单个标准十进制整数，范围为 1～100，省略时为 50。
+        重复值、空值、前导零、符号或空白按 limit 字段错误处理。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+      example: 50
     UserSessionID:
       name: id
       in: path
