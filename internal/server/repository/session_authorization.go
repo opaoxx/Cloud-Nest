@@ -11,8 +11,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// FindSessionAuthorization 读取指定用户与会话的授权状态，供普通请求授权判断使用。
-// userID/sessionID 来自已验证令牌，关键写入仍在用户事务中复核当前状态。
+// FindSessionAuthorization 只读查询指定用户与会话的状态，供请求授权及目标归属定位使用。
+// userID 来自已验证凭证或事务身份，sessionID 为对应会话或用户范围内的目标。
+// 关键写入仍在用户事务中锁定并复核当前状态。
 func (store *Store) FindSessionAuthorization(ctx context.Context, userID, sessionID uint64) (*domain.SessionAuthorization, error) {
 	// 1. 检查查询参数，设置有期限的查询上下文。
 	if ctx == nil || userID == 0 || sessionID == 0 {
