@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -209,6 +209,8 @@ DELETE /api/v1/sessions/{id} 已接入正式路由及启动流程，使用共享
 已提供 ParseUserDeviceListQuery，将 before_id/limit 转为设备服务的 BeforeDeviceID/PageSize，默认首页和每页 50 条，显式 0 表示首页。设备与会话共用分页校验，各自保留固定字段提示；查询格式、数字边界、HTTP 错误及服务衔接验证见 [第 087 步学习记录](docs/开发学习记录.md#第-087-步定义设备列表查询参数-dto)。
 
 已提供 handler.UserDevices，组合认证 Actor、分页参数、设备服务与响应 DTO，交付统一 JSON、请求 ID 和禁止缓存头。测试专用 GET 入口已通过真实 MySQL/JWT/HTTP 验证分页、用户隔离、同设备多会话、历史状态及撤销边界。执行顺序与复验命令见 [第 088 步学习记录](docs/开发学习记录.md#第-088-步组合设备列表-http-处理函数)。
+
+GET /api/v1/devices 已接入正式路由和启动装配，使用共享 Bearer 授权及设备列表服务，支持 before_id/limit 分页和当前设备标记。正式启动、重启、同设备多会话及禁用/撤销边界验证已通过，本地登录和查询示例见 [第 089 步学习记录](docs/开发学习记录.md#第-089-步接入正式设备列表与启动装配)。
 
 ## 本地连接信息
 

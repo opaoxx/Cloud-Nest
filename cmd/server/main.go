@@ -125,7 +125,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MinIO 桶访问检查通过", "bucket", storageConfig.Bucket)
 
-	// 9. 复用连接池，构造令牌校验、请求授权、用户资料和会话列表服务。
+	// 9. 复用连接池，构造令牌校验、请求授权、用户资料、会话及设备列表服务。
 	store, err := repository.NewStore(connectionPool)
 	if err != nil {
 		logger.Error("装配数据访问入口失败", "stage", "application", "error", err)
@@ -139,6 +139,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	authorizationService := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
 	profileService := service.NewUserProfileService(store.FindUserProfile)
 	sessionListService := service.NewUserSessionService(store.ListUserSessions)
+	deviceListService := service.NewUserDeviceService(store.ListUserDevices)
 
 	// 10. 装配真实凭证、共享失败限流及登录会话、令牌服务。
 	credentialService := service.NewCredentialService(store.FindLoginAccountByUsername)
@@ -185,11 +186,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
-	// 13. 注册系统检查、当前用户、会话列表及撤销、登录、刷新与退出接口。
+	// 13. 注册系统检查、当前用户、会话及设备列表、会话撤销、登录、刷新与退出接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
+	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
 	serverhttp.RegisterRevokeSessionRoute(router, authorizationService.Authorize, revokeService.Revoke)
 	serverhttp.RegisterLoginRoute(router, allowedOrigins, loginGate.Authenticate, loginTokens.Create, profileService.Get, secureCookie)
 	serverhttp.RegisterRefreshRoute(router, allowedOrigins, refreshTokens.Refresh, secureCookie)

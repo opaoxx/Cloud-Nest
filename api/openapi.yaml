@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、设备列表、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -22,7 +22,7 @@ info:
     HTTP 登录限流适配器已实现；受限响应见 RateLimited/RetryAfter 共享组件。
     登录操作共用单进程失败限流器，系统检查与当前用户 GET 使用各自处理链。
     受保护路由可挂载认证中间件，使用 BearerAuth；共享失败响应见 AuthorizationRejected 和 AccountDisabled。
-    GET /api/v1/me 和 GET /api/v1/sessions 已挂载认证中间件，后续业务操作按需引用这些组件。
+    GET /api/v1/me、GET /api/v1/sessions 和 GET /api/v1/devices 已挂载认证中间件，后续业务操作按需引用这些组件。
     UserSummary 与 UserProfileData 定义用户资料的共享响应数据，用户和根目录 ID 使用十进制字符串，
     三项字节计数使用 0 到 9007199254740991 的 JSON 整数。后续登录和当前用户操作按需引用。
     当前用户接口共享成功响应见 CurrentUserProfile，响应使用 no-store。
@@ -54,6 +54,7 @@ info:
     UserDeviceBeforeID/UserDeviceLimit 定义设备列表查询参数，默认首页和每页 50 条，额外字段采用忽略策略。
     设备与会话查询共用完整 RawQuery 解析及数字校验，整体格式错误定位 query，其后依次检查 before_id、limit。
     设备列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserDevicesListed。
+    GET /api/v1/devices 已由启动入口绑定共享授权与真实设备列表服务，支持分页、当前设备标记及历史状态读取。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -96,6 +97,41 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           $ref: '#/components/responses/TargetSessionNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/devices:
+    get:
+      tags: [Account]
+      operationId: listUserDevices
+      summary: 分页读取当前用户的设备列表
+      description: |
+        Bearer JWT 和数据库授权通过后解析 before_id/limit，按已认证 Actor.UserID 读取列表。
+        按设备 ID 降序分页，响应使用 items/has_more，后续页取本页末项 ID 作为 before_id。
+        current 表示本次请求的设备身份匹配，同设备多个会话共享设备项与当前标记。
+        历史设备撤销和可空活动时间按查询结果返回。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UserDeviceBeforeID'
+        - $ref: '#/components/parameters/UserDeviceLimit'
+      responses:
+        '200':
+          $ref: '#/components/responses/UserDevicesListed'
+        '400':
+          description: 已认证请求的查询格式或字段错误，INVALID_ARGUMENT，details.field 为 query、before_id 或 limit。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/sessions:
@@ -970,7 +1006,7 @@ components:
           schema:
             $ref: '#/components/schemas/RevokeSessionResponse'
     UserDevicesListed:
-      description: 设备列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，供后续设备列表操作引用。
+      description: 设备列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，由正式设备列表操作引用。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
