@@ -234,6 +234,8 @@ PATCH /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享 B
 
 已提供 NewRevokeDeviceData，将设备撤销服务确认提交后的结果转换为 revoked=true，RevokeDeviceResponse 使用统一 data/request_id。空结果和未确认标记返回设备数据错误，JSON 字段、独立副本及服务提交边界验证见 [第 100 步学习记录](docs/开发学习记录.md#第-100-步定义设备撤销成功响应-dto)。
 
+已提供 RevokeDeviceSuccess，将设备及关联会话确认提交后的结果交付为 HTTP 200 JSON，关联请求 ID 并设置 no-store/Pragma no-cache。测试专用 DELETE 入口已验证成功、异常、取消、已提交响应及真实 HTTP 传输，执行顺序与复验命令见 [第 101 步学习记录](docs/开发学习记录.md#第-101-步交付设备撤销成功的-http-响应)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
