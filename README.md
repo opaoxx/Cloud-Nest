@@ -220,6 +220,8 @@ GET /api/v1/devices 已接入正式路由和启动装配，使用共享 Bearer �
 
 已提供 RenameDeviceService.Rename，组合已认证用户事务与设备改名，核对并复制设备结果，确认提交后返回。目标缺失或跨账号转换为 ErrTargetDeviceNotFound，调用者失效保留原分类；提交、取消、副本与真实 MySQL/JWT 验证见 [第 093 步学习记录](docs/开发学习记录.md#第-093-步组合设备名称更新服务)。
 
+已提供 NewRenameDeviceData，将改名服务已提交的设备结果转换为 data.device，完整响应使用 data/request_id。设备展示包含字符串 ID、名称、平台及三项 UTC 微秒时间，可空时间明确返回 null。字段、时间边界、副本与服务衔接验证见 [第 094 步学习记录](docs/开发学习记录.md#第-094-步定义设备改名成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

@@ -56,6 +56,7 @@ info:
     设备列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserDevicesListed。
     GET /api/v1/devices 已由启动入口绑定共享授权与真实设备列表服务，支持分页、当前设备标记及历史状态读取。
     RenameDeviceRequest 定义后续修改设备名称的请求正文，name 复用登录设备名称的输入规则，字段错误定位 name。
+    RenamedDeviceSummary/RenameDeviceData/RenameDeviceResponse 定义后续改名成功响应，使用 data.device 与 request_id，设备时间为 UTC 微秒值。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
@@ -597,6 +598,50 @@ components:
               device_revoked_at: null
               current: false
           has_more: false
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RenamedDeviceSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, platform, created_at, last_seen_at, revoked_at]
+      description: 改名事务确认提交后的设备展示字段，名称保留原文，可空时间明确交付 null。
+      properties:
+        id:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/id'
+        name:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/name'
+        platform:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/platform'
+        created_at:
+          $ref: '#/components/schemas/UserDeviceSummary/properties/created_at'
+        last_seen_at:
+          $ref: '#/components/schemas/UserDeviceSummary/properties/last_seen_at'
+        revoked_at:
+          $ref: '#/components/schemas/UserDeviceSummary/properties/revoked_at'
+    RenameDeviceData:
+      type: object
+      additionalProperties: false
+      required: [device]
+      properties:
+        device:
+          $ref: '#/components/schemas/RenamedDeviceSummary'
+    RenameDeviceResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RenameDeviceData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          device:
+            id: '13'
+            name: 学习电脑
+            platform: WEB
+            created_at: '2026-11-13T00:00:00.123456Z'
+            last_seen_at: null
+            revoked_at: null
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RenameDeviceRequest:
       type: object
