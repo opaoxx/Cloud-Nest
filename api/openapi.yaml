@@ -56,6 +56,7 @@ info:
     设备列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserDevicesListed。
     GET /api/v1/devices 已由启动入口绑定共享授权与真实设备列表服务，支持分页、当前设备标记及历史状态读取。
     RenameDeviceRequest 定义后续修改设备名称的请求正文，name 复用登录设备名称的输入规则，字段错误定位 name。
+    UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1395,6 +1396,21 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    UserDeviceID:
+      name: id
+      in: path
+      required: true
+      description: |
+        目标设备 ID，范围为 1～18446744073709551615，使用标准十进制字符串。
+        路由解码后校验，零、前导零、符号、空白、小数和溢出按 id 字段错误处理。
+        最多 20 位的数字仍须满足上述 uint64 上限，服务端执行范围检查。
+        调用者身份由 Bearer 认证提供，目标归属由后续设备业务流程检查。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 20
+        pattern: '^[1-9][0-9]{0,19}$'
+      example: '13'
     UserDeviceBeforeID:
       name: before_id
       in: query
