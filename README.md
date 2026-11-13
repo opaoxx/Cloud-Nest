@@ -196,6 +196,8 @@ GET /api/v1/sessions 已接入正式启动流程，使用 Bearer 认证和 befor
 
 已提供 RevokeSessionSuccess，将已提交撤销结果交付为 HTTP 200 JSON，关联本次请求 ID，附带 no-store/Pragma no-cache。测试专用 DELETE 入口已验证正常交付、异常结果、取消、已提交响应及真实 HTTP 传输，完整处理函数与正式路由按后续小步接入。执行顺序与验证命令见 [第 081 步学习记录](docs/开发学习记录.md#第-081-步交付指定会话撤销成功的-http-响应)。
 
+已提供 handler.RevokeSession，组合认证 Actor、路径 ID 校验、撤销服务与成功交付。有效调用者访问缺失或其他账号目标时返回 SESSION_NOT_FOUND 404，调用者失效沿用认证错误。测试专用路由已通过真实 MySQL/JWT/HTTP 验证归属、重复撤销、回滚及事务状态复查，正式路由和启动接入按下一小步实施。代码与验证方法见 [第 082 步学习记录](docs/开发学习记录.md#第-082-步组合指定会话撤销-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
