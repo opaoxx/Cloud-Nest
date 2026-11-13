@@ -55,6 +55,7 @@ info:
     设备与会话查询共用完整 RawQuery 解析及数字校验，整体格式错误定位 query，其后依次检查 before_id、limit。
     设备列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserDevicesListed。
     GET /api/v1/devices 已由启动入口绑定共享授权与真实设备列表服务，支持分页、当前设备标记及历史状态读取。
+    RenameDeviceRequest 定义后续修改设备名称的请求正文，name 复用登录设备名称的输入规则，字段错误定位 name。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -596,6 +597,19 @@ components:
               current: false
           has_more: false
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RenameDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      description: |
+        修改设备名称的请求 DTO。name 使用有效 UTF-8，长度为 1～100 个 Unicode 码点。
+        不能全为空白或包含控制字符，保留提交的大小写、空白及 Unicode 原文。
+        名称格式复用 LoginRequest.device_name 的规则，字段错误使用 name。
+      properties:
+        name:
+          $ref: '#/components/schemas/LoginRequest/properties/device_name'
+      example:
+        name: 学习电脑
     LogoutRequest:
       type: object
       additionalProperties: false

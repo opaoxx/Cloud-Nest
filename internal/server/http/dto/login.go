@@ -2,8 +2,6 @@ package dto
 
 import (
 	"regexp"
-	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -46,7 +44,7 @@ func (request LoginRequest) Validate() *FieldError {
 	if parseError != nil || len(request.InstallationID) != 36 || installationID.Version() != 4 || installationID.Variant() != uuid.RFC4122 || installationID.String() != request.InstallationID {
 		return &FieldError{Field: "installation_id", Message: "安装标识须为标准小写 UUID v4"}
 	}
-	if !utf8.ValidString(request.DeviceName) || utf8.RuneCountInString(request.DeviceName) > 100 || strings.TrimSpace(request.DeviceName) == "" || strings.ContainsFunc(request.DeviceName, unicode.IsControl) {
+	if !validDeviceName(request.DeviceName) {
 		return &FieldError{Field: "device_name", Message: "设备名称须为 1～100 个字符，不能全为空白或包含控制字符"}
 	}
 
