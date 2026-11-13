@@ -45,6 +45,7 @@ info:
     会话列表查询解析完整 RawQuery，额外字段采用忽略策略。整体格式错误定位 query，参数错误定位 before_id 或 limit。
     会话列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserSessionsListed。
     GET /api/v1/sessions 已由启动入口绑定真实授权与列表服务，支持分页、当前标记及历史状态读取。
+    UserSessionID 定义后续撤销指定会话操作的路径参数，解析器已通过测试专用 DELETE 入口验证。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1150,6 +1151,22 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    UserSessionID:
+      name: id
+      in: path
+      required: true
+      description: |
+        目标会话 ID，范围为 1～18446744073709551615，使用标准十进制字符串。
+        路由解码后校验，零、前导零、符号、空白、小数和溢出按 id 字段错误处理。
+        最多 20 位的数字仍须满足上述 uint64 上限，服务端执行范围检查。
+        本参数供后续 DELETE /api/v1/sessions/{id} 引用，当前通过测试专用路径验证。
+        调用者身份由 Bearer 认证提供，目标会话归属由后续业务流程检查。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 20
+        pattern: '^[1-9][0-9]{0,19}$'
+      example: '13'
     UserSessionBeforeID:
       name: before_id
       in: query
