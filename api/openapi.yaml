@@ -57,6 +57,7 @@ info:
     GET /api/v1/devices 已由启动入口绑定共享授权与真实设备列表服务，支持分页、当前设备标记及历史状态读取。
     RenameDeviceRequest 定义后续修改设备名称的请求正文，name 复用登录设备名称的输入规则，字段错误定位 name。
     RenamedDeviceSummary/RenameDeviceData/RenameDeviceResponse 定义后续改名成功响应，使用 data.device 与 request_id，设备时间为 UTC 微秒值。
+    设备改名成功交付方法已通过测试专用 PATCH 入口验证，共享成功响应见 RenameDeviceSucceeded。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
@@ -1046,6 +1047,25 @@ components:
               message: 会话不存在
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RenameDeviceSucceeded:
+      description: |
+        设备改名成功 HTTP 200，使用 data.device 与本次请求 ID，响应采用 no-store 和 Pragma no-cache。
+        供后续设备改名操作引用，提交确认后交付设备结果。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RenameDeviceResponse'
     RevokeSessionSucceeded:
       description: |
         指定会话撤销成功 HTTP 200，使用 revoked=true 与本次请求 ID，响应采用 no-store 和 Pragma no-cache。
