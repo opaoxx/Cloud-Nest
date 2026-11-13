@@ -171,19 +171,26 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	refreshTokens := service.NewRefreshTokenService(refreshSessions.Refresh, signer.Issue)
 
-	// 12. 复用已认证用户事务，装配当前会话退出服务。
+	// 12. 复用已认证用户事务，装配当前会话退出及指定会话撤销服务。
 	logoutService := service.NewLogoutService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.LogoutTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
 				return action(txContext, txStore)
 			})
 		})
+	revokeService := service.NewRevokeSessionService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RevokeSessionTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		})
 
-	// 13. 注册系统检查、当前用户、会话列表、登录、刷新与退出接口。
+	// 13. 注册系统检查、当前用户、会话列表及撤销、登录、刷新与退出接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
+	serverhttp.RegisterRevokeSessionRoute(router, authorizationService.Authorize, revokeService.Revoke)
 	serverhttp.RegisterLoginRoute(router, allowedOrigins, loginGate.Authenticate, loginTokens.Create, profileService.Get, secureCookie)
 	serverhttp.RegisterRefreshRoute(router, allowedOrigins, refreshTokens.Refresh, secureCookie)
 	serverhttp.RegisterLogoutRoute(router, allowedOrigins, authorizationService.Authorize, logoutService.Logout, secureCookie)

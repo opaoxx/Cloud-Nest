@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me 和 GET /api/v1/sessions，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -197,6 +197,8 @@ GET /api/v1/sessions 已接入正式启动流程，使用 Bearer 认证和 befor
 已提供 RevokeSessionSuccess，将已提交撤销结果交付为 HTTP 200 JSON，关联本次请求 ID，附带 no-store/Pragma no-cache。测试专用 DELETE 入口已验证正常交付、异常结果、取消、已提交响应及真实 HTTP 传输，完整处理函数与正式路由按后续小步接入。执行顺序与验证命令见 [第 081 步学习记录](docs/开发学习记录.md#第-081-步交付指定会话撤销成功的-http-响应)。
 
 已提供 handler.RevokeSession，组合认证 Actor、路径 ID 校验、撤销服务与成功交付。有效调用者访问缺失或其他账号目标时返回 SESSION_NOT_FOUND 404，调用者失效沿用认证错误。测试专用路由已通过真实 MySQL/JWT/HTTP 验证归属、重复撤销、回滚及事务状态复查，正式路由和启动接入按下一小步实施。代码与验证方法见 [第 082 步学习记录](docs/开发学习记录.md#第-082-步组合指定会话撤销-http-处理函数)。
+
+DELETE /api/v1/sessions/{id} 已接入正式路由及启动流程，使用共享授权和用户事务撤销自己的指定会话。重复撤销保留首次时间，目标缺失或属于其他账号返回 SESSION_NOT_FOUND 404，调用者失效使用认证错误。实际启动及重启验证已通过，登录两个学习会话并撤销指定目标的示例见 [第 083 步学习记录](docs/开发学习记录.md#第-083-步接入正式指定会话撤销接口与启动装配)。
 
 ## 本地连接信息
 

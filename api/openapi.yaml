@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料及会话列表接口、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -45,10 +45,11 @@ info:
     会话列表查询解析完整 RawQuery，额外字段采用忽略策略。整体格式错误定位 query，参数错误定位 before_id 或 limit。
     会话列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserSessionsListed。
     GET /api/v1/sessions 已由启动入口绑定真实授权与列表服务，支持分页、当前标记及历史状态读取。
-    UserSessionID 定义后续撤销指定会话操作的路径参数，解析器已通过测试专用 DELETE 入口验证。
+    UserSessionID 定义正式撤销指定会话操作的路径参数，使用非零 uint64 的标准十进制字符串。
     RevokeSessionData/RevokeSessionResponse 定义指定会话撤销的成功数据，使用 revoked=true 与统一 data/request_id 外层。
     指定会话撤销成功交付方法已通过测试专用 DELETE 入口验证，共享响应见 RevokeSessionSucceeded。
     指定会话撤销处理函数已组合认证 Actor、路径解析、服务及成功交付，目标不存在的共享 404 见 TargetSessionNotFound。
+    DELETE /api/v1/sessions/{id} 已由启动入口绑定共享授权及已认证用户事务，支持指定当前或其他会话及重复撤销。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -57,6 +58,42 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/sessions/{id}:
+    delete:
+      tags: [Account]
+      operationId: revokeSession
+      summary: 撤销当前用户的指定会话
+      description: |
+        Bearer JWT 和数据库授权通过后解析路径 id，使用已认证 Actor 进入用户事务复查并撤销目标。
+        当前会话、同设备及其他设备会话均可作为自己的目标，已撤销的目标重复操作成功并保留首次时间。
+        目标不存在或属于其他账号时返回同一 SESSION_NOT_FOUND 404，调用者会话失效使用认证错误。
+        成功撤销当前会话后，该会话的访问与刷新凭证在后续请求中失效。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UserSessionID'
+      responses:
+        '200':
+          $ref: '#/components/responses/RevokeSessionSucceeded'
+        '400':
+          description: 已认证请求的路径 id 格式或范围错误，INVALID_ARGUMENT，details.field 为 id。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetSessionNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/sessions:
     get:
       tags: [Account]
@@ -821,7 +858,7 @@ components:
     TargetSessionNotFound:
       description: |
         HTTP 404，SESSION_NOT_FOUND，当前用户范围内未找到目标会话。
-        目标不存在及属于其他账号时使用相同公开响应，details 为 null，供后续撤销指定会话操作引用。
+        目标不存在及属于其他账号时使用相同公开响应，details 为 null，由正式撤销指定会话操作引用。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -846,7 +883,7 @@ components:
     RevokeSessionSucceeded:
       description: |
         指定会话撤销成功 HTTP 200，使用 revoked=true 与本次请求 ID，响应采用 no-store 和 Pragma no-cache。
-        成功交付已通过测试专用 DELETE 入口验证，供后续指定会话撤销操作引用。
+        由正式 DELETE /api/v1/sessions/{id} 操作引用，提交确认后交付结果。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -1229,8 +1266,8 @@ components:
         目标会话 ID，范围为 1～18446744073709551615，使用标准十进制字符串。
         路由解码后校验，零、前导零、符号、空白、小数和溢出按 id 字段错误处理。
         最多 20 位的数字仍须满足上述 uint64 上限，服务端执行范围检查。
-        本参数供后续 DELETE /api/v1/sessions/{id} 引用，当前通过测试专用路径验证。
-        调用者身份由 Bearer 认证提供，目标会话归属由后续业务流程检查。
+        正式 DELETE /api/v1/sessions/{id} 使用该路径参数。
+        调用者身份由 Bearer 认证提供，目标会话归属在已认证用户事务中检查。
       schema:
         type: string
         minLength: 1

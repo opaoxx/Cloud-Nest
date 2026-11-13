@@ -506,6 +506,68 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		}
 		return payload
 	}
+	// 正式指定会话撤销接口按调用者归属核对目标提交时间。
+	revoke := func(t *testing.T, targetID, accessToken string, status int, code, field string) time.Time {
+		t.Helper()
+		revokeRequest, err := http.NewRequest(http.MethodDelete, "http://"+address+"/api/v1/sessions/"+targetID+"?user_id=3&id=27&note=private-query", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		revokeRequest.Header.Set("Origin", "http://127.0.0.1:5173")
+		if accessToken != "" {
+			revokeRequest.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		response, err := client.Do(revokeRequest)
+		if err != nil {
+			t.Fatal("正式会话撤销请求失败", err)
+		}
+		defer response.Body.Close()
+		encoded, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" ||
+			response.Header.Get("X-Request-ID") == "" || len(response.Cookies()) != 0 {
+			t.Fatal("正式撤销状态、缓存或读取错误", response.StatusCode, err)
+		}
+		if status != 200 {
+			var rejected dto.ErrorResponse
+			if json.Unmarshal(encoded, &rejected) != nil || rejected.Error.Code != code || rejected.RequestID != response.Header.Get("X-Request-ID") {
+				t.Fatal("正式撤销错误结构或请求 ID 异常")
+			}
+			if field == "" {
+				if rejected.Error.Details != nil {
+					t.Fatal("非字段错误 details 应为空")
+				}
+			} else if len(rejected.Error.Details) != 1 || rejected.Error.Details["field"] != field {
+				t.Fatal("正式撤销路径错误位置不正确")
+			}
+			if status == 404 && (rejected.Error.Message != "会话不存在" || response.Header.Get("WWW-Authenticate") != "") {
+				t.Fatal("正式目标错误与认证错误混淆")
+			}
+			if status == 401 && response.Header.Get("WWW-Authenticate") == "" {
+				t.Fatal("正式撤销认证错误缺少 Bearer 提示")
+			}
+			return time.Time{}
+		}
+		var payload dto.RevokeSessionResponse
+		if json.Unmarshal(encoded, &payload) != nil || !payload.Data.Revoked || payload.RequestID != response.Header.Get("X-Request-ID") || response.Header.Get("Pragma") != "no-cache" {
+			t.Fatal("正式撤销成功结构错误")
+		}
+		identity, err := verifier.Verify(accessToken)
+		if err != nil || identity == nil {
+			t.Fatal("核对正式撤销身份失败", err)
+		}
+		var revokedAt, updatedAt time.Time
+		if err := pool.QueryRowContext(ctx, "SELECT revoked_at,updated_at FROM auth_sessions WHERE user_id=? AND id=?", identity.UserID, targetID).Scan(&revokedAt, &updatedAt); err != nil ||
+			revokedAt.IsZero() || !revokedAt.Equal(updatedAt) || revokedAt.Nanosecond()%1000 != 0 {
+			t.Fatal("正式撤销返回成功时目标状态未正确提交", err)
+		}
+		return revokedAt
+	}
+	revoke(t, "0", "", 401, "AUTH_REQUIRED", "")
+	revoke(t, "0", token.Token, 400, "INVALID_ARGUMENT", "id")
+	revoke(t, "18446744073709551616", token.Token, 400, "INVALID_ARGUMENT", "id")
+	revoke(t, "18446744073709551615", token.Token, 404, "SESSION_NOT_FOUND", "")
+	revoke(t, "27", token.Token, 404, "SESSION_NOT_FOUND", "")
+	revoke(t, "17", foreignToken.Token, 404, "SESSION_NOT_FOUND", "")
 	list(t, "limit=0", "", 401, "AUTH_REQUIRED", "")
 	list(t, "limit=0", token.Token, 400, "INVALID_ARGUMENT", "limit")
 	list(t, "before_id=%ZZ", token.Token, 400, "INVALID_ARGUMENT", "query")
@@ -571,6 +633,27 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if len(history.Data.Items) != 5 || history.Data.Items[0].ID != nativeExited.Data.Session.ID || history.Data.Items[0].RevokedAt == nil || history.Data.Items[0].LastSeenAt == nil || !history.Data.Items[0].ExpiresAt.Equal(expiredAt) {
 		t.Fatal("正式列表未交付退出后的历史时间事实")
 	}
+	// 通过正式登录创建两个独立目标，分别撤销其他设备与同设备会话。
+	remoteTarget, _ := login(t, "native", nativeInstallation, "fixture-password", 200)
+	remoteRevokedAt := revoke(t, remoteTarget.Data.Session.ID, webRefreshed.Data.AccessToken, 200, "", "")
+	if repeatedAt := revoke(t, remoteTarget.Data.Session.ID, webRefreshed.Data.AccessToken, 200, "", ""); !repeatedAt.Equal(remoteRevokedAt) {
+		t.Fatal("正式重复撤销覆盖了首次撤销时间")
+	}
+	request(t, "/api/v1/me", remoteTarget.Data.AccessToken, 401)
+	refresh(t, "native", remoteTarget.Data.RefreshToken, remoteTarget.Data.Session.ID, 401, 0)
+	request(t, "/api/v1/me", nativeRefreshed.Data.AccessToken, 200)
+	sameDeviceTarget, sameDeviceCookies := login(t, "web", webInstallation, "fixture-password", 200)
+	if sameDeviceTarget.Data.Device.ID != webLogin.Data.Device.ID {
+		t.Fatal("正式撤销没有建立同设备目标")
+	}
+	revoke(t, sameDeviceTarget.Data.Session.ID, webRefreshed.Data.AccessToken, 200, "", "")
+	request(t, "/api/v1/me", sameDeviceTarget.Data.AccessToken, 401)
+	refresh(t, "web", sameDeviceCookies[0].Value, sameDeviceTarget.Data.Session.ID, 401, 0)
+	request(t, "/api/v1/me", webRefreshed.Data.AccessToken, 200)
+	revokeHistory := list(t, "", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(revokeHistory.Data.Items) != 7 || revokeHistory.Data.Items[0].ID != sameDeviceTarget.Data.Session.ID || revokeHistory.Data.Items[0].RevokedAt == nil {
+		t.Fatal("正式列表未呈现指定撤销后的历史状态")
+	}
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -583,6 +666,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	expectedSecureCookie = true
 	stopSecond := start()
 	checkProfile(t)
+	if repeatedAt := revoke(t, remoteTarget.Data.Session.ID, webRefreshed.Data.AccessToken, 200, "", ""); !repeatedAt.Equal(remoteRevokedAt) {
+		t.Fatal("重启后的重复撤销覆盖首次时间")
+	}
+	request(t, "/api/v1/me", remoteTarget.Data.AccessToken, 401)
+	refresh(t, "native", remoteTarget.Data.RefreshToken, remoteTarget.Data.Session.ID, 401, 0)
 	list(t, "", webRefreshed.Data.AccessToken, 200, "", "")
 	list(t, "", foreignToken.Token, 200, "", "")
 	logout(t, "web", repeatedLogin.Data.AccessToken, repeatedLogin.Data.Session.ID, 401, "SESSION_REVOKED")
@@ -597,6 +685,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	request(t, "/api/v1/me", token.Token, 403)
 	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
+	revoke(t, remoteTarget.Data.Session.ID, token.Token, 403, "ACCOUNT_DISABLED", "")
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 403, 0)
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
 		t.Fatal(err)
@@ -606,6 +695,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	request(t, "/api/v1/me", token.Token, 401)
 	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
+	revoke(t, remoteTarget.Data.Session.ID, token.Token, 401, "SESSION_REVOKED", "")
 	// 设备撤销后重新登录复用设备 ID，旧会话保持撤销。
 	if _, err := pool.ExecContext(ctx, "UPDATE user_devices SET revoked_at=UTC_TIMESTAMP(6) WHERE id=13"); err != nil {
 		t.Fatal(err)
@@ -615,6 +705,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	revoke(t, remoteTarget.Data.Session.ID, webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", nativeLogin.Data.AccessToken, 200, "", "")
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
 	restoredLogin, restoredCookies := login(t, "web", webInstallation, "fixture-password", 200)
@@ -626,6 +717,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
 	restoredRefreshed, restoredRaw := refresh(t, "web", restoredCookies[0].Value, restoredLogin.Data.Session.ID, 200, 2)
 	nativeFinal, nativeFinalRaw := refresh(t, "native", nativeRaw, nativeLogin.Data.Session.ID, 200, 4)
+	// 指定当前会话提交后，其旧访问与刷新凭证均失效，其他会话仍可请求。
+	selfTarget, _ := login(t, "native", nativeInstallation, "fixture-password", 200)
+	revoke(t, selfTarget.Data.Session.ID, selfTarget.Data.AccessToken, 200, "", "")
+	request(t, "/api/v1/me", selfTarget.Data.AccessToken, 401)
+	refresh(t, "native", selfTarget.Data.RefreshToken, selfTarget.Data.Session.ID, 401, 0)
+	revoke(t, remoteTarget.Data.Session.ID, selfTarget.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	request(t, "/api/v1/me", nativeFinal.Data.AccessToken, 200)
+	revoke(t, selfTarget.Data.Session.ID, nativeFinal.Data.AccessToken, 200, "", "")
 	for attempt := 1; attempt <= 11; attempt++ {
 		status := 401
 		if attempt == 11 {
