@@ -236,6 +236,8 @@ PATCH /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享 B
 
 已提供 RevokeDeviceSuccess，将设备及关联会话确认提交后的结果交付为 HTTP 200 JSON，关联请求 ID 并设置 no-store/Pragma no-cache。测试专用 DELETE 入口已验证成功、异常、取消、已提交响应及真实 HTTP 传输，执行顺序与复验命令见 [第 101 步学习记录](docs/开发学习记录.md#第-101-步交付设备撤销成功的-http-响应)。
 
+已提供 handler.RevokeDevice，组合认证 Actor、设备 ID 路径解析、撤销服务及成功交付，目标缺失或跨账号复用 DEVICE_NOT_FOUND 404。测试专用 DELETE 入口已通过真实 MySQL/JWT/HTTP 验证设备与全部会话撤销、重复请求、两表回滚、调用者状态复查及重新登录复用，代码与复验命令见 [第 102 步学习记录](docs/开发学习记录.md#第-102-步组合设备撤销-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
