@@ -182,6 +182,8 @@ POST /api/v1/auth/logout 已接入正式启动流程，使用 Bearer 认证和 c
 
 已提供 ParseUserSessionListQuery，解析 before_id/limit 为列表服务参数。省略参数时读取首页、每页 50 条，显式 before_id=0 也表示首页，页大小为 1～100；额外查询字段采用忽略策略。标准十进制写法、重复值和整体解析错误的处理见 [第 074 步学习记录](docs/开发学习记录.md#第-074-步定义会话列表查询参数-dto)。
 
+已提供 handler.UserSessions，读取认证 Actor，串联分页解析、列表服务与响应 DTO，交付带请求 ID 的 JSON 和禁止缓存头。测试专用路由已通过真实 MySQL/JWT/HTTP 验证分页、用户隔离、历史状态及认证边界。代码和运行方法见 [第 075 步学习记录](docs/开发学习记录.md#第-075-步组合会话列表-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

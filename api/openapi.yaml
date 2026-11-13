@@ -43,6 +43,7 @@ info:
     UserSessionSummary/UserSessionListData/UserSessionListResponse 定义会话列表响应，使用字符串 ID、UTC 微秒时间、Current 及分页字段。
     UserSessionBeforeID/UserSessionLimit 定义后续会话列表操作的查询参数，默认首页和每页 50 条，输入错误使用固定字段提示。
     会话列表查询解析完整 RawQuery，额外字段采用忽略策略。整体格式错误定位 query，参数错误定位 before_id 或 limit。
+    会话列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserSessionsListed。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -755,6 +756,23 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    UserSessionsListed:
+      description: 会话列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，供后续会话列表操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UserSessionListResponse'
     LogoutSucceeded:
       description: |
         退出成功 HTTP 200，由正式退出操作引用。两种客户端共用 revoked=true 和请求 ID。
