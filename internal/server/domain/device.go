@@ -11,7 +11,7 @@ var ErrDeviceNotFound = errors.New("设备不存在")
 // ErrDeviceAlreadyExists 表示设备插入触发唯一键冲突，不允许静默覆盖已有设备。
 var ErrDeviceAlreadyExists = errors.New("该用户的安装设备已存在")
 
-// ErrInvalidDeviceData 表示设备数据或写入结果违反登录设备的归属及状态约定。
+// ErrInvalidDeviceData 表示设备数据或操作结果违反设备的归属及状态约定。
 var ErrInvalidDeviceData = errors.New("登录设备数据异常")
 
 // ErrDeviceRevoked 表示设备仍处于撤销状态，当前无法用于授权或会话创建。
