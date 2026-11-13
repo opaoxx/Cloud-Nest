@@ -578,6 +578,97 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		}
 		return payload
 	}
+	// 正式改名接口逐项核对提交结果与用户范围内的设备事实。
+	type renameSnapshot struct {
+		device    domain.UserDevice
+		updatedAt time.Time
+	}
+	readRename := func(t *testing.T, userID uint64, targetID string) renameSnapshot {
+		t.Helper()
+		var value renameSnapshot
+		var lastSeenAt, revokedAt sql.NullTime
+		if err := pool.QueryRowContext(ctx, "SELECT id,user_id,name,platform,created_at,last_seen_at,revoked_at,updated_at FROM user_devices WHERE user_id=? AND id=?", userID, targetID).
+			Scan(&value.device.ID, &value.device.UserID, &value.device.Name, &value.device.Platform, &value.device.CreatedAt, &lastSeenAt, &revokedAt, &value.updatedAt); err != nil {
+			t.Fatal("读取正式改名快照失败", err)
+		}
+		if lastSeenAt.Valid {
+			value.device.LastSeenAt = &lastSeenAt.Time
+		}
+		if revokedAt.Valid {
+			value.device.RevokedAt = &revokedAt.Time
+		}
+		return value
+	}
+	renameDevice := func(t *testing.T, targetID, accessToken, name string, status int, code, field string) time.Time {
+		t.Helper()
+		var before renameSnapshot
+		var owner uint64
+		if status == 200 {
+			identity, err := verifier.Verify(accessToken)
+			if err != nil || identity == nil {
+				t.Fatal("核对正式改名身份失败", err)
+			}
+			owner = identity.UserID
+			before = readRename(t, owner, targetID)
+		}
+		body, err := json.Marshal(dto.RenameDeviceRequest{Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		message, err := http.NewRequest(http.MethodPatch, "http://"+address+"/api/v1/devices/"+targetID+"?user_id=3&id=23&name=private-query", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		message.Header.Set("Content-Type", "application/json; charset=utf-8")
+		message.Header.Set("Origin", "http://127.0.0.1:5173")
+		if accessToken != "" {
+			message.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		response, err := client.Do(message)
+		if err != nil {
+			t.Fatal("正式改名请求失败", err)
+		}
+		defer response.Body.Close()
+		encoded, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("X-Request-ID") == "" || response.Header.Get("Cache-Control") != "no-store" || (status != 401 && status != 403 && response.Header.Get("Pragma") != "no-cache") || len(response.Cookies()) != 0 {
+			t.Fatal("正式改名状态、缓存或读取错误", response.StatusCode, err)
+		}
+		if status != 200 {
+			var failure dto.ErrorResponse
+			if json.Unmarshal(encoded, &failure) != nil || failure.Error.Code != code || failure.RequestID != response.Header.Get("X-Request-ID") {
+				t.Fatal("正式改名错误响应异常")
+			}
+			if field == "" {
+				if failure.Error.Details != nil {
+					t.Fatal("非字段错误 details 应为空")
+				}
+			} else if len(failure.Error.Details) != 1 || failure.Error.Details["field"] != field {
+				t.Fatal("正式改名字段位置错误")
+			}
+			if status == 404 && (failure.Error.Message != "设备不存在" || response.Header.Get("WWW-Authenticate") != "") {
+				t.Fatal("正式设备目标与认证错误混淆")
+			}
+			if status == 401 && response.Header.Get("WWW-Authenticate") == "" {
+				t.Fatal("改名认证错误缺少 Bearer 提示")
+			}
+			return time.Time{}
+		}
+		var payload dto.RenameDeviceResponse
+		if json.Unmarshal(encoded, &payload) != nil || payload.RequestID != response.Header.Get("X-Request-ID") || payload.Data.Device.ID != targetID || payload.Data.Device.Name != name {
+			t.Fatal("正式改名成功 JSON 异常")
+		}
+		after := readRename(t, owner, targetID)
+		expected := before
+		expected.device.Name, expected.updatedAt = name, after.updatedAt
+		if !reflect.DeepEqual(after, expected) || after.updatedAt.Nanosecond()%1000 != 0 || (before.device.Name == name && !after.updatedAt.Equal(before.updatedAt)) {
+			t.Fatal("正式改名字段或同名重试的更新时间错误")
+		}
+		data, err := dto.NewRenameDeviceData(&after.device)
+		if err != nil || !reflect.DeepEqual(payload.Data, *data) {
+			t.Fatal("正式改名响应与提交事实不一致", err)
+		}
+		return after.updatedAt
+	}
 	// 正式指定会话撤销接口按调用者归属核对目标提交时间。
 	revoke := func(t *testing.T, targetID, accessToken string, status int, code, field string) time.Time {
 		t.Helper()
@@ -648,6 +739,13 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	listDevices(t, "before_id=%ZZ", token.Token, 400, "INVALID_ARGUMENT", "query")
 	listDevices(t, "before_id=18446744073709551616", token.Token, 400, "INVALID_ARGUMENT", "before_id")
 	listDevices(t, "limit=1&limit=2", token.Token, 400, "INVALID_ARGUMENT", "limit")
+	renameDevice(t, "0", "", "新名", 401, "AUTH_REQUIRED", "")
+	renameDevice(t, "0", token.Token, "新名", 400, "INVALID_ARGUMENT", "id")
+	renameDevice(t, "13", token.Token, "", 400, "INVALID_ARGUMENT", "name")
+	renameDevice(t, "18446744073709551616", token.Token, "新名", 400, "INVALID_ARGUMENT", "id")
+	renameDevice(t, "18446744073709551615", token.Token, "新名", 404, "DEVICE_NOT_FOUND", "")
+	renameDevice(t, "23", token.Token, "新名", 404, "DEVICE_NOT_FOUND", "")
+	renameDevice(t, "13", foreignToken.Token, "新名", 404, "DEVICE_NOT_FOUND", "")
 	const webInstallation = "28ee758a-0727-42de-ae7d-3bb33155e148"
 	const nativeInstallation = "edbf7e35-36ea-45a5-bdb9-58e76b46fd5e"
 	logout(t, "web", "", "", 401, "AUTH_REQUIRED")
@@ -757,6 +855,12 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal("正式列表未呈现指定撤销后的历史状态")
 	}
 
+	webDeviceName, nativeDeviceName := "  重启后仍保留的浏览器 🎮  ", "改名后的移动设备"
+	webRenamedAt := renameDevice(t, "13", webRefreshed.Data.AccessToken, webDeviceName, 200, "", "")
+	if repeatedAt := renameDevice(t, "13", webRefreshed.Data.AccessToken, webDeviceName, 200, "", ""); !repeatedAt.Equal(webRenamedAt) {
+		t.Fatal("正式同名重试改变更新时间")
+	}
+	renameDevice(t, nativeLogin.Data.Device.ID, webRefreshed.Data.AccessToken, nativeDeviceName, 200, "", "")
 	devicesBeforeRestart := listDevices(t, "", webRefreshed.Data.AccessToken, 200, "", "")
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
@@ -775,6 +879,12 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal("重启前后设备列表事实或当前标记不一致")
 	}
 	listDevices(t, "", foreignToken.Token, 200, "", "")
+	if len(devicesAfterRestart.Data.Items) != 2 || devicesAfterRestart.Data.Items[0].Name != nativeDeviceName || devicesAfterRestart.Data.Items[1].Name != webDeviceName {
+		t.Fatal("正式设备改名未在重启后持久化")
+	}
+	if repeatedAt := renameDevice(t, "13", webRefreshed.Data.AccessToken, webDeviceName, 200, "", ""); !repeatedAt.Equal(webRenamedAt) {
+		t.Fatal("重启后同名请求覆盖原更新时间")
+	}
 	if repeatedAt := revoke(t, remoteTarget.Data.Session.ID, webRefreshed.Data.AccessToken, 200, "", ""); !repeatedAt.Equal(remoteRevokedAt) {
 		t.Fatal("重启后的重复撤销覆盖首次时间")
 	}
@@ -795,6 +905,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	request(t, "/api/v1/me", token.Token, 403)
 	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
 	listDevices(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
+	renameDevice(t, "13", token.Token, "失效请求名称", 403, "ACCOUNT_DISABLED", "")
 	revoke(t, remoteTarget.Data.Session.ID, token.Token, 403, "ACCOUNT_DISABLED", "")
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 403, 0)
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
@@ -806,6 +917,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	request(t, "/api/v1/me", token.Token, 401)
 	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", token.Token, 401, "SESSION_REVOKED", "")
+	renameDevice(t, "13", token.Token, "失效请求名称", 401, "SESSION_REVOKED", "")
 	revoke(t, remoteTarget.Data.Session.ID, token.Token, 401, "SESSION_REVOKED", "")
 	// 设备撤销后重新登录复用设备 ID，旧会话保持撤销。
 	if _, err := pool.ExecContext(ctx, "UPDATE user_devices SET revoked_at=UTC_TIMESTAMP(6) WHERE id=13"); err != nil {
@@ -817,15 +929,18 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	renameDevice(t, "13", webLogin.Data.AccessToken, "失效请求名称", 401, "SESSION_REVOKED", "")
 	revoke(t, remoteTarget.Data.Session.ID, webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", nativeLogin.Data.AccessToken, 200, "", "")
 	revokedDevices := listDevices(t, "", nativeLogin.Data.AccessToken, 200, "", "")
 	if len(revokedDevices.Data.Items) != 2 || revokedDevices.Data.Items[1].ID != "13" || revokedDevices.Data.Items[1].RevokedAt == nil {
 		t.Fatal("有效设备未看到其他设备的撤销事实")
 	}
+	webDeviceName = "撤销后重新命名的浏览器"
+	renameDevice(t, "13", nativeLogin.Data.AccessToken, webDeviceName, 200, "", "")
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
 	restoredLogin, restoredCookies := login(t, "web", webInstallation, "fixture-password", 200)
-	if restoredLogin.Data.Device.ID != "13" {
+	if restoredLogin.Data.Device.ID != "13" || restoredLogin.Data.Device.Name != webDeviceName {
 		t.Fatal("撤销设备重新登录没有复用 ID")
 	}
 	restoredDevices := listDevices(t, "", restoredLogin.Data.AccessToken, 200, "", "")
@@ -863,6 +978,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	logout(t, "web", restoredRefreshed.Data.AccessToken, restoredLogin.Data.Session.ID, 401, "SESSION_REVOKED")
 	list(t, "", restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	renameDevice(t, "13", restoredRefreshed.Data.AccessToken, "退出后名称", 401, "SESSION_REVOKED", "")
 	list(t, "", nativeFinal.Data.AccessToken, 200, "", "")
 	request(t, "/api/v1/me", nativeFinal.Data.AccessToken, 200)
 	logout(t, "native", nativeFinal.Data.AccessToken, nativeLogin.Data.Session.ID, 200, "")
@@ -871,6 +987,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	refresh(t, "native", nativeFinalRaw, nativeLogin.Data.Session.ID, 401, 0)
 	list(t, "", nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	renameDevice(t, nativeLogin.Data.Device.ID, nativeFinal.Data.AccessToken, "退出后名称", 401, "SESSION_REVOKED", "")
 	list(t, "", foreignToken.Token, 200, "", "")
 	stopSecond()
 	after, err := os.Stat(secretPath)

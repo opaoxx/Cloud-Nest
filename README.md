@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -225,6 +225,8 @@ GET /api/v1/devices 已接入正式路由和启动装配，使用共享 Bearer �
 已提供 RenameDeviceSuccess，将已确认提交的设备改名结果交付为 HTTP 200 JSON，使用 data.device/request_id、no-store 和 Pragma no-cache。测试专用 PATCH 入口已验证请求 ID、设备字段、异常、取消与真实 HTTP 传输，执行顺序和复验命令见 [第 095 步学习记录](docs/开发学习记录.md#第-095-步交付设备改名成功的-http-响应)。
 
 已提供 handler.RenameDevice，组合认证 Actor、设备路径、名称正文、改名服务及成功交付。缺失或其他账号目标统一返回 DEVICE_NOT_FOUND 404，调用者失效沿用认证错误。测试专用路由已通过真实 MySQL/JWT/HTTP 验证改名、同名重试、归属、回滚及事务复查，执行顺序与复验命令见 [第 096 步学习记录](docs/开发学习记录.md#第-096-步组合设备改名-http-处理函数)。
+
+PATCH /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享 Bearer 授权与用户事务修改设备名称，成功返回 data.device/request_id。同名重试、重启持久化、已撤销设备及重新登录复用已通过真实启动验证，本地登录和改名示例见 [第 097 步学习记录](docs/开发学习记录.md#第-097-步接入正式设备改名接口与启动装配)。
 
 ## 本地连接信息
 

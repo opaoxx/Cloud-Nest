@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、设备列表、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、设备列表与改名、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -59,6 +59,7 @@ info:
     RenamedDeviceSummary/RenameDeviceData/RenameDeviceResponse 定义后续改名成功响应，使用 data.device 与 request_id，设备时间为 UTC 微秒值。
     设备改名成功交付方法已通过测试专用 PATCH 入口验证，共享成功响应见 RenameDeviceSucceeded。
     设备改名处理函数已组合 Actor、路径、名称正文、服务及交付，目标不存在的共享 404 见 TargetDeviceNotFound。
+    PATCH /api/v1/devices/{id} 已由启动入口绑定共享授权、用户事务和真实改名服务，确认提交后返回更新设备。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
@@ -102,6 +103,52 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           $ref: '#/components/responses/TargetSessionNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/devices/{id}:
+    patch:
+      tags: [Account]
+      operationId: renameDevice
+      summary: 修改当前用户的指定设备名称
+      description: |
+        Bearer JWT 和数据库授权通过后，依次解析路径 id、读取 JSON 正文并校验 name。
+        使用已认证 Actor 进入用户事务，复查当前身份和目标归属，确认提交后交付设备结果。
+        当前及其他自有设备均可改名，已撤销目标保留撤销状态，同名重试保留原更新时间。
+        目标不存在或属于其他账号时返回 DEVICE_NOT_FOUND 404，调用者失效使用认证错误。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UserDeviceID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameDeviceRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/RenameDeviceSucceeded'
+        '400':
+          description: 路径 id、名称或 JSON 输入错误，INVALID_ARGUMENT；字段校验定位 id 或 name，JSON 读取错误的 details 为 null。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetDeviceNotFound'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/devices:
@@ -1026,7 +1073,7 @@ components:
     TargetDeviceNotFound:
       description: |
         HTTP 404，DEVICE_NOT_FOUND，当前用户范围内未找到目标设备。
-        目标不存在及属于其他账号时使用相同公开响应，details 为 null，供后续设备改名操作引用。
+        目标不存在及属于其他账号时使用相同公开响应，details 为 null，由正式设备改名操作引用。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -1076,7 +1123,7 @@ components:
     RenameDeviceSucceeded:
       description: |
         设备改名成功 HTTP 200，使用 data.device 与本次请求 ID，响应采用 no-store 和 Pragma no-cache。
-        供后续设备改名操作引用，提交确认后交付设备结果。
+        由正式设备改名操作引用，提交确认后交付设备结果。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
