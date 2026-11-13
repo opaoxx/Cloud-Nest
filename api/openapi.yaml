@@ -60,6 +60,7 @@ info:
     设备改名成功交付方法已通过测试专用 PATCH 入口验证，共享成功响应见 RenameDeviceSucceeded。
     设备改名处理函数已组合 Actor、路径、名称正文、服务及交付，目标不存在的共享 404 见 TargetDeviceNotFound。
     PATCH /api/v1/devices/{id} 已由启动入口绑定共享授权、用户事务和真实改名服务，确认提交后返回更新设备。
+    RevokeDeviceData/RevokeDeviceResponse 定义后续设备撤销成功响应，使用 revoked=true 和统一 data/request_id 外层。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
@@ -719,6 +720,29 @@ components:
           description: 请求客户端类型，使用准确小写值。
       example:
         client_type: web
+    RevokeDeviceData:
+      type: object
+      additionalProperties: false
+      required: [revoked]
+      description: 设备及关联会话撤销事务确认提交后的成功数据。
+      properties:
+        revoked:
+          type: boolean
+          enum: [true]
+          description: 目标设备及关联会话已处于撤销状态，事务已确认提交，包含重复撤销成功。
+    RevokeDeviceResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RevokeDeviceData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          revoked: true
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RevokeSessionData:
       type: object
       additionalProperties: false

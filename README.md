@@ -232,6 +232,8 @@ PATCH /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享 B
 
 已提供 RevokeDeviceService.Revoke，组合已认证用户事务与设备/关联会话撤销，确认提交后返回 Revoked=true。目标缺失或跨账号使用 ErrTargetDeviceNotFound，调用者失效保留原分类。提交、取消、两表回滚、并发及真实 MySQL/JWT 验证见 [第 099 步学习记录](docs/开发学习记录.md#第-099-步组合设备撤销服务)。
 
+已提供 NewRevokeDeviceData，将设备撤销服务确认提交后的结果转换为 revoked=true，RevokeDeviceResponse 使用统一 data/request_id。空结果和未确认标记返回设备数据错误，JSON 字段、独立副本及服务提交边界验证见 [第 100 步学习记录](docs/开发学习记录.md#第-100-步定义设备撤销成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
