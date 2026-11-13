@@ -224,6 +224,8 @@ GET /api/v1/devices 已接入正式路由和启动装配，使用共享 Bearer �
 
 已提供 RenameDeviceSuccess，将已确认提交的设备改名结果交付为 HTTP 200 JSON，使用 data.device/request_id、no-store 和 Pragma no-cache。测试专用 PATCH 入口已验证请求 ID、设备字段、异常、取消与真实 HTTP 传输，执行顺序和复验命令见 [第 095 步学习记录](docs/开发学习记录.md#第-095-步交付设备改名成功的-http-响应)。
 
+已提供 handler.RenameDevice，组合认证 Actor、设备路径、名称正文、改名服务及成功交付。缺失或其他账号目标统一返回 DEVICE_NOT_FOUND 404，调用者失效沿用认证错误。测试专用路由已通过真实 MySQL/JWT/HTTP 验证改名、同名重试、归属、回滚及事务复查，执行顺序与复验命令见 [第 096 步学习记录](docs/开发学习记录.md#第-096-步组合设备改名-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

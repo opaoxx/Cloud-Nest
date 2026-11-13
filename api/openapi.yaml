@@ -58,6 +58,7 @@ info:
     RenameDeviceRequest 定义后续修改设备名称的请求正文，name 复用登录设备名称的输入规则，字段错误定位 name。
     RenamedDeviceSummary/RenameDeviceData/RenameDeviceResponse 定义后续改名成功响应，使用 data.device 与 request_id，设备时间为 UTC 微秒值。
     设备改名成功交付方法已通过测试专用 PATCH 入口验证，共享成功响应见 RenameDeviceSucceeded。
+    设备改名处理函数已组合 Actor、路径、名称正文、服务及交付，目标不存在的共享 404 见 TargetDeviceNotFound。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
@@ -1022,6 +1023,31 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    TargetDeviceNotFound:
+      description: |
+        HTTP 404，DEVICE_NOT_FOUND，当前用户范围内未找到目标设备。
+        目标不存在及属于其他账号时使用相同公开响应，details 为 null，供后续设备改名操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: DEVICE_NOT_FOUND
+              message: 设备不存在
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TargetSessionNotFound:
       description: |
         HTTP 404，SESSION_NOT_FOUND，当前用户范围内未找到目标会话。
