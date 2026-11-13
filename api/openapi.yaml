@@ -46,6 +46,7 @@ info:
     会话列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserSessionsListed。
     GET /api/v1/sessions 已由启动入口绑定真实授权与列表服务，支持分页、当前标记及历史状态读取。
     UserSessionID 定义后续撤销指定会话操作的路径参数，解析器已通过测试专用 DELETE 入口验证。
+    RevokeSessionData/RevokeSessionResponse 定义指定会话撤销的成功数据，使用 revoked=true 与统一 data/request_id 外层。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -464,6 +465,29 @@ components:
           description: 请求客户端类型，使用准确小写值。
       example:
         client_type: web
+    RevokeSessionData:
+      type: object
+      additionalProperties: false
+      required: [revoked]
+      description: 指定目标会话已处于撤销状态，用户事务确认提交后的成功数据。
+      properties:
+        revoked:
+          type: boolean
+          enum: [true]
+          description: 目标已处于撤销状态，事务已确认提交，包含重复撤销成功。
+    RevokeSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RevokeSessionData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          revoked: true
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     LogoutData:
       type: object
       additionalProperties: false

@@ -192,6 +192,8 @@ GET /api/v1/sessions 已接入正式启动流程，使用 Bearer 认证和 befor
 
 已提供 RevokeSessionService，组合已认证用户事务与指定会话撤销，提交确认后返回 Revoked=true。事务入口的调用者状态错误保留原分类，目标不存在或属于其他账号时转换为 ErrTargetSessionNotFound。重复调用、并发、回滚和取消边界已通过真实 MySQL/JWT 验证，响应 DTO 与正式 HTTP 接入按后续小步实施。接口职责与验证方法见 [第 079 步学习记录](docs/开发学习记录.md#第-079-步组合指定会话撤销服务)。
 
+已提供 NewRevokeSessionData，将指定会话撤销的已提交结果映射为 revoked=true，RevokeSessionResponse 使用统一 data/request_id 外层。空结果与未确认标记返回既有数据错误，JSON 字段、副本独立性及服务衔接已通过单元验证。数据格式与运行方法见 [第 080 步学习记录](docs/开发学习记录.md#第-080-步定义指定会话撤销成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
