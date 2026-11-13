@@ -2,7 +2,7 @@ package domain
 
 import "time"
 
-// UserDevice 保存用户设备列表的一条内部记录。
+// UserDevice 保存设备查询及名称更新使用的内部记录。
 type UserDevice struct {
 	// ID 是设备记录的完整无符号主键。
 	ID uint64

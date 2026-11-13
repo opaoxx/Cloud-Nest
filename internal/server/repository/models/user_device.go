@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-// UserDevice 是设备列表查询的七列只读投影。
+// UserDevice 是设备列表与名称更新查询共用的七列只读投影。
 type UserDevice struct {
 	// ID 对应设备主键。
 	ID uint64 `gorm:"column:id;->"`

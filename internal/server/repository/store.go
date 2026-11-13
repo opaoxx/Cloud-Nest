@@ -18,7 +18,7 @@ type Store struct {
 	loginUserID uint64
 	// refreshSession 仅由刷新事务入口绑定，保存已锁定并复查的会话副本。
 	refreshSession *domain.VerifiedRefreshSession
-	// authenticatedActor 由已认证用户事务入口绑定，限定会话写入的用户归属及当前身份。
+	// authenticatedActor 由已认证用户事务入口绑定，限定设备及会话写入的归属与当前身份。
 	authenticatedActor *domain.Actor
 }
 

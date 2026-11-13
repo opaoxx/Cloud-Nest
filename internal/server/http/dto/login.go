@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
 // loginUsernamePattern 与 users 的 ASCII 字符约束及 VARCHAR(64) 上限保持一致。
@@ -44,7 +45,7 @@ func (request LoginRequest) Validate() *FieldError {
 	if parseError != nil || len(request.InstallationID) != 36 || installationID.Version() != 4 || installationID.Variant() != uuid.RFC4122 || installationID.String() != request.InstallationID {
 		return &FieldError{Field: "installation_id", Message: "安装标识须为标准小写 UUID v4"}
 	}
-	if !validDeviceName(request.DeviceName) {
+	if !domain.ValidDeviceName(request.DeviceName) {
 		return &FieldError{Field: "device_name", Message: "设备名称须为 1～100 个字符，不能全为空白或包含控制字符"}
 	}
 

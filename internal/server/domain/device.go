@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ErrDeviceNotFound 表示该用户与安装标识组合未找到设备，不表示数据库故障。
+// ErrDeviceNotFound 表示在指定用户范围内未找到目标设备，不表示数据库故障。
 var ErrDeviceNotFound = errors.New("设备不存在")
 
 // ErrDeviceAlreadyExists 表示设备插入触发唯一键冲突，不允许静默覆盖已有设备。
