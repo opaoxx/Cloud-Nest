@@ -194,6 +194,8 @@ GET /api/v1/sessions 已接入正式启动流程，使用 Bearer 认证和 befor
 
 已提供 NewRevokeSessionData，将指定会话撤销的已提交结果映射为 revoked=true，RevokeSessionResponse 使用统一 data/request_id 外层。空结果与未确认标记返回既有数据错误，JSON 字段、副本独立性及服务衔接已通过单元验证。数据格式与运行方法见 [第 080 步学习记录](docs/开发学习记录.md#第-080-步定义指定会话撤销成功响应-dto)。
 
+已提供 RevokeSessionSuccess，将已提交撤销结果交付为 HTTP 200 JSON，关联本次请求 ID，附带 no-store/Pragma no-cache。测试专用 DELETE 入口已验证正常交付、异常结果、取消、已提交响应及真实 HTTP 传输，完整处理函数与正式路由按后续小步接入。执行顺序与验证命令见 [第 081 步学习记录](docs/开发学习记录.md#第-081-步交付指定会话撤销成功的-http-响应)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

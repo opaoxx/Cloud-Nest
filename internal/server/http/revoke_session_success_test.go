@@ -1,0 +1,216 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
+	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
+)
+
+func TestRevokeSessionSuccessDelivery(t *testing.T) {
+	const requestID = "28ee758a-0727-42de-ae7d-3bb33155e148"
+	for _, testCase := range []struct {
+		name            string
+		requestIDs      []string
+		expectedID      string
+		origin, pending bool
+	}{
+		{name: "existing request id", requestIDs: []string{requestID}, expectedID: requestID},
+		{name: "uppercase request id", requestIDs: []string{strings.ToUpper(requestID)}, expectedID: requestID},
+		{name: "generated request id"},
+		{name: "invalid request id", requestIDs: []string{"private-request-id"}},
+		{name: "duplicate request id", requestIDs: []string{requestID, requestID}},
+		{name: "allowed origin", requestIDs: []string{requestID}, expectedID: requestID, origin: true},
+		{name: "pending body headers", requestIDs: []string{requestID}, expectedID: requestID, pending: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			// 1. 测试入口只交付已经确认的结果，公共中间件提供请求 ID。
+			result := &domain.RevokeSessionResult{Revoked: true}
+			var logs bytes.Buffer
+			var storedID string
+			origin := "http://127.0.0.1:5173"
+			router := NewRouter(logging.New(&logs), []string{origin}, func(context.Context) bool { return true })
+			router.DELETE("/test-revoke-success", func(requestContext *gin.Context) {
+				storedID = requestcontext.RequestID(requestContext.Request.Context())
+				if testCase.pending {
+					requestContext.Header("Content-Length", "3")
+					requestContext.Header("Content-Encoding", "gzip")
+					requestContext.Header("Content-Type", "application/octet-stream")
+				}
+				handler.RevokeSessionSuccess(requestContext, result)
+			}, func(*gin.Context) { t.Error("成功交付后进入下游") })
+			request := httptest.NewRequest("DELETE", "/test-revoke-success?note=private-query", nil)
+			for _, value := range testCase.requestIDs {
+				request.Header.Add("X-Request-ID", value)
+			}
+			if testCase.origin {
+				request.Header.Set("Origin", origin)
+			}
+			request.Header.Set("Authorization", "Bearer private-access")
+			request.AddCookie(&http.Cookie{Name: handler.RefreshCookieName, Value: "private-refresh"})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			// 2. 检查正文、缓存及正文相关头，关联上下文、响应和日志中的 ID。
+			if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" ||
+				response.Header().Get("Content-Type") != "application/json; charset=utf-8" || response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) ||
+				response.Header().Get("Content-Encoding") != "" || len(response.Header().Values("Set-Cookie")) != 0 {
+				t.Fatal("成功状态或响应头错误")
+			}
+			var body dto.RevokeSessionResponse
+			if json.Unmarshal(response.Body.Bytes(), &body) != nil || !body.Data.Revoked || body.RequestID == "" ||
+				body.RequestID != storedID || body.RequestID != response.Header().Get("X-Request-ID") {
+				t.Fatal("成功 JSON 或请求 ID 错误")
+			}
+			parsedID, err := uuid.Parse(body.RequestID)
+			if err != nil || parsedID.Version() != 4 || (testCase.expectedID != "" && body.RequestID != testCase.expectedID) {
+				t.Fatal("请求 ID 生成、保留或规范化错误")
+			}
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(response.Body.Bytes(), &fields) != nil || len(fields) != 2 || string(fields["data"]) != "{\"revoked\":true}" {
+				t.Fatal("成功响应包含非约定字段")
+			}
+			var completed map[string]any
+			if json.Unmarshal(logs.Bytes(), &completed) != nil || completed["request_id"] != body.RequestID || completed["status"] != float64(200) || completed["path"] != "/test-revoke-success" {
+				t.Fatal("完成日志的请求 ID、状态或路径错误")
+			}
+			if testCase.origin && response.Header().Get("Access-Control-Allow-Origin") != origin {
+				t.Fatal("成功响应缺少 CORS 头")
+			}
+
+			// 3. 检查原始请求值保护及输入结果。
+			for _, marker := range []string{"private-query", "private-access", "private-refresh", "private-request-id"} {
+				if strings.Contains(response.Body.String(), marker) || strings.Contains(logs.String(), marker) {
+					t.Fatal("正文或完成日志包含原始请求值")
+				}
+			}
+			if !result.Revoked {
+				t.Fatal("交付修改了服务结果")
+			}
+		})
+	}
+}
+
+func TestRevokeSessionSuccessFailures(t *testing.T) {
+	for _, failure := range []string{"nil result", "unconfirmed result", "cancelled", "deadline exceeded", "cancel before write"} {
+		t.Run(failure, func(t *testing.T) {
+			result := &domain.RevokeSessionResult{Revoked: true}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var callContext context.Context = ctx
+			switch failure {
+			case "nil result":
+				result = nil
+			case "unconfirmed result":
+				result.Revoked = false
+			case "cancelled":
+				cancel()
+			case "deadline exceeded":
+				expired, release := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				defer release()
+				callContext = expired
+			}
+			router := NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+			router.DELETE("/test-revoke-success", func(requestContext *gin.Context) {
+				requestContext.Header("Content-Length", "3")
+				requestContext.Header("Content-Encoding", "gzip")
+				requestContext.Header("Content-Type", "application/octet-stream")
+				if failure == "cancel before write" {
+					lateContext, cancelLate := context.WithCancel(requestContext.Request.Context())
+					defer cancelLate()
+					// 复用已有测试上下文，在第二次 Err 检查时取消。
+					requestContext.Request = requestContext.Request.WithContext(&cancelBeforeRefreshWriteContext{Context: lateContext, cancel: cancelLate})
+				}
+				handler.RevokeSessionSuccess(requestContext, result)
+			}, func(*gin.Context) { t.Error("失败交付后进入下游") })
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest("DELETE", "/test-revoke-success", nil).WithContext(callContext))
+			var body dto.ErrorResponse
+			if json.Unmarshal(response.Body.Bytes(), &body) != nil || response.Code != 500 || body.Error.Code != "INTERNAL_ERROR" || body.Error.Details != nil ||
+				body.RequestID == "" || body.RequestID != response.Header().Get("X-Request-ID") || response.Header().Get("Cache-Control") != "no-store" ||
+				response.Header().Get("Pragma") != "no-cache" || response.Header().Get("Content-Type") != "application/json; charset=utf-8" ||
+				response.Header().Get("Content-Encoding") != "" || response.Header().Get("Content-Length") != "" || len(response.Header().Values("Set-Cookie")) != 0 {
+				t.Fatal("失败交付的错误结构或响应头错误")
+			}
+		})
+	}
+}
+
+func TestRevokeSessionSuccessCommittedResponse(t *testing.T) {
+	for _, name := range []string{"body written", "headers flushed"} {
+		t.Run(name, func(t *testing.T) {
+			router := NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+			router.DELETE("/test-revoke-success", func(requestContext *gin.Context) {
+				if name == "body written" {
+					requestContext.String(202, "already-written")
+				} else {
+					requestContext.Status(202)
+					requestContext.Writer.WriteHeaderNow()
+				}
+				cancelled, cancel := context.WithCancel(requestContext.Request.Context())
+				cancel()
+				requestContext.Request = requestContext.Request.WithContext(cancelled)
+				handler.RevokeSessionSuccess(requestContext, nil)
+			}, func(*gin.Context) { t.Error("已提交响应后进入下游") })
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest("DELETE", "/test-revoke-success", nil))
+			expectedBody, expectedType := "", ""
+			if name == "body written" {
+				expectedBody, expectedType = "already-written", "text/plain; charset=utf-8"
+			}
+			if response.Code != 202 || response.Body.String() != expectedBody || response.Header().Get("Content-Type") != expectedType ||
+				response.Header().Get("Cache-Control") != "" || response.Header().Get("Pragma") != "" || len(response.Header().Values("Set-Cookie")) != 0 {
+				t.Fatal("已提交响应被改写")
+			}
+		})
+	}
+}
+
+func TestRevokeSessionSuccessHTTP(t *testing.T) {
+	// 1. 使用空闲端口启动测试服务，验证实际 HTTP 传输。
+	router := NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+	router.DELETE("/test-revoke-success", func(requestContext *gin.Context) {
+		handler.RevokeSessionSuccess(requestContext, &domain.RevokeSessionResult{Revoked: true})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 2 * time.Second
+	request, err := http.NewRequest("DELETE", server.URL+"/test-revoke-success", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Request-ID", "28EE758A-0727-42DE-AE7D-3BB33155E148")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("真实 HTTP 请求失败", err)
+	}
+	defer response.Body.Close()
+	encoded, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal("读取真实响应失败", err)
+	}
+
+	// 2. 核对网络响应状态、JSON、长度和缓存头。
+	var body dto.RevokeSessionResponse
+	if json.Unmarshal(encoded, &body) != nil || response.StatusCode != 200 || !body.Data.Revoked || body.RequestID != "28ee758a-0727-42de-ae7d-3bb33155e148" ||
+		body.RequestID != response.Header.Get("X-Request-ID") || response.ContentLength != int64(len(encoded)) ||
+		response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Cache-Control") != "no-store" ||
+		response.Header.Get("Pragma") != "no-cache" || len(response.Cookies()) != 0 {
+		t.Fatal("真实 HTTP 成功交付错误")
+	}
+}
