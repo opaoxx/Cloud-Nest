@@ -41,6 +41,8 @@ info:
     退出处理函数已组合 Actor、JSON/字段/来源检查、退出服务与成功交付，并通过带认证中间件的测试路由验证。
     POST /api/v1/auth/logout 已由启动入口装配真实授权及退出服务，撤销当前会话并按客户端模式交付结果。
     UserSessionSummary/UserSessionListData/UserSessionListResponse 定义会话列表响应，使用字符串 ID、UTC 微秒时间、Current 及分页字段。
+    UserSessionBeforeID/UserSessionLimit 定义后续会话列表操作的查询参数，默认首页和每页 50 条，输入错误使用固定字段提示。
+    会话列表查询解析完整 RawQuery，额外字段采用忽略策略。整体格式错误定位 query，参数错误定位 before_id 或 limit。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1095,6 +1097,34 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    UserSessionBeforeID:
+      name: before_id
+      in: query
+      required: false
+      description: |
+        单个标准十进制边界值，范围为 0～18446744073709551615。省略或显式 0 表示首页。
+        后续页使用上一页末项会话 ID，查询读取 ID 小于该值的记录。
+        使用准确的十进制写法，重复值、空值、前导零、符号或空白按 before_id 字段错误处理。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 20
+        pattern: '^(0|[1-9][0-9]{0,19})$'
+        default: '0'
+      example: '13'
+    UserSessionLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        单个标准十进制整数，范围为 1～100，省略时为 50。
+        重复值、空值、前导零、符号、空白或小数按 limit 字段错误处理。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+      example: 50
     WebRefreshCookie:
       name: cloudnest_refresh_token
       in: cookie
