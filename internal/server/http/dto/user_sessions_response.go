@@ -59,25 +59,25 @@ func NewUserSessionListData(result *domain.UserSessionList) (*UserSessionListDat
 		if session.ID == 0 || session.UserID == 0 || session.DeviceID == 0 {
 			return nil, domain.ErrInvalidSessionData
 		}
-		createdAt, err := sessionListTime(&session.CreatedAt)
-		if err != nil {
-			return nil, err
+		createdAt, valid := listResponseTime(&session.CreatedAt)
+		if !valid {
+			return nil, domain.ErrInvalidSessionData
 		}
-		expiresAt, err := sessionListTime(&session.ExpiresAt)
-		if err != nil {
-			return nil, err
+		expiresAt, valid := listResponseTime(&session.ExpiresAt)
+		if !valid {
+			return nil, domain.ErrInvalidSessionData
 		}
-		lastSeenAt, err := sessionListTime(session.LastSeenAt)
-		if err != nil {
-			return nil, err
+		lastSeenAt, valid := listResponseTime(session.LastSeenAt)
+		if !valid {
+			return nil, domain.ErrInvalidSessionData
 		}
-		revokedAt, err := sessionListTime(session.RevokedAt)
-		if err != nil {
-			return nil, err
+		revokedAt, valid := listResponseTime(session.RevokedAt)
+		if !valid {
+			return nil, domain.ErrInvalidSessionData
 		}
-		deviceRevokedAt, err := sessionListTime(session.DeviceRevokedAt)
-		if err != nil {
-			return nil, err
+		deviceRevokedAt, valid := listResponseTime(session.DeviceRevokedAt)
+		if !valid {
+			return nil, domain.ErrInvalidSessionData
 		}
 		data.Items = append(data.Items, UserSessionSummary{
 			ID: strconv.FormatUint(session.ID, 10),
@@ -97,19 +97,4 @@ func NewUserSessionListData(result *domain.UserSessionList) (*UserSessionListDat
 
 	// 3. 返回列表数据与分页提示。
 	return data, nil
-}
-
-// sessionListTime 将可空数据库时间复制为 UTC 微秒值。
-func sessionListTime(value *time.Time) (*time.Time, error) {
-	// 1. 保留空值，复制并规范化非空时间。
-	if value == nil {
-		return nil, nil
-	}
-	normalized := value.UTC().Truncate(time.Microsecond)
-
-	// 2. 检查 UTC 年份处于数据库 DATETIME 的有效范围。
-	if normalized.Year() < 1000 || normalized.Year() > 9999 {
-		return nil, domain.ErrInvalidSessionData
-	}
-	return &normalized, nil
 }

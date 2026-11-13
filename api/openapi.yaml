@@ -50,6 +50,7 @@ info:
     指定会话撤销成功交付方法已通过测试专用 DELETE 入口验证，共享响应见 RevokeSessionSucceeded。
     指定会话撤销处理函数已组合认证 Actor、路径解析、服务及成功交付，目标不存在的共享 404 见 TargetSessionNotFound。
     DELETE /api/v1/sessions/{id} 已由启动入口绑定共享授权及已认证用户事务，支持指定当前或其他会话及重复撤销。
+    UserDeviceSummary/UserDeviceListData/UserDeviceListResponse 定义后续设备列表响应，使用字符串 ID、UTC 微秒时间、current 及分页字段。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -416,6 +417,72 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    UserDeviceSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, platform, created_at, last_seen_at, revoked_at, current]
+      description: 已经服务归属与分页检查的设备记录转换结果，保留历史状态和可空时间。
+      properties:
+        id:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/id'
+        name:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/name'
+        platform:
+          $ref: '#/components/schemas/LoginDeviceSummary/properties/platform'
+        created_at:
+          type: string
+          format: date-time
+          description: UTC 设备创建时间，最多六位小数，UTC 年份为 1000～9999。
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 可空 UTC 最近认证活动时间，最多六位小数，非空 UTC 年份为 1000～9999。
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 可空 UTC 设备撤销时间，最多六位小数，非空 UTC 年份为 1000～9999。
+        current:
+          type: boolean
+          description: 服务按本次请求 Actor.DeviceID 计算的当前设备标记，false 明确返回。
+    UserDeviceListData:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      description: |
+        本页最多 100 条，按设备 ID 降序排列。空页使用 items=[]，has_more=false。
+        has_more=true 时，客户端取本页末项 ID 作为后续页边界。
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/UserDeviceSummary'
+        has_more:
+          type: boolean
+          description: 查询时的后续页提示，false 明确返回。
+    UserDeviceListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/UserDeviceListData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          items:
+            - id: '13'
+              name: 学习设备
+              platform: WEB
+              created_at: '2026-11-13T00:00:00.123456Z'
+              last_seen_at: null
+              revoked_at: null
+              current: true
+          has_more: false
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UserSessionSummary:
       type: object
       additionalProperties: false
