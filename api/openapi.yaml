@@ -40,6 +40,7 @@ info:
     LogoutRequest 定义退出 JSON 输入，client_type 精确选择 web/native，供后续来源检查及交付选择使用。
     退出处理函数已组合 Actor、JSON/字段/来源检查、退出服务与成功交付，并通过带认证中间件的测试路由验证。
     POST /api/v1/auth/logout 已由启动入口装配真实授权及退出服务，撤销当前会话并按客户端模式交付结果。
+    UserSessionSummary/UserSessionListData/UserSessionListResponse 定义会话列表响应，使用字符串 ID、UTC 微秒时间、Current 及分页字段。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -336,6 +337,80 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    UserSessionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, device, created_at, expires_at, last_seen_at, revoked_at, device_revoked_at, current]
+      description: 已经服务归属与分页检查的会话记录转换结果，历史状态按事实交付。
+      properties:
+        id:
+          $ref: '#/components/schemas/LoginSessionSummary/properties/id'
+        device:
+          $ref: '#/components/schemas/LoginDeviceSummary'
+        created_at:
+          type: string
+          format: date-time
+          description: UTC 会话创建时间，最多六位小数，UTC 年份为 1000～9999。
+        expires_at:
+          type: string
+          format: date-time
+          description: UTC 会话截止时间，最多六位小数，UTC 年份为 1000～9999，保留历史到期事实。
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 可空 UTC 会话最近使用时间，最多六位小数，非空 UTC 年份为 1000～9999。
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 可空 UTC 会话撤销时间，最多六位小数，非空 UTC 年份为 1000～9999。
+        device_revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 可空 UTC 设备撤销时间，最多六位小数，非空 UTC 年份为 1000～9999。
+        current:
+          type: boolean
+          description: 服务按本次请求 Actor.SessionID 计算的当前会话标记，false 明确返回。
+    UserSessionListData:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      description: |
+        本页最多 100 条，按会话 ID 降序排列。空页使用 items=[]，has_more=false。
+        has_more=true 时，客户端取本页末项 ID 作为后续页边界。
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/UserSessionSummary'
+        has_more:
+          type: boolean
+          description: 查询时的后续页提示，false 明确返回。
+    UserSessionListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/UserSessionListData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          items:
+            - id: '11'
+              device: {id: '13', name: 学习设备, platform: WEB}
+              created_at: '2026-11-13T00:00:00.123456Z'
+              expires_at: '2026-11-13T01:00:00.123456Z'
+              last_seen_at: null
+              revoked_at: null
+              device_revoked_at: null
+              current: false
+          has_more: false
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     LogoutRequest:
       type: object
       additionalProperties: false

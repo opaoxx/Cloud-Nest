@@ -178,6 +178,8 @@ POST /api/v1/auth/logout 已接入正式启动流程，使用 Bearer 认证和 c
 
 已提供 UserSessionService.List，接收已认证 Actor，校验分页、归属和顺序，并按会话 ID 标记 Current。服务返回独立的列表与可空时间副本，当前会话位于其他页时，本页各项 Current=false。调用关系及真实 MySQL/JWT 验证见 [第 072 步学习记录](docs/开发学习记录.md#第-072-步组合会话列表服务并标记当前会话)。
 
+已提供 NewUserSessionListData，将列表服务结果映射为 data.items/has_more 和 request_id。会话及设备 ID 使用字符串，时间使用 UTC 微秒值，可空时间明确返回 null，空列表使用 []。字段、JSON 示例、服务衔接及边界验证见 [第 073 步学习记录](docs/开发学习记录.md#第-073-步定义会话列表响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
