@@ -8,6 +8,10 @@ import (
 // ErrDeviceNotFound 表示在指定用户范围内未找到目标设备，不表示数据库故障。
 var ErrDeviceNotFound = errors.New("设备不存在")
 
+// ErrTargetDeviceNotFound 表示设备操作的目标在当前用户范围内不存在。
+// 服务仅在事务回调中转换该错误，调用者身份失效使用原认证错误。
+var ErrTargetDeviceNotFound = errors.New("目标设备不存在")
+
 // ErrDeviceAlreadyExists 表示设备插入触发唯一键冲突，不允许静默覆盖已有设备。
 var ErrDeviceAlreadyExists = errors.New("该用户的安装设备已存在")
 
