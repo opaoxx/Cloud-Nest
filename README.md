@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me 和 GET /api/v1/sessions，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -183,6 +183,8 @@ POST /api/v1/auth/logout 已接入正式启动流程，使用 Bearer 认证和 c
 已提供 ParseUserSessionListQuery，解析 before_id/limit 为列表服务参数。省略参数时读取首页、每页 50 条，显式 before_id=0 也表示首页，页大小为 1～100；额外查询字段采用忽略策略。标准十进制写法、重复值和整体解析错误的处理见 [第 074 步学习记录](docs/开发学习记录.md#第-074-步定义会话列表查询参数-dto)。
 
 已提供 handler.UserSessions，读取认证 Actor，串联分页解析、列表服务与响应 DTO，交付带请求 ID 的 JSON 和禁止缓存头。测试专用路由已通过真实 MySQL/JWT/HTTP 验证分页、用户隔离、历史状态及认证边界。代码和运行方法见 [第 075 步学习记录](docs/开发学习记录.md#第-075-步组合会话列表-http-处理函数)。
+
+GET /api/v1/sessions 已接入正式启动流程，使用 Bearer 认证和 before_id/limit 查询当前用户的会话。响应包含 items、has_more、当前标记及历史状态，重启、账号隔离和退出后的列表状态已通过真实启动联测。完整登录、查询及后续页示例见 [第 076 步学习记录](docs/开发学习记录.md#第-076-步接入正式会话列表与启动装配)。
 
 ## 本地连接信息
 

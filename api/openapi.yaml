@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料接口、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的当前用户资料及会话列表接口、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -22,7 +22,7 @@ info:
     HTTP 登录限流适配器已实现；受限响应见 RateLimited/RetryAfter 共享组件。
     登录操作共用单进程失败限流器，系统检查与当前用户 GET 使用各自处理链。
     受保护路由可挂载认证中间件，使用 BearerAuth；共享失败响应见 AuthorizationRejected 和 AccountDisabled。
-    GET /api/v1/me 已挂载认证中间件，后续业务操作按需引用这些组件。
+    GET /api/v1/me 和 GET /api/v1/sessions 已挂载认证中间件，后续业务操作按需引用这些组件。
     UserSummary 与 UserProfileData 定义用户资料的共享响应数据，用户和根目录 ID 使用十进制字符串，
     三项字节计数使用 0 到 9007199254740991 的 JSON 整数。后续登录和当前用户操作按需引用。
     当前用户接口共享成功响应见 CurrentUserProfile，响应使用 no-store。
@@ -41,9 +41,10 @@ info:
     退出处理函数已组合 Actor、JSON/字段/来源检查、退出服务与成功交付，并通过带认证中间件的测试路由验证。
     POST /api/v1/auth/logout 已由启动入口装配真实授权及退出服务，撤销当前会话并按客户端模式交付结果。
     UserSessionSummary/UserSessionListData/UserSessionListResponse 定义会话列表响应，使用字符串 ID、UTC 微秒时间、Current 及分页字段。
-    UserSessionBeforeID/UserSessionLimit 定义后续会话列表操作的查询参数，默认首页和每页 50 条，输入错误使用固定字段提示。
+    UserSessionBeforeID/UserSessionLimit 定义会话列表操作的查询参数，默认首页和每页 50 条，输入错误使用固定字段提示。
     会话列表查询解析完整 RawQuery，额外字段采用忽略策略。整体格式错误定位 query，参数错误定位 before_id 或 limit。
     会话列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserSessionsListed。
+    GET /api/v1/sessions 已由启动入口绑定真实授权与列表服务，支持分页、当前标记及历史状态读取。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -52,6 +53,40 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/sessions:
+    get:
+      tags: [Account]
+      operationId: listUserSessions
+      summary: 分页读取当前用户的会话列表
+      description: |
+        Bearer JWT 和数据库授权通过后解析 before_id/limit，按已认证 Actor.UserID 读取列表。
+        按会话 ID 降序分页，响应使用 items/has_more，后续页取本页末项 ID 作为 before_id。
+        current 表示本次请求的会话身份匹配，历史撤销、设备撤销和到期事实按查询结果返回。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UserSessionBeforeID'
+        - $ref: '#/components/parameters/UserSessionLimit'
+      responses:
+        '200':
+          $ref: '#/components/responses/UserSessionsListed'
+        '400':
+          description: 已认证请求的查询格式或字段错误，INVALID_ARGUMENT，details.field 为 query、before_id 或 limit。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/auth/logout:
     post:
       tags: [Account]
@@ -757,7 +792,7 @@ components:
           $ref: '#/components/headers/RequestID/schema'
   responses:
     UserSessionsListed:
-      description: 会话列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，供后续会话列表操作引用。
+      description: 会话列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，由正式会话列表操作引用。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

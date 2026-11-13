@@ -99,8 +99,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota,used_storage,reserved_storage) VALUES(1,'fixture_one','真实启动用户','fixture_hash',100,60,40)",
+		"INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(3,'fixture_other','其他启动用户','fixture_hash',100)",
 		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(11,1,NULL,'',X'','DIR')",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(13,1,'28ee758a-0727-42de-ae7d-3bb33155e148','启动测试设备','WEB')",
+		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(23,3,'0adfc616-05b0-4469-a138-806e7aa667f8','其他账号设备','WINDOWS')",
 	} {
 		if _, err := pool.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
@@ -116,6 +118,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	session := domain.LoginSession{ID: 17, UserID: 1, DeviceID: 13, ExpiresAt: time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)}
 	hash := sha256.Sum256([]byte("fixture-refresh"))
 	if _, err := pool.ExecContext(ctx, "INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(17,1,13,?,?)", hash[:], session.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+	foreignSession := domain.LoginSession{ID: 27, UserID: 3, DeviceID: 23, ExpiresAt: session.ExpiresAt}
+	foreignHash := sha256.Sum256([]byte("fixture-other-refresh"))
+	if _, err := pool.ExecContext(ctx, "INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(27,3,23,?,?)", foreignHash[:], foreignSession.ExpiresAt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,6 +229,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	verifier, err := service.NewAccessTokenVerifier(jwtConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignToken, err := signer.Issue(foreignSession)
+	if err != nil {
+		t.Fatal(err)
+	}
 	token, err := signer.Issue(session)
 	if err != nil {
 		t.Fatal("正式路由测试令牌签发失败")
@@ -236,7 +251,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	checkProfile(t)
 	// 正式登录接口从密码验证开始，创建的令牌再访问当前用户接口。
-	var loginSecrets []string
+	loginSecrets := []string{foreignToken.Token, "fixture-other-refresh"}
 	expectedSecureCookie := false
 	login := func(t *testing.T, clientType, installationID, password string, status int) (dto.LoginResponse, []*http.Cookie) {
 		t.Helper()
@@ -427,6 +442,73 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Fatal("正式退出返回成功时撤销尚未确认入库", err)
 		}
 	}
+	// 正式会话列表按令牌身份核对每条记录归属、设备与当前标记。
+	list := func(t *testing.T, query, accessToken string, status int, code, field string) dto.UserSessionListResponse {
+		t.Helper()
+		listRequest, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/v1/sessions", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listRequest.URL.RawQuery = query
+		listRequest.Header.Set("Origin", "http://127.0.0.1:5173")
+		if accessToken != "" {
+			listRequest.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		response, err := client.Do(listRequest)
+		if err != nil {
+			t.Fatal("正式会话列表请求失败", err)
+		}
+		defer response.Body.Close()
+		encoded, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Request-ID") == "" || len(response.Cookies()) != 0 {
+			t.Fatal("正式会话列表状态、缓存或读取错误", response.StatusCode, err)
+		}
+		var payload dto.UserSessionListResponse
+		if status != 200 {
+			var failure dto.ErrorResponse
+			if json.Unmarshal(encoded, &failure) != nil || failure.Error.Code != code || failure.RequestID != response.Header.Get("X-Request-ID") {
+				t.Fatal("正式列表错误结构异常")
+			}
+			if field == "" {
+				if failure.Error.Details != nil {
+					t.Fatal("非字段错误 details 应为空")
+				}
+			} else if len(failure.Error.Details) != 1 || failure.Error.Details["field"] != field {
+				t.Fatal("正式列表查询错误位置不正确")
+			}
+			return payload
+		}
+		if json.Unmarshal(encoded, &payload) != nil || payload.Data.Items == nil || payload.RequestID != response.Header.Get("X-Request-ID") || response.Header.Get("Pragma") != "no-cache" {
+			t.Fatal("正式列表成功结构异常")
+		}
+		identity, err := verifier.Verify(accessToken)
+		if err != nil || identity == nil {
+			t.Fatal("核对正式列表身份失败", err)
+		}
+		var previousID uint64
+		for _, item := range payload.Data.Items {
+			identifier, err := strconv.ParseUint(item.ID, 10, 64)
+			if err != nil || (previousID != 0 && identifier >= previousID) || item.Current != (identifier == identity.SessionID) || item.CreatedAt.Location() != time.UTC || item.CreatedAt.Nanosecond()%1000 != 0 {
+				t.Fatal("正式列表标识、倒序、当前标记或时间错误", err)
+			}
+			previousID = identifier
+			var deviceID uint64
+			var revokedAt, deviceRevokedAt sql.NullTime
+			if err := pool.QueryRowContext(ctx, "SELECT sessions.device_id,sessions.revoked_at,devices.revoked_at FROM auth_sessions AS sessions JOIN user_devices AS devices ON devices.user_id=sessions.user_id AND devices.id=sessions.device_id WHERE sessions.user_id=? AND sessions.id=?", identity.UserID, identifier).Scan(&deviceID, &revokedAt, &deviceRevokedAt); err != nil {
+				t.Fatal("正式列表包含归属不符的会话", err)
+			}
+			if item.Device.ID != strconv.FormatUint(deviceID, 10) || (item.RevokedAt != nil) != revokedAt.Valid || (item.DeviceRevokedAt != nil) != deviceRevokedAt.Valid {
+				t.Fatal("正式列表设备或可空状态错误")
+			}
+			if (revokedAt.Valid && !item.RevokedAt.Equal(revokedAt.Time)) || (deviceRevokedAt.Valid && !item.DeviceRevokedAt.Equal(deviceRevokedAt.Time)) {
+				t.Fatal("正式列表撤销时间与数据库不一致")
+			}
+		}
+		return payload
+	}
+	list(t, "limit=0", "", 401, "AUTH_REQUIRED", "")
+	list(t, "limit=0", token.Token, 400, "INVALID_ARGUMENT", "limit")
+	list(t, "before_id=%ZZ", token.Token, 400, "INVALID_ARGUMENT", "query")
 	const webInstallation = "28ee758a-0727-42de-ae7d-3bb33155e148"
 	const nativeInstallation = "edbf7e35-36ea-45a5-bdb9-58e76b46fd5e"
 	logout(t, "web", "", "", 401, "AUTH_REQUIRED")
@@ -447,6 +529,27 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	refresh(t, "web", webCookies[0].Value, webLogin.Data.Session.ID, 401, 0)
 	nativeRefreshed, nativeRaw := refresh(t, "native", nativeLogin.Data.RefreshToken, nativeLogin.Data.Session.ID, 200, 2)
 	refresh(t, "native", nativeLogin.Data.RefreshToken, nativeLogin.Data.Session.ID, 401, 0)
+	// 登录及刷新所得访问令牌通过正式列表路径完成分页和归属验证。
+	firstPage := list(t, "limit=2&user_id=3&note=private-query", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(firstPage.Data.Items) != 2 || !firstPage.Data.HasMore || firstPage.Data.Items[0].ID != repeatedLogin.Data.Session.ID {
+		t.Fatal("正式列表首页的分页或倒序错误")
+	}
+	secondPage := list(t, "before_id="+firstPage.Data.Items[1].ID+"&limit=2", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(secondPage.Data.Items) != 2 || secondPage.Data.HasMore || secondPage.Data.Items[0].ID != webLogin.Data.Session.ID || !secondPage.Data.Items[0].Current {
+		t.Fatal("正式列表后续页当前标记错误")
+	}
+	emptyPage := list(t, "before_id=17", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(emptyPage.Data.Items) != 0 || emptyPage.Data.HasMore {
+		t.Fatal("正式列表末页边界错误")
+	}
+	maximumPage := list(t, "before_id=18446744073709551615&limit=100", nativeRefreshed.Data.AccessToken, 200, "", "")
+	if len(maximumPage.Data.Items) != 4 || maximumPage.Data.HasMore {
+		t.Fatal("正式列表最大边界或账号隔离错误")
+	}
+	foreignPage := list(t, "user_id=1", foreignToken.Token, 200, "", "")
+	if len(foreignPage.Data.Items) != 1 || foreignPage.Data.Items[0].ID != "27" || !foreignPage.Data.Items[0].Current {
+		t.Fatal("正式列表的其他账号身份错误")
+	}
 	// 第一轮启动中分别退出独立会话，原有会话继续用于刷新及重启验证。
 	logout(t, "web", repeatedLogin.Data.AccessToken, repeatedLogin.Data.Session.ID, 200, "")
 	request(t, "/api/v1/me", repeatedLogin.Data.AccessToken, 401)
@@ -460,6 +563,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	request(t, "/api/v1/me", nativeExited.Data.AccessToken, 401)
 	refresh(t, "native", nativeExited.Data.RefreshToken, nativeExited.Data.Session.ID, 401, 0)
 	request(t, "/api/v1/me", nativeRefreshed.Data.AccessToken, 200)
+	expiredAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET created_at=?,last_seen_at=?,expires_at=? WHERE id=?", expiredAt.Add(-time.Hour), expiredAt, expiredAt, nativeExited.Data.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	history := list(t, "", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(history.Data.Items) != 5 || history.Data.Items[0].ID != nativeExited.Data.Session.ID || history.Data.Items[0].RevokedAt == nil || history.Data.Items[0].LastSeenAt == nil || !history.Data.Items[0].ExpiresAt.Equal(expiredAt) {
+		t.Fatal("正式列表未交付退出后的历史时间事实")
+	}
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -472,6 +583,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	expectedSecureCookie = true
 	stopSecond := start()
 	checkProfile(t)
+	list(t, "", webRefreshed.Data.AccessToken, 200, "", "")
+	list(t, "", foreignToken.Token, 200, "", "")
 	logout(t, "web", repeatedLogin.Data.AccessToken, repeatedLogin.Data.Session.ID, 401, "SESSION_REVOKED")
 	request(t, "/api/v1/me", nativeExited.Data.AccessToken, 401)
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 200)
@@ -483,6 +596,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", token.Token, 403)
+	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 403, 0)
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
 		t.Fatal(err)
@@ -491,6 +605,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", token.Token, 401)
+	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	// 设备撤销后重新登录复用设备 ID，旧会话保持撤销。
 	if _, err := pool.ExecContext(ctx, "UPDATE user_devices SET revoked_at=UTC_TIMESTAMP(6) WHERE id=13"); err != nil {
 		t.Fatal(err)
@@ -499,6 +614,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
+	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	list(t, "", nativeLogin.Data.AccessToken, 200, "", "")
 	refresh(t, "web", webRaw, webLogin.Data.Session.ID, 401, 0)
 	restoredLogin, restoredCookies := login(t, "web", webInstallation, "fixture-password", 200)
 	if restoredLogin.Data.Device.ID != "13" {
@@ -517,23 +634,28 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		login(t, "web", webInstallation, "wrong-password", status)
 	}
 	request(t, "/api/v1/me", restoredLogin.Data.AccessToken, 200)
+	list(t, "", restoredLogin.Data.AccessToken, 200, "", "")
 	// 第二轮启动沿用 Secure 配置，刷新后的最新凭证也受当前会话撤销控制。
 	logout(t, "web", restoredRefreshed.Data.AccessToken, restoredLogin.Data.Session.ID, 200, "")
 	request(t, "/api/v1/me", restoredLogin.Data.AccessToken, 401)
 	request(t, "/api/v1/me", restoredRefreshed.Data.AccessToken, 401)
 	refresh(t, "web", restoredRaw, restoredLogin.Data.Session.ID, 401, 0)
 	logout(t, "web", restoredRefreshed.Data.AccessToken, restoredLogin.Data.Session.ID, 401, "SESSION_REVOKED")
+	list(t, "", restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	list(t, "", nativeFinal.Data.AccessToken, 200, "", "")
 	request(t, "/api/v1/me", nativeFinal.Data.AccessToken, 200)
 	logout(t, "native", nativeFinal.Data.AccessToken, nativeLogin.Data.Session.ID, 200, "")
 	request(t, "/api/v1/me", nativeLogin.Data.AccessToken, 401)
 	request(t, "/api/v1/me", nativeFinal.Data.AccessToken, 401)
 	refresh(t, "native", nativeFinalRaw, nativeLogin.Data.Session.ID, 401, 0)
+	list(t, "", nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	list(t, "", foreignToken.Token, 200, "", "")
 	stopSecond()
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("生产启动流程重写了已有密钥")
 	}
-	if strings.Contains(logs.String(), token.Token) || strings.Contains(logs.String(), "fixture-refresh") {
+	if strings.Contains(logs.String(), token.Token) || strings.Contains(logs.String(), "fixture-refresh") || strings.Contains(logs.String(), "private-query") {
 		t.Fatal("启动或访问日志泄漏了凭证")
 	}
 	for _, secret := range loginSecrets {
