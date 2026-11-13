@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、设备列表与改名、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -63,6 +63,7 @@ info:
     RevokeDeviceData/RevokeDeviceResponse 定义后续设备撤销成功响应，使用 revoked=true 和统一 data/request_id 外层。
     设备撤销成功交付方法已通过测试专用 DELETE 入口验证，共享成功响应见 RevokeDeviceSucceeded。
     设备撤销处理函数组合 Actor、设备路径、撤销服务及交付，目标不存在复用 TargetDeviceNotFound。
+    DELETE /api/v1/devices/{id} 由启动入口绑定共享授权及用户事务，原子撤销设备和全部关联会话。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
 servers:
   - url: http://127.0.0.1:18081
@@ -109,6 +110,43 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/devices/{id}:
+    delete:
+      tags: [Account]
+      operationId: revokeDevice
+      summary: 撤销当前用户的指定设备及关联会话
+      description: |
+        Bearer JWT 和数据库授权通过后解析路径 id，使用已认证 Actor 进入用户事务复查并撤销目标。
+        当前或其他自有设备均可撤销，设备与其尚未撤销的全部会话一起提交。
+        已撤销目标重复操作成功，保留首次撤销时间，并补齐尚未撤销的关联会话。
+        目标不存在或属于其他账号时返回同一 DEVICE_NOT_FOUND 404，调用者失效使用认证错误。
+        撤销当前设备后，该设备旧会话的访问与刷新凭证在后续请求中失效。
+        再次使用正确账号密码登录可复用原设备 ID 并创建新会话，旧会话保持失效。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UserDeviceID'
+      responses:
+        '200':
+          $ref: '#/components/responses/RevokeDeviceSucceeded'
+        '400':
+          description: 已认证请求的路径 id 格式或范围错误，INVALID_ARGUMENT，details.field 为 id。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetDeviceNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
     patch:
       tags: [Account]
       operationId: renameDevice
@@ -1168,7 +1206,7 @@ components:
     RevokeDeviceSucceeded:
       description: |
         设备及关联会话撤销成功 HTTP 200，使用 revoked=true 与本次请求 ID，响应采用 no-store 和 Pragma no-cache。
-        供后续设备撤销操作引用，事务确认提交后交付结果。
+        由正式 DELETE /api/v1/devices/{id} 操作引用，事务确认提交后交付结果。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

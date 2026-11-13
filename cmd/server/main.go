@@ -172,7 +172,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	refreshTokens := service.NewRefreshTokenService(refreshSessions.Refresh, signer.Issue)
 
-	// 12. 复用已认证用户事务，装配退出、会话撤销及设备改名服务。
+	// 12. 复用已认证用户事务，装配退出、会话撤销、设备改名及撤销服务。
 	logoutService := service.NewLogoutService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.LogoutTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -192,6 +192,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
+	revokeDeviceService := service.NewRevokeDeviceService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RevokeDeviceTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		})
+
 	// 13. 注册系统检查、用户资料、会话及设备管理、登录、刷新与退出接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
@@ -199,6 +206,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
 	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
 	serverhttp.RegisterRenameDeviceRoute(router, authorizationService.Authorize, renameService.Rename)
+	serverhttp.RegisterRevokeDeviceRoute(router, authorizationService.Authorize, revokeDeviceService.Revoke)
 	serverhttp.RegisterRevokeSessionRoute(router, authorizationService.Authorize, revokeService.Revoke)
 	serverhttp.RegisterLoginRoute(router, allowedOrigins, loginGate.Authenticate, loginTokens.Create, profileService.Get, secureCookie)
 	serverhttp.RegisterRefreshRoute(router, allowedOrigins, refreshTokens.Refresh, secureCookie)

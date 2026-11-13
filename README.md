@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -237,6 +237,8 @@ PATCH /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享 B
 已提供 RevokeDeviceSuccess，将设备及关联会话确认提交后的结果交付为 HTTP 200 JSON，关联请求 ID 并设置 no-store/Pragma no-cache。测试专用 DELETE 入口已验证成功、异常、取消、已提交响应及真实 HTTP 传输，执行顺序与复验命令见 [第 101 步学习记录](docs/开发学习记录.md#第-101-步交付设备撤销成功的-http-响应)。
 
 已提供 handler.RevokeDevice，组合认证 Actor、设备 ID 路径解析、撤销服务及成功交付，目标缺失或跨账号复用 DEVICE_NOT_FOUND 404。测试专用 DELETE 入口已通过真实 MySQL/JWT/HTTP 验证设备与全部会话撤销、重复请求、两表回滚、调用者状态复查及重新登录复用，代码与复验命令见 [第 102 步学习记录](docs/开发学习记录.md#第-102-步组合设备撤销-http-处理函数)。
+
+DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享授权与用户事务撤销设备及全部关联会话。真实启动和重启已验证重复撤销、历史时间、访问/刷新失效、当前设备及重新登录复用，本地登录和撤销示例见 [第 103 步学习记录](docs/开发学习记录.md#第-103-步接入正式设备撤销接口与启动装配)。
 
 ## 本地连接信息
 
