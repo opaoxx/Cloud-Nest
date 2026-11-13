@@ -53,6 +53,7 @@ info:
     UserDeviceSummary/UserDeviceListData/UserDeviceListResponse 定义后续设备列表响应，使用字符串 ID、UTC 微秒时间、current 及分页字段。
     UserDeviceBeforeID/UserDeviceLimit 定义设备列表查询参数，默认首页和每页 50 条，额外字段采用忽略策略。
     设备与会话查询共用完整 RawQuery 解析及数字校验，整体格式错误定位 query，其后依次检查 before_id、limit。
+    设备列表处理函数已组合 Actor、查询参数、列表服务及响应 DTO，测试专用 GET 入口的共享成功响应见 UserDevicesListed。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -968,6 +969,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RevokeSessionResponse'
+    UserDevicesListed:
+      description: 设备列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，供后续设备列表操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UserDeviceListResponse'
     UserSessionsListed:
       description: 会话列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，由正式会话列表操作引用。
       headers:

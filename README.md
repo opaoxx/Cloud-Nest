@@ -208,6 +208,8 @@ DELETE /api/v1/sessions/{id} 已接入正式路由及启动流程，使用共享
 
 已提供 ParseUserDeviceListQuery，将 before_id/limit 转为设备服务的 BeforeDeviceID/PageSize，默认首页和每页 50 条，显式 0 表示首页。设备与会话共用分页校验，各自保留固定字段提示；查询格式、数字边界、HTTP 错误及服务衔接验证见 [第 087 步学习记录](docs/开发学习记录.md#第-087-步定义设备列表查询参数-dto)。
 
+已提供 handler.UserDevices，组合认证 Actor、分页参数、设备服务与响应 DTO，交付统一 JSON、请求 ID 和禁止缓存头。测试专用 GET 入口已通过真实 MySQL/JWT/HTTP 验证分页、用户隔离、同设备多会话、历史状态及撤销边界。执行顺序与复验命令见 [第 088 步学习记录](docs/开发学习记录.md#第-088-步组合设备列表-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
