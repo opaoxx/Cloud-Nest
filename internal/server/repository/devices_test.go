@@ -31,6 +31,13 @@ func (connector *deviceConnector) Connect(ctx context.Context) (driver.Conn, err
 type deviceConnection struct{ *accountConnection }
 
 func (*deviceConnection) CheckNamedValue(value *driver.NamedValue) error {
+	if identifier, optional := value.Value.(*uint64); optional {
+		value.Value = nil
+		if identifier != nil {
+			value.Value = *identifier
+		}
+		return nil
+	}
 	if _, unsigned := value.Value.(uint64); unsigned {
 		return nil
 	}

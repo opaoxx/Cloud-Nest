@@ -3,6 +3,8 @@ package dto
 import (
 	"net/http"
 	"strings"
+
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
 // ParseIdempotencyKey 解析单个业务幂等请求头，长度与现有 ASCII VARCHAR(128) 对齐。
@@ -20,9 +22,7 @@ func ParseIdempotencyKey(request *http.Request) (string, *FieldError) {
 
 	// 2. 去除首尾 HTTP 空白，检查长度和字符范围。
 	key := strings.Trim(values[0], " \t")
-	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(character rune) bool {
-		return character < 0x21 || character > 0x7e || character == ','
-	}) {
+	if !domain.ValidIdempotencyKey(key) {
 		return "", fieldError
 	}
 

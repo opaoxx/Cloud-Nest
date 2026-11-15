@@ -16,6 +16,29 @@ var ErrIdempotencyRecordNotFound = errors.New("幂等记录不存在")
 // ErrInvalidIdempotencyRecordData 表示幂等记录的范围、摘要或结果字段异常。
 var ErrInvalidIdempotencyRecordData = errors.New("幂等记录数据异常")
 
+// ErrIdempotencyRecordAlreadyExists 表示当前用户、操作和键已有记录。
+var ErrIdempotencyRecordAlreadyExists = errors.New("幂等记录已存在")
+
+// IdempotencyResultInput 保存业务操作提供的请求范围及稳定结果字段。
+type IdempotencyResultInput struct {
+	// Operation 是服务端确定的版本化操作名。
+	Operation string
+	// IdempotencyKey 是已解析并保留大小写的客户端请求键。
+	IdempotencyKey string
+	// RequestHash 是规范化业务请求的固定摘要。
+	RequestHash [sha256.Size]byte
+	// ResourceType 指明结果资源类型。
+	ResourceType string
+	// ResourceID 为 nil 时表示结果未关联具体资源。
+	ResourceID *uint64
+	// ResponseStatus 是要保存的 HTTP 状态码。
+	ResponseStatus int
+	// ResponseBody 为 nil 时保存 SQL NULL，否则提供合法 UTF-8 JSON。
+	ResponseBody json.RawMessage
+	// ExpiresAt 由上层按保留策略计算，写入时转换为 UTC 微秒。
+	ExpiresAt time.Time
+}
+
 // IdempotencyRecord 保存幂等请求及已提交结果的数据库事实。
 type IdempotencyRecord struct {
 	// ID 是幂等记录的完整无符号主键。

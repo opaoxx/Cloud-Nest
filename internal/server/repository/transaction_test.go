@@ -26,6 +26,7 @@ type loginTransactionScript struct {
 	deviceQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	sessionQuery                                       func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	rotate                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	revoke                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -127,6 +128,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 	script.rolledBack = make(chan struct{})
 	connector := &loginTransactionConnector{script: script}
 	connector.deviceConnector.accountConnector.query = func(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
+		if strings.Contains(query, "idempotency_records") && script.idempotencyQuery != nil {
+			script.record("idempotency")
+			return script.idempotencyQuery(ctx, query, arguments)
+		}
 		if strings.Contains(query, "file_entries") && script.entryQuery != nil {
 			script.record("entry")
 			return script.entryQuery(ctx, query, arguments)
