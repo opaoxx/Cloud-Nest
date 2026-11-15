@@ -19,6 +19,12 @@ var ErrInvalidIdempotencyRecordData = errors.New("幂等记录数据异常")
 // ErrIdempotencyRecordAlreadyExists 表示当前用户、操作和键已有记录。
 var ErrIdempotencyRecordAlreadyExists = errors.New("幂等记录已存在")
 
+// ErrIdempotencyRequestConflict 表示同一请求键关联了不同业务参数。
+var ErrIdempotencyRequestConflict = errors.New("幂等键已用于不同请求参数")
+
+// ErrIdempotencyRecordExpired 表示记录已到保留截止时间，需先核对已有资源状态。
+var ErrIdempotencyRecordExpired = errors.New("幂等记录已到期，请先核对已有资源状态")
+
 // IdempotencyResultInput 保存业务操作提供的请求范围及稳定结果字段。
 type IdempotencyResultInput struct {
 	// Operation 是服务端确定的版本化操作名。

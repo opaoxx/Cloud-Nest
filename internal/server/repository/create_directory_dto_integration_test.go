@@ -150,7 +150,67 @@ func TestCreateDirectoryDataIntegration(t *testing.T) {
 			t.Fatal("已保存结果无法组成响应", err)
 		}
 	})
-	// 4. 数据库允许合法 JSON，恢复层继续检查创建结果的结构和字段。
+	// 4. 实际保存后，在用户事务内比对当前请求并恢复原始快照。
+	t.Run("replay validation and request conflicts", func(t *testing.T) {
+		data, saved := createSnapshot(t, "复用资料", nil, "snapshot-replay")
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(2)
+		err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			record, err := txStore.FindUserIdempotencyRecord(txContext, actor.UserID, domain.CreateDirectoryOperation, "snapshot-replay")
+			if err != nil {
+				return err
+			}
+			for _, name := range []string{"复用资料", " 复用资料\u3000", "其他资料"} {
+				hash, err := service.BuildCreateDirectoryRequestHash(11, name, nil)
+				if err != nil {
+					return err
+				}
+				validationError := service.ValidateCreateDirectoryReplay(record, actor.UserID, "snapshot-replay", hash, time.Now())
+				if name == "其他资料" {
+					if !errors.Is(validationError, domain.ErrIdempotencyRequestConflict) {
+						return fmt.Errorf("同键不同参数未识别冲突: %w", validationError)
+					}
+					continue
+				}
+				if validationError != nil {
+					return validationError
+				}
+				restored, err := dto.RestoreCreateDirectoryData(record.ResponseBody)
+				if err != nil || !reflect.DeepEqual(data, restored) {
+					return fmt.Errorf("复用校验后未准确恢复创建快照: %w", err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reloaded, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateDirectoryOperation, "snapshot-replay")
+		if err != nil || !reflect.DeepEqual(saved, reloaded) {
+			t.Fatal("复用判断修改了已保存结果", err)
+		}
+	})
+	t.Run("stored replay boundaries", func(t *testing.T) {
+		_, saved := createSnapshot(t, "复用边界", nil, "snapshot-replay-boundary")
+		if err := service.ValidateCreateDirectoryReplay(saved, actor.UserID, saved.IdempotencyKey, saved.RequestHash, saved.ExpiresAt.Add(-time.Nanosecond)); err != nil {
+			t.Fatal("截止前记录未通过", err)
+		}
+		if err := service.ValidateCreateDirectoryReplay(saved, actor.UserID, saved.IdempotencyKey, saved.RequestHash, saved.ExpiresAt); !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+			t.Fatal("到期记录未返回专用错误", err)
+		}
+		if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=JSON_SET(response_body,'$.entry.id','11') WHERE id=? AND user_id=1", saved.ID); err != nil {
+			t.Fatal(err)
+		}
+		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateDirectoryOperation, saved.IdempotencyKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.ValidateCreateDirectoryReplay(record, actor.UserID, record.IdempotencyKey, record.RequestHash, time.Now()); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+			t.Fatal("正文目录 ID 与元数据资源 ID 不一致未拒绝", err)
+		}
+	})
+
+	// 5. 数据库允许合法 JSON，恢复层继续检查创建结果的结构和字段。
 	t.Run("invalid saved creation data", func(t *testing.T) {
 		_, saved := createSnapshot(t, "异常结果恢复", nil, "snapshot-invalid")
 		var payload map[string]map[string]json.RawMessage
