@@ -68,6 +68,8 @@ info:
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
     目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
+    DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
+    当前查询条件为 directory、modified_desc 和空 q/kind，重复值及不匹配条件返回固定字段错误。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1744,6 +1746,68 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    DirectoryParentID:
+      name: parent_id
+      in: query
+      required: true
+      description: |
+        单个非零 uint64 标准十进制 ID，取自真实根目录或普通目录。
+        缺失、重复、空值、零、前导零、符号、空白或溢出按 parent_id 字段错误处理。
+      schema:
+        $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+      example: '12'
+    DirectoryCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个游标原文，省略或显式空值表示首页。解码后的文本最多 1024 字节。
+        查询 DTO 检查重复和长度，签名及当前用户/目录绑定交给分页服务。
+      schema:
+        type: string
+        maxLength: 1024
+        default: ''
+    DirectoryLimit:
+      $ref: '#/components/parameters/UserDeviceLimit'
+    DirectoryScope:
+      name: scope
+      in: query
+      required: false
+      description: 当前目录查询范围，省略时为 directory，显式值须单个匹配。
+      schema:
+        type: string
+        enum: [directory]
+        default: directory
+    DirectorySort:
+      name: sort
+      in: query
+      required: false
+      description: 当前目录默认排序，显式值须单个 modified_desc。
+      schema:
+        type: string
+        enum: [modified_desc]
+        default: modified_desc
+    DirectorySearch:
+      name: q
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: 当前空搜索条件，省略或单个空值匹配当前查询与游标摘要。
+      schema:
+        type: string
+        enum: ['']
+        default: ''
+    DirectoryKind:
+      name: kind
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: 当前空类型筛选，省略或单个空值匹配当前查询与游标摘要。
+      schema:
+        type: string
+        enum: ['']
+        default: ''
     UserDeviceID:
       name: id
       in: path

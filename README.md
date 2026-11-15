@@ -260,6 +260,8 @@ DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享�
 
 已提供 DirectoryPageSuccess，将成功目录页交付为 HTTP 200 JSON，关联请求 ID，设置 no-store/Pragma no-cache，并处理异常数据和取消。测试专用 GET 入口已验证字段、空页/末页、正文头、已提交响应及真实网络传输，执行顺序与复验命令见 [第 113 步学习记录](docs/开发学习记录.md#第-113-步交付目录列表成功的-http-响应)。
 
+已提供 ParseDirectoryPageQuery，解析必填 parent_id、单个原始 cursor 和默认 50 条的 limit，并核对当前 directory/modified_desc/空筛选条件。参数、HTTP 字段错误及分页服务衔接已验证，执行顺序与复验命令见 [第 114 步学习记录](docs/开发学习记录.md#第-114-步定义目录列表查询参数-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
