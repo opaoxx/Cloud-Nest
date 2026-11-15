@@ -77,6 +77,8 @@ info:
     详情成功交付方法通过测试专用 GET 入口验证，共享响应见 EntryDetailRetrieved，交付 UTF-8 JSON、请求 ID 和禁止缓存头。
     详情处理函数组合 Actor、路径 DTO、详情服务及成功交付，路径错误定位 id，不可见目标复用 TargetEntryNotFound。
     GET /api/v1/entries/{id} 已由启动入口绑定共享授权与真实详情快照服务，支持文件、目录和根目录读取。
+    CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
+    请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1046,6 +1048,33 @@ components:
             last_seen_at: null
             revoked_at: null
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateDirectoryRequest:
+      type: object
+      additionalProperties: false
+      required: [parent_id, name]
+      description: |
+        创建文件夹请求 DTO。parent_id 按非零 uint64 的标准十进制字符串解析，用户归属来自认证上下文。
+        name 保留输入原文，DTO 检查非空有效 UTF-8。后续服务去除首尾空白，并复用完整名称校验与名称键生成。
+        最终展示名为 1～120 个 UTF-16 代码单元，名称键最多 768 字节，命名规则见后端方案。
+        color_key 可省略或为 null，显式空字符串保留。提供文本时须为最多 16 字节的可打印 ASCII。
+        字段错误按 parent_id、name、color_key 顺序返回，目录归属、可见性及创建结果由后续业务流程确认。
+      properties:
+        parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        name:
+          type: string
+          minLength: 1
+          description: 原始名称文本，保留空白、大小写和 Unicode 写法供后续统一命名服务处理。
+        color_key:
+          type: string
+          nullable: true
+          maxLength: 16
+          pattern: '^[\x20-\x7E]*(?![\s\S])'
+          description: 可空颜色键，保留空字符串及原值，字符范围为 U+0020～U+007E。
+      example:
+        parent_id: '11'
+        name: 学习资料
+        color_key: green
     RenameDeviceRequest:
       type: object
       additionalProperties: false

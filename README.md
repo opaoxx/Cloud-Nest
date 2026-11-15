@@ -290,6 +290,8 @@ GET /api/v1/entries/{id} 已接入正式路由和生产启动装配，读取当�
 
 已提供 Store.CreateUserDirectory，在已认证用户事务中检查父目录归属和自身状态，插入普通文件夹并通过活动名称唯一键读回数据库默认字段，重名返回 ErrEntryNameConflict。真实 MySQL 已验证默认值、空颜色、回滚、历史重名复用、失效身份、同名并发和高位无符号自增 ID，执行顺序与复验方法见 [第 128 步学习记录](docs/开发学习记录.md#第-128-步在已认证用户事务内创建文件夹记录)。
 
+已提供 CreateDirectoryRequest、CreateDirectoryInput 和 ParseCreateDirectoryRequest，将 JSON 字符串父目录 ID 转为非零 uint64，检查名称基础文本和可空颜色键，并返回独立输入。测试入口已验证 JSON 绑定、字段错误、认证先行和统一名称服务衔接，执行顺序与复验方法见 [第 129 步学习记录](docs/开发学习记录.md#第-129-步定义创建文件夹请求-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
