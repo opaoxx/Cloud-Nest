@@ -302,6 +302,8 @@ GET /api/v1/entries/{id} 已接入正式路由和生产启动装配，读取当�
 
 已提供 Store.CreateUserIdempotencyRecord，在已认证用户事务中保存九项请求/结果字段，归属取自绑定身份，重复范围返回记录已存在错误，插入后读回实际标识与时间。真实 MySQL 已验证文件夹与幂等结果同事务提交/回滚、JSON 空值、占用范围、当前身份复查、并发和高位整数，执行顺序与复验方法见 [第 134 步学习记录](docs/开发学习记录.md#第-134-步在已认证用户事务内保存幂等结果)。
 
+已提供 CreatedDirectorySummary、CreateDirectoryData、CreateDirectoryResponse 和 NewCreateDirectoryData，创建成功数据使用 data.entry，复用十项基础字段并附加可空颜色，外层关联当前 request_id。真实 MySQL 已验证稳定数据同事务保存、JSON 读回、后续目录变化下的创建快照和转换失败回滚，字段及复验方法见 [第 135 步学习记录](docs/开发学习记录.md#第-135-步定义创建文件夹成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
