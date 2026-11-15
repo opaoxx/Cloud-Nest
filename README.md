@@ -306,6 +306,8 @@ GET /api/v1/entries/{id} 已接入正式路由和生产启动装配，读取当�
 
 已提供 dto.RestoreCreateDirectoryData，从已保存 JSON 恢复创建快照，逐项检查十一项必需字段、精确字段名、类型、空值、字符串标识和新建目录规则，时间沿用 UTC 微秒转换，异常返回幂等记录数据错误。真实 MySQL 已验证 JSON 读回、颜色空值、历史创建快照和异常结果拒绝，执行顺序与复验方法见 [第 136 步学习记录](docs/开发学习记录.md#第-136-步恢复并校验已保存的创建文件夹响应)。
 
+已提供 handler.CreateDirectorySuccess，接收已确认提交的稳定 JSON，复用恢复校验后关联当前 request_id，预先编码并按 201 交付 data.entry，沿用 no-store、Pragma no-cache、取消检查和统一内部错误。测试 POST 入口、真实 HTTP 传输及同快照关联不同请求 ID 验证通过，执行顺序与复验方法见 [第 137 步学习记录](docs/开发学习记录.md#第-137-步交付创建文件夹成功-http-响应)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

@@ -81,6 +81,7 @@ info:
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
     IdempotencyKey 定义后续业务写请求的 Idempotency-Key 请求头，单值及字符错误定位 Idempotency-Key。
     CreatedDirectorySummary/CreateDirectoryData/CreateDirectoryResponse 定义创建成功的稳定目录快照和 data/request_id 外层。
+    CreateDirectorySucceeded 定义创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1710,6 +1711,25 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RevokeSessionResponse'
+    CreateDirectorySucceeded:
+      description: |
+        创建文件夹成功 HTTP 201，使用 data.entry 创建快照与当前请求 ID。
+        交付前恢复并校验已确认提交的稳定 JSON，响应采用 no-store 和 Pragma no-cache，供后续创建操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CreateDirectoryResponse'
     EntryDetailRetrieved:
       description: |
         指定目录项详情成功 HTTP 200，使用完整 EntryDetailResponse 和本次请求 ID。
