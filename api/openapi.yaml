@@ -75,6 +75,7 @@ info:
     EntryID 定义后续文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
     EntryDetailData/EntryDetailResponse 定义指定目录项的完整公开详情，kind 映射文件类别，来源设备及历史空值按实际数据返回。
     详情成功交付方法通过测试专用 GET 入口验证，共享响应见 EntryDetailRetrieved，交付 UTF-8 JSON、请求 ID 和禁止缓存头。
+    详情处理函数组合 Actor、路径 DTO、详情服务及成功交付，路径错误定位 id，不可见目标复用 TargetEntryNotFound。
 servers:
   - url: http://127.0.0.1:18081
 tags:
