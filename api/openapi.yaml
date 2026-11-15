@@ -73,6 +73,7 @@ info:
     目录页处理函数组合 Actor、查询 DTO、分页服务和交付，输入/游标错误见 DirectoryQueryRejected，不可见目录见 TargetEntryNotFound。
     GET /api/v1/entries 已由启动入口绑定共享授权、同请求只读快照及持久化主密钥派生的目录游标签名配置。
     EntryID 定义后续文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
+    EntryDetailData/EntryDetailResponse 定义指定目录项的完整公开详情，kind 映射文件类别，来源设备及历史空值按实际数据返回。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -602,6 +603,118 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    EntrySourceDeviceSummary:
+      type: object
+      nullable: true
+      additionalProperties: false
+      required: [id, name]
+      description: 内容发布时的来源设备，全部信息缺失时为 null，历史记录中未知的字段单独为 null。
+      properties:
+        id:
+          type: string
+          nullable: true
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 非零 uint64 的标准十进制字符串，上限为 18446744073709551615。
+        name:
+          type: string
+          nullable: true
+          description: 发布时名称快照，保留原始空白与空字符串。
+    EntryDetailData:
+      type: object
+      additionalProperties: false
+      required: [id, parent_id, name, kind, size_bytes, revision, created_at, modified_at, updated_at, status, extension, mime_type, color_key, content_modified_at, source_device, starred, starred_at, last_opened_at]
+      description: 可见文件或目录的完整详情，公开标识及版本使用字符串，所有可空字段明确返回 null。
+      properties:
+        id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        parent_id:
+          type: string
+          nullable: true
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 非零 uint64 父目录标识，真实根目录为 null，上限为 18446744073709551615。
+        name:
+          type: string
+          description: 目录项原始名称，真实根目录为空字符串。
+        kind:
+          type: string
+          enum: [folder, document, image, video, audio, archive, other]
+          description: DIR 为 folder，FILE 根据已保存的 category 映射。
+        size_bytes:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/size_bytes'
+        revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        created_at:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/created_at'
+        modified_at:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/modified_at'
+        updated_at:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/updated_at'
+        status:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/status'
+        extension:
+          type: string
+          nullable: true
+          description: 原始扩展名提示，空文本与 null 分别保留。
+        mime_type:
+          type: string
+          nullable: true
+          description: 发布时保存的内容 MIME。
+        color_key:
+          type: string
+          nullable: true
+          description: 原始文件夹颜色键。
+        content_modified_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: 最近内容发布时间，UTC 微秒精度，年份为 1000～9999。
+        source_device:
+          $ref: '#/components/schemas/EntrySourceDeviceSummary'
+        starred:
+          type: boolean
+          description: 当且仅当 starred_at 非 null 时为 true。
+        starred_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: 收藏时间，UTC 微秒精度，年份为 1000～9999。
+        last_opened_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: 最近成功授权访问时间，UTC 微秒精度，年份为 1000～9999。
+    EntryDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/EntryDetailData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          id: '23'
+          parent_id: '12'
+          name: 学习笔记.md
+          kind: document
+          size_bytes: 2048
+          revision: '3'
+          created_at: '2026-11-15T01:30:00.123456Z'
+          modified_at: '2026-11-15T02:30:00.123456Z'
+          updated_at: '2026-11-15T02:30:00.123456Z'
+          status: ACTIVE
+          extension: md
+          mime_type: text/markdown
+          color_key: null
+          content_modified_at: '2026-11-15T01:30:00.123456Z'
+          source_device:
+            id: '19'
+            name: '  发布时设备 🎮  '
+          starred: true
+          starred_at: '2026-11-15T02:30:00.123456Z'
+          last_opened_at: '2026-11-15T03:30:00.123456Z'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     DirectoryEntrySummary:
       type: object
       additionalProperties: false
