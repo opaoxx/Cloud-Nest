@@ -79,6 +79,7 @@ info:
     GET /api/v1/entries/{id} 已由启动入口绑定共享授权与真实详情快照服务，支持文件、目录和根目录读取。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
+    IdempotencyKey 定义后续业务写请求的 Idempotency-Key 请求头，单值及字符错误定位 Idempotency-Key。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -2058,6 +2059,21 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        业务写请求的单值幂等键，建议客户端生成 UUID，也支持符合字符规则的其他请求标识。
+        首尾 HTTP 空格及制表符在解析时去除，键保留大小写。去空白后须为 1～128 字节可见 ASCII，逗号及内部空白拒绝。
+        多个字段行以及合并后的逗号多值均返回固定 Idempotency-Key 字段错误。
+        长度与模式约束针对解析后的键，后续幂等流程结合用户、版本化操作与请求摘要关联结果。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[\x21-\x2B\x2D-\x7E]{1,128}(?![\s\S])'
+      example: 28ee758a-0727-42de-ae7d-3bb33155e148
     EntryID:
       name: id
       in: path
