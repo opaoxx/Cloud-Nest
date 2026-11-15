@@ -82,6 +82,8 @@ info:
     IdempotencyKey 定义后续业务写请求的 Idempotency-Key 请求头，单值及字符错误定位 Idempotency-Key。
     CreatedDirectorySummary/CreateDirectoryData/CreateDirectoryResponse 定义创建成功的稳定目录快照和 data/request_id 外层。
     CreateDirectorySucceeded 定义创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
+    创建处理按认证、幂等头、JSON 和字段校验、幂等服务、结果核对与交付的顺序执行。
+    CreateDirectoryRejected/CreateDirectoryConflict 定义创建参数错误、名称冲突、幂等参数冲突及记录到期的公开响应。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1543,6 +1545,74 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    CreateDirectoryRejected:
+      description: |
+        HTTP 400，幂等头或正文参数、文件父项及层级超限使用 INVALID_ARGUMENT，完整命名规则不满足使用 INVALID_NAME。
+        字段校验通过 details.field 定位 Idempotency-Key、parent_id、name 或 color_key。JSON 读取或绑定错误的 details 为 null。
+        提示采用固定文本，响应采用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_NAME
+              message: 目录项名称不符合命名规则
+              details:
+                field: name
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateDirectoryConflict:
+      description: |
+        HTTP 409，活动名称冲突使用 NAME_CONFLICT，同键不同参数使用 IDEMPOTENCY_CONFLICT。
+        已保存记录到期使用 IDEMPOTENCY_EXPIRED，提示先核对已有资源状态。details 为 null，响应采用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            name_conflict:
+              value:
+                error:
+                  code: NAME_CONFLICT
+                  message: 当前文件夹中已存在同名文件或文件夹
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            request_conflict:
+              value:
+                error:
+                  code: IDEMPOTENCY_CONFLICT
+                  message: 幂等键已用于不同请求参数
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            expired_record:
+              value:
+                error:
+                  code: IDEMPOTENCY_EXPIRED
+                  message: 幂等记录已到期，请先核对已有资源状态
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     DirectoryQueryRejected:
       description: |
         HTTP 400，查询格式/字段或文件父项使用 INVALID_ARGUMENT，签名/范围无效使用 INVALID_CURSOR。

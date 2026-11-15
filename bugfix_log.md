@@ -1,5 +1,21 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-16——创建 HTTP 联测的文件父项夹具缺少内容分类
+
+### 问题现象
+
+第 140 步首次真实 MySQL 联测在初始化文件父项夹具时连续三次违反 ck_entries_content，尚未进入 HTTP 请求。修复前记录于此，接下来按正式约束核对 FILE 必填字段并补齐夹具。
+
+### 根因与修复方案
+
+正式 ck_entries_content 要求 FILE 的 category 非空，并为尚未清理完成的文件关联 object_id。新夹具已填写对象和大小，遗漏 category。补充 category='OTHER'，沿用正式迁移约束。
+
+### 验证结果
+
+修正后真实 JWT/MySQL/HTTP 八组主场景连续三次通过，包含文件父项的 INVALID_ARGUMENT 400。与既有幂等创建服务及创建快照真实数据库组合回归连续三次通过，四十七组 HTTP 流程、认证先行、已发送状态及装配依赖定向验证通过，独占库清理与清理复核通过。
+
+go test -count=1 ./...、go vet ./...、gofmt、git diff --check、文件空白、学习记录结构及两段 PowerShell 示例语法检查通过，OpenAPI 261 处本地引用及新错误组件示例检查通过。
+
 ## 2026-11-16——幂等创建联测的到期夹具依赖主机与容器微小时差
 
 ### 问题现象
