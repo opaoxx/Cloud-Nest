@@ -292,6 +292,8 @@ GET /api/v1/entries/{id} 已接入正式路由和生产启动装配，读取当�
 
 已提供 CreateDirectoryRequest、CreateDirectoryInput 和 ParseCreateDirectoryRequest，将 JSON 字符串父目录 ID 转为非零 uint64，检查名称基础文本和可空颜色键，并返回独立输入。测试入口已验证 JSON 绑定、字段错误、认证先行和统一名称服务衔接，执行顺序与复验方法见 [第 129 步学习记录](docs/开发学习记录.md#第-129-步定义创建文件夹请求-dto)。
 
+已提供 CreateDirectoryService.Create，复用名称规则，在同一已认证用户事务中检查父目录及祖先可见性、目录类型和创建后的 32 层深度，再写入并确认提交后返回独立记录。颜色规则由 DTO 和服务共用 Domain 实现，真实 MySQL 已验证路径、层级、回滚、同名并发及高位自增，执行顺序与复验方法见 [第 130 步学习记录](docs/开发学习记录.md#第-130-步组合创建文件夹核心服务)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

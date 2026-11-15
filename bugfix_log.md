@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-15——目录创建服务联测提前填写清理完成时间
+
+### 问题现象
+
+第 130 步首次真实 MySQL 联测中，隐藏祖先场景切换到 TRASHED 时违反 ck_entries_purged。夹具给三种非活动状态统一填写了 purged_at。修复前记录于此，接下来根据状态分别填写清理开始和完成时间。
+
+### 根因与修复方案
+
+状态夹具把清理完成时间统一设置为当前时间，但 ck_entries_purged 要求非 PURGED 状态的 purged_at 为 NULL。改为根据状态设置 purge_started_at 和 purged_at，分别在 PURGING 和 PURGED 状态填写对应时间，其余置空。
+
+### 验证结果
+
+修正后创建服务真实 MySQL 八组主场景连续三次通过，TRASHED、PURGING、PURGED 三类父目录及祖先均按预期拒绝创建。七组成功、二十二组失败、十一组输入、深度边界及九组事务边界测试通过，DTO/HTTP 颜色规则回归通过。既有目录写入、父链服务及已认证用户事务真实 MySQL 回归连续三次通过。go test -count=1 ./...、go vet ./...、gofmt、git diff --check、新增文件空白及两段 PowerShell 示例语法检查通过，独占库清理与清理复核通过。
+
 ## 2026-11-15——创建目录 DTO 测试入口遗漏认证失败回调
 
 ### 问题现象

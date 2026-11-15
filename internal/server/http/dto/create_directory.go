@@ -1,8 +1,9 @@
 package dto
 
 import (
-	"strings"
 	"unicode/utf8"
+
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
 // CreateDirectoryRequest 保存创建文件夹的 JSON 请求字段。
@@ -40,10 +41,8 @@ func ParseCreateDirectoryRequest(request CreateDirectoryRequest) (*CreateDirecto
 	}
 
 	// 3. 检查可空颜色键的长度和字符范围。
-	if request.ColorKey != nil && (len(*request.ColorKey) > 16 || strings.ContainsFunc(*request.ColorKey, func(character rune) bool {
-		return character < 0x20 || character > 0x7e
-	})) {
-		return nil, &FieldError{Field: "color_key", Message: "颜色键须为 null 或不超过 16 字节的可打印 ASCII 文本"}
+	if !domain.ValidDirectoryColorKey(request.ColorKey) {
+		return nil, &FieldError{Field: "color_key", Message: domain.ErrInvalidDirectoryColorKey.Error()}
 	}
 
 	// 4. 复制颜色值，返回结构化输入。
