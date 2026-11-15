@@ -163,7 +163,7 @@ func TestValidateEntryNameSharedExamples(t *testing.T) {
 		Valid       bool   `json:"valid"`
 		DisplayName string `json:"display_name"`
 	}
-	if err := json.Unmarshal(content, &examples); err != nil || len(examples) != 24 {
+	if err := json.Unmarshal(content, &examples); err != nil || len(examples) != 40 {
 		t.Fatal("共享名称样例读取错误", err)
 	}
 
