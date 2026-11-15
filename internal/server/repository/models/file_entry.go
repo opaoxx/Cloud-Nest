@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-// FileEntry 是指定目录项基础信息的十一列只读投影。
+// FileEntry 是目录项基础信息与活动子项查询共用的十一列只读投影。
 type FileEntry struct {
 	// ID 对应 file_entries.id。
 	ID uint64 `gorm:"column:id;->"`
