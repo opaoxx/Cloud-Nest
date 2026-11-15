@@ -320,6 +320,8 @@ POST /api/v1/directories 已接入正式路由与生产启动装配，复用共�
 
 已提供 service.ValidateEntryRevision、ErrEntryRevisionConflict 和 EntryRevisionConflictError，相同非零版本通过，不同版本返回附带当前版本的固定冲突错误，零当前版本沿用目录项数据错误。测试 HTTP 入口已验证重命名 DTO、版本比对、包装错误识别和字符串 current_revision 交付，规则及复验方法见 [第 143 步学习记录](docs/开发学习记录.md#第-143-步实现目录项预期版本校验)。
 
+已提供 EntryNameMetadata 和 service.BuildEntryNameMetadata，复用统一名称校验，按最后一个非首位英文句点提取小写后缀，沿用 Demo 的三十二项扩展名分类清单。文件夹字段为空，无后缀及超三十二字符后缀采用空提示和 OTHER。真实 MySQL 已验证可空字段、Unicode 字符容量及详情 kind 映射，规则及复验方法见 [第 144 步学习记录](docs/开发学习记录.md#第-144-步实现目录项扩展名与文件分类计算)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
