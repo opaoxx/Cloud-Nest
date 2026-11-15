@@ -11,6 +11,9 @@ var ErrFileEntryNotFound = errors.New("目录项不存在")
 // ErrInvalidFileEntryData 表示目录项查询结果的归属或基础标识异常。
 var ErrInvalidFileEntryData = errors.New("目录项数据异常")
 
+// ErrRootEntryRename 表示真实根目录受数据库根记录约束保护。
+var ErrRootEntryRename = errors.New("根目录不能重命名")
+
 // FileEntry 保存文件或目录的基础记录，供后续状态与祖先链检查使用。
 type FileEntry struct {
 	// ID 是文件或目录的完整无符号主键。
