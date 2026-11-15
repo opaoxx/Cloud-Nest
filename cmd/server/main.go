@@ -218,10 +218,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	directoryPageService := service.NewDirectoryPageService(directoryCursorVerifier.Verify, directoryListService.List, directoryCursorSigner.Sign)
 
-	// 14. 注册系统检查、目录列表、用户资料、会话及设备管理、登录、刷新与退出接口。
+	// 14. 复用目录快照入口，装配指定目录项详情服务。
+	entryDetailService := service.NewEntryDetailService(
+		func(ctx context.Context, action func(context.Context, service.EntryDetailReader) error) error {
+			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+				return action(snapshotContext, snapshotStore)
+			})
+		})
+
+	// 15. 注册系统检查、目录列表及详情、用户资料、会话及设备管理、登录、刷新与退出接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List)
+	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
 	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
@@ -237,7 +246,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 15. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 16. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

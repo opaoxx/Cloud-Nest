@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的目录列表、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的目录列表及详情、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -72,10 +72,11 @@ info:
     当前查询条件为 directory、modified_desc 和空 q/kind，重复值及不匹配条件返回固定字段错误。
     目录页处理函数组合 Actor、查询 DTO、分页服务和交付，输入/游标错误见 DirectoryQueryRejected，不可见目录见 TargetEntryNotFound。
     GET /api/v1/entries 已由启动入口绑定共享授权、同请求只读快照及持久化主密钥派生的目录游标签名配置。
-    EntryID 定义后续文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
+    EntryID 定义文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
     EntryDetailData/EntryDetailResponse 定义指定目录项的完整公开详情，kind 映射文件类别，来源设备及历史空值按实际数据返回。
     详情成功交付方法通过测试专用 GET 入口验证，共享响应见 EntryDetailRetrieved，交付 UTF-8 JSON、请求 ID 和禁止缓存头。
     详情处理函数组合 Actor、路径 DTO、详情服务及成功交付，路径错误定位 id，不可见目标复用 TargetEntryNotFound。
+    GET /api/v1/entries/{id} 已由启动入口绑定共享授权与真实详情快照服务，支持文件、目录和根目录读取。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -86,6 +87,45 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/entries/{id}:
+    get:
+      tags: [Entries]
+      operationId: getEntryDetail
+      summary: 读取当前用户可见文件或目录的完整详情
+      description: |
+        Bearer JWT 和数据库授权通过后解析路径 id，按认证 Actor.UserID 读取目标。
+        在同一次只读快照中检查账号、目标及全部祖先，再读取扩展展示与收藏/访问偏好。
+        文件类别映射小写 kind，目录使用 folder，根目录 parent_id 为 null、名称为空字符串。
+        标识及版本为字符串，字节数处于 JSON 安全整数范围，时间为 UTC 微秒值。
+        来源设备保留发布时名称快照，历史记录中的未知来源字段按实际空值返回。
+        缺少偏好记录时 starred=false，两项偏好时间为 null。
+        缺失、跨账号或不可见目标统一返回 ENTRY_NOT_FOUND，路径格式错误定位 id。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+      responses:
+        '200':
+          $ref: '#/components/responses/EntryDetailRetrieved'
+        '400':
+          description: 已认证请求的路径 id 格式或范围错误，INVALID_ARGUMENT，details.field 为 id。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/entries:
     get:
       tags: [Entries]

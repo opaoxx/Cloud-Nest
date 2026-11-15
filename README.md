@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -279,6 +279,8 @@ GET /api/v1/entries 已接入正式路由和启动装配，支持指定可见目
 已提供 handler.EntryDetailSuccess，将成功详情转换为 DTO、附加请求 ID、预先编码并交付 200 UTF-8 JSON，设置 no-store/Pragma no-cache，异常数据及取消沿用统一内部错误。测试专用 GET 入口已验证完整字段、根目录、历史空值、请求关联、正文头和实际网络传输，执行顺序与复验方法见 [第 122 步学习记录](docs/开发学习记录.md#第-122-步交付目录项详情成功的-http-响应)。
 
 已提供 handler.EntryDetail，组合认证 Actor、路径 DTO、详情服务及成功交付。路径错误定位 id，不可见目标统一映射 ENTRY_NOT_FOUND，账号/会话错误沿用认证规则，服务结果再次核对请求目标及用户。测试专用 GET 入口已通过真实 MySQL/JWT/HTTP 联测，执行顺序与复验方法见 [第 123 步学习记录](docs/开发学习记录.md#第-123-步组合目录项详情-http-处理函数)。
+
+GET /api/v1/entries/{id} 已接入正式路由和生产启动装配，读取当前用户可见文件、目录及根目录的完整详情。路由绑定共享授权与真实只读快照服务，交付类别、来源名称快照和收藏/访问偏好等十八项公开字段。实际启动及重启验证已覆盖字段、账号隔离、生命周期、失效凭证和目录列表共存，体验与复验方法见 [第 124 步学习记录](docs/开发学习记录.md#第-124-步接入正式目录项详情接口)。
 
 ## 本地连接信息
 
