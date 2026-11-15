@@ -84,6 +84,7 @@ info:
     CreateDirectorySucceeded 定义创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
     创建处理按认证、幂等头、JSON 和字段校验、幂等服务、结果核对与交付的顺序执行。
     CreateDirectoryRejected/CreateDirectoryConflict 定义创建参数错误、名称冲突、幂等参数冲突及记录到期的公开响应。
+    POST /api/v1/directories 已由启动入口绑定共享授权、用户事务、幂等创建服务及稳定结果编解码。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -94,6 +95,52 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/directories:
+    post:
+      tags: [Entries]
+      operationId: createDirectory
+      summary: 在当前用户的可见父目录中创建文件夹
+      description: |
+        Bearer JWT 和数据库授权通过后，依次解析单个 Idempotency-Key、受限 JSON 和创建字段。
+        parent_id 为真实父目录的标准十进制字符串，用户归属来自认证 Actor。
+        名称按统一规则去首尾空白、校验并生成判重键，颜色保留省略/null、空字符串及原始文本。
+        同一用户事务复查账号、设备和会话，检查父目录完整路径及创建后的 32 层深度。
+        首次创建与稳定结果一起提交，结果保留八天。有效期内同键同参数返回原始 201 创建快照，同键不同参数返回 409。
+        到期记录返回 IDEMPOTENCY_EXPIRED，提示先核对已有资源状态。各次交付关联当前 request_id。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDirectoryRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/CreateDirectorySucceeded'
+        '400':
+          $ref: '#/components/responses/CreateDirectoryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/CreateDirectoryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/entries/{id}:
     get:
       tags: [Entries]

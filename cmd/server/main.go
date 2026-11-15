@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/http/security"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
@@ -226,11 +228,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
-	// 15. 注册系统检查、目录列表及详情、用户资料、会话及设备管理、登录、刷新与退出接口。
+	// 15. 绑定用户事务与创建结果编解码，装配幂等创建服务。
+	createDirectoryService := service.NewIdempotentCreateDirectoryService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentCreateDirectoryTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+		func(entry *domain.FileEntry, colorKey *string) (json.RawMessage, error) {
+			data, err := dto.NewCreateDirectoryData(entry, colorKey)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(data)
+		},
+		func(body json.RawMessage) error {
+			_, err := dto.RestoreCreateDirectoryData(body)
+			return err
+		},
+	)
+
+	// 16. 注册已有业务接口及正式创建文件夹接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
+	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
 	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
@@ -246,7 +269,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 16. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 17. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

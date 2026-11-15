@@ -1339,6 +1339,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal("同用户的其他设备未能使用目录游标")
 	}
 
+	// 正式创建与幂等保存经过真实启动装配，创建快照跨服务重启复用。
+	createdDirectoryBeforeRestart := verifyServerDirectoryCreation(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
+	createdDetailBeforeRestart := getEntryDetail(t, createdDirectoryBeforeRestart.Data.Entry.ID, webRefreshed.Data.AccessToken, 200, "", "")
+	createdDirectoryPage := listDirectory(t, "parent_id=15", webRefreshed.Data.AccessToken, 200, "", "")
+	if createdDetailBeforeRestart.Data.Name != "正式创建后改名" || len(createdDirectoryPage.Data.Items) != 1 || createdDirectoryPage.Data.Items[0].ID != createdDirectoryBeforeRestart.Data.Entry.ID {
+		t.Fatal("正式创建的目录未衔接列表与详情读取")
+	}
+
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
 	before, err := os.Stat(secretPath)
@@ -1349,6 +1357,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	createdDirectoryAfterRestart := requestServerCreateDirectory(t, "http://"+address, webRefreshed.Data.AccessToken, serverCreateDirectoryKey, serverCreateDirectoryBody, 201, "", "")
+	if !reflect.DeepEqual(createdDirectoryBeforeRestart.Data, createdDirectoryAfterRestart.Data) || createdDirectoryBeforeRestart.RequestID == createdDirectoryAfterRestart.RequestID {
+		t.Fatal("重启后正式创建幂等快照或当前请求 ID 错误")
+	}
+	createdDetailAfterRestart := getEntryDetail(t, createdDirectoryBeforeRestart.Data.Entry.ID, webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(createdDetailBeforeRestart.Data, createdDetailAfterRestart.Data) {
+		t.Fatal("重启后新建目录的详情事实不一致")
+	}
 	checkProfile(t)
 	detailAfterRestart := getEntryDetail(t, "23", webRefreshed.Data.AccessToken, 200, "", "")
 	if !reflect.DeepEqual(detailBeforeRestart.Data, detailAfterRestart.Data) {
@@ -1539,7 +1555,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", serverCreateDirectoryKey, "正式创建 🌱", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}
