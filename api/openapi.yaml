@@ -65,6 +65,8 @@ info:
     设备撤销处理函数组合 Actor、设备路径、撤销服务及交付，目标不存在复用 TargetDeviceNotFound。
     DELETE /api/v1/devices/{id} 由启动入口绑定共享授权及用户事务，原子撤销设备和全部关联会话。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
+    DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
+    目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -549,6 +551,111 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    DirectoryEntrySummary:
+      type: object
+      additionalProperties: false
+      required: [id, parent_id, name, entry_type, size_bytes, revision, created_at, modified_at, updated_at, status]
+      description: 当前基础目录项字段，来自同一快照的活动子项，时间为 UTC 微秒值。
+      properties:
+        id:
+          type: string
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 非零 uint64 的标准十进制字符串，上限为 18446744073709551615。
+        parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        name:
+          type: string
+          minLength: 1
+          description: 按数据库原文返回的子项展示名称。
+        entry_type:
+          type: string
+          enum: [FILE, DIR]
+        size_bytes:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: 文件内容大小快照，目录为 0。
+        revision:
+          type: string
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 非零 uint64 版本的标准十进制字符串。
+        created_at:
+          type: string
+          format: date-time
+          description: UTC 创建时间，最多六位小数，年份为 1000～9999。
+        modified_at:
+          type: string
+          format: date-time
+          description: UTC 业务修改时间，最多六位小数，年份为 1000～9999。
+        updated_at:
+          type: string
+          format: date-time
+          description: UTC 记录更新时间，最多六位小数，年份为 1000～9999。
+        status:
+          type: string
+          enum: [ACTIVE]
+    DirectoryBreadcrumb:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        name:
+          type: string
+          description: 目录真实名称，根目录保留空字符串。
+    DirectoryPageData:
+      type: object
+      additionalProperties: false
+      required: [items, breadcrumbs, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/DirectoryEntrySummary'
+        breadcrumbs:
+          type: array
+          minItems: 1
+          maxItems: 33
+          description: 从真实根目录到当前父目录排列。
+          items:
+            $ref: '#/components/schemas/DirectoryBreadcrumb'
+        next_cursor:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 1024
+          description: 下一页签名游标原文，末页和空页明确返回 null。
+    DirectoryPageResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/DirectoryPageData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          items:
+            - id: '23'
+              parent_id: '12'
+              name: 学习笔记.md
+              entry_type: FILE
+              size_bytes: 2048
+              revision: '3'
+              created_at: '2026-11-15T01:30:00.123456Z'
+              modified_at: '2026-11-15T02:30:00.123456Z'
+              updated_at: '2026-11-15T02:30:00.123456Z'
+              status: ACTIVE
+          breadcrumbs:
+            - id: '11'
+              name: ''
+            - id: '12'
+              name: 课程资料
+          next_cursor: null
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UserDeviceSummary:
       type: object
       additionalProperties: false

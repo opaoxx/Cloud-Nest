@@ -256,6 +256,8 @@ DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享�
 
 已提供 DirectoryPageService.List，接收客户端 cursor 文本，复用游标校验、目录列表和下一页签名，返回路径、独立子项及可空 NextCursor。首页、后续页、末页、错误短路和完整整数流程已通过真实 MySQL 验证，执行顺序与复验命令见 [第 111 步学习记录](docs/开发学习记录.md#第-111-步组合带游标的目录分页服务)。
 
+已提供 NewDirectoryPageData，将完整目录页映射为 items、breadcrumbs 和可空 next_cursor，DirectoryPageResponse 使用 data/request_id 外层。当前十项基础子项字段使用 entry_type、字符串 ID/版本、JSON 安全字节数和 UTC 微秒时间，转换及真实游标衔接见 [第 112 步学习记录](docs/开发学习记录.md#第-112-步定义目录列表响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
