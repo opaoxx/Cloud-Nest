@@ -87,6 +87,7 @@ info:
     POST /api/v1/directories 已由启动入口绑定共享授权、用户事务、幂等创建服务及稳定结果编解码。
     RenameEntryRequest 定义后续目录项重命名正文，name 保留原文，expected_revision 使用非零 uint64 的标准十进制字符串。
     重命名正文按 name、expected_revision 顺序定位字段错误，客户端所见版本由后续持锁事务比对。
+    EntryRevisionConflict 定义后续版本冲突的 HTTP 409，details.current_revision 使用字符串保留当前完整版本。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1611,6 +1612,33 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    EntryRevisionConflict:
+      description: |
+        HTTP 409，REVISION_CONFLICT，客户端预期版本与当前可见目录项版本不一致。
+        固定提示为文件已发生变化，请刷新后重试。details.current_revision 为非零 uint64 的标准十进制字符串。
+        版本比对与更新在后续持锁事务内执行，响应使用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: REVISION_CONFLICT
+              message: 文件已发生变化，请刷新后重试
+              details:
+                current_revision: '3'
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateDirectoryRejected:
       description: |
         HTTP 400，幂等头或正文参数、文件父项及层级超限使用 INVALID_ARGUMENT，完整命名规则不满足使用 INVALID_NAME。
