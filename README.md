@@ -262,6 +262,8 @@ DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享�
 
 已提供 ParseDirectoryPageQuery，解析必填 parent_id、单个原始 cursor 和默认 50 条的 limit，并核对当前 directory/modified_desc/空筛选条件。参数、HTTP 字段错误及分页服务衔接已验证，执行顺序与复验命令见 [第 114 步学习记录](docs/开发学习记录.md#第-114-步定义目录列表查询参数-dto)。
 
+已提供 handler.DirectoryPage，组合认证 Actor、查询 DTO、带游标分页服务与成功交付。无效游标、不可见目录、文件父项和认证错误按契约映射，测试专用 GET 入口已通过真实 MySQL/JWT/HTTP 验证，执行顺序与复验命令见 [第 115 步学习记录](docs/开发学习记录.md#第-115-步组合目录列表-http-处理函数)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
