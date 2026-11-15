@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的目录列表、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -71,14 +71,60 @@ info:
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
     当前查询条件为 directory、modified_desc 和空 q/kind，重复值及不匹配条件返回固定字段错误。
     目录页处理函数组合 Actor、查询 DTO、分页服务和交付，输入/游标错误见 DirectoryQueryRejected，不可见目录见 TargetEntryNotFound。
+    GET /api/v1/entries 已由启动入口绑定共享授权、同请求只读快照及持久化主密钥派生的目录游标签名配置。
 servers:
   - url: http://127.0.0.1:18081
 tags:
+  - name: Entries
+    description: 当前用户的文件与目录元数据。
   - name: Account
     description: 当前用户身份与资料。
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/entries:
+    get:
+      tags: [Entries]
+      operationId: listDirectoryEntries
+      summary: 分页读取当前用户可见目录的活动子项
+      description: |
+        Bearer JWT 和数据库授权通过后解析查询，parent_id 必填，根目录 ID 从 GET /api/v1/me 获取。
+        当前支持 scope=directory、sort=modified_desc 和空 q/kind，省略时使用这些默认条件。
+        父目录与祖先须属于当前用户且均为活动目录，路径及子项在同一只读快照内读取。
+        子项按 modified_at、id 降序分页，limit 默认 50、上限 100，末页和空页的 next_cursor 为 null。
+        首次请求省略 cursor 或传空值，后续请求原样使用返回游标，校验用户、父目录、排序与筛选范围。
+        同一用户的有效会话可共用游标，沿用同一持久化签名配置重启后可继续使用。
+        跨请求采用弱一致性分页，客户端按 ID 合并去重，查询条件变化时重新读取首页。
+        不可见、跨账号或不存在的目标统一返回 ENTRY_NOT_FOUND，可见文件父项定位 parent_id 输入错误。
+        当前交付基础 entry_type 元数据、真实根目录到当前目录的面包屑和可空下一页游标。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/DirectoryScope'
+        - $ref: '#/components/parameters/DirectoryParentID'
+        - $ref: '#/components/parameters/DirectorySearch'
+        - $ref: '#/components/parameters/DirectoryKind'
+        - $ref: '#/components/parameters/DirectorySort'
+        - $ref: '#/components/parameters/DirectoryCursor'
+        - $ref: '#/components/parameters/DirectoryLimit'
+      responses:
+        '200':
+          $ref: '#/components/responses/DirectoryPageListed'
+        '400':
+          $ref: '#/components/responses/DirectoryQueryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/sessions/{id}:
     delete:
       tags: [Account]

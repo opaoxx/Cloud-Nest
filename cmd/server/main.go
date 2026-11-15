@@ -199,9 +199,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
-	// 13. 注册系统检查、用户资料、会话及设备管理、登录、刷新与退出接口。
+	// 13. 复用目录快照入口与持久化签名配置，装配目录分页服务。
+	directoryListService := service.NewDirectoryListService(
+		func(ctx context.Context, action func(context.Context, service.DirectoryListReader) error) error {
+			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+				return action(snapshotContext, snapshotStore)
+			})
+		})
+	directoryCursorSigner, err := service.NewDirectoryCursorSigner(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配目录游标签名器失败", "stage", "application", "error", err)
+		return err
+	}
+	directoryCursorVerifier, err := service.NewDirectoryCursorVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配目录游标校验器失败", "stage", "application", "error", err)
+		return err
+	}
+	directoryPageService := service.NewDirectoryPageService(directoryCursorVerifier.Verify, directoryListService.List, directoryCursorSigner.Sign)
+
+	// 14. 注册系统检查、目录列表、用户资料、会话及设备管理、登录、刷新与退出接口。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
+	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
 	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
@@ -217,7 +237,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 14. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
+	// 15. 启动 HTTP 并处理退出通知；返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

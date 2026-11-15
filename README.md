@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -263,6 +263,8 @@ DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享�
 已提供 ParseDirectoryPageQuery，解析必填 parent_id、单个原始 cursor 和默认 50 条的 limit，并核对当前 directory/modified_desc/空筛选条件。参数、HTTP 字段错误及分页服务衔接已验证，执行顺序与复验命令见 [第 114 步学习记录](docs/开发学习记录.md#第-114-步定义目录列表查询参数-dto)。
 
 已提供 handler.DirectoryPage，组合认证 Actor、查询 DTO、带游标分页服务与成功交付。无效游标、不可见目录、文件父项和认证错误按契约映射，测试专用 GET 入口已通过真实 MySQL/JWT/HTTP 验证，执行顺序与复验命令见 [第 115 步学习记录](docs/开发学习记录.md#第-115-步组合目录列表-http-处理函数)。
+
+GET /api/v1/entries 已接入正式路由和启动装配，支持指定可见目录的活动子项、面包屑及签名游标分页。当前查询条件为 directory、modified_desc 和空 q/kind；parent_id 从当前用户资料取得，limit 默认 50、上限 100。游标使用持久化主密钥派生的目录专用签名配置，实际启动和重启已验证原游标续页、账号隔离及失效凭证拒绝，体验与复验方法见 [第 116 步学习记录](docs/开发学习记录.md#第-116-步接入正式目录列表接口)。
 
 ## 本地连接信息
 

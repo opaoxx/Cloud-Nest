@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -102,12 +103,19 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota,used_storage,reserved_storage) VALUES(1,'fixture_one','真实启动用户','fixture_hash',100,60,40)",
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(3,'fixture_other','其他启动用户','fixture_hash',100)",
 		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(11,1,NULL,'',X'','DIR')",
+		"INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(41,1,'MINIO','fixture-bucket','fixture-server-directory',2048)",
+		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(33,3,NULL,'',X'','DIR'),(14,1,11,'祖先目录',CAST('祖先目录' AS BINARY),'DIR'),(12,1,14,'当前目录',CAST('当前目录' AS BINARY),'DIR'),(15,1,11,'空目录',CAST('空目录' AS BINARY),'DIR'),(21,1,12,'子项一',CAST('子项一' AS BINARY),'DIR'),(22,1,12,'子项二',CAST('子项二' AS BINARY),'DIR')",
+		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size,revision) VALUES(23,1,12,'学习笔记.md',CAST('学习笔记.md' AS BINARY),'FILE','DOCUMENT',41,2048,3),(42,1,11,'根下文件.md',CAST('根下文件.md' AS BINARY),'FILE','DOCUMENT',41,2048,1)",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(13,1,'28ee758a-0727-42de-ae7d-3bb33155e148','启动测试设备','WEB')",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(23,3,'0adfc616-05b0-4469-a138-806e7aa667f8','其他账号设备','WINDOWS')",
 	} {
 		if _, err := pool.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
+	}
+	directoryStamp := time.Date(2026, 11, 15, 2, 30, 0, 123456000, time.UTC)
+	if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET modified_at=?", directoryStamp); err != nil {
+		t.Fatal(err)
 	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte("fixture-password"), 12)
 	if err != nil {
@@ -253,6 +261,167 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	checkProfile(t)
 	// 正式登录接口从密码验证开始，创建的令牌再访问当前用户接口。
 	loginSecrets := []string{foreignToken.Token, "fixture-other-refresh"}
+	// 正式目录接口按认证身份读取元数据，并独立核对数据库事实与实际配置签名。
+	directoryCursorVerifier, err := service.NewDirectoryCursorVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listDirectory := func(t *testing.T, query, accessToken string, status int, code, field string) dto.DirectoryPageResponse {
+		t.Helper()
+		// 1. 请求正式路径，检查网络交付、请求关联、CORS 和缓存。
+		directoryRequest, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/v1/entries", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		directoryRequest.URL.RawQuery = query
+		directoryRequest.Header.Set("Origin", "http://127.0.0.1:5173")
+		if accessToken != "" {
+			directoryRequest.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		response, err := client.Do(directoryRequest)
+		if err != nil {
+			t.Fatal("正式目录列表网络请求失败", err)
+		}
+		defer response.Body.Close()
+		encoded, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" ||
+			response.Header.Get("X-Request-ID") == "" || len(response.Cookies()) != 0 ||
+			response.Header.Get("Access-Control-Allow-Origin") != "http://127.0.0.1:5173" ||
+			response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Content-Encoding") != "" {
+			t.Fatal("正式目录列表状态、关联、CORS 或正文头错误", response.StatusCode, err)
+		}
+		var payload dto.DirectoryPageResponse
+		if status != 200 {
+			var failure dto.ErrorResponse
+			if json.Unmarshal(encoded, &failure) != nil || failure.Error.Code != code || failure.RequestID != response.Header.Get("X-Request-ID") {
+				t.Fatal("正式目录列表错误响应异常")
+			}
+			if field == "" {
+				if failure.Error.Details != nil {
+					t.Fatal("非字段错误 details 应为空")
+				}
+			} else if len(failure.Error.Details) != 1 || failure.Error.Details["field"] != field {
+				t.Fatal("正式目录列表错误字段异常")
+			}
+			return payload
+		}
+		if json.Unmarshal(encoded, &payload) != nil || payload.RequestID != response.Header.Get("X-Request-ID") ||
+			payload.Data.Items == nil || len(payload.Data.Breadcrumbs) == 0 || response.Header.Get("Pragma") != "no-cache" {
+			t.Fatal("正式目录列表成功响应异常")
+		}
+
+		// 2. 使用真实令牌确定用户，逐项检查公开元数据及根到当前目录的父链。
+		identity, err := verifier.Verify(accessToken)
+		if err != nil || identity == nil {
+			t.Fatal("核对正式目录列表身份失败")
+		}
+		parsed, err := url.ParseQuery(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parentID := parsed.Get("parent_id")
+		for _, item := range payload.Data.Items {
+			var name, entryType, entryStatus string
+			var parent, revision, size uint64
+			var createdAt, modifiedAt, updatedAt time.Time
+			if err := pool.QueryRowContext(ctx, "SELECT parent_id,name,entry_type,file_size,revision,status,created_at,modified_at,updated_at FROM file_entries WHERE user_id=? AND id=?", identity.UserID, item.ID).
+				Scan(&parent, &name, &entryType, &size, &revision, &entryStatus, &createdAt, &modifiedAt, &updatedAt); err != nil {
+				t.Fatal("正式目录列表包含归属不符的子项", err)
+			}
+			if item.ParentID != parentID || item.ParentID != strconv.FormatUint(parent, 10) || item.Name != name || item.EntryType != entryType ||
+				item.SizeBytes != size || item.Revision != strconv.FormatUint(revision, 10) || item.Status != "ACTIVE" || item.Status != entryStatus ||
+				!item.CreatedAt.Equal(createdAt) || !item.ModifiedAt.Equal(modifiedAt) || !item.UpdatedAt.Equal(updatedAt) {
+				t.Fatal("正式目录列表公开字段与数据库事实不一致")
+			}
+			for _, stamp := range []time.Time{item.CreatedAt, item.ModifiedAt, item.UpdatedAt} {
+				if stamp.Location() != time.UTC || stamp.Nanosecond()%1000 != 0 {
+					t.Fatal("正式目录列表时间应为 UTC 微秒值")
+				}
+			}
+		}
+		for index, crumb := range payload.Data.Breadcrumbs {
+			var name string
+			var parent sql.NullString
+			if err := pool.QueryRowContext(ctx, "SELECT parent_id,name FROM file_entries WHERE user_id=? AND id=? AND entry_type='DIR' AND status='ACTIVE'", identity.UserID, crumb.ID).Scan(&parent, &name); err != nil {
+				t.Fatal("正式目录面包屑包含不可见或跨用户目录", err)
+			}
+			if crumb.Name != name || (index == 0 && (parent.Valid || name != "")) ||
+				(index > 0 && (!parent.Valid || parent.String != payload.Data.Breadcrumbs[index-1].ID)) {
+				t.Fatal("正式目录面包屑顺序或名称错误")
+			}
+		}
+		if payload.Data.Breadcrumbs[len(payload.Data.Breadcrumbs)-1].ID != parentID {
+			t.Fatal("正式目录面包屑终点错误")
+		}
+
+		// 3. 使用本次启动配置校验返回游标，确认绑定用户、目录及页尾位置。
+		if payload.Data.NextCursor != nil {
+			if len(payload.Data.Items) == 0 {
+				t.Fatal("空页不应生成后续游标")
+			}
+			parentNumber, err := strconv.ParseUint(parentID, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			position, err := directoryCursorVerifier.Verify(identity.UserID, parentNumber, *payload.Data.NextCursor)
+			last := payload.Data.Items[len(payload.Data.Items)-1]
+			if err != nil || position == nil || strconv.FormatUint(position.ID, 10) != last.ID || !position.ModifiedAt.Equal(last.ModifiedAt) {
+				t.Fatal("正式目录游标与持久化配置或页尾位置不一致")
+			}
+			loginSecrets = append(loginSecrets, *payload.Data.NextCursor)
+		}
+		return payload
+	}
+	listDirectory(t, "parent_id=0", "", 401, "AUTH_REQUIRED", "")
+	for _, failure := range []struct {
+		query, code, field string
+		status             int
+	}{
+		{query: "", status: 400, code: "INVALID_ARGUMENT", field: "parent_id"},
+		{query: "parent_id=12&limit=0", status: 400, code: "INVALID_ARGUMENT", field: "limit"},
+		{query: "parent_id=12&cursor=private-directory-cursor", status: 400, code: "INVALID_CURSOR", field: "cursor"},
+		{query: "parent_id=12&scope=all", status: 400, code: "INVALID_ARGUMENT", field: "scope"},
+		{query: "parent_id=12&sort=name_asc", status: 400, code: "INVALID_ARGUMENT", field: "sort"},
+		{query: "parent_id=12&q=private-directory-query", status: 400, code: "INVALID_ARGUMENT", field: "q"},
+		{query: "parent_id=12&kind=FILE", status: 400, code: "INVALID_ARGUMENT", field: "kind"},
+		{query: "parent_id=33", status: 404, code: "ENTRY_NOT_FOUND"},
+		{query: "parent_id=18446744073709551615", status: 404, code: "ENTRY_NOT_FOUND"},
+		{query: "parent_id=42", status: 400, code: "INVALID_ARGUMENT", field: "parent_id"},
+	} {
+		listDirectory(t, failure.query, token.Token, failure.status, failure.code, failure.field)
+	}
+	directoryFirst := listDirectory(t, "parent_id=12&limit=2&user_id=3&extra=private-directory-query", token.Token, 200, "", "")
+	if len(directoryFirst.Data.Items) != 2 || directoryFirst.Data.Items[0].ID != "23" || directoryFirst.Data.Items[1].ID != "22" ||
+		directoryFirst.Data.NextCursor == nil || len(directoryFirst.Data.Breadcrumbs) != 3 || directoryFirst.Data.Breadcrumbs[0].ID != "11" || directoryFirst.Data.Breadcrumbs[1].ID != "14" {
+		t.Fatal("正式目录首页、同时间倒序或三层路径错误")
+	}
+	directoryNextQuery := "parent_id=12&limit=2&cursor=" + url.QueryEscape(*directoryFirst.Data.NextCursor)
+	directoryLast := listDirectory(t, directoryNextQuery, token.Token, 200, "", "")
+	if len(directoryLast.Data.Items) != 1 || directoryLast.Data.Items[0].ID != "21" || directoryLast.Data.NextCursor != nil {
+		t.Fatal("正式目录后续页或末页错误")
+	}
+	rootDirectory := listDirectory(t, "parent_id=11", token.Token, 200, "", "")
+	if len(rootDirectory.Data.Items) != 3 || len(rootDirectory.Data.Breadcrumbs) != 1 || rootDirectory.Data.NextCursor != nil {
+		t.Fatal("正式根目录列表错误")
+	}
+	emptyDirectory := listDirectory(t, "parent_id=15&cursor=", token.Token, 200, "", "")
+	foreignDirectory := listDirectory(t, "parent_id=33&user_id=1", foreignToken.Token, 200, "", "")
+	if len(emptyDirectory.Data.Items) != 0 || emptyDirectory.Data.NextCursor != nil || len(foreignDirectory.Data.Items) != 0 || foreignDirectory.Data.NextCursor != nil {
+		t.Fatal("正式空目录或其他账号目录隔离错误")
+	}
+	listDirectory(t, directoryNextQuery, foreignToken.Token, 400, "INVALID_CURSOR", "cursor")
+	listDirectory(t, "parent_id=11&cursor="+url.QueryEscape(*directoryFirst.Data.NextCursor), token.Token, 400, "INVALID_CURSOR", "cursor")
+	for _, entryID := range []uint64{12, 14} {
+		for _, state := range []string{"TRASHED", "PURGING", "PURGED"} {
+			if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status=?,deleted_at=UTC_TIMESTAMP(6),purge_started_at=IF(?='PURGING',UTC_TIMESTAMP(6),NULL),purged_at=IF(?='PURGED',UTC_TIMESTAMP(6),NULL) WHERE id=?", state, state, state, entryID); err != nil {
+				t.Fatal(err)
+			}
+			listDirectory(t, directoryNextQuery, token.Token, 404, "ENTRY_NOT_FOUND", "")
+			if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status='ACTIVE',deleted_at=NULL,purge_started_at=NULL,purged_at=NULL WHERE id=?", entryID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	expectedSecureCookie := false
 	login := func(t *testing.T, clientType, installationID, password string, status int) (dto.LoginResponse, []*http.Cookie) {
 		t.Helper()
@@ -1002,6 +1171,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	deviceSessionsBeforeRestart := readDeviceSessions(t, 1, deviceTarget.Data.Device.ID)
 	devicesBeforeRestart := listDevices(t, "", webRefreshed.Data.AccessToken, 200, "", "")
+	directoryBeforeRestart := listDirectory(t, "parent_id=12&limit=2", webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(directoryFirst.Data, directoryBeforeRestart.Data) {
+		t.Fatal("同用户不同会话读取相同目录出现不一致")
+	}
+	directoryFromOtherDevice := listDirectory(t, directoryNextQuery, nativeRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(directoryLast.Data, directoryFromOtherDevice.Data) {
+		t.Fatal("同用户的其他设备未能使用目录游标")
+	}
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1014,6 +1191,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	expectedSecureCookie = true
 	stopSecond := start()
 	checkProfile(t)
+	directoryAfterRestart := listDirectory(t, "parent_id=12&limit=2", webRefreshed.Data.AccessToken, 200, "", "")
+	directoryNextAfterRestart := listDirectory(t, directoryNextQuery, webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(directoryBeforeRestart.Data, directoryAfterRestart.Data) || !reflect.DeepEqual(directoryLast.Data, directoryNextAfterRestart.Data) {
+		t.Fatal("重启后的目录元数据或原签名游标续页错误")
+	}
 	devicesAfterRestart := listDevices(t, "", webRefreshed.Data.AccessToken, 200, "", "")
 	if !reflect.DeepEqual(devicesBeforeRestart.Data, devicesAfterRestart.Data) {
 		t.Fatal("重启前后设备列表事实或当前标记不一致")
@@ -1053,6 +1235,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", token.Token, 403)
+	listDirectory(t, "parent_id=0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
 	listDevices(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
 	renameDevice(t, "13", token.Token, "失效请求名称", 403, "ACCOUNT_DISABLED", "")
@@ -1062,12 +1245,20 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET expires_at=DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 MINUTE) WHERE id=17"); err != nil {
+		t.Fatal(err)
+	}
+	listDirectory(t, directoryNextQuery, token.Token, 401, "SESSION_REVOKED", "")
+	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET expires_at=? WHERE id=17", session.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(6) WHERE id=17"); err != nil {
 		t.Fatal(err)
 	}
 	request(t, "/api/v1/me", token.Token, 401)
 	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", token.Token, 401, "SESSION_REVOKED", "")
+	listDirectory(t, directoryNextQuery, token.Token, 401, "SESSION_REVOKED", "")
 	renameDevice(t, "13", token.Token, "失效请求名称", 401, "SESSION_REVOKED", "")
 	revoke(t, remoteTarget.Data.Session.ID, token.Token, 401, "SESSION_REVOKED", "")
 	revokeDevice(t, deviceTarget.Data.Device.ID, token.Token, 401, "SESSION_REVOKED", "")
@@ -1076,10 +1267,12 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	listDirectory(t, directoryNextQuery, webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	renameDevice(t, "13", webLogin.Data.AccessToken, "失效请求名称", 401, "SESSION_REVOKED", "")
 	revoke(t, remoteTarget.Data.Session.ID, webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	revokeDevice(t, deviceTarget.Data.Device.ID, webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", nativeLogin.Data.AccessToken, 200, "", "")
+	listDirectory(t, directoryNextQuery, nativeLogin.Data.AccessToken, 200, "", "")
 	revokedDevices := listDevices(t, "", nativeLogin.Data.AccessToken, 200, "", "")
 	if len(revokedDevices.Data.Items) != 3 || revokedDevices.Data.Items[2].ID != "13" || revokedDevices.Data.Items[2].RevokedAt == nil {
 		t.Fatal("有效设备未看到其他设备的撤销事实")
@@ -1091,6 +1284,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if restoredLogin.Data.Device.ID != "13" || restoredLogin.Data.Device.Name != webDeviceName {
 		t.Fatal("撤销设备重新登录没有复用 ID")
 	}
+	listDirectory(t, directoryNextQuery, restoredLogin.Data.AccessToken, 200, "", "")
+	listDirectory(t, directoryNextQuery, webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	restoredDevices := listDevices(t, "", restoredLogin.Data.AccessToken, 200, "", "")
 	if len(restoredDevices.Data.Items) != 3 || restoredDevices.Data.Items[2].ID != "13" || restoredDevices.Data.Items[2].RevokedAt != nil || !restoredDevices.Data.Items[2].Current {
 		t.Fatal("恢复设备的 ID、撤销状态或当前标记错误")
@@ -1145,6 +1340,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	logout(t, "web", restoredRefreshed.Data.AccessToken, restoredLogin.Data.Session.ID, 401, "SESSION_REVOKED")
 	list(t, "", restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	listDirectory(t, directoryNextQuery, restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	renameDevice(t, "13", restoredRefreshed.Data.AccessToken, "退出后名称", 401, "SESSION_REVOKED", "")
 	revokeDevice(t, deviceTarget.Data.Device.ID, restoredRefreshed.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", nativeFinal.Data.AccessToken, 200, "", "")
@@ -1155,6 +1351,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	refresh(t, "native", nativeFinalRaw, nativeLogin.Data.Session.ID, 401, 0)
 	list(t, "", nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
+	listDirectory(t, directoryNextQuery, nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	renameDevice(t, nativeLogin.Data.Device.ID, nativeFinal.Data.AccessToken, "退出后名称", 401, "SESSION_REVOKED", "")
 	revokeDevice(t, deviceTarget.Data.Device.ID, nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", foreignToken.Token, 200, "", "")
@@ -1169,6 +1366,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	for _, secret := range loginSecrets {
 		if strings.Contains(logs.String(), secret) {
 			t.Error("正式认证日志泄漏凭证")
+		}
+	}
+	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor"} {
+		if strings.Contains(logs.String(), privateValue) {
+			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}
 	}
 }
