@@ -258,6 +258,8 @@ DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享�
 
 已提供 NewDirectoryPageData，将完整目录页映射为 items、breadcrumbs 和可空 next_cursor，DirectoryPageResponse 使用 data/request_id 外层。当前十项基础子项字段使用 entry_type、字符串 ID/版本、JSON 安全字节数和 UTC 微秒时间，转换及真实游标衔接见 [第 112 步学习记录](docs/开发学习记录.md#第-112-步定义目录列表响应-dto)。
 
+已提供 DirectoryPageSuccess，将成功目录页交付为 HTTP 200 JSON，关联请求 ID，设置 no-store/Pragma no-cache，并处理异常数据和取消。测试专用 GET 入口已验证字段、空页/末页、正文头、已提交响应及真实网络传输，执行顺序与复验命令见 [第 113 步学习记录](docs/开发学习记录.md#第-113-步交付目录列表成功的-http-响应)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

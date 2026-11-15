@@ -67,6 +67,7 @@ info:
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
+    目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1348,6 +1349,25 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RevokeSessionResponse'
+    DirectoryPageListed:
+      description: |
+        目录列表成功 HTTP 200，返回 items、breadcrumbs、可空 next_cursor 与请求 ID。
+        响应使用 no-store 和 Pragma no-cache，供后续目录列表操作引用。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DirectoryPageResponse'
     UserDevicesListed:
       description: 设备列表读取成功 HTTP 200，使用 no-store 和 Pragma no-cache，由正式设备列表操作引用。
       headers:
