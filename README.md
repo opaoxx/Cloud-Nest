@@ -252,6 +252,8 @@ DELETE /api/v1/devices/{id} 已接入正式路由和启动装配，使用共享�
 
 已提供 DirectoryCursorSigner.Sign，使用专用派生密钥和 HMAC-SHA256，将版本、用户、父目录、directory/modified_desc、空筛选摘要及微秒时间/ID 编码为签名游标。固定向量、字段改动、并发及真实目录页衔接已通过验证，执行顺序与复验命令见 [第 109 步学习记录](docs/开发学习记录.md#第-109-步生成带签名的目录分页游标)。
 
+已提供 DirectoryCursorVerifier.Verify，核对规范编码、HMAC、版本及用户/父目录/默认查询绑定，返回独立的 FileEntryPosition，版本 1 输入上限为 1024 字节。异常协议、并发及真实 MySQL 后续页衔接已通过验证，执行顺序与复验命令见 [第 110 步学习记录](docs/开发学习记录.md#第-110-步校验并解码目录分页游标)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
