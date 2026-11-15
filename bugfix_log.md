@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-15——目录项路径契约检查误读共享 ID 长度约束
+
+### 问题现象
+
+第 117 步目录项 ID 解析及 HTTP 定向测试通过，首次临时 OpenAPI 检查脚本读取共享目录项 ID 结构的 minLength 时出现 KeyError。修复前记录于此，接下来依据已有 schema 的实际声明调整检查断言。
+
+### 根因与修复方案
+
+本轮临时检查脚本参照设备 ID 的显式 minLength/maxLength 断言，但复用的 DirectoryEntrySummary.properties.id 使用正则 ^[1-9][0-9]{0,19}$ 表达非零、标准十进制及 1～20 位限制。脚本访问不存在的字段导致 KeyError。改为核对实际类型和正则，并验证合法/非法样例以及描述中的 uint64 上限，继续由 Go 解析执行精确数值范围校验。
+
+### 验证结果
+
+修正后的 OpenAPI 检查通过，223 处本地引用有效，EntryID 的路径位置、必填、共享 schema、范围和示例准确。六组合法、二十七组非法 DTO 输入和二十一组 HTTP 场景通过，既有资源路径/目录查询回归通过。go test -count=1 ./...、go vet ./...、gofmt 检查、git diff --check、新文件空白及本轮 PowerShell 示例语法检查均通过。
+
 ## 2026-11-15——目录列表服务联测保留了未使用的 reflect 导入
 
 ### 问题现象

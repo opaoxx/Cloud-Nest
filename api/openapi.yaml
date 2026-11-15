@@ -72,6 +72,7 @@ info:
     当前查询条件为 directory、modified_desc 和空 q/kind，重复值及不匹配条件返回固定字段错误。
     目录页处理函数组合 Actor、查询 DTO、分页服务和交付，输入/游标错误见 DirectoryQueryRejected，不可见目录见 TargetEntryNotFound。
     GET /api/v1/entries 已由启动入口绑定共享授权、同请求只读快照及持久化主密钥派生的目录游标签名配置。
+    EntryID 定义后续文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1854,6 +1855,19 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    EntryID:
+      name: id
+      in: path
+      required: true
+      description: |
+        目标文件或目录的 ID，范围为 1～18446744073709551615，使用标准十进制字符串。
+        路由解码后校验，零、前导零、符号、空白、小数、残留编码和溢出按 id 字段错误处理。
+        字段提示为“目录项 ID 须为 1～18446744073709551615 的标准十进制整数”。
+        最多 20 位的数字仍须满足上述 uint64 上限，服务端执行范围检查。
+        调用者身份由 Bearer 认证提供，目标归属和目录祖先可见性由后续业务流程检查。
+      schema:
+        $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+      example: '23'
     DirectoryParentID:
       name: parent_id
       in: query
