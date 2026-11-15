@@ -95,8 +95,8 @@ func TestCreateDirectoryDataIntegration(t *testing.T) {
 		if saved.ResourceID == nil || data.Entry.ID != fmt.Sprint(*saved.ResourceID) || data.Entry.ParentID != "11" || data.Entry.Name != "Cafe\u0301 🌱" || data.Entry.Revision != "1" || data.Entry.ColorKey == nil || *data.Entry.ColorKey != "green" {
 			t.Fatal("响应与实际保存结果不一致")
 		}
-		var restored dto.CreateDirectoryData
-		if json.Unmarshal(saved.ResponseBody, &restored) != nil || !reflect.DeepEqual(data, &restored) {
+		restored, err := dto.RestoreCreateDirectoryData(saved.ResponseBody)
+		if err != nil || !reflect.DeepEqual(data, restored) {
 			t.Fatal("数据库 JSON 读回未恢复创建时 DTO")
 		}
 		var fields map[string]json.RawMessage
@@ -111,8 +111,8 @@ func TestCreateDirectoryDataIntegration(t *testing.T) {
 		empty := ""
 		for index, color := range []*string{nil, &empty} {
 			data, saved := createSnapshot(t, fmt.Sprintf("颜色目录-%d", index), color, fmt.Sprintf("snapshot-color-%d", index))
-			var restored dto.CreateDirectoryData
-			if json.Unmarshal(saved.ResponseBody, &restored) != nil || !reflect.DeepEqual(data, &restored) || (restored.Entry.ColorKey == nil) != (color == nil) || (color != nil && *restored.Entry.ColorKey != "") {
+			restored, err := dto.RestoreCreateDirectoryData(saved.ResponseBody)
+			if err != nil || !reflect.DeepEqual(data, restored) || (restored.Entry.ColorKey == nil) != (color == nil) || (color != nil && *restored.Entry.ColorKey != "") {
 				t.Fatal("颜色 NULL 或空串在持久化后改变")
 			}
 		}
@@ -137,17 +137,42 @@ func TestCreateDirectoryDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var restored dto.CreateDirectoryData
-		if json.Unmarshal(record.ResponseBody, &restored) != nil || !reflect.DeepEqual(data, &restored) || restored.Entry.Name != "原始名称" || restored.Entry.Revision != "1" || restored.Entry.ColorKey == nil || *restored.Entry.ColorKey != "green" {
+		restored, err := dto.RestoreCreateDirectoryData(record.ResponseBody)
+		if err != nil || !reflect.DeepEqual(data, restored) || restored.Entry.Name != "原始名称" || restored.Entry.Revision != "1" || restored.Entry.ColorKey == nil || *restored.Entry.ColorKey != "green" {
 			t.Fatal("创建快照混入当前目录字段")
 		}
 		first := dto.CreateDirectoryResponse{Data: *data, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e148"}
-		next := dto.CreateDirectoryResponse{Data: restored, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e149"}
+		next := dto.CreateDirectoryResponse{Data: *restored, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e149"}
 		if !reflect.DeepEqual(first.Data, next.Data) || first.RequestID == next.RequestID {
 			t.Fatal("稳定数据与本次请求 ID 关联错误")
 		}
 		if _, err := json.Marshal(next); err != nil {
 			t.Fatal("已保存结果无法组成响应", err)
+		}
+	})
+	// 4. 数据库允许合法 JSON，恢复层继续检查创建结果的结构和字段。
+	t.Run("invalid saved creation data", func(t *testing.T) {
+		_, saved := createSnapshot(t, "异常结果恢复", nil, "snapshot-invalid")
+		var payload map[string]map[string]json.RawMessage
+		if err := json.Unmarshal(saved.ResponseBody, &payload); err != nil {
+			t.Fatal(err)
+		}
+		delete(payload["entry"], "size_bytes")
+		missingSize, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, body := range []string{"null", "[]", `{"entry":null}`, string(missingSize)} {
+			if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=? WHERE id=? AND user_id=1", body, saved.ID); err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.FindUserIdempotencyRecord(ctx, 1, domain.CreateDirectoryOperation, "snapshot-invalid")
+			if err != nil {
+				t.Fatal("合法 JSON 事实读取失败", err)
+			}
+			if data, err := dto.RestoreCreateDirectoryData(record.ResponseBody); data != nil || !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+				t.Fatal("异常保存结果未被恢复层拒绝", err)
+			}
 		}
 	})
 	t.Run("invalid dto rolls back directory", func(t *testing.T) {

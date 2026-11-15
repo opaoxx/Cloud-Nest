@@ -304,6 +304,8 @@ GET /api/v1/entries/{id} 已接入正式路由和生产启动装配，读取当�
 
 已提供 CreatedDirectorySummary、CreateDirectoryData、CreateDirectoryResponse 和 NewCreateDirectoryData，创建成功数据使用 data.entry，复用十项基础字段并附加可空颜色，外层关联当前 request_id。真实 MySQL 已验证稳定数据同事务保存、JSON 读回、后续目录变化下的创建快照和转换失败回滚，字段及复验方法见 [第 135 步学习记录](docs/开发学习记录.md#第-135-步定义创建文件夹成功响应-dto)。
 
+已提供 dto.RestoreCreateDirectoryData，从已保存 JSON 恢复创建快照，逐项检查十一项必需字段、精确字段名、类型、空值、字符串标识和新建目录规则，时间沿用 UTC 微秒转换，异常返回幂等记录数据错误。真实 MySQL 已验证 JSON 读回、颜色空值、历史创建快照和异常结果拒绝，执行顺序与复验方法见 [第 136 步学习记录](docs/开发学习记录.md#第-136-步恢复并校验已保存的创建文件夹响应)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
