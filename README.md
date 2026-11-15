@@ -276,6 +276,8 @@ GET /api/v1/entries 已接入正式路由和启动装配，支持指定可见目
 
 已提供 NewEntryDetailData 和 EntryDetailResponse，将内部详情映射为十八项公开字段及 data/request_id 外层，文件类别生成 kind，收藏时间生成 starred。根目录 parent_id 为 null，来源设备历史未知字段保留 null，标识/版本使用字符串，时间复用 UTC 微秒转换。单元及真实 MySQL 已验证完整字段、来源空值、类别、整数/日期边界与独立副本，执行顺序与复验方法见 [第 121 步学习记录](docs/开发学习记录.md#第-121-步定义目录项详情响应-dto)。
 
+已提供 handler.EntryDetailSuccess，将成功详情转换为 DTO、附加请求 ID、预先编码并交付 200 UTF-8 JSON，设置 no-store/Pragma no-cache，异常数据及取消沿用统一内部错误。测试专用 GET 入口已验证完整字段、根目录、历史空值、请求关联、正文头和实际网络传输，执行顺序与复验方法见 [第 122 步学习记录](docs/开发学习记录.md#第-122-步交付目录项详情成功的-http-响应)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
