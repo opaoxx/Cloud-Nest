@@ -54,6 +54,10 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 	if err != nil {
 		t.Fatal(err)
 	}
+	verifier, err := service.NewNameEntryCursorVerifier(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	signPosition := func(t *testing.T, query domain.GlobalEntryQuery, position *domain.NameEntryPosition) *domain.NameEntryPosition {
 		t.Helper()
 		if position == nil {
@@ -120,7 +124,40 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if repeated, err := signer.Sign(actor.UserID, resized, original); err != nil || repeated != cursor {
 			t.Fatal("真实名称游标页大小调整改变绑定", err)
 		}
-		return &domain.NameEntryPosition{NameKey: nameKey, ID: entryID}
+		// 3. 正式校验器与独立位置对照，错误用户、筛选和文本在续读前拒绝。
+		independent := domain.NameEntryPosition{NameKey: nameKey, ID: entryID}
+		restored, err := verifier.Verify(actor.UserID, resized, cursor)
+		if err != nil || restored == nil || !reflect.DeepEqual(*restored, independent) || restored == position || !reflect.DeepEqual(*position, original) {
+			t.Fatal("正式名称校验器未还原独立位置", err)
+		}
+		current, err := verifier.Verify(actor.UserID, query, cursor)
+		if err != nil || current == nil || current == restored || !reflect.DeepEqual(*current, *restored) {
+			t.Fatal("名称校验结果共享位置", err)
+		}
+		restored.NameKey[0] ^= 1
+		if !bytes.Equal(current.NameKey, independent.NameKey) {
+			t.Fatal("名称还原结果共享字节")
+		}
+		changedSearch, changedKind, changedScope := query, query, query
+		changedSearch.Search += " "
+		changedKind.Kind = "image"
+		if query.Scope == "all" {
+			changedScope.Scope = "starred"
+		} else {
+			changedScope.Scope = "all"
+		}
+		for _, invalid := range []struct {
+			userID uint64
+			query  domain.GlobalEntryQuery
+			cursor string
+		}{
+			{3, query, cursor}, {actor.UserID, changedSearch, cursor}, {actor.UserID, changedKind, cursor}, {actor.UserID, changedScope, cursor}, {actor.UserID, query, cursor + "A"},
+		} {
+			if result, err := verifier.Verify(invalid.userID, invalid.query, invalid.cursor); result != nil || !errors.Is(err, domain.ErrInvalidNameEntryCursor) {
+				t.Fatal("名称错误游标绑定通过校验", err)
+			}
+		}
+		return current
 	}
 	restore := func(statement string) {
 		t.Helper()
