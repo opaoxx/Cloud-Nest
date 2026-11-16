@@ -103,8 +103,11 @@ func TestRenameEntryDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal("重命名与响应快照事务失败", err)
 		}
-		var decoded dto.RenameEntryData
-		if saved == nil || json.Unmarshal(saved.ResponseBody, &decoded) != nil || !reflect.DeepEqual(data, &decoded) || saved.ResourceID == nil || *saved.ResourceID != entryID || saved.Operation != domain.RenameEntryOperation || saved.ResponseStatus != 200 {
+		if saved == nil || saved.ResourceID == nil || *saved.ResourceID != entryID || saved.Operation != domain.RenameEntryOperation || saved.ResponseStatus != 200 {
+			t.Fatal("数据库快照记录错误")
+		}
+		decoded, restoreError := dto.RestoreRenameEntryData(saved.ResponseBody)
+		if restoreError != nil || !reflect.DeepEqual(data, decoded) {
 			t.Fatal("数据库快照读回错误")
 		}
 		return data, saved
@@ -159,8 +162,8 @@ func TestRenameEntryDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var decoded dto.RenameEntryData
-		if json.Unmarshal(record.ResponseBody, &decoded) != nil || !reflect.DeepEqual(firstData, &decoded) || decoded.Entry.Name != "Cafe\u0301.PDF" || decoded.Entry.Revision != "4" {
+		decoded, restoreError := dto.RestoreRenameEntryData(record.ResponseBody)
+		if restoreError != nil || !reflect.DeepEqual(firstData, decoded) || decoded.Entry.Name != "Cafe\u0301.PDF" || decoded.Entry.Revision != "4" {
 			t.Fatal("首次快照混入后续状态")
 		}
 		current, err := store.FindUserFileEntry(ctx, 1, 14)
@@ -237,6 +240,57 @@ func TestRenameEntryDataIntegration(t *testing.T) {
 		}
 		if record, err := store.FindUserIdempotencyRecord(ctx, 1, domain.RenameEntryOperation, "rename-rollback"); record != nil || !errors.Is(err, domain.ErrIdempotencyRecordNotFound) {
 			t.Fatal("保存后失败仍保留幂等记录", err)
+		}
+	})
+
+	// 4. 合法 MySQL JSON 中的异常快照由恢复入口按统一错误拒绝。
+	t.Run("invalid persisted snapshots", func(t *testing.T) {
+		if firstRecord == nil {
+			t.Fatal("首次快照缺失")
+		}
+		defer func() {
+			if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=? WHERE id=?", string(firstRecord.ResponseBody), firstRecord.ID); err != nil {
+				t.Error("恢复原始测试快照失败", err)
+			}
+		}()
+		for _, mode := range []string{"missing field", "source shape", "invalid id", "unknown kind", "starred mismatch", "null size", "hidden status", "extra field"} {
+			var payload map[string]map[string]any
+			if err := json.Unmarshal(firstRecord.ResponseBody, &payload); err != nil {
+				t.Fatal(err)
+			}
+			entry := payload["entry"]
+			switch mode {
+			case "missing field":
+				delete(entry, "extension")
+			case "source shape":
+				entry["source_device"] = map[string]any{"id": "13"}
+			case "invalid id":
+				entry["id"] = "0"
+			case "unknown kind":
+				entry["kind"] = "UNKNOWN"
+			case "starred mismatch":
+				entry["starred"] = false
+			case "null size":
+				entry["size_bytes"] = nil
+			case "hidden status":
+				entry["status"] = "TRASHED"
+			case "extra field":
+				entry["request_id"] = "private"
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=? WHERE id=?", string(encoded), firstRecord.ID); err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.FindUserIdempotencyRecord(ctx, 1, domain.RenameEntryOperation, "rename-file-007")
+			if err != nil {
+				t.Fatal("通用 JSON 记录读取失败", err)
+			}
+			if data, err := dto.RestoreRenameEntryData(record.ResponseBody); data != nil || !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) || err.Error() != "幂等记录数据异常" {
+				t.Fatal("异常持久快照未拒绝", mode, err)
+			}
 		}
 	})
 }
