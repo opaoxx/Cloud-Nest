@@ -525,3 +525,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 NameEntryCursorVerifier，先核对名称用途 HMAC，再检查版本、当前用户、all/starred、name_asc、筛选及规范编码，返回独立的原始名称键/ID 位置。支持 2048 字节游标边界，合法页大小调整可继续使用原文本，异常文本及绑定统一返回名称游标错误。固定向量、二进制键、协议异常、副本/并发及正式 MySQL 校验续读连续三次通过，顺序与复验方法见 [第 221 步学习记录](docs/开发学习记录.md#第-221-步实现名称游标校验与位置还原)。
 
 已提供 NameEntryPageService，组合 all/starred、name_asc 的首页、游标校验、可见列表读取及下一页签名，输出独立目录项与可空文本游标。名称键/ID 严格升序，预算空页及短页保留最后消费位置，名称文本容量沿用 2048 字节。服务组合与真实 MySQL 普通/收藏、长二进制键、页大小调整及预算续读连续三次通过，调用与复验方法见 [第 222 步学习记录](docs/开发学习记录.md#第-222-步组合带文本游标的名称升序分页服务)。
+
+已提供 NameEntryPageData、NameEntryPageResponse 和 NewNameEntryPageData，将名称文本分页结果转换为十字段条目摘要、空 breadcrumbs 及可空 next_cursor。复用完整 ID/版本字符串、JSON 安全字节数和 UTC 微秒时间，名称游标按最多 2048 字节检查。精确 JSON、边界、错误及副本专项和真实 MySQL 普通/预算/长游标响应转换连续三次通过，字段与复验方法见 [第 223 步学习记录](docs/开发学习记录.md#第-223-步定义名称升序分页响应-dto)。

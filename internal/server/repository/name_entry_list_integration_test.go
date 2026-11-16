@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -198,7 +199,60 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if err != nil || result == nil || result.Entries == nil || (result.NextCursor != nil) != (nextID != 0) || listCalls != 1 {
 			t.Fatal("名称文本分页结果错误", err)
 		}
-		// 2. 与数据库事实和原独立协议检查对照，再把实际文本交给下页。
+		// 2. 转换真实分页结果，独立核对公开字段、空值和来源副本。
+		data, err := dto.NewNameEntryPageData(result)
+		if err != nil || data == nil || data.Items == nil || data.Breadcrumbs == nil || len(data.Items) != len(result.Entries) || len(data.Breadcrumbs) != 0 || (data.NextCursor != nil) != (result.NextCursor != nil) {
+			t.Fatal("真实名称分页响应转换失败", err)
+		}
+		const requestID = "28ee758a-0727-42de-ae7d-3bb33155e148"
+		encoded, err := json.Marshal(dto.NameEntryPageResponse{Data: *data, RequestID: requestID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]json.RawMessage
+		var payload map[string]json.RawMessage
+		if json.Unmarshal(encoded, &response) != nil || len(response) != 2 || string(response["request_id"]) != strconv.Quote(requestID) || json.Unmarshal(response["data"], &payload) != nil || len(payload) != 3 || string(payload["breadcrumbs"]) != "[]" {
+			t.Fatal("真实名称分页响应外层或导航错误")
+		}
+		var items []map[string]json.RawMessage
+		if json.Unmarshal(payload["items"], &items) != nil || items == nil || len(items) != len(result.Entries) {
+			t.Fatal("真实名称分页响应条目数组错误")
+		}
+		for index, item := range items {
+			entry := result.Entries[index].Entry
+			expected := map[string]any{
+				"id": strconv.FormatUint(entry.ID, 10), "parent_id": strconv.FormatUint(*entry.ParentID, 10),
+				"name": entry.Name, "entry_type": entry.EntryType, "size_bytes": entry.FileSize,
+				"revision": strconv.FormatUint(entry.Revision, 10), "status": entry.Status,
+				"created_at": entry.CreatedAt.UTC().Truncate(time.Microsecond), "modified_at": entry.ModifiedAt.UTC().Truncate(time.Microsecond), "updated_at": entry.UpdatedAt.UTC().Truncate(time.Microsecond),
+			}
+			if len(item) != len(expected) {
+				t.Fatal("真实名称分页条目字段数量错误")
+			}
+			for field, value := range expected {
+				fieldJSON, err := json.Marshal(value)
+				if err != nil || !bytes.Equal(item[field], fieldJSON) {
+					t.Fatal("真实名称分页字段与已确认记录不符", field, err)
+				}
+			}
+		}
+		cursorJSON := "null"
+		if result.NextCursor != nil {
+			cursorJSON = strconv.Quote(*result.NextCursor)
+			if data.NextCursor == result.NextCursor || *data.NextCursor != *result.NextCursor {
+				t.Fatal("真实名称分页 DTO 游标副本错误")
+			}
+		}
+		if string(payload["next_cursor"]) != cursorJSON {
+			t.Fatal("真实名称分页 DTO 游标文本或 null 错误")
+		}
+		if data.NextCursor != nil {
+			*data.NextCursor = "local-name-cursor"
+			if strconv.Quote(*result.NextCursor) != cursorJSON {
+				t.Fatal("真实名称分页 DTO 游标修改影响来源")
+			}
+		}
+		// 3. 与数据库事实和原独立协议检查对照，再把实际文本交给下页。
 		listed := &domain.NameEntryList{Entries: result.Entries, HasMore: result.NextCursor != nil}
 		if result.NextCursor == nil {
 			check(t, listed, ids, 0)
