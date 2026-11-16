@@ -8,7 +8,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// DirectoryEntrySummary 保存当前目录列表的一条基础展示记录。
+// DirectoryEntrySummary 保存目录列表与全局列表共用的一条基础展示记录。
 type DirectoryEntrySummary struct {
 	// ID 是当前目录项标识的十进制字符串。
 	ID string `json:"id"`
@@ -99,40 +99,14 @@ func NewDirectoryPageData(result *domain.DirectoryPageResult) (*DirectoryPageDat
 	// 3. 转换子项标识、大小、版本和 UTC 时间。
 	parentID := result.Path.Entries[len(result.Path.Entries)-1].ID
 	for _, entry := range result.Entries {
-		if entry.ID == 0 || entry.UserID != ownerID || entry.ParentID == nil || *entry.ParentID != parentID ||
-			entry.Revision == 0 || entry.Name == "" || entry.Status != "ACTIVE" || (entry.EntryType != "FILE" && entry.EntryType != "DIR") {
+		if entry.UserID != ownerID || entry.ParentID == nil || *entry.ParentID != parentID {
 			return nil, domain.ErrInvalidFileEntryData
 		}
-		if entry.EntryType == "DIR" && entry.FileSize != 0 {
-			return nil, domain.ErrInvalidFileEntryData
+		summary, err := newDirectoryEntrySummary(entry)
+		if err != nil {
+			return nil, err
 		}
-		if entry.FileSize > maxJSONSafeInteger {
-			return nil, fmt.Errorf("目录项字节数超出 JSON 安全整数范围")
-		}
-		createdAt, valid := listResponseTime(&entry.CreatedAt)
-		if !valid {
-			return nil, domain.ErrInvalidFileEntryData
-		}
-		modifiedAt, valid := listResponseTime(&entry.ModifiedAt)
-		if !valid {
-			return nil, domain.ErrInvalidFileEntryData
-		}
-		updatedAt, valid := listResponseTime(&entry.UpdatedAt)
-		if !valid {
-			return nil, domain.ErrInvalidFileEntryData
-		}
-		data.Items = append(data.Items, DirectoryEntrySummary{
-			ID:         strconv.FormatUint(entry.ID, 10),
-			ParentID:   strconv.FormatUint(*entry.ParentID, 10),
-			Name:       entry.Name,
-			EntryType:  entry.EntryType,
-			SizeBytes:  entry.FileSize,
-			Revision:   strconv.FormatUint(entry.Revision, 10),
-			CreatedAt:  *createdAt,
-			ModifiedAt: *modifiedAt,
-			UpdatedAt:  *updatedAt,
-			Status:     entry.Status,
-		})
+		data.Items = append(data.Items, *summary)
 	}
 
 	// 4. 复制下一页游标，返回响应数据。
@@ -141,4 +115,38 @@ func NewDirectoryPageData(result *domain.DirectoryPageResult) (*DirectoryPageDat
 		data.NextCursor = &nextCursor
 	}
 	return data, nil
+}
+
+// newDirectoryEntrySummary 复用活动普通目录项的标识、大小及 UTC 微秒转换。
+func newDirectoryEntrySummary(entry domain.FileEntry) (*DirectoryEntrySummary, error) {
+	// 1. 核对普通项的标识、父目录、类型及活动状态。
+	if entry.ID == 0 || entry.UserID == 0 || entry.ParentID == nil || *entry.ParentID == 0 ||
+		entry.Revision == 0 || entry.Name == "" || entry.Status != "ACTIVE" || (entry.EntryType != "FILE" && entry.EntryType != "DIR") {
+		return nil, domain.ErrInvalidFileEntryData
+	}
+	if entry.EntryType == "DIR" && entry.FileSize != 0 {
+		return nil, domain.ErrInvalidFileEntryData
+	}
+	if entry.FileSize > maxJSONSafeInteger {
+		return nil, fmt.Errorf("目录项字节数超出 JSON 安全整数范围")
+	}
+	// 2. 复用时间转换，生成独立的公开摘要值。
+	createdAt, validCreated := listResponseTime(&entry.CreatedAt)
+	modifiedAt, validModified := listResponseTime(&entry.ModifiedAt)
+	updatedAt, validUpdated := listResponseTime(&entry.UpdatedAt)
+	if !validCreated || !validModified || !validUpdated {
+		return nil, domain.ErrInvalidFileEntryData
+	}
+	return &DirectoryEntrySummary{
+		ID:         strconv.FormatUint(entry.ID, 10),
+		ParentID:   strconv.FormatUint(*entry.ParentID, 10),
+		Name:       entry.Name,
+		EntryType:  entry.EntryType,
+		SizeBytes:  entry.FileSize,
+		Revision:   strconv.FormatUint(entry.Revision, 10),
+		CreatedAt:  *createdAt,
+		ModifiedAt: *modifiedAt,
+		UpdatedAt:  *updatedAt,
+		Status:     entry.Status,
+	}, nil
 }

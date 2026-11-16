@@ -66,6 +66,7 @@ info:
     DELETE /api/v1/devices/{id} 由启动入口绑定共享授权及用户事务，原子撤销设备和全部关联会话。
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
+    GlobalEntryPageData/GlobalEntryPageResponse 定义全局分页响应，复用条目摘要，breadcrumbs 为 []，预算空页保留 next_cursor，结束时返回 null。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
     目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
@@ -1111,7 +1112,7 @@ components:
       type: object
       additionalProperties: false
       required: [id, parent_id, name, entry_type, size_bytes, revision, created_at, modified_at, updated_at, status]
-      description: 当前基础目录项字段，来自同一快照的活动子项，时间为 UTC 微秒值。
+      description: 目录及全局列表共用的基础目录项字段，来自同一快照的可见活动项，时间为 UTC 微秒值。
       properties:
         id:
           type: string
@@ -1160,6 +1161,48 @@ components:
         name:
           type: string
           description: 目录真实名称，根目录保留空字符串。
+    GlobalEntryPageData:
+      type: object
+      additionalProperties: false
+      required: [items, breadcrumbs, next_cursor]
+      description: 全局可见分页数据，空页使用空数组，预算空页可携带下一页游标。
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/DirectoryEntrySummary'
+        breadcrumbs:
+          type: array
+          maxItems: 0
+          description: 空数组表达跨目录的全局视图。
+          items:
+            $ref: '#/components/schemas/DirectoryBreadcrumb'
+        next_cursor:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 1024
+          description: 下一页签名游标，预算空页可返回文本，结束时明确返回 null。
+      example:
+        items: []
+        breadcrumbs: []
+        next_cursor: null
+    GlobalEntryPageResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/GlobalEntryPageData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          items: []
+          breadcrumbs: []
+          next_cursor: fixture-signed-global-cursor
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     DirectoryPageData:
       type: object
       additionalProperties: false

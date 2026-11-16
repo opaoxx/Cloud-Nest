@@ -465,3 +465,5 @@ POST /api/v1/entries/{id}/access 已接入正式路由与启动装配，按 prev
 已提供 GlobalEntryCursorVerifier，复用全局签名器的密钥派生及规范编码，校验 HMAC、版本、当前用户、范围/排序、筛选摘要及位置，返回独立 UTC 微秒位置。异常游标统一使用全局游标错误，合法页大小调整可继续使用原游标。协议异常、篡改、用途、并发及真实预算空页的签名/校验/续读闭环验证通过，规则与复验方法见 [第 191 步学习记录](docs/开发学习记录.md#第-191-步实现全局游标校验与位置还原)。
 
 已提供 GlobalEntryPageService，统一首页空游标、非空游标校验、已确认全局列表读取与下一页签名，返回可见项及可空文本游标。预算空页保留续页文本，结束时 NextCursor 为 nil，续页位置核对向后推进。参数、异常、取消、副本及正式 MySQL 文本游标闭环验证通过，装配与复验方法见 [第 192 步学习记录](docs/开发学习记录.md#第-192-步组合带游标的全局分页服务)。
+
+已提供 GlobalEntryPageData、GlobalEntryPageResponse 和 NewGlobalEntryPageData，复用十字段条目摘要及 UTC 微秒转换。全局 breadcrumbs 使用 []，预算空页保留 next_cursor，结束时输出 null，ID/版本采用完整字符串、大小采用安全 JSON 整数。目录与全局摘要共用转换方法，原目录回归及真实全局分页 JSON 验证通过，格式与复验方法见 [第 193 步学习记录](docs/开发学习记录.md#第-193-步定义全局分页响应-dto)。

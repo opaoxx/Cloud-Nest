@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -205,6 +206,31 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 	thirdPage, err := paging.List(ctx, actor, pageQuery, *secondPage.NextCursor)
 	if err != nil || thirdPage == nil || len(thirdPage.Entries) != 1 || thirdPage.Entries[0].ID != 13 || thirdPage.NextCursor != nil || listCalls != 3 {
 		t.Fatal("正式文本游标结束或调用次数错误", err)
+	}
+	// 5. 真实预算空页、正常续页和结束结果转换为公开 DTO。
+	for _, page := range []*domain.GlobalEntryPageResult{firstPage, secondPage, thirdPage} {
+		data, err := dto.NewGlobalEntryPageData(page)
+		if err != nil || data == nil || data.Items == nil || data.Breadcrumbs == nil || len(data.Items) != len(page.Entries) || len(data.Breadcrumbs) != 0 || (data.NextCursor != nil) != (page.NextCursor != nil) {
+			t.Fatal("真实全局分页 DTO 形状错误", err)
+		}
+		if page.NextCursor != nil && (*data.NextCursor != *page.NextCursor || data.NextCursor == page.NextCursor) {
+			t.Fatal("真实全局游标转换或副本错误")
+		}
+		for index, item := range data.Items {
+			entry := page.Entries[index]
+			if item.ID != strconv.FormatUint(entry.ID, 10) || item.ParentID != strconv.FormatUint(*entry.ParentID, 10) || item.Name != entry.Name || item.SizeBytes != entry.FileSize || item.Status != "ACTIVE" || !item.ModifiedAt.Equal(entry.ModifiedAt) {
+				t.Fatal("真实全局条目摘要字段错误")
+			}
+		}
+		encoded, err := json.Marshal(dto.GlobalEntryPageResponse{Data: *data, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e148"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var outer map[string]json.RawMessage
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(encoded, &outer) != nil || len(outer) != 2 || json.Unmarshal(outer["data"], &fields) != nil || len(fields) != 3 || string(fields["breadcrumbs"]) != "[]" || (page.NextCursor == nil && string(fields["next_cursor"]) != "null") || (len(page.Entries) == 0 && string(fields["items"]) != "[]") {
+			t.Fatal("真实全局响应 JSON 字段或空值错误")
+		}
 	}
 	for _, mode := range []string{"user", "search", "kind", "tampering"} {
 		currentActor, filters, currentCursor := actor, pageQuery, *firstPage.NextCursor
