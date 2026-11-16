@@ -11,14 +11,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -208,6 +215,39 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if err != nil {
 			t.Fatal(err)
 		}
+		// 3. 通过系统分配端口交付真实分页结果，核对正文、响应头和请求日志。
+		var logs bytes.Buffer
+		router := serverhttp.NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
+		router.GET("/test-size-entry-page-success", func(requestContext *gin.Context) {
+			handler.SizeEntryPageSuccess(requestContext, result)
+		}, func(*gin.Context) { t.Error("真实大小分页交付后进入下游") })
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 2 * time.Second
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-size-entry-page-success?note=private-query", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Request-ID", strings.ToUpper(requestID))
+		httpResponse, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readError := io.ReadAll(httpResponse.Body)
+		closeError := httpResponse.Body.Close()
+		server.Close()
+		if readError != nil || closeError != nil || httpResponse.StatusCode != http.StatusOK || httpResponse.Header.Get("Content-Type") != "application/json; charset=utf-8" ||
+			httpResponse.Header.Get("Cache-Control") != "no-store" || httpResponse.Header.Get("Pragma") != "no-cache" || httpResponse.Header.Get("X-Request-ID") != requestID ||
+			httpResponse.Header.Get("Content-Encoding") != "" || httpResponse.ContentLength != int64(len(body)) || len(httpResponse.Cookies()) != 0 || !bytes.Equal(body, encoded) {
+			t.Fatal("真实大小分页 HTTP 状态、响应头或完整正文错误", readError, closeError)
+		}
+		var completed map[string]any
+		if json.Unmarshal(logs.Bytes(), &completed) != nil || completed["request_id"] != requestID || completed["status"] != float64(200) ||
+			completed["path"] != "/test-size-entry-page-success" || completed["method"] != "GET" || strings.Contains(logs.String(), "private-query") ||
+			(result.NextCursor != nil && strings.Contains(logs.String(), *result.NextCursor)) {
+			t.Fatal("真实大小分页请求日志关联或内容错误")
+		}
 		var response map[string]json.RawMessage
 		var payload map[string]json.RawMessage
 		if json.Unmarshal(encoded, &response) != nil || len(response) != 2 || string(response["request_id"]) != strconv.Quote(requestID) ||
@@ -246,7 +286,7 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if string(payload["next_cursor"]) != cursorJSON || (data.NextCursor == nil) != (result.NextCursor == nil) {
 			t.Fatal("真实大小分页游标文本或 null 错误")
 		}
-		// 3. 对照数据库与独立协议检查，返回实际文本供下页继续读取。
+		// 4. 对照数据库与独立协议检查，返回实际文本供下页继续读取。
 		listed := &domain.SizeEntryList{Entries: result.Entries, HasMore: result.NextCursor != nil}
 		if result.NextCursor == nil {
 			check(t, listed, ids, nextID)
@@ -262,7 +302,7 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if err != nil || repeated != *result.NextCursor {
 			t.Fatal("大小文本分页与独立协议不符", err)
 		}
-		// 4. 错误用户、范围、筛选及文本在再次调用列表前拒绝。
+		// 5. 错误用户、范围、筛选及文本在再次调用列表前拒绝。
 		changedSearch, changedKind, changedScope := query, query, query
 		changedSearch.Search += " "
 		changedKind.Kind = "image"
