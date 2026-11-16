@@ -3,6 +3,7 @@ package repository
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -154,6 +156,96 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			}
 		}
 	}
+
+	checkTextPage := func(t *testing.T, query domain.GlobalEntryQuery, result *domain.GlobalEntryPageResult, ids []uint64, nextID uint64) {
+		t.Helper()
+		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || (result.NextCursor != nil) != (nextID != 0) {
+			t.Fatal("真实文本分页结果或续页形状错误")
+		}
+		for index, entry := range result.Entries {
+			stored, err := store.FindUserFileEntry(ctx, actor.UserID, entry.ID)
+			if entry.ID != ids[index] || err != nil || stored == nil || !reflect.DeepEqual(entry, *stored) {
+				t.Fatal("文本分页基础字段或顺序错误", err)
+			}
+		}
+		if result.NextCursor != nil {
+			position, err := cursorVerifier.Verify(actor.UserID, query, *result.NextCursor)
+			if err != nil || position == nil || position.ID != nextID {
+				t.Fatal("文本分页游标绑定或最后消费位置错误", err)
+			}
+			stored, err := store.FindUserFileEntry(ctx, actor.UserID, nextID)
+			if err != nil || stored == nil || !position.ModifiedAt.Equal(stored.ModifiedAt) {
+				t.Fatal("文本分页游标修改时间错误", err)
+			}
+		}
+		// 实际服务结果继续转换为公开数据，检查空数组和明确结束值。
+		data, err := dto.NewGlobalEntryPageData(result)
+		if err != nil || data == nil || data.Items == nil || data.Breadcrumbs == nil || len(data.Items) != len(ids) || len(data.Breadcrumbs) != 0 {
+			t.Fatal("真实文本分页响应 DTO 错误", err)
+		}
+		encoded, err := json.Marshal(data)
+		var fields map[string]json.RawMessage
+		if err != nil || json.Unmarshal(encoded, &fields) != nil || len(fields) != 3 || string(fields["breadcrumbs"]) != "[]" || (len(ids) == 0 && string(fields["items"]) != "[]") || (nextID == 0 && string(fields["next_cursor"]) != "null") {
+			t.Fatal("文本分页 JSON 公开字段或空值错误", err)
+		}
+		if result.NextCursor != nil && (data.NextCursor == nil || *data.NextCursor != *result.NextCursor || data.NextCursor == result.NextCursor) {
+			t.Fatal("文本分页游标转换或副本错误")
+		}
+	}
+	t.Run("text cursor first next end and binding", func(t *testing.T) {
+		// 1. 真实空游标首页与合法页大小调整后的续页。
+		listing, calls := makeList(nil)
+		paging := service.NewGlobalEntryPageService(cursorVerifier.Verify, listing.List, cursorSigner.Sign)
+		query := queryForPage(1)
+		query.Search, query.Kind = "学习", "document"
+		first, err := paging.List(ctx, actor, query, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, query, first, []uint64{15}, 15)
+		query.PageSize = 2
+		next, err := paging.List(ctx, actor, query, *first.NextCursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, query, next, []uint64{13}, 0)
+		// 2. 无效用户/范围/筛选或篡改的游标在候选读取前被拒绝。
+		for _, mode := range []string{"user", "scope", "search", "kind", "tampered"} {
+			identity, filters, cursor := actor, query, *first.NextCursor
+			switch mode {
+			case "user":
+				identity.UserID = 3
+			case "scope":
+				filters.Scope = domain.GlobalEntryScopeAll
+				if query.Scope == domain.GlobalEntryScopeAll {
+					filters.Scope = domain.GlobalEntryScopeStarred
+				}
+			case "search":
+				filters.Search += " "
+			case "kind":
+				filters.Kind = "image"
+			case "tampered":
+				cursor += "="
+			}
+			beforeCalls := *calls
+			result, err := paging.List(ctx, identity, filters, cursor)
+			if result != nil || !errors.Is(err, domain.ErrInvalidGlobalEntryCursor) || *calls != beforeCalls {
+				t.Fatal("错误文本游标进入了候选读取", mode, err)
+			}
+		}
+		// 3. 空结束页和空列表账号状态通过真实服务链检查。
+		query.Search = "无匹配项"
+		empty, err := paging.List(ctx, actor, query, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, query, empty, nil, 0)
+		disabled := actor
+		disabled.UserID = 5
+		if result, err := paging.List(ctx, disabled, query, ""); result != nil || !errors.Is(err, domain.ErrAccountDisabled) {
+			t.Fatal("文本空列表未复查账号状态", err)
+		}
+	})
 
 	// 2. 验证页内截断、续页、分类、搜索与账号范围。
 	t.Run("unconsumed candidates and tuple continuation", func(t *testing.T) {
@@ -333,6 +425,27 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("text cursor budget empty next and end", func(t *testing.T) {
+		listing, calls := makeList(nil)
+		paging := service.NewGlobalEntryPageService(cursorVerifier.Verify, listing.List, cursorSigner.Sign)
+		query := queryForPage(1)
+		query.Kind = "document"
+		first, err := paging.List(ctx, actor, query, "")
+		if err != nil || *calls != 10 {
+			t.Fatal("文本预算空页扫描次数错误", err)
+		}
+		checkTextPage(t, query, first, nil, 1001)
+		second, err := paging.List(ctx, actor, query, *first.NextCursor)
+		if err != nil || *calls != 11 {
+			t.Fatal("文本预算空页续读错误", err)
+		}
+		checkTextPage(t, query, second, []uint64{15}, 15)
+		third, err := paging.List(ctx, actor, query, *second.NextCursor)
+		if err != nil || *calls != 12 {
+			t.Fatal("文本预算分页结束错误", err)
+		}
+		checkTextPage(t, query, third, []uint64{13}, 0)
+	})
 	t.Run("empty budget page continues to visible entries", func(t *testing.T) {
 		listing, calls := makeList(nil)
 		query := queryForPage(2)

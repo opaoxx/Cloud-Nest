@@ -27,10 +27,20 @@ func globalEntryPageFixture() (domain.Actor, domain.GlobalEntryQuery, *domain.Fi
 }
 
 func TestGlobalEntryPageServiceFlow(t *testing.T) {
+	testGlobalEntryPageServiceFlow(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryPageServiceFlow(t *testing.T) {
+	testGlobalEntryPageServiceFlow(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryPageServiceFlow(t *testing.T, scope string) {
+	t.Helper()
 	for _, mode := range []string{"first page", "next page", "empty end", "full end", "short continuation", "empty first continuation", "empty next continuation", "empty next end", "offset positions", "older next larger id", "maximum ids", "maximum cursor length"} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 按场景组合三个能力，检查参数、顺序和空页续页。
 			actor, query, position, listed := globalEntryPageFixture()
+			query.Scope = scope
 			cursor := ""
 			wantVerify, wantSign := 0, 1
 			signedText := "fixture-next"
@@ -120,6 +130,15 @@ func TestGlobalEntryPageServiceFlow(t *testing.T) {
 }
 
 func TestGlobalEntryPageServiceFailures(t *testing.T) {
+	testGlobalEntryPageServiceFailures(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryPageServiceFailures(t *testing.T) {
+	testGlobalEntryPageServiceFailures(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryPageServiceFailures(t *testing.T, scope string) {
+	t.Helper()
 	fixtureFailure := errors.New("fixture failure")
 	for _, mode := range []string{
 		"verify error", "nil verify", "zero verify id", "bad verify time", "list error", "nil list", "large list", "missing next", "unexpected next",
@@ -129,6 +148,7 @@ func TestGlobalEntryPageServiceFailures(t *testing.T) {
 	} {
 		t.Run(mode, func(t *testing.T) {
 			actor, query, position, listed := globalEntryPageFixture()
+			query.Scope = scope
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			want := error(domain.ErrInvalidFileEntryData)
@@ -247,9 +267,19 @@ func TestGlobalEntryPageServiceFailures(t *testing.T) {
 }
 
 func TestGlobalEntryPageServiceInputs(t *testing.T) {
-	for _, mode := range []string{"nil context", "zero user", "zero device", "zero session", "zero page", "large page", "starred", "name sort", "invalid search", "large cursor", "cancelled", "expired"} {
+	testGlobalEntryPageServiceInputs(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryPageServiceInputs(t *testing.T) {
+	testGlobalEntryPageServiceInputs(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryPageServiceInputs(t *testing.T, scope string) {
+	t.Helper()
+	for _, mode := range []string{"nil context", "zero user", "zero device", "zero session", "zero page", "large page", "recent", "starred name sort", "name sort", "invalid search", "large cursor", "cancelled", "expired"} {
 		t.Run(mode, func(t *testing.T) {
 			actor, query, _, _ := globalEntryPageFixture()
+			query.Scope = scope
 			var ctx context.Context = context.Background()
 			cursor := ""
 			var want error
@@ -266,8 +296,10 @@ func TestGlobalEntryPageServiceInputs(t *testing.T) {
 				query.PageSize = 0
 			case "large page":
 				query.PageSize = 101
-			case "starred":
-				query.Scope = domain.GlobalEntryScopeStarred
+			case "recent":
+				query.Scope, query.Sort = domain.GlobalEntryScopeRecent, domain.GlobalEntrySortLastOpenedDesc
+			case "starred name sort":
+				query.Scope, query.Sort = domain.GlobalEntryScopeStarred, domain.GlobalEntrySortNameAsc
 			case "name sort":
 				query.Sort = domain.GlobalEntrySortNameAsc
 			case "invalid search":

@@ -30,13 +30,13 @@ func NewGlobalEntryPageService(
 	return &GlobalEntryPageService{verifyCursor: verifyCursor, listEntries: listEntries, signCursor: signCursor}
 }
 
-// List 处理 all/modified_desc 的首页及文本游标续页，允许预算空页继续翻页。
+// List 处理 all/starred 修改时间降序查询的首页及文本游标续页，允许预算空页继续翻页。
 // 用户和查询沿用已有绑定，取消或任何失败均返回 nil。
 func (pageService *GlobalEntryPageService) List(ctx context.Context, actor domain.Actor, query domain.GlobalEntryQuery, cursor string) (*domain.GlobalEntryPageResult, error) {
-	// 1. 校验身份、查询、游标长度和上下文。
+	// 1. 校验身份、all/starred 查询、游标长度和上下文。
 	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 || !query.IsValid() ||
-		query.Scope != domain.GlobalEntryScopeAll || query.Sort != domain.GlobalEntrySortModifiedDesc {
-		return nil, fmt.Errorf("全局分页需要上下文、完整身份及 all/modified_desc 的合法查询")
+		(query.Scope != domain.GlobalEntryScopeAll && query.Scope != domain.GlobalEntryScopeStarred) || query.Sort != domain.GlobalEntrySortModifiedDesc {
+		return nil, fmt.Errorf("全局分页需要上下文、完整身份及 all/starred、modified_desc 的合法查询")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
