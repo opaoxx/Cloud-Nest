@@ -489,3 +489,5 @@ ParseGlobalEntryPageQuery 已接收单个 scope=all/starred，并保留实际范
 GET /api/v1/entries?scope=starred 已接入正式路由，按当前用户的收藏事实、搜索和分类读取完整父链可见项，面包屑为 []，预算空页保留 next_cursor。正式 PUT 收藏/取消后可通过列表核对，原普通/预算游标在服务重启后继续有效。真实启动/重启及每轮新增二十七次 GET、八次 PUT 连续三次通过，示例和复验方法见 [第 203 步学习记录](docs/开发学习记录.md#第-203-步接入正式收藏列表路由)。
 
 已提供 RecentEntryPosition，以 LastOpenedAt 和完整无符号目录项 ID 表达最近使用列表的内部续页位置。IsValid 核对非零 ID、UTC 年份 1000～9999 及微秒精度，带时区输入按同一时刻检查并保留原值。二十组正常/边界专项及全局查询模型连续三次通过，模型和复验方法见 [第 204 步学习记录](docs/开发学习记录.md#第-204-步定义最近使用列表的分页位置模型)。
+
+已提供 Store.ListUserRecentEntryCandidates，接收认证用户、recent/last_opened_desc 的空筛选查询及可空 RecentEntryPosition。关联当前用户偏好后读取最近访问过的活动普通文件，以访问时间/ID 降序多取一条，返回基础记录、LastOpenedAt 与 HasMore，完整祖先链由上层在同快照内检查。专项及正式 MySQL 的排序分页、百条页、隔离、快照和整数/日期边界连续三次通过，调用和复验方法见 [第 205 步学习记录](docs/开发学习记录.md#第-205-步按用户读取最近访问文件候选)。
