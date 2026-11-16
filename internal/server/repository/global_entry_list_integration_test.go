@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -103,6 +104,42 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 		return listing, &calls
 	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
+	cursorSigner, err := service.NewGlobalEntryCursorSigner(bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursorVerifier, err := service.NewGlobalEntryCursorVerifier(bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreNextPosition := func(t *testing.T, query domain.GlobalEntryQuery, position *domain.FileEntryPosition) *domain.FileEntryPosition {
+		t.Helper()
+		// 1. 将实际最后消费位置签名，使用调整后的合法页大小校验。
+		if position == nil {
+			t.Fatal("真实续页缺少最后消费位置")
+		}
+		original := *position
+		cursor, err := cursorSigner.Sign(actor.UserID, query, original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resized := query
+		resized.PageSize = 100
+		restored, err := cursorVerifier.Verify(actor.UserID, resized, cursor)
+		if err != nil || restored == nil || !reflect.DeepEqual(*restored, original) || restored == position || *position != original {
+			t.Fatal("真实列表游标签名、还原或独立结果错误", err)
+		}
+		// 2. 同一密钥下，两类查询范围的游标绑定准确。
+		other := query
+		other.Scope = domain.GlobalEntryScopeAll
+		if query.Scope == domain.GlobalEntryScopeAll {
+			other.Scope = domain.GlobalEntryScopeStarred
+		}
+		if invalid, err := cursorVerifier.Verify(actor.UserID, other, cursor); invalid != nil || !errors.Is(err, domain.ErrInvalidGlobalEntryCursor) {
+			t.Fatal("不同查询范围通过真实列表游标校验", err)
+		}
+		return restored
+	}
 	checkPage := func(t *testing.T, result *domain.GlobalEntryList, ids []uint64, more bool, nextID uint64) {
 		t.Helper()
 		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || result.HasMore != more || (result.NextPosition != nil) != more {
@@ -128,7 +165,7 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			t.Fatal(err)
 		}
 		checkPage(t, first, []uint64{15}, true, 15)
-		second, err := listing.List(ctx, actor, query, first.NextPosition)
+		second, err := listing.List(ctx, actor, query, restoreNextPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,7 +187,7 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			t.Fatal(err)
 		}
 		checkPage(t, first, []uint64{15, 13}, true, 13)
-		second, err := listing.List(ctx, actor, query, first.NextPosition)
+		second, err := listing.List(ctx, actor, query, restoreNextPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +342,7 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			t.Fatal("预算扫描次数错误", err)
 		}
 		checkPage(t, first, nil, true, 1001)
-		second, err := listing.List(ctx, actor, query, first.NextPosition)
+		second, err := listing.List(ctx, actor, query, restoreNextPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -323,7 +360,7 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			t.Fatal(err)
 		}
 		checkPage(t, first, []uint64{2000}, true, 1001)
-		second, err := listing.List(ctx, actor, query, first.NextPosition)
+		second, err := listing.List(ctx, actor, query, restoreNextPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -344,7 +381,7 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 			t.Fatal("预算边界补读次数错误", err)
 		}
 		checkPage(t, first, []uint64{1001}, true, 1001)
-		second, err := listing.List(ctx, actor, query, first.NextPosition)
+		second, err := listing.List(ctx, actor, query, restoreNextPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}

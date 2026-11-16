@@ -26,10 +26,20 @@ func signedGlobalEntryPayloadForTest(masterKey []byte, encoded string) string {
 }
 
 func TestGlobalEntryCursorVerifierRoundTrip(t *testing.T) {
+	testGlobalEntryCursorVerifierRoundTrip(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorVerifierRoundTrip(t *testing.T) {
+	testGlobalEntryCursorVerifierRoundTrip(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorVerifierRoundTrip(t *testing.T, scope string) {
+	t.Helper()
 	for _, mode := range []string{"normal", "offset", "whole second", "minimum datetime", "maximum datetime", "maximum ids", "empty filters", "special filters", "long filters", "page size adjustment"} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 将有效查询和数据库位置签名，再还原为独立 UTC 微秒位置。
 			masterKey, query, position := globalEntryCursorSignerFixture()
+			query.Scope = scope
 			userID := uint64(7)
 			switch mode {
 			case "offset":
@@ -73,8 +83,13 @@ func TestGlobalEntryCursorVerifierRoundTrip(t *testing.T) {
 	}
 	t.Run("independent Python vector", func(t *testing.T) {
 		masterKey, query, want := globalEntryCursorSignerFixture()
-		payload := `{"version":1,"user_id":"7","scope":"all","sort":"modified_desc","filter_hash":"4a19847aa216599d9b153f3f6ac17a65e8d9e3bbfe8e1c549d56705500b32b22","modified_at":"2026-11-16T02:30:00.123456Z","entry_id":"19"}`
-		cursor := base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".qPAFnAylyXFwHZrDjqz1IidIjR1z49Od8-X2-NhMGyI"
+		query.Scope = scope
+		payload := `{"version":1,"user_id":"7","scope":"` + scope + `","sort":"modified_desc","filter_hash":"4a19847aa216599d9b153f3f6ac17a65e8d9e3bbfe8e1c549d56705500b32b22","modified_at":"2026-11-16T02:30:00.123456Z","entry_id":"19"}`
+		expectedSignature := "qPAFnAylyXFwHZrDjqz1IidIjR1z49Od8-X2-NhMGyI"
+		if scope == domain.GlobalEntryScopeStarred {
+			expectedSignature = "7Bkyl-_49vPL5zy5i9Cn1H-rpOeCbW8mVok9eDSrFog"
+		}
+		cursor := base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + expectedSignature
 		verifier, err := NewGlobalEntryCursorVerifier(masterKey)
 		if err != nil {
 			t.Fatal(err)
@@ -86,7 +101,21 @@ func TestGlobalEntryCursorVerifierRoundTrip(t *testing.T) {
 }
 
 func TestGlobalEntryCursorVerifierSignedPayloadFailures(t *testing.T) {
+	testGlobalEntryCursorVerifierSignedPayloadFailures(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorVerifierSignedPayloadFailures(t *testing.T) {
+	testGlobalEntryCursorVerifierSignedPayloadFailures(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorVerifierSignedPayloadFailures(t *testing.T, scope string) {
+	t.Helper()
 	masterKey, query, position := globalEntryCursorSignerFixture()
+	query.Scope = scope
+	otherScope := domain.GlobalEntryScopeAll
+	if scope == domain.GlobalEntryScopeAll {
+		otherScope = domain.GlobalEntryScopeStarred
+	}
 	signer, err := NewGlobalEntryCursorSigner(masterKey)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +139,7 @@ func TestGlobalEntryCursorVerifierSignedPayloadFailures(t *testing.T) {
 		{"string version", `"version":1`, `"version":"1"`},
 		{"wrong user", `"user_id":"7"`, `"user_id":"8"`},
 		{"leading user zero", `"user_id":"7"`, `"user_id":"07"`},
-		{"scope", `"scope":"all"`, `"scope":"starred"`},
+		{"scope", `"scope":"` + scope + `"`, `"scope":"` + otherScope + `"`},
 		{"sort", `"sort":"modified_desc"`, `"sort":"name_asc"`},
 		{"filters", `4a19847aa216599d9b153f3f6ac17a65e8d9e3bbfe8e1c549d56705500b32b22`, strings.Repeat("0", 64)},
 		{"missing filters", `"filter_hash":"4a19847aa216599d9b153f3f6ac17a65e8d9e3bbfe8e1c549d56705500b32b22",`, ``},
@@ -170,7 +199,21 @@ func TestGlobalEntryCursorVerifierSignedPayloadFailures(t *testing.T) {
 }
 
 func TestGlobalEntryCursorVerifierEncodingAndBinding(t *testing.T) {
+	testGlobalEntryCursorVerifierEncodingAndBinding(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorVerifierEncodingAndBinding(t *testing.T) {
+	testGlobalEntryCursorVerifierEncodingAndBinding(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorVerifierEncodingAndBinding(t *testing.T, scope string) {
+	t.Helper()
 	masterKey, query, position := globalEntryCursorSignerFixture()
+	query.Scope = scope
+	otherScope := domain.GlobalEntryScopeAll
+	if scope == domain.GlobalEntryScopeAll {
+		otherScope = domain.GlobalEntryScopeStarred
+	}
 	signer, err := NewGlobalEntryCursorSigner(masterKey)
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +266,7 @@ func TestGlobalEntryCursorVerifierEncodingAndBinding(t *testing.T) {
 			case "kind":
 				input.Kind = "image"
 			case "scope":
-				input.Scope = domain.GlobalEntryScopeStarred
+				input.Scope = otherScope
 			case "sort":
 				input.Sort = domain.GlobalEntrySortNameAsc
 			case "page size":
@@ -267,7 +310,17 @@ func TestGlobalEntryCursorVerifierEncodingAndBinding(t *testing.T) {
 }
 
 func TestGlobalEntryCursorVerifierOwnershipAndConcurrency(t *testing.T) {
+	testGlobalEntryCursorVerifierOwnershipAndConcurrency(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorVerifierOwnershipAndConcurrency(t *testing.T) {
+	testGlobalEntryCursorVerifierOwnershipAndConcurrency(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorVerifierOwnershipAndConcurrency(t *testing.T, scope string) {
+	t.Helper()
 	masterKey, query, position := globalEntryCursorSignerFixture()
+	query.Scope = scope
 	signer, err := NewGlobalEntryCursorSigner(masterKey)
 	if err != nil {
 		t.Fatal(err)

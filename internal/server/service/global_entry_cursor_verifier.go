@@ -29,14 +29,15 @@ func NewGlobalEntryCursorVerifier(masterKey []byte) (*GlobalEntryCursorVerifier,
 	return &GlobalEntryCursorVerifier{signer: signer}, nil
 }
 
-// Verify 检查当前用户及查询绑定，成功返回独立的 UTC 微秒位置。
+// Verify 检查当前用户及 all/starred 查询绑定，成功返回独立的 UTC 微秒位置。
 // 空文本和无效游标返回 ErrInvalidGlobalEntryCursor，组件未初始化单独报告。
 func (verifier *GlobalEntryCursorVerifier) Verify(userID uint64, query domain.GlobalEntryQuery, cursor string) (*domain.FileEntryPosition, error) {
-	// 1. 检查校验器、用户、查询和游标长度。
+	// 1. 检查校验器、用户、all/starred 查询和游标长度。
 	if verifier == nil || verifier.signer == nil || len(verifier.signer.signingKey) != sha256.Size {
 		return nil, fmt.Errorf("全局游标校验器尚未初始化")
 	}
-	if userID == 0 || !query.IsValid() || query.Scope != domain.GlobalEntryScopeAll ||
+	if userID == 0 || !query.IsValid() ||
+		(query.Scope != domain.GlobalEntryScopeAll && query.Scope != domain.GlobalEntryScopeStarred) ||
 		query.Sort != domain.GlobalEntrySortModifiedDesc || cursor == "" || len(cursor) > domain.MaxGlobalEntryCursorLength {
 		return nil, domain.ErrInvalidGlobalEntryCursor
 	}

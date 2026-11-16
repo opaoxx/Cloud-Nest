@@ -63,14 +63,15 @@ func NewGlobalEntryCursorSigner(masterKey []byte) (*GlobalEntryCursorSigner, err
 	return &GlobalEntryCursorSigner{signingKey: derivation.Sum(nil)}, nil
 }
 
-// Sign 为 all/modified_desc 查询的最后消费位置生成版本 1 游标。
+// Sign 为 all/starred 的修改时间降序查询生成版本 1 游标。
 // 搜索与分类按原文绑定，每页数量按模型校验，合法数量调整沿用同一查询绑定。
 func (signer *GlobalEntryCursorSigner) Sign(userID uint64, query domain.GlobalEntryQuery, position domain.FileEntryPosition) (string, error) {
-	// 1. 检查签名器、用户、查询与续页位置。
+	// 1. 检查签名器、用户、all/starred 查询与续页位置。
 	if signer == nil || len(signer.signingKey) != sha256.Size {
 		return "", fmt.Errorf("全局游标签名器尚未初始化")
 	}
-	if userID == 0 || !query.IsValid() || query.Scope != domain.GlobalEntryScopeAll ||
+	if userID == 0 || !query.IsValid() ||
+		(query.Scope != domain.GlobalEntryScopeAll && query.Scope != domain.GlobalEntryScopeStarred) ||
 		query.Sort != domain.GlobalEntrySortModifiedDesc || !position.IsValid() {
 		return "", domain.ErrInvalidGlobalEntryCursor
 	}

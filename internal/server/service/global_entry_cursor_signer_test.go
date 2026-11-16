@@ -59,9 +59,19 @@ func globalEntryCursorSignerFixture() ([]byte, domain.GlobalEntryQuery, domain.F
 }
 
 func TestGlobalEntryCursorSignerPayload(t *testing.T) {
+	testGlobalEntryCursorSignerPayload(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorSignerPayload(t *testing.T) {
+	testGlobalEntryCursorSignerPayload(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorSignerPayload(t *testing.T, scope string) {
+	t.Helper()
 	for _, mode := range []string{"canonical", "offset", "whole second", "minimum datetime", "maximum datetime", "maximum ids", "empty filters", "special JSON characters", "long keyword", "minimum page size", "maximum page size", "long master key"} {
 		t.Run(mode, func(t *testing.T) {
 			masterKey, query, position := globalEntryCursorSignerFixture()
+			query.Scope = scope
 			userID := uint64(7)
 			filters := `{"q":"学习%_","kind":"document"}`
 			switch mode {
@@ -102,11 +112,15 @@ func TestGlobalEntryCursorSignerPayload(t *testing.T) {
 			}
 			fields := readGlobalEntryCursorForTest(t, cursor, masterKey)
 			hash := sha256.Sum256([]byte(filters))
-			if fields["version"] != float64(1) || fields["user_id"] != strconv.FormatUint(userID, 10) || fields["entry_id"] != strconv.FormatUint(position.ID, 10) || fields["scope"] != "all" || fields["sort"] != "modified_desc" || fields["filter_hash"] != hex.EncodeToString(hash[:]) || fields["modified_at"] != position.ModifiedAt.UTC().Format("2006-01-02T15:04:05.000000Z") || !reflect.DeepEqual(position, originalPosition) || query != originalQuery {
+			if fields["version"] != float64(1) || fields["user_id"] != strconv.FormatUint(userID, 10) || fields["entry_id"] != strconv.FormatUint(position.ID, 10) || fields["scope"] != query.Scope || fields["sort"] != "modified_desc" || fields["filter_hash"] != hex.EncodeToString(hash[:]) || fields["modified_at"] != position.ModifiedAt.UTC().Format("2006-01-02T15:04:05.000000Z") || !reflect.DeepEqual(position, originalPosition) || query != originalQuery {
 				t.Fatal("全局载荷、筛选摘要、时间或输入保护错误")
 			}
 			if mode == "canonical" || mode == "offset" || mode == "minimum page size" || mode == "maximum page size" {
-				if strings.Split(cursor, ".")[1] != "qPAFnAylyXFwHZrDjqz1IidIjR1z49Od8-X2-NhMGyI" {
+				expectedSignature := "qPAFnAylyXFwHZrDjqz1IidIjR1z49Od8-X2-NhMGyI"
+				if scope == domain.GlobalEntryScopeStarred {
+					expectedSignature = "7Bkyl-_49vPL5zy5i9Cn1H-rpOeCbW8mVok9eDSrFog"
+				}
+				if strings.Split(cursor, ".")[1] != expectedSignature {
 					t.Fatal("签名与独立 Python 固定向量不一致")
 				}
 			}
@@ -115,7 +129,17 @@ func TestGlobalEntryCursorSignerPayload(t *testing.T) {
 }
 
 func TestGlobalEntryCursorSignerBindingAndPurpose(t *testing.T) {
+	testGlobalEntryCursorSignerBindingAndPurpose(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorSignerBindingAndPurpose(t *testing.T) {
+	testGlobalEntryCursorSignerBindingAndPurpose(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorSignerBindingAndPurpose(t *testing.T, scope string) {
+	t.Helper()
 	masterKey, query, position := globalEntryCursorSignerFixture()
+	query.Scope = scope
 	signer, err := NewGlobalEntryCursorSigner(masterKey)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +148,7 @@ func TestGlobalEntryCursorSignerBindingAndPurpose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"user", "search", "search whitespace", "search suffix", "kind", "entry", "microsecond", "page size"} {
+	for _, mode := range []string{"user", "search", "search whitespace", "search suffix", "kind", "scope", "entry", "microsecond", "page size"} {
 		t.Run(mode, func(t *testing.T) {
 			userID, changedQuery, changedPosition := uint64(7), query, position
 			switch mode {
@@ -138,6 +162,11 @@ func TestGlobalEntryCursorSignerBindingAndPurpose(t *testing.T) {
 				changedQuery.Search += "A"
 			case "kind":
 				changedQuery.Kind = "image"
+			case "scope":
+				changedQuery.Scope = domain.GlobalEntryScopeAll
+				if scope == domain.GlobalEntryScopeAll {
+					changedQuery.Scope = domain.GlobalEntryScopeStarred
+				}
 			case "entry":
 				changedPosition.ID++
 			case "microsecond":
@@ -190,17 +219,27 @@ func TestGlobalEntryCursorSignerBindingAndPurpose(t *testing.T) {
 }
 
 func TestGlobalEntryCursorSignerInputs(t *testing.T) {
+	testGlobalEntryCursorSignerInputs(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorSignerInputs(t *testing.T) {
+	testGlobalEntryCursorSignerInputs(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorSignerInputs(t *testing.T, scope string) {
+	t.Helper()
 	for _, length := range []int{0, 1, 31} {
 		if signer, err := NewGlobalEntryCursorSigner(make([]byte, length)); signer != nil || err == nil {
 			t.Fatal("短主密钥构造成功")
 		}
 	}
 	masterKey, query, position := globalEntryCursorSignerFixture()
+	query.Scope = scope
 	signer, err := NewGlobalEntryCursorSigner(masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"zero user", "zero entry", "zero time", "early date", "late date", "nanosecond", "empty query", "starred scope", "recent scope", "name sort", "size sort", "invalid search", "invalid kind", "zero page", "large page"} {
+	for _, mode := range []string{"zero user", "zero entry", "zero time", "early date", "late date", "nanosecond", "empty query", "starred name sort", "recent scope", "name sort", "size sort", "invalid search", "invalid kind", "zero page", "large page"} {
 		t.Run(mode, func(t *testing.T) {
 			userID, inputQuery, inputPosition := uint64(7), query, position
 			switch mode {
@@ -218,8 +257,9 @@ func TestGlobalEntryCursorSignerInputs(t *testing.T) {
 				inputPosition.ModifiedAt = inputPosition.ModifiedAt.Add(time.Nanosecond)
 			case "empty query":
 				inputQuery = domain.GlobalEntryQuery{}
-			case "starred scope":
+			case "starred name sort":
 				inputQuery.Scope = domain.GlobalEntryScopeStarred
+				inputQuery.Sort = domain.GlobalEntrySortNameAsc
 			case "recent scope":
 				inputQuery.Scope, inputQuery.Sort = domain.GlobalEntryScopeRecent, domain.GlobalEntrySortLastOpenedDesc
 			case "name sort":
@@ -249,7 +289,17 @@ func TestGlobalEntryCursorSignerInputs(t *testing.T) {
 }
 
 func TestGlobalEntryCursorSignerOwnershipAndConcurrency(t *testing.T) {
+	testGlobalEntryCursorSignerOwnershipAndConcurrency(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryCursorSignerOwnershipAndConcurrency(t *testing.T) {
+	testGlobalEntryCursorSignerOwnershipAndConcurrency(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryCursorSignerOwnershipAndConcurrency(t *testing.T, scope string) {
+	t.Helper()
 	masterKey, query, position := globalEntryCursorSignerFixture()
+	query.Scope = scope
 	originalKey := bytes.Clone(masterKey)
 	signer, err := NewGlobalEntryCursorSigner(masterKey)
 	if err != nil {
