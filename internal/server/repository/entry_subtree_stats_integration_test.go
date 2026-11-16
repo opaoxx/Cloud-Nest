@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestFindUserEntrySubtreeStatsIntegration(t *testing.T) {
@@ -40,6 +41,22 @@ func TestFindUserEntrySubtreeStatsIntegration(t *testing.T) {
 			t.Fatal("实际子树统计错误", source, result, err)
 		}
 	}
+	validateMove := func(source, target uint64) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, txStore *Store) error {
+			checker := service.NewEntryMoveTargetService(func(ctx context.Context, action func(context.Context, service.FileEntryPathReader) error) error {
+				return action(ctx, txStore)
+			})
+			paths, err := checker.Check(snapshotContext, domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}, source, target)
+			if err != nil {
+				return err
+			}
+			stats, err := txStore.FindUserEntrySubtreeStats(snapshotContext, 1, source)
+			if err != nil {
+				return err
+			}
+			return service.ValidateEntryMoveLimits(paths, stats)
+		})
+	}
 	t.Run("file empty directory nested tree and roots", func(t *testing.T) {
 		for _, item := range []struct{ source, count, depth uint64 }{{13, 1, 0}, {17, 1, 0}, {15, 3, 2}, {12, 11, 3}, {11, 13, 4}, {18, 2, 1}, {19, 2, 1}, {20, 1, 0}, {23, 1, 0}} {
 			check(t, 1, item.source, item.count, item.depth)
@@ -50,6 +67,15 @@ func TestFindUserEntrySubtreeStatsIntegration(t *testing.T) {
 		for _, scope := range []struct{ user, source uint64 }{{1, 999}, {1, 33}, {3, 12}, {99, 12}} {
 			if result, err := store.FindUserEntrySubtreeStats(ctx, scope.user, scope.source); result != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
 				t.Fatal("范围缺失未返回不存在", err)
+			}
+		}
+	})
+	t.Run("relationship statistics and limits compose", func(t *testing.T) {
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(2)
+		for _, pair := range []struct{ source, target uint64 }{{12, 14}, {15, 11}, {13, 11}} {
+			if err := validateMove(pair.source, pair.target); err != nil {
+				t.Fatal("真实关系与子树统计限制组合错误", err)
 			}
 		}
 	})
@@ -125,6 +151,19 @@ func TestFindUserEntrySubtreeStatsIntegration(t *testing.T) {
 			parent = id
 		}
 		check(t, 1, 100, 33, 32)
+		// 移动源及后代在新位置的最终深度，同时核对文件和目录边界。
+		if err := validateMove(101, 11); err != nil {
+			t.Fatal("目录移动后恰好 32 层被拒绝", err)
+		}
+		if err := validateMove(100, 11); !errors.Is(err, domain.ErrFileEntryDepthExceeded) {
+			t.Fatal("目录移动后 33 层未拒绝", err)
+		}
+		if err := validateMove(13, 130); err != nil {
+			t.Fatal("文件移动后恰好 32 层被拒绝", err)
+		}
+		if err := validateMove(13, 131); !errors.Is(err, domain.ErrFileEntryDepthExceeded) {
+			t.Fatal("文件移动后 33 层未拒绝", err)
+		}
 		if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(133,1,?,'relative33',CAST('relative33' AS BINARY),'DIR')", parent); err != nil {
 			t.Fatal(err)
 		}
@@ -160,10 +199,16 @@ func TestFindUserEntrySubtreeStatsIntegration(t *testing.T) {
 			}
 		}
 		check(t, 1, 300, 10000, 1)
+		if err := validateMove(300, 14); err != nil {
+			t.Fatal("10000 项真实子树被拒绝", err)
+		}
 		if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(20000,1,300,'extra-node',CAST('extra-node' AS BINARY),'DIR')"); err != nil {
 			t.Fatal(err)
 		}
 		check(t, 1, 300, 10001, 1)
+		if err := validateMove(300, 14); !errors.Is(err, domain.ErrFileEntrySubtreeTooLarge) {
+			t.Fatal("10001 项真实子树未拒绝", err)
+		}
 	})
 	t.Run("maximum unsigned owner and entry", func(t *testing.T) {
 		maximum := ^uint64(0)
@@ -171,6 +216,9 @@ func TestFindUserEntrySubtreeStatsIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		check(t, 1, maximum, 2, 1)
+		if err := validateMove(maximum, 14); err != nil {
+			t.Fatal("最大源标识的移动限制组合错误", err)
+		}
 		if _, err := pool.ExecContext(ctx, "INSERT INTO users(id,username,display_name,password_hash,status) VALUES(?,'maximum_owner','高位用户','fixture_hash','ACTIVE')", maximum); err != nil {
 			t.Fatal(err)
 		}

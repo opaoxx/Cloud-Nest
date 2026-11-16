@@ -1,5 +1,13 @@
 package domain
 
+import "errors"
+
+// MaxFileEntrySubtreeNodes 限定单次目录操作的子树节点数量，包含源自身。
+const MaxFileEntrySubtreeNodes = 10000
+
+// ErrFileEntrySubtreeTooLarge 表示本次目录操作的子树超出节点数量上限。
+var ErrFileEntrySubtreeTooLarge = errors.New("单次目录操作不能超过 10000 个目录项")
+
 // EntrySubtreeStats 保存同一条查询得到的物理子树统计，包含源自身及各生命周期保留记录。
 type EntrySubtreeStats struct {
 	// UserID 是子树所属用户。
