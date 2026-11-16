@@ -54,7 +54,21 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 		kind                            string
 		search                          string
 		pattern                         string
+		scope                           string
 	}{
+		{name: "starred empty", scope: "starred", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "starred file", scope: "starred", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "starred across parents", scope: "starred", entries: []domain.FileEntry{base, otherDirectory}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base, otherDirectory}}},
+		{name: "starred extra row", scope: "starred", entries: []domain.FileEntry{base, sameTime, olderTime}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base, sameTime}, HasMore: true}},
+		{name: "starred folder", scope: "starred", kind: "folder", entries: []domain.FileEntry{directory}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{directory}}},
+		{name: "starred filtered seek", scope: "starred", kind: "document", search: "笔记", pattern: "%笔记%", before: offsetPosition, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "starred escaped pattern", scope: "starred", search: "%_=", pattern: "%=%=_==%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "starred maximum user", scope: "starred", userID: maximum, entries: []domain.FileEntry{large}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{large}}},
+		{name: "starred maximum page", scope: "starred", pageSize: 100, entries: fullEntries, want: &domain.FileEntryPage{Entries: fullEntries[:100], HasMore: true}},
+		{name: "starred query failure", scope: "starred", queryError: queryFailure, wantError: queryFailure},
+		{name: "starred partial failure", scope: "starred", entries: []domain.FileEntry{base}, rowError: rowFailure, wantError: rowFailure},
+		{name: "starred wrong owner", scope: "starred", entries: []domain.FileEntry{base}, change: func(rows [][]driver.Value) { rows[0][1] = "8" }, wantError: domain.ErrInvalidFileEntryData},
+		{name: "starred invalid peek", scope: "starred", pageSize: 1, entries: []domain.FileEntry{base, sameTime}, change: func(rows [][]driver.Value) { rows[1][2] = "0" }, wantError: domain.ErrInvalidFileEntryData},
 		{name: "empty page", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
 		{name: "single file", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
 		{name: "directory", entries: []domain.FileEntry{directory}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{directory}}},
@@ -156,8 +170,12 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 				head := "SELECT id,user_id,parent_id,name,entry_type,file_size,revision,status,created_at,modified_at,updated_at FROM file_entries WHERE "
 				predicates := []string{"user_id = ? AND status = ? AND parent_id IS NOT NULL"}
 				values := []any{userID, "ACTIVE"}
-				if testCase.kind != "" || testCase.search != "" || testCase.before != nil {
+				if testCase.scope == "starred" || testCase.kind != "" || testCase.search != "" || testCase.before != nil {
 					predicates[0] = "(" + predicates[0] + ")"
+				}
+				if testCase.scope == "starred" {
+					predicates = append(predicates, "(EXISTS (SELECT 1 FROM user_entry_preferences WHERE user_entry_preferences.user_id = ? AND user_entry_preferences.entry_id = file_entries.id AND user_entry_preferences.starred_at IS NOT NULL))")
+					values = append(values, userID)
 				}
 				if testCase.kind == "folder" {
 					predicates = append(predicates, "entry_type = ?")
@@ -200,6 +218,9 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 			// 2. 核对完整页、HasMore 或错误，失败时丢弃部分结果。
 			query := globalEntryCandidateQuery(pageSize)
 			query.Kind, query.Search = testCase.kind, testCase.search
+			if testCase.scope != "" {
+				query.Scope = testCase.scope
+			}
 			queryBefore := query
 			page, err := store.ListUserGlobalEntryCandidates(context.Background(), userID, query, testCase.before)
 			if query != queryBefore {
@@ -220,6 +241,36 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 			}
 			if err := pool.PingContext(context.Background()); err != nil {
 				t.Fatal("查询关闭了共享连接池")
+			}
+		})
+	}
+}
+
+func TestListUserStarredEntryCandidatesCancellation(t *testing.T) {
+	for _, phase := range []string{"before query", "after query"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if phase == "before query" {
+				cancel()
+			}
+			calls := 0
+			connector := &deviceConnector{accountConnector: accountConnector{query: func(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+				calls++
+				cancel()
+				return &directoryEntryRows{}, nil
+			}}}
+			pool := sql.OpenDB(connector)
+			defer pool.Close()
+			store, err := NewStore(pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := globalEntryCandidateQuery(2)
+			query.Scope = domain.GlobalEntryScopeStarred
+			page, err := store.ListUserGlobalEntryCandidates(ctx, 7, query, nil)
+			if page != nil || !errors.Is(err, context.Canceled) || (phase == "before query" && calls != 0) || (phase == "after query" && calls != 1) {
+				t.Fatal("收藏候选取消交付或查询次数错误", err, calls)
 			}
 		})
 	}
@@ -269,7 +320,7 @@ func TestListUserGlobalEntryCandidatesInput(t *testing.T) {
 }
 
 func TestListUserGlobalEntryCandidatesQueryBounds(t *testing.T) {
-	for _, mode := range []string{"zero query", "directory scope", "starred scope", "recent scope", "name sort", "size sort", "invalid encoding", "invalid kind", "uppercase kind", "padded kind", "raw file kind", "injection kind"} {
+	for _, mode := range []string{"zero query", "directory scope", "starred name sort", "recent scope", "name sort", "size sort", "invalid encoding", "invalid kind", "uppercase kind", "padded kind", "raw file kind", "injection kind"} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 检查当前读取能力支持的查询组合，提前拒绝其余条件。
 			query := globalEntryCandidateQuery(2)
@@ -278,8 +329,9 @@ func TestListUserGlobalEntryCandidatesQueryBounds(t *testing.T) {
 				query = domain.GlobalEntryQuery{}
 			case "directory scope":
 				query.Scope = "directory"
-			case "starred scope":
+			case "starred name sort":
 				query.Scope = domain.GlobalEntryScopeStarred
+				query.Sort = domain.GlobalEntrySortNameAsc
 			case "recent scope":
 				query.Scope, query.Sort = domain.GlobalEntryScopeRecent, domain.GlobalEntrySortLastOpenedDesc
 			case "name sort":

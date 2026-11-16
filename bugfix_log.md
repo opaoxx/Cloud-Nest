@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-16——收藏候选专项验证命令漏选测试
+
+### 问题现象
+
+第 198 步复核专项统计结果时，发现正则把 ListUserStarredEntryCandidates 前缀作为完整测试名并使用结尾锚点，未纳入 Cancellation 与 Integration 后缀。组合回归还把既有 TestSetUserEntryStarredIntegration 写成了 SetEntryStarredIntegration，遗漏该测试。此前收藏候选独立专项和真实表已连续三次通过。修正前记录于此，接下来使用实际完整名称及正确前缀匹配，并断言预期测试均有通过事件。
+
+### 根因与修复方案
+
+专项命令把测试名前缀与结尾锚点直接组合，漏掉带后缀的两项收藏测试；另一项旧测试名称凭印象填写，未匹配实际的 SetUserEntryStarred。改为 ListUserStarredEntryCandidates.* 前缀及已核对的完整名称，并解析 go test -json，断言五项预期主测试均有通过事件。
+
+### 验证结果
+
+修正后的收藏取消、二十组收藏正式表场景、既有收藏写入、原全局候选及签名/预算分页组合回归连续三次通过。通过事件分别为 9、63、57、27、3，包含主测试和三次子测试。原候选八十七组结果、十二组输入、十二组查询边界和五组取消专项通过。最终 go test -count=1 ./...、go vet ./...、gofmt、git diff --check、学习记录结构及两段 PowerShell 示例语法核对通过。OpenAPI 379 处本地引用与正式路由清单及原迁移摘要核对通过。
+
 ## 2026-11-16——全局路由验证中的补丁匹配与引用解析问题
 
 ### 问题现象
