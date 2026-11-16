@@ -531,3 +531,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 handler.NameEntryPageSuccess，接收已确认的名称分页结果，转换 DTO、关联当前 request_id 并完整编码 JSON，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。异常及取消复用统一错误，交付过程核对响应提交状态。专项与真实 MySQL 普通/收藏/预算/长游标结果的实际 GET 交付连续三次通过，调用与复验方法见 [第 224 步学习记录](docs/开发学习记录.md#第-224-步实现名称升序分页成功-http-交付)。
 
 已提供 NameEntryPageQuery 与 ParseNameEntryPageQuery，完整解析名称列表 URL，默认 all/name_asc、每页五十条，接收 all/starred、搜索、分类及最多 2048 字节的解码游标原文。复用领域分类和标准页大小校验，重复值或非法参数返回固定字段提示。专项、HTTP 输入及真实 MySQL 查询到交付闭环连续三次通过，规则与复验方法见 [第 225 步学习记录](docs/开发学习记录.md#第-225-步定义名称升序列表查询参数-dto)。
+
+已提供 handler.NameEntryPage，组合可信 Actor、名称查询 DTO、分页服务和成功/错误交付。格式错误使用固定 INVALID_ARGUMENT，名称游标及绑定错误使用 INVALID_CURSOR，账号/会话/设备错误复用统一授权响应。处理函数专项及真实认证、普通/收藏/长游标、预算空页/短页和状态联测连续三次通过，调用与复验方法见 [第 226 步学习记录](docs/开发学习记录.md#第-226-步实现名称升序列表-http-处理函数)。
