@@ -54,6 +54,10 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 	if err != nil {
 		t.Fatal(err)
 	}
+	verifier, err := service.NewSizeEntryCursorVerifier(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	signPosition := func(t *testing.T, query domain.GlobalEntryQuery, position *domain.SizeEntryPosition) *domain.SizeEntryPosition {
 		t.Helper()
 		if position == nil {
@@ -120,7 +124,40 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if repeated, err := signer.Sign(actor.UserID, resized, original); err != nil || repeated != cursor {
 			t.Fatal("真实大小游标页大小调整改变绑定", err)
 		}
-		return &domain.SizeEntryPosition{FileSize: fileSize, ID: entryID}
+		// 3. 正式校验器与独立解码位置对照，错误绑定在续读前拒绝。
+		independent := domain.SizeEntryPosition{FileSize: fileSize, ID: entryID}
+		restored, err := verifier.Verify(actor.UserID, resized, cursor)
+		if err != nil || restored == nil || *restored != independent || restored == position || *position != original {
+			t.Fatal("正式大小校验器未还原独立位置", err)
+		}
+		current, err := verifier.Verify(actor.UserID, query, cursor)
+		if err != nil || current == nil || current == restored || *current != independent {
+			t.Fatal("大小校验结果共享位置", err)
+		}
+		restored.FileSize ^= 1
+		if *current != independent {
+			t.Fatal("大小还原结果相互影响")
+		}
+		changedSearch, changedKind, changedScope := query, query, query
+		changedSearch.Search += " "
+		changedKind.Kind = "image"
+		if query.Scope == "all" {
+			changedScope.Scope = "starred"
+		} else {
+			changedScope.Scope = "all"
+		}
+		for _, invalid := range []struct {
+			userID uint64
+			query  domain.GlobalEntryQuery
+			cursor string
+		}{
+			{3, query, cursor}, {actor.UserID, changedSearch, cursor}, {actor.UserID, changedKind, cursor}, {actor.UserID, changedScope, cursor}, {actor.UserID, query, cursor + "A"},
+		} {
+			if result, err := verifier.Verify(invalid.userID, invalid.query, invalid.cursor); result != nil || !errors.Is(err, domain.ErrInvalidSizeEntryCursor) {
+				t.Fatal("大小错误游标绑定通过校验", err)
+			}
+		}
+		return current
 	}
 	restore := func(statement string) {
 		t.Helper()
