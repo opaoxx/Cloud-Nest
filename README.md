@@ -483,3 +483,5 @@ GlobalEntryListService.List 已支持 starred/modified_desc，在同一只读快
 全局游标签名器及校验器已支持 starred/modified_desc，沿用版本 1 七字段载荷，签名绑定当前用户、查询范围、排序、搜索/分类摘要和最后消费位置。两类范围的固定向量、协议异常、密钥/结果副本、并发及真实普通/预算空页签名续读验证连续三次通过，格式和复验方法见 [第 200 步学习记录](docs/开发学习记录.md#第-200-步让全局签名游标支持收藏范围)。
 
 GlobalEntryPageService.List 已支持 starred/modified_desc，按空游标首页、非空游标校验、可见收藏列表读取和下一页签名返回 Entries/NextCursor。预算空页保留文本游标，结束页 NextCursor 为 nil。两类范围服务专项及真实 MySQL 普通/预算分页、筛选绑定和公开 DTO 空值验证连续三次通过，调用与复验方法见 [第 201 步学习记录](docs/开发学习记录.md#第-201-步让文本游标分页服务支持收藏范围)。
+
+ParseGlobalEntryPageQuery 已接收单个 scope=all/starred，并保留实际范围，默认 all/modified_desc、每页五十条。搜索、分类及游标原文继续传给分页服务，重复/空/不支持范围使用固定 scope 字段提示。参数、测试 HTTP 入口及真实 MySQL 文本分页闭环连续三次通过，说明和复验方法见 [第 202 步学习记录](docs/开发学习记录.md#第-202-步让全局列表查询参数支持收藏范围)。

@@ -16,9 +16,18 @@ import (
 
 func TestParseGlobalEntryPageQuery(t *testing.T) {
 	for _, testCase := range []struct {
-		name, raw, search, kind, cursor string
-		size                            int
+		name, raw, search, kind, cursor, scope string
+		size                                   int
 	}{
+		{name: "starred defaults", raw: "scope=starred", scope: "starred", size: 50},
+		{name: "starred complete", raw: "scope=starred&sort=modified_desc&q=学习&kind=document&cursor=opaque.page&limit=2", scope: "starred", search: "学习", kind: "document", cursor: "opaque.page", size: 2},
+		{name: "encoded starred scope", raw: "%73cope=%73tarred", scope: "starred", size: 50},
+		{name: "starred whitespace", raw: "scope=starred&q=+%09%20&kind=folder", scope: "starred", search: " \t ", kind: "folder", size: 50},
+		{name: "starred maximum cursor", raw: "scope=starred&limit=100&cursor=" + strings.Repeat("a", 1024), scope: "starred", cursor: strings.Repeat("a", 1024), size: 100},
+		{name: "starred ignored extras", raw: "scope=starred&parent_id=private-parent&parent_id=0&user_id=99", scope: "starred", size: 50},
+		{name: "starred unicode form", raw: "scope=starred&q=Cafe%CC%81&kind=image", scope: "starred", search: "Cafe\u0301", kind: "image", size: 50},
+		{name: "starred literal search", raw: "scope=starred&q=" + url.QueryEscape("%_+=\x00"), scope: "starred", search: "%_+=\x00", size: 50},
+		{name: "starred long search", raw: "scope=starred&q=" + url.QueryEscape(strings.Repeat("学", 2000)), scope: "starred", search: strings.Repeat("学", 2000), size: 50},
 		{name: "defaults", size: 50},
 		{name: "explicit defaults", raw: "scope=all&sort=modified_desc&q=&kind=&cursor=&limit=50", size: 50},
 		{name: "empty without equals", raw: "q&kind&cursor", size: 50},
@@ -40,7 +49,11 @@ func TestParseGlobalEntryPageQuery(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			input, fieldError := ParseGlobalEntryPageQuery(testCase.raw)
-			expected := domain.GlobalEntryQuery{Scope: "all", Sort: "modified_desc", Search: testCase.search, Kind: testCase.kind, PageSize: testCase.size}
+			scope := testCase.scope
+			if scope == "" {
+				scope = domain.GlobalEntryScopeAll
+			}
+			expected := domain.GlobalEntryQuery{Scope: scope, Sort: "modified_desc", Search: testCase.search, Kind: testCase.kind, PageSize: testCase.size}
 			if fieldError != nil || input == nil || input.Query != expected || input.Cursor != testCase.cursor || !input.Query.IsValid() {
 				t.Fatal("全局查询参数、默认值或原文错误", fieldError)
 			}
@@ -52,6 +65,10 @@ func TestParseGlobalEntryPageQuery(t *testing.T) {
 			if fieldError != nil || input == nil || input.Query.Kind != kind {
 				t.Fatal("领域分类未被完整接收", fieldError)
 			}
+			starred, fieldError := ParseGlobalEntryPageQuery("scope=starred&kind=" + kind)
+			if fieldError != nil || starred == nil || starred.Query.Scope != domain.GlobalEntryScopeStarred || starred.Query.Kind != kind {
+				t.Fatal("收藏分类或范围未被完整接收", fieldError)
+			}
 		})
 	}
 }
@@ -59,7 +76,7 @@ func TestParseGlobalEntryPageQuery(t *testing.T) {
 func TestParseGlobalEntryPageQueryFailures(t *testing.T) {
 	messages := map[string]string{
 		"query":  "查询参数格式不正确",
-		"scope":  "当前全局查询范围须为单个 all",
+		"scope":  "当前全局查询范围须为单个 all 或 starred",
 		"sort":   "当前全局排序须为单个 modified_desc",
 		"q":      "搜索条件须为单个有效 UTF-8 文本",
 		"kind":   "类型筛选须为单个空值或 folder/document/image/video/audio/archive/other",
@@ -67,8 +84,20 @@ func TestParseGlobalEntryPageQueryFailures(t *testing.T) {
 		"limit":  "每页数量须为单个 1～100 的标准十进制整数",
 	}
 	for _, testCase := range []struct{ name, raw, field string }{
+		{"duplicate starred", "scope=starred&scope=starred", "scope"},
+		{"encoded duplicate starred", "scope=starred&%73cope=starred", "scope"},
+		{"mixed scopes", "scope=all&scope=starred", "scope"},
+		{"spaced starred", "scope=starred+", "scope"},
+		{"double encoded starred", "scope=%2573tarred", "scope"},
+		{"starred wrong sort", "scope=starred&sort=name_asc", "sort"},
+		{"starred invalid search", "scope=starred&q=%FF", "q"},
+		{"starred duplicate search", "scope=starred&q=&%71=", "q"},
+		{"starred invalid kind", "scope=starred&kind=private-kind", "kind"},
+		{"starred duplicate cursor", "scope=starred&cursor=&cursor=", "cursor"},
+		{"starred invalid limit", "scope=starred&limit=0", "limit"},
+		{"starred malformed query", "scope=starred&note=%ZZ", "query"},
 		{"directory scope", "scope=directory", "scope"},
-		{"starred scope", "scope=starred", "scope"},
+		{"uppercase starred scope", "scope=STARRED", "scope"},
 		{"recent scope", "scope=recent", "scope"},
 		{"empty scope", "scope=", "scope"},
 		{"uppercase scope", "scope=ALL", "scope"},
@@ -141,6 +170,15 @@ func TestParseGlobalEntryPageQueryFailures(t *testing.T) {
 }
 
 func TestGlobalEntryPageQueryServiceParameters(t *testing.T) {
+	testGlobalEntryPageQueryServiceParameters(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryPageQueryServiceParameters(t *testing.T) {
+	testGlobalEntryPageQueryServiceParameters(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryPageQueryServiceParameters(t *testing.T, scope string) {
+	t.Helper()
 	// 1. 使用真实签名器生成绑定搜索原文的游标，通过查询 DTO 还原输入。
 	masterKey := bytes.Repeat([]byte{9}, 32)
 	signer, err := service.NewGlobalEntryCursorSigner(masterKey)
@@ -151,13 +189,13 @@ func TestGlobalEntryPageQueryServiceParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := domain.GlobalEntryQuery{Scope: "all", Sort: "modified_desc", Search: " 学习%_+ ", Kind: "document", PageSize: 50}
+	query := domain.GlobalEntryQuery{Scope: scope, Sort: "modified_desc", Search: " 学习%_+ ", Kind: "document", PageSize: 50}
 	position := domain.FileEntryPosition{ModifiedAt: time.Date(2026, 11, 15, 3, 30, 0, 123456000, time.UTC), ID: 25}
 	cursor, err := signer.Sign(7, query, position)
 	if err != nil {
 		t.Fatal(err)
 	}
-	values := url.Values{"scope": {"all"}, "q": {query.Search}, "kind": {query.Kind}, "limit": {"2"}, "cursor": {cursor}, "user_id": {"99"}}
+	values := url.Values{"scope": {scope}, "q": {query.Search}, "kind": {query.Kind}, "limit": {"2"}, "cursor": {cursor}, "user_id": {"99"}}
 	input, fieldError := ParseGlobalEntryPageQuery(values.Encode())
 	if fieldError != nil || input == nil {
 		t.Fatal(fieldError)
@@ -186,13 +224,19 @@ func TestGlobalEntryPageQueryServiceParameters(t *testing.T) {
 		t.Fatal("服务结果未转换为全局响应", err)
 	}
 
-	// 3. 修改搜索或分类仍能解析，但原游标由分页服务拒绝。
-	for _, field := range []string{"q", "kind"} {
-		changed := url.Values{"q": {query.Search}, "kind": {query.Kind}, "cursor": {cursor}}
+	// 3. 修改范围、搜索或分类后完成格式解析，再由分页服务核对原游标绑定。
+	for _, field := range []string{"q", "kind", "scope"} {
+		changed := url.Values{"scope": {scope}, "q": {query.Search}, "kind": {query.Kind}, "cursor": {cursor}}
 		if field == "q" {
 			changed.Set(field, strings.TrimSpace(query.Search))
-		} else {
+		} else if field == "kind" {
 			changed.Set(field, "image")
+		} else {
+			other := domain.GlobalEntryScopeAll
+			if scope == domain.GlobalEntryScopeAll {
+				other = domain.GlobalEntryScopeStarred
+			}
+			changed.Set(field, other)
 		}
 		parsed, fieldError := ParseGlobalEntryPageQuery(changed.Encode())
 		if fieldError != nil || parsed == nil {

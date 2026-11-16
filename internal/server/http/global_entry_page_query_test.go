@@ -18,16 +18,20 @@ import (
 
 func TestGlobalEntryPageQueryHTTPFlow(t *testing.T) {
 	for _, testCase := range []struct {
-		name, raw, field, search, kind, cursor string
-		size                                   int
+		name, raw, field, search, kind, cursor, scope string
+		size                                          int
 	}{
+		{name: "starred default query", raw: "scope=starred", scope: "starred", size: 50},
+		{name: "starred encoded scope", raw: "%73cope=%73tarred&limit=1", scope: "starred", size: 1},
+		{name: "starred filters", raw: "scope=starred&q=" + url.QueryEscape(" private-学习%_+ ") + "&kind=document&limit=2", scope: "starred", search: " private-学习%_+ ", kind: "document", size: 2},
+		{name: "starred next cursor", raw: "scope=starred&cursor=private-cursor&limit=100", scope: "starred", cursor: "private-cursor", size: 100},
 		{name: "defaults", size: 50},
 		{name: "explicit mode", raw: "scope=all&sort=modified_desc&q=&kind=&cursor=", size: 50},
 		{name: "search and category", raw: "q=" + url.QueryEscape(" private-学习%_+ ") + "&kind=document&limit=2", search: " private-学习%_+ ", kind: "document", size: 2},
 		{name: "next page", raw: "cursor=private-cursor&limit=100", cursor: "private-cursor", size: 100},
 		{name: "encoded keys", raw: "%71=%E5%AD%A6%E4%B9%A0&%6Bind=folder&%6Cimit=%31", search: "学习", kind: "folder", size: 1},
 		{name: "ignored identity", raw: "user_id=99&parent_id=private-parent&note=private-query", size: 50},
-		{name: "unsupported scope", raw: "scope=starred", field: "scope"},
+		{name: "unsupported scope", raw: "scope=recent", field: "scope"},
 		{name: "empty scope", raw: "scope=", field: "scope"},
 		{name: "duplicate scope", raw: "scope=all&%73cope=all", field: "scope"},
 		{name: "unsupported sort", raw: "sort=name_asc", field: "sort"},
@@ -74,6 +78,9 @@ func TestGlobalEntryPageQueryHTTPFlow(t *testing.T) {
 			if testCase.field == "" {
 				var body dto.GlobalEntryPageResponse
 				expected := domain.GlobalEntryQuery{Scope: "all", Sort: "modified_desc", Search: testCase.search, Kind: testCase.kind, PageSize: testCase.size}
+				if testCase.scope != "" {
+					expected.Scope = testCase.scope
+				}
 				if response.Code != 200 || accepted == nil || accepted.Query != expected || accepted.Cursor != testCase.cursor || json.Unmarshal(response.Body.Bytes(), &body) != nil || len(body.Data.Items) != 1 || body.RequestID != response.Header().Get("X-Request-ID") {
 					t.Fatal("解析或全局成功交付衔接错误")
 				}

@@ -27,14 +27,17 @@ import (
 
 func TestGlobalEntryPageHandlerFlow(t *testing.T) {
 	for _, testCase := range []struct {
-		name, raw, code, field, search, kind, cursor      string
-		status, calls, size, cancelOn                     int
-		serviceError                                      error
-		change                                            func(*domain.GlobalEntryPageResult)
-		missingActor, nilResult, maximumActor             bool
-		cancelBefore, cancelAfter, deadline, panicService bool
-		pending, noOrigin, forbiddenOrigin                bool
+		name, raw, code, field, search, kind, cursor, scope string
+		status, calls, size, cancelOn                       int
+		serviceError                                        error
+		change                                              func(*domain.GlobalEntryPageResult)
+		missingActor, nilResult, maximumActor               bool
+		cancelBefore, cancelAfter, deadline, panicService   bool
+		pending, noOrigin, forbiddenOrigin                  bool
 	}{
+		{name: "starred query", raw: "scope=starred", scope: "starred", status: 200, calls: 1},
+		{name: "starred search query", raw: "scope=starred&q=" + url.QueryEscape(" 学习%_+ ") + "&kind=document&limit=2", scope: "starred", search: " 学习%_+ ", kind: "document", size: 2, status: 200, calls: 1},
+		{name: "starred next query", raw: "scope=starred&cursor=private-opaque-cursor&limit=2", scope: "starred", cursor: "private-opaque-cursor", size: 2, status: 200, calls: 1},
 		{name: "defaults", status: 200, calls: 1},
 		{name: "explicit mode", raw: "scope=all&sort=modified_desc&q=&kind=&cursor=", status: 200, calls: 1},
 		{name: "search and kind", raw: "q=" + url.QueryEscape(" 学习%_+ ") + "&kind=document&limit=2", search: " 学习%_+ ", kind: "document", size: 2, status: 200, calls: 1},
@@ -47,7 +50,7 @@ func TestGlobalEntryPageHandlerFlow(t *testing.T) {
 		{name: "last page", status: 200, calls: 1, change: func(result *domain.GlobalEntryPageResult) { result.NextCursor = nil }},
 		{name: "maximum identity", raw: "limit=100", size: 100, maximumActor: true, status: 200, calls: 1},
 		{name: "missing actor before query", raw: "limit=0", missingActor: true, status: 500, code: "INTERNAL_ERROR"},
-		{name: "unsupported scope", raw: "scope=starred", status: 400, code: "INVALID_ARGUMENT", field: "scope"},
+		{name: "unsupported scope", raw: "scope=recent", status: 400, code: "INVALID_ARGUMENT", field: "scope"},
 		{name: "unsupported sort", raw: "sort=name_asc", status: 400, code: "INVALID_ARGUMENT", field: "sort"},
 		{name: "invalid search", raw: "q=%FF", status: 400, code: "INVALID_ARGUMENT", field: "q"},
 		{name: "duplicate search", raw: "q=private-one&%71=private-two", status: 400, code: "INVALID_ARGUMENT", field: "q"},
@@ -132,6 +135,9 @@ func TestGlobalEntryPageHandlerFlow(t *testing.T) {
 			list := handler.GlobalEntryPage(func(received context.Context, identity domain.Actor, query domain.GlobalEntryQuery, cursor string) (*domain.GlobalEntryPageResult, error) {
 				calls++
 				expected := domain.GlobalEntryQuery{Scope: "all", Sort: "modified_desc", Search: testCase.search, Kind: testCase.kind, PageSize: size}
+				if testCase.scope != "" {
+					expected.Scope = testCase.scope
+				}
 				if received != expectedContext || identity != actor || query != expected || cursor != testCase.cursor {
 					t.Error("分页服务收到的身份、上下文或查询参数错误")
 				}

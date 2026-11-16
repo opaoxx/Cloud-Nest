@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +159,18 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 		}
 	}
 
+	parseTextQuery := func(t *testing.T, query domain.GlobalEntryQuery, cursor string) *dto.GlobalEntryPageQuery {
+		t.Helper()
+		values := url.Values{
+			"scope": {query.Scope}, "sort": {query.Sort}, "q": {query.Search}, "kind": {query.Kind},
+			"limit": {strconv.Itoa(query.PageSize)}, "cursor": {cursor}, "user_id": {"3"}, "parent_id": {"private-parent"},
+		}
+		input, fieldError := dto.ParseGlobalEntryPageQuery(values.Encode())
+		if fieldError != nil || input == nil || input.Query != query || input.Cursor != cursor {
+			t.Fatal("真实文本分页查询解析或原文保留错误", fieldError)
+		}
+		return input
+	}
 	checkTextPage := func(t *testing.T, query domain.GlobalEntryQuery, result *domain.GlobalEntryPageResult, ids []uint64, nextID uint64) {
 		t.Helper()
 		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || (result.NextCursor != nil) != (nextID != 0) {
@@ -198,13 +212,15 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 		paging := service.NewGlobalEntryPageService(cursorVerifier.Verify, listing.List, cursorSigner.Sign)
 		query := queryForPage(1)
 		query.Search, query.Kind = "学习", "document"
-		first, err := paging.List(ctx, actor, query, "")
+		input := parseTextQuery(t, query, "")
+		first, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkTextPage(t, query, first, []uint64{15}, 15)
 		query.PageSize = 2
-		next, err := paging.List(ctx, actor, query, *first.NextCursor)
+		input = parseTextQuery(t, query, *first.NextCursor)
+		next, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -228,21 +244,23 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 				cursor += "="
 			}
 			beforeCalls := *calls
-			result, err := paging.List(ctx, identity, filters, cursor)
+			changedInput := parseTextQuery(t, filters, cursor)
+			result, err := paging.List(ctx, identity, changedInput.Query, changedInput.Cursor)
 			if result != nil || !errors.Is(err, domain.ErrInvalidGlobalEntryCursor) || *calls != beforeCalls {
 				t.Fatal("错误文本游标进入了候选读取", mode, err)
 			}
 		}
 		// 3. 空结束页和空列表账号状态通过真实服务链检查。
 		query.Search = "无匹配项"
-		empty, err := paging.List(ctx, actor, query, "")
+		input = parseTextQuery(t, query, "")
+		empty, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkTextPage(t, query, empty, nil, 0)
 		disabled := actor
 		disabled.UserID = 5
-		if result, err := paging.List(ctx, disabled, query, ""); result != nil || !errors.Is(err, domain.ErrAccountDisabled) {
+		if result, err := paging.List(ctx, disabled, input.Query, input.Cursor); result != nil || !errors.Is(err, domain.ErrAccountDisabled) {
 			t.Fatal("文本空列表未复查账号状态", err)
 		}
 	})
@@ -430,17 +448,20 @@ func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
 		paging := service.NewGlobalEntryPageService(cursorVerifier.Verify, listing.List, cursorSigner.Sign)
 		query := queryForPage(1)
 		query.Kind = "document"
-		first, err := paging.List(ctx, actor, query, "")
+		input := parseTextQuery(t, query, "")
+		first, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil || *calls != 10 {
 			t.Fatal("文本预算空页扫描次数错误", err)
 		}
 		checkTextPage(t, query, first, nil, 1001)
-		second, err := paging.List(ctx, actor, query, *first.NextCursor)
+		input = parseTextQuery(t, query, *first.NextCursor)
+		second, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil || *calls != 11 {
 			t.Fatal("文本预算空页续读错误", err)
 		}
 		checkTextPage(t, query, second, []uint64{15}, 15)
-		third, err := paging.List(ctx, actor, query, *second.NextCursor)
+		input = parseTextQuery(t, query, *second.NextCursor)
+		third, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil || *calls != 12 {
 			t.Fatal("文本预算分页结束错误", err)
 		}

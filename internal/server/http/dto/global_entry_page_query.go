@@ -16,7 +16,7 @@ type GlobalEntryPageQuery struct {
 }
 
 // ParseGlobalEntryPageQuery 解析完整 RawQuery，失败返回固定公开字段错误。
-// 当前支持 all/modified_desc，额外字段沿用忽略策略，游标签名由分页服务校验。
+// 当前支持 all/starred 的修改时间降序查询，额外字段沿用忽略策略，游标签名由分页服务校验。
 func ParseGlobalEntryPageQuery(rawQuery string) (*GlobalEntryPageQuery, *FieldError) {
 	// 1. 完整解析查询字符串，设置全局查询默认值。
 	values, err := url.ParseQuery(rawQuery)
@@ -27,14 +27,15 @@ func ParseGlobalEntryPageQuery(rawQuery string) (*GlobalEntryPageQuery, *FieldEr
 		Scope: domain.GlobalEntryScopeAll, Sort: domain.GlobalEntrySortModifiedDesc, PageSize: 50,
 	}}
 
-	// 2. 校验当前支持的范围和排序。
-	for _, rule := range []struct{ field, expected, message string }{
-		{field: "scope", expected: query.Query.Scope, message: "当前全局查询范围须为单个 all"},
-		{field: "sort", expected: query.Query.Sort, message: "当前全局排序须为单个 modified_desc"},
-	} {
-		if supplied, present := values[rule.field]; present && (len(supplied) != 1 || supplied[0] != rule.expected) {
-			return nil, &FieldError{Field: rule.field, Message: rule.message}
+	// 2. 校验范围和排序，保留 all/starred 实际范围。
+	if scopes, present := values["scope"]; present {
+		if len(scopes) != 1 || (scopes[0] != domain.GlobalEntryScopeAll && scopes[0] != domain.GlobalEntryScopeStarred) {
+			return nil, &FieldError{Field: "scope", Message: "当前全局查询范围须为单个 all 或 starred"}
 		}
+		query.Query.Scope = scopes[0]
+	}
+	if sorts, present := values["sort"]; present && (len(sorts) != 1 || sorts[0] != domain.GlobalEntrySortModifiedDesc) {
+		return nil, &FieldError{Field: "sort", Message: "当前全局排序须为单个 modified_desc"}
 	}
 
 	// 3. 校验搜索与分类，保留搜索原文。
