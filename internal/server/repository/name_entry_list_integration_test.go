@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -195,14 +196,22 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 	}
 	checkTextPage := func(t *testing.T, listing *service.NameEntryListService, query domain.GlobalEntryQuery, cursor string, ids []uint64, nextID uint64) string {
 		t.Helper()
-		// 1. 组合正式能力，并统计错误绑定是否在列表读取前被拒绝。
+		// 1. 解析 URL 原文后组合正式能力，检查类型化条件及可信身份。
+		values := url.Values{
+			"scope": {query.Scope}, "sort": {query.Sort}, "q": {query.Search}, "kind": {query.Kind},
+			"limit": {strconv.Itoa(query.PageSize)}, "cursor": {cursor}, "user_id": {"99"}, "parent_id": {"private-parent"},
+		}
+		input, fieldError := dto.ParseNameEntryPageQuery(values.Encode())
+		if fieldError != nil || input == nil || input.Query != query || input.Cursor != cursor {
+			t.Fatal("真实名称分页 URL 条件或原文错误", fieldError)
+		}
 		listCalls := 0
 		paging := service.NewNameEntryPageService(verifier.Verify,
 			func(current context.Context, identity domain.Actor, filters domain.GlobalEntryQuery, after *domain.NameEntryPosition) (*domain.NameEntryList, error) {
 				listCalls++
 				return listing.List(current, identity, filters, after)
 			}, signer.Sign)
-		result, err := paging.List(ctx, actor, query, cursor)
+		result, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil || result == nil || result.Entries == nil || (result.NextCursor != nil) != (nextID != 0) || listCalls != 1 {
 			t.Fatal("名称文本分页结果错误", err)
 		}
@@ -220,13 +229,21 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		var logs bytes.Buffer
 		router := serverhttp.NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
 		router.GET("/test-name-entry-page-success", func(requestContext *gin.Context) {
+			parsed, fieldError := dto.ParseNameEntryPageQuery(requestContext.Request.URL.RawQuery)
+			if fieldError != nil {
+				handler.InvalidArgument(requestContext, fieldError)
+				return
+			}
+			if parsed.Query != input.Query || parsed.Cursor != input.Cursor {
+				t.Error("实际 GET 未保留名称查询条件")
+			}
 			handler.NameEntryPageSuccess(requestContext, result)
 		}, func(*gin.Context) { t.Error("真实名称分页交付后进入下游") })
 		server := httptest.NewServer(router)
 		defer server.Close()
 		client := server.Client()
 		client.Timeout = 2 * time.Second
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-name-entry-page-success", nil)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-name-entry-page-success?"+values.Encode(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
