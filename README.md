@@ -535,3 +535,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 handler.NameEntryPage，组合可信 Actor、名称查询 DTO、分页服务和成功/错误交付。格式错误使用固定 INVALID_ARGUMENT，名称游标及绑定错误使用 INVALID_CURSOR，账号/会话/设备错误复用统一授权响应。处理函数专项及真实认证、普通/收藏/长游标、预算空页/短页和状态联测连续三次通过，调用与复验方法见 [第 226 步学习记录](docs/开发学习记录.md#第-226-步实现名称升序列表-http-处理函数)。
 
 GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 scope=all&sort=name_asc 或 scope=starred&sort=name_asc。正式启动装配同快照名称列表及持久化主密钥派生的名称游标，支持搜索、分类、2048 字节游标和预算空页续读。路由及真实启动/重启联测连续三次通过，普通、收藏、预算和长键原游标可跨重启使用，示例与复验方法见 [第 227 步学习记录](docs/开发学习记录.md#第-227-步接入正式名称升序列表路由与启动装配)。
+
+已提供 SizeEntryPosition，以完整无符号 FileSize 和目录项 ID 表达大小/ID 双降序的内部续页位置。IsValid 检查非零 ID，大小接受零字节至 uint64 最大值，可保存最后扫描候选。四十五组边界、四组基础记录/副本及既有大小读取正式表回归连续三次通过，模型与复验方法见 [第 228 步学习记录](docs/开发学习记录.md#第-228-步定义全局大小降序分页位置模型)。
