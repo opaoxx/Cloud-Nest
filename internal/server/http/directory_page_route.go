@@ -11,7 +11,7 @@ import (
 )
 
 // RegisterDirectoryPageRoute 注册目录列表路径，可追加一个全局分页服务。
-// 单个 scope=all 进入全局查询，其余输入交由目录查询 DTO 校验。
+// 单个 all/starred 进入全局分页处理，其余输入交由目录查询 DTO 校验。
 func RegisterDirectoryPageRoute(
 	router *gin.Engine,
 	authorize func(context.Context, string) (*domain.Actor, error),
@@ -28,14 +28,14 @@ func RegisterDirectoryPageRoute(
 	protected := middleware.RequireAuthorization(authorize, handler.AuthorizationFailure)
 	directoryPage := handler.DirectoryPage(listPage)
 
-	// 2. 识别单个 scope=all，选择全局或目录处理函数。
+	// 2. 识别单个 all/starred，选择全局或目录处理函数。
 	entriesPage := directoryPage
 	if len(globalPages) == 1 {
 		globalPage := handler.GlobalEntryPage(globalPages[0])
 		entriesPage = func(requestContext *gin.Context) {
 			values, err := url.ParseQuery(requestContext.Request.URL.RawQuery)
 			scopes := values["scope"]
-			if err == nil && len(scopes) == 1 && scopes[0] == domain.GlobalEntryScopeAll {
+			if err == nil && len(scopes) == 1 && (scopes[0] == domain.GlobalEntryScopeAll || scopes[0] == domain.GlobalEntryScopeStarred) {
 				globalPage(requestContext)
 				return
 			}

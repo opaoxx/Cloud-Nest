@@ -18,12 +18,28 @@ import (
 
 func TestRegisterGlobalEntryPageRoute(t *testing.T) {
 	for _, testCase := range []struct {
-		name, method, path, raw, code, field, search, kind, cursor string
-		status, auth, directories, globals, details, size          int
-		parentID                                                   uint64
-		bearer, preflight, budget, foreignOrigin                   bool
-		authorizationError, serviceError                           error
+		name, method, path, raw, code, field, search, kind, cursor, scope string
+		status, auth, directories, globals, details, size                 int
+		parentID                                                          uint64
+		bearer, preflight, budget, foreignOrigin                          bool
+		authorizationError, serviceError                                  error
 	}{
+		{name: "starred default", raw: "scope=starred", scope: "starred", bearer: true, status: 200, auth: 1, globals: 1, size: 50},
+		{name: "starred filters", raw: "scope=starred&sort=modified_desc&q=+%E5%AD%A6%E4%B9%A0%25_%2B+&kind=document&limit=2", scope: "starred", search: " 学习%_+ ", kind: "document", bearer: true, status: 200, auth: 1, globals: 1, size: 2},
+		{name: "encoded starred", raw: "%73cope=%73tarred&limit=1", scope: "starred", bearer: true, status: 200, auth: 1, globals: 1, size: 1},
+		{name: "starred ignored parent", raw: "scope=starred&parent_id=private-parent&parent_id=0&user_id=99", scope: "starred", bearer: true, status: 200, auth: 1, globals: 1, size: 50},
+		{name: "starred cursor", raw: "scope=starred&cursor=private-starred-cursor&limit=100", scope: "starred", cursor: "private-starred-cursor", bearer: true, status: 200, auth: 1, globals: 1, size: 100},
+		{name: "starred budget empty", raw: "scope=starred", scope: "starred", budget: true, bearer: true, status: 200, auth: 1, globals: 1, size: 50},
+		{name: "duplicate starred", raw: "scope=starred&%73cope=starred", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
+		{name: "mixed global scopes", raw: "scope=all&scope=starred", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
+		{name: "starred bad limit", raw: "scope=starred&limit=0", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "limit"},
+		{name: "starred bad search", raw: "scope=starred&q=%FF", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "q"},
+		{name: "starred malformed query", raw: "scope=starred&note=%ZZ", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "query"},
+		{name: "starred missing authorization", raw: "scope=starred&limit=0", status: 401, code: "AUTH_REQUIRED"},
+		{name: "starred revoked authorization", raw: "scope=starred&limit=0", bearer: true, authorizationError: domain.ErrSessionRevoked, status: 401, auth: 1, code: "SESSION_REVOKED"},
+		{name: "starred invalid cursor", raw: "scope=starred", scope: "starred", bearer: true, serviceError: domain.ErrInvalidGlobalEntryCursor, status: 400, auth: 1, globals: 1, size: 50, code: "INVALID_CURSOR", field: "cursor"},
+		{name: "starred internal failure", raw: "scope=starred", scope: "starred", bearer: true, serviceError: errors.New("private-service-error"), status: 500, auth: 1, globals: 1, size: 50, code: "INTERNAL_ERROR"},
+		{name: "starred preflight", method: "OPTIONS", raw: "scope=starred", preflight: true, status: 204},
 		{name: "default directory", raw: "parent_id=12", bearer: true, status: 200, auth: 1, directories: 1, parentID: 12, size: 50},
 		{name: "explicit directory", raw: "scope=directory&parent_id=12&limit=2", bearer: true, status: 200, auth: 1, directories: 1, parentID: 12, size: 2},
 		{name: "directory cursor", raw: "parent_id=12&cursor=private-directory-cursor", cursor: "private-directory-cursor", bearer: true, status: 200, auth: 1, directories: 1, parentID: 12, size: 50},
@@ -35,7 +51,7 @@ func TestRegisterGlobalEntryPageRoute(t *testing.T) {
 		{name: "budget empty", raw: "scope=all", budget: true, bearer: true, status: 200, auth: 1, globals: 1, size: 50},
 		{name: "missing scope and parent", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "parent_id"},
 		{name: "empty scope", raw: "scope=&parent_id=12", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
-		{name: "unsupported scope", raw: "scope=starred", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
+		{name: "unsupported scope", raw: "scope=recent", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
 		{name: "uppercase scope", raw: "scope=ALL", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
 		{name: "uppercase key", raw: "SCOPE=all&parent_id=12", bearer: true, status: 200, auth: 1, directories: 1, parentID: 12, size: 50},
 		{name: "duplicate all", raw: "scope=all&scope=all", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
@@ -89,6 +105,9 @@ func TestRegisterGlobalEntryPageRoute(t *testing.T) {
 					globalCalls++
 					checkActor(ctx, received)
 					expected := domain.GlobalEntryQuery{Scope: "all", Sort: "modified_desc", Search: testCase.search, Kind: testCase.kind, PageSize: testCase.size}
+					if testCase.scope != "" {
+						expected.Scope = testCase.scope
+					}
 					if query != expected || cursor != testCase.cursor {
 						t.Error("全局分派的参数错误")
 					}

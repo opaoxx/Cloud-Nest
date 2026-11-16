@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-16——收藏列表启动联测与既有收藏写入变量重名
+
+### 问题现象
+
+第 203 步首次启动联测编译失败，新增收藏列表使用 starredBeforeRestart/starredAfterRestart，与既有收藏写入响应变量同名，出现 GlobalEntryPageResponse 和 SetStarredResponse 类型不匹配、缺少 NextCursor 及重复声明错误。修正前记录于此，接下来为新增列表响应使用明确的 starredList 前缀，再执行完整启动及重启验证。
+
+### 根因与修复方案
+
+同一个启动联测函数同时验证 PUT 收藏写入与 GET 收藏列表，新代码沿用了既有写入响应的 starredBeforeRestart/starredAfterRestart 名称，使多重声明复用到错误类型。将新增列表响应明确命名为 starredListBeforeRestart/starredListAfterRestart，并同步修正其游标、对照及日志保护引用。
+
+### 验证结果
+
+修正后真实 run 启动与重启联测连续三次通过，每轮新增二十七次收藏 GET 和八次 PUT，普通/预算原游标跨重启续读准确。四十八组正式路由、两组依赖及相邻路由组合专项连续三次通过，收藏/全局列表、收藏候选及原签名正式表组合回归通过。go vet ./...、gofmt 及 OpenAPI 379 处本地引用与正式路由清单核对通过。go test -count=1 ./... 全量、git diff --check、学习记录历史/结构及两段 PowerShell 示例语法复验通过。
+
 ## 2026-11-16——收藏候选专项验证命令漏选测试
 
 ### 问题现象
