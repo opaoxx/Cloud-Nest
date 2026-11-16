@@ -11,6 +11,9 @@ var ErrFileEntryNotFound = errors.New("目录项不存在")
 // ErrInvalidFileEntryData 表示目录项查询结果的归属或基础标识异常。
 var ErrInvalidFileEntryData = errors.New("目录项数据异常")
 
+// ErrFileEntryNotFile 表示访问记录等文件操作收到有效目录目标。
+var ErrFileEntryNotFile = errors.New("目标目录项不是文件")
+
 // ErrRootEntryRename 表示真实根目录受数据库根记录约束保护。
 var ErrRootEntryRename = errors.New("根目录不能重命名")
 

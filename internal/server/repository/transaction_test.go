@@ -34,6 +34,7 @@ type loginTransactionScript struct {
 	renameEntry                                        func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	moveEntry                                          func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	setStarred                                         func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	recordAccess                                       func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	restore                                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
 	rollbackOnce                                       sync.Once
@@ -69,6 +70,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "INSERT INTO user_entry_preferences (user_id, entry_id, last_opened_at)") && connection.script.recordAccess != nil {
+		connection.script.record("record_access")
+		return connection.script.recordAccess(ctx, statement, arguments)
+	}
 	if (strings.HasPrefix(statement, "INSERT INTO user_entry_preferences ") || strings.HasPrefix(statement, "UPDATE user_entry_preferences ")) && connection.script.setStarred != nil {
 		connection.script.record("set_starred")
 		return connection.script.setStarred(ctx, statement, arguments)
