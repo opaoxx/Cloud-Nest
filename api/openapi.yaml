@@ -69,7 +69,8 @@ info:
     GlobalEntryPageData/GlobalEntryPageResponse 定义全局分页响应，复用条目摘要，breadcrumbs 为 []，预算空页保留 next_cursor，结束时返回 null。
     全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     GlobalEntryScope/GlobalEntrySort/GlobalEntrySearch/GlobalEntryKind/GlobalEntryCursor/GlobalEntryLimit 定义全局查询 DTO 输入，默认 all/modified_desc、每页 50 条。
-    全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略，正式全局入口将在处理函数及路由装配时连接。
+    全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略。
+    全局页处理函数组合认证 Actor、查询 DTO、分页服务及成功交付，输入/游标错误见 GlobalEntryQueryRejected，结果核对当前用户和请求页大小，正式全局入口将在路由装配时连接。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
     目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
@@ -2293,6 +2294,42 @@ components:
                   code: IDEMPOTENCY_EXPIRED
                   message: 幂等记录已到期，请先核对已有资源状态
                   details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    GlobalEntryQueryRejected:
+      description: |
+        HTTP 400，查询格式及字段使用 INVALID_ARGUMENT，游标签名/用户/范围/筛选绑定无效使用 INVALID_CURSOR。
+        details.field 定位 query、scope、sort、q、kind、cursor 或 limit，返回固定提示，适用于 all/modified_desc 全局分页。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalid_cursor:
+              value:
+                error:
+                  code: INVALID_CURSOR
+                  message: 全局分页游标无效，请重新查询
+                  details:
+                    field: cursor
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            invalid_search:
+              value:
+                error:
+                  code: INVALID_ARGUMENT
+                  message: 搜索条件须为单个有效 UTF-8 文本
+                  details:
+                    field: q
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     DirectoryQueryRejected:
       description: |
