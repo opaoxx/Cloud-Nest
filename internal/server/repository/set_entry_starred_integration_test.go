@@ -13,6 +13,20 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
+// starredResultStore 在真实收藏写入后注入异常，验证核心服务的结果核对及回滚。
+type starredResultStore struct {
+	*Store
+	afterSet func(*domain.EntryPreference)
+}
+
+func (store *starredResultStore) SetUserEntryStarred(ctx context.Context, entryID uint64, starred bool) (*domain.EntryPreference, error) {
+	preference, err := store.Store.SetUserEntryStarred(ctx, entryID, starred)
+	if err == nil && store.afterSet != nil {
+		store.afterSet(preference)
+	}
+	return preference, err
+}
+
 func TestSetUserEntryStarredIntegration(t *testing.T) {
 	// 1. 正式表独占库准备当前身份、文件/目录及不同偏好状态。
 	pool := userProfileDatabase(t)
@@ -50,23 +64,13 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
-	set := func(callContext context.Context, entryID uint64, starred bool) (*domain.EntryPreference, error) {
-		var prepared *domain.EntryPreference
-		err := store.WithUserTransaction(callContext, actor, func(txContext context.Context, txStore *Store) error {
-			paths := service.NewFileEntryPathService(func(ctx context.Context, action func(context.Context, service.FileEntryPathReader) error) error {
-				return action(ctx, txStore)
-			})
-			if _, err := paths.Get(txContext, actor, entryID); err != nil {
-				return err
-			}
-			var err error
-			prepared, err = txStore.SetUserEntryStarred(txContext, entryID, starred)
-			return err
+	starredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
+		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			return action(txContext, txStore)
 		})
-		if err != nil {
-			return nil, err
-		}
-		return prepared, nil
+	})
+	set := func(callContext context.Context, entryID uint64, starred bool) (*domain.EntryPreference, error) {
+		return starredService.Set(callContext, actor, entryID, starred)
 	}
 	read := func(entryID uint64) *domain.EntryPreference {
 		t.Helper()
@@ -202,6 +206,69 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 			}
 		}
 	})
+	t.Run("service invalid result and cancellation rollback", func(t *testing.T) {
+		for _, mode := range []string{"wrong owner", "wrong target", "wrong state", "zero time", "cancel after write", "outer callback failure"} {
+			t.Run(mode, func(t *testing.T) {
+				before, beforeAudit := read(13), audit(13)
+				callContext, cancelCall := context.WithCancel(ctx)
+				defer cancelCall()
+				failure := errors.New("fixture outer callback failure")
+				injected := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
+					return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+						err := action(txContext, &starredResultStore{Store: txStore, afterSet: func(preference *domain.EntryPreference) {
+							switch mode {
+							case "wrong owner":
+								preference.UserID++
+							case "wrong target":
+								preference.EntryID++
+							case "wrong state":
+								preference.StarredAt = nil
+							case "zero time":
+								*preference.StarredAt = time.Time{}
+							case "cancel after write":
+								cancelCall()
+							}
+						}})
+						if err == nil && mode == "outer callback failure" {
+							return failure
+						}
+						return err
+					})
+				})
+				result, err := injected.Set(callContext, actor, 13, true)
+				want := domain.ErrInvalidFileEntryData
+				if mode == "cancel after write" {
+					want = context.Canceled
+				}
+				if mode == "outer callback failure" {
+					want = failure
+				}
+				if result != nil || !errors.Is(err, want) || !reflect.DeepEqual(read(13), before) || audit(13) != beforeAudit {
+					t.Fatal("服务写后失败未完整回滚偏好及审计事实", err)
+				}
+			})
+		}
+	})
+	t.Run("service confirmed commit then canceled", func(t *testing.T) {
+		callContext, cancelCall := context.WithCancel(ctx)
+		defer cancelCall()
+		committed := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
+			err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+				return action(txContext, txStore)
+			})
+			if err == nil {
+				cancelCall()
+			}
+			return err
+		})
+		result, err := committed.Set(callContext, actor, 13, true)
+		if err != nil || result == nil || callContext.Err() != context.Canceled || !reflect.DeepEqual(result, read(13)) {
+			t.Fatal("真实提交后的收藏事实错误", err)
+		}
+		if _, err := set(ctx, 13, false); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("identity recheck", func(t *testing.T) {
 		for _, item := range []struct {
 			change, restore string
@@ -300,11 +367,9 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 		maximumActor := domain.Actor{UserID: maximum, DeviceID: maximum, SessionID: maximum}
 		var result *domain.EntryPreference
 		setMaximum := func(starred bool) error {
-			return store.WithUserTransaction(ctx, maximumActor, func(txContext context.Context, txStore *Store) error {
-				var err error
-				result, err = txStore.SetUserEntryStarred(txContext, maximum, starred)
-				return err
-			})
+			var err error
+			result, err = starredService.Set(ctx, maximumActor, maximum, starred)
+			return err
 		}
 		if err := setMaximum(true); err != nil || result == nil || result.UserID != maximum || result.EntryID != maximum || result.StarredAt == nil {
 			t.Fatal("最大标识收藏错误", err)
