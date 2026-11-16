@@ -70,6 +70,7 @@ info:
     NameEntryPageData/NameEntryPageResponse 定义名称升序分页响应，条目复用基础摘要，breadcrumbs 为 []，名称游标最多 2048 字节，预算空页保留 next_cursor。
     SizeEntryPageData/SizeEntryPageResponse 定义大小降序分页响应，条目复用基础摘要，breadcrumbs 为 []，大小游标最多 1024 字节，预算空页保留 next_cursor，结束时返回 null。
     大小降序分页成功交付通过测试专用 GET 入口验证，共享响应见 SizeEntryPageListed，关联当前 request_id 并设置禁止缓存头。
+    SizeEntryScope/SizeEntrySort/SizeEntrySearch/SizeEntryKind/SizeEntryCursor/SizeEntryLimit 定义大小降序查询 DTO 输入，默认 all/size_desc、每页 50 条，搜索和游标保留解码原文。
     名称升序分页通过正式 GET /api/v1/entries?scope=all/starred&sort=name_asc 交付，共享响应见 NameEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     NameEntryScope/NameEntrySort/NameEntrySearch/NameEntryKind/NameEntryCursor/NameEntryLimit 定义名称升序查询 DTO 输入，默认 all/name_asc、每页 50 条，搜索和游标保留解码原文。
     名称升序处理函数通过正式列表入口组合认证 Actor、查询 DTO、分页服务和成功交付，输入与游标错误见 NameEntryQueryRejected。
@@ -3559,6 +3560,43 @@ components:
         maxLength: 2048
         default: ''
     NameEntryLimit:
+      $ref: '#/components/parameters/GlobalEntryLimit'
+    SizeEntryScope:
+      name: scope
+      in: query
+      required: false
+      description: 大小降序查询 DTO 的范围，省略时为 all，显式值须为单个 all 或 starred。
+      schema:
+        type: string
+        enum: [all, starred]
+        default: all
+    SizeEntrySort:
+      name: sort
+      in: query
+      required: false
+      description: 大小降序查询 DTO 的排序，省略时为 size_desc，显式值须单个匹配。
+      schema:
+        type: string
+        enum: [size_desc]
+        default: size_desc
+    SizeEntrySearch:
+      $ref: '#/components/parameters/GlobalEntrySearch'
+    SizeEntryKind:
+      $ref: '#/components/parameters/GlobalEntryKind'
+    SizeEntryCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个大小游标原文，省略或显式空值表示首页，解码后最多 1024 字节。
+        查询 DTO 检查重复和字节长度，分页服务校验签名、用户及查询绑定。
+        额外字段沿用忽略策略，parent_id 和 user_id 等值作为额外字段处理。
+      schema:
+        type: string
+        maxLength: 1024
+        default: ''
+    SizeEntryLimit:
       $ref: '#/components/parameters/GlobalEntryLimit'
     RecentEntryScope:
       name: scope

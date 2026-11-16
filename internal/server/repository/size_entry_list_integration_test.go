@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -193,7 +194,15 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 	}
 	checkTextPage := func(t *testing.T, query domain.GlobalEntryQuery, cursor string, ids []uint64, nextID uint64) string {
 		t.Helper()
-		// 1. 组合正式校验、同快照可见列表与签名，统计列表调用。
+		// 1. 经 URL 和查询 DTO 保留条件，再组合正式校验、同快照列表与签名。
+		values := url.Values{
+			"scope": {query.Scope}, "sort": {query.Sort}, "q": {query.Search}, "kind": {query.Kind},
+			"cursor": {cursor}, "limit": {strconv.Itoa(query.PageSize)}, "user_id": {"99"}, "parent_id": {"private-parent"}, "note": {"private-query"},
+		}
+		input, fieldError := dto.ParseSizeEntryPageQuery(values.Encode())
+		if fieldError != nil || input == nil || input.Query != query || input.Cursor != cursor {
+			t.Fatal("真实大小查询条件或原文转换错误", fieldError)
+		}
 		listing, _ := makeList(nil)
 		listCalls := 0
 		paging := service.NewSizeEntryPageService(verifier.Verify,
@@ -201,7 +210,7 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				listCalls++
 				return listing.List(current, actor, filters, before)
 			}, signer.Sign)
-		result, err := paging.List(ctx, actor, query, cursor)
+		result, err := paging.List(ctx, actor, input.Query, input.Cursor)
 		if err != nil || result == nil || listCalls != 1 || result.Entries == nil {
 			t.Fatal("大小文本分页组合失败", err)
 		}
@@ -219,13 +228,21 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		var logs bytes.Buffer
 		router := serverhttp.NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
 		router.GET("/test-size-entry-page-success", func(requestContext *gin.Context) {
+			parsed, fieldError := dto.ParseSizeEntryPageQuery(requestContext.Request.URL.RawQuery)
+			if fieldError != nil {
+				handler.InvalidArgument(requestContext, fieldError)
+				return
+			}
+			if parsed.Query != input.Query || parsed.Cursor != input.Cursor {
+				t.Error("实际 GET 未保留大小查询条件")
+			}
 			handler.SizeEntryPageSuccess(requestContext, result)
 		}, func(*gin.Context) { t.Error("真实大小分页交付后进入下游") })
 		server := httptest.NewServer(router)
 		defer server.Close()
 		client := server.Client()
 		client.Timeout = 2 * time.Second
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-size-entry-page-success?note=private-query", nil)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-size-entry-page-success?"+values.Encode(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

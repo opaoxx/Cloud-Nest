@@ -551,3 +551,5 @@ GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 sco
 已提供 SizeEntryPageData、SizeEntryPageResponse 和 NewSizeEntryPageData，将大小文本分页结果转换为十字段条目摘要、空 breadcrumbs 及可空 next_cursor。复用完整 ID/版本字符串、JSON 安全字节数和 UTC 微秒时间，大小游标按最多 1024 字节检查。精确 JSON、边界、错误与副本专项及真实 MySQL 普通/收藏/预算分页转换连续三次通过，字段与复验方法见 [第 234 步学习记录](docs/开发学习记录.md#第-234-步定义大小降序分页响应-dto)。
 
 已提供 handler.SizeEntryPageSuccess，将已确认的大小分页结果转换为 DTO、关联当前 request_id 并预先编码 JSON，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。预算空页保留 next_cursor，结束为 null，异常及取消复用统一错误。专项与真实 MySQL 普通/收藏/预算结果的测试 GET 交付连续三次通过，调用与复验方法见 [第 235 步学习记录](docs/开发学习记录.md#第-235-步实现大小降序分页成功-http-交付)。
+
+已提供 SizeEntryPageQuery 与 ParseSizeEntryPageQuery，完整解析大小列表 RawQuery，默认 all/size_desc、每页五十条，接收 all/starred、原文搜索、分类和最多 1024 字节的解码游标。复用领域分类及标准页大小校验，重复或非法参数返回固定字段提示。查询专项、HTTP 输入及真实 MySQL 分页到交付组合连续三次通过，规则与复验方法见 [第 236 步学习记录](docs/开发学习记录.md#第-236-步定义大小降序列表查询参数-dto)。
