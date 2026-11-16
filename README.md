@@ -342,6 +342,8 @@ POST /api/v1/directories 已接入正式路由与生产启动装配，复用共�
 
 PATCH /api/v1/entries/{id} 已接入正式路由与启动装配，绑定共享授权、已认证用户事务、幂等重命名服务及 DTO 编解码。真实 run 启动已验证文件/目录、同名、名称/版本/幂等冲突、列表/详情衔接，以及服务重启后的原始快照复用。正式参数与响应见 [OpenAPI](api/openapi.yaml)，执行顺序与复验方法见 [第 154 步学习记录](docs/开发学习记录.md#第-154-步接入正式目录项重命名接口与启动装配)。
 
+已提供 MoveEntryRequest、MoveEntryInput 和 ParseMoveEntryRequest，按 target_parent_id、expected_revision 顺序解析非零 uint64 标准十进制字符串，完整保留高位整数。测试 POST 入口已验证认证、源路径、幂等头、JSON 绑定和字段错误，参数边界及复验方法见 [第 155 步学习记录](docs/开发学习记录.md#第-155-步定义目录项移动请求-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

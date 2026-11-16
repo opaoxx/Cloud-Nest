@@ -1306,6 +1306,23 @@ components:
       example:
         name: 学习资料（新版）
         expected_revision: '3'
+    MoveEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [target_parent_id, expected_revision]
+      description: |
+        目录项移动请求 DTO，源目录项 ID 来自路径，用户身份来自认证上下文。
+        target_parent_id 和 expected_revision 均为非零 uint64 标准十进制字符串，上限为 18446744073709551615。
+        字段错误按 target_parent_id、expected_revision 顺序返回固定提示。
+        目标目录、完整祖先、子树关系、深度和版本比对由后续已认证用户事务中的服务检查。
+      properties:
+        target_parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        expected_revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+      example:
+        target_parent_id: '12'
+        expected_revision: '3'
     RenameDeviceRequest:
       type: object
       additionalProperties: false
