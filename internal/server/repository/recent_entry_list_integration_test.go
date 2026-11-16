@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -158,6 +159,93 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			t.Fatal("真实最近列表最后扫描位置错误")
 		}
 	}
+	makePage := func() (*service.RecentEntryPageService, *int) {
+		listing, calls := makeList(nil)
+		return service.NewRecentEntryPageService(cursorVerifier.Verify, listing.List, cursorSigner.Sign), calls
+	}
+	checkTextPage := func(t *testing.T, query domain.GlobalEntryQuery, result *domain.RecentEntryPageResult, ids []uint64, nextID uint64) {
+		t.Helper()
+		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || (result.NextCursor != nil) != (nextID != 0) {
+			t.Fatal("真实最近文本分页形状或结束状态错误")
+		}
+		for index, candidate := range result.Entries {
+			stored, err := store.FindUserFileEntry(ctx, actor.UserID, candidate.Entry.ID)
+			if err != nil || stored == nil || candidate.Entry.ID != ids[index] || !reflect.DeepEqual(candidate.Entry, *stored) {
+				t.Fatal("最近文本分页丢失文件基础字段", err)
+			}
+			preference, err := store.FindUserEntryPreference(ctx, actor.UserID, candidate.Entry.ID)
+			if err != nil || preference == nil || preference.LastOpenedAt == nil || !candidate.LastOpenedAt.Equal(*preference.LastOpenedAt) {
+				t.Fatal("最近文本分页丢失访问事实", err)
+			}
+		}
+		if nextID == 0 {
+			return
+		}
+		position, err := cursorVerifier.Verify(actor.UserID, query, *result.NextCursor)
+		if err != nil || position == nil || position.ID != nextID {
+			t.Fatal("最近文本分页下一页签名位置错误", err)
+		}
+		preference, err := store.FindUserEntryPreference(ctx, actor.UserID, nextID)
+		if err != nil || preference == nil || preference.LastOpenedAt == nil || !position.LastOpenedAt.Equal(*preference.LastOpenedAt) {
+			t.Fatal("最近文本游标访问时间与最后扫描项不符", err)
+		}
+	}
+	t.Run("text page first next end and binding", func(t *testing.T) {
+		paging, calls := makePage()
+		query := recentEntryCandidateQuery(1)
+		first, err := paging.List(ctx, actor, query, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, query, first, []uint64{103}, 103)
+		// 有效页大小变化可复用原文本，第二页在隐藏过滤后填满两项。
+		resized := query
+		resized.PageSize = 2
+		resizedPage, err := paging.List(ctx, actor, resized, *first.NextCursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, resized, resizedPage, []uint64{101, 105}, 0)
+		second, err := paging.List(ctx, actor, query, *first.NextCursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, query, second, []uint64{101}, 101)
+		third, err := paging.List(ctx, actor, query, *second.NextCursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, query, third, []uint64{105}, 0)
+		emptyQuery := query
+		emptyQuery.Search = "没有匹配的最近文件"
+		empty, err := paging.List(ctx, actor, emptyQuery, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, emptyQuery, empty, nil, 0)
+
+		// 错误用户、筛选或文本在读取候选前返回。
+		changedSearch, changedKind := query, query
+		changedSearch.Search = "学习"
+		changedKind.Kind = "document"
+		beforeCalls := *calls
+		for _, invalid := range []struct {
+			userID uint64
+			query  domain.GlobalEntryQuery
+			cursor string
+		}{
+			{3, query, *first.NextCursor},
+			{actor.UserID, changedSearch, *first.NextCursor},
+			{actor.UserID, changedKind, *first.NextCursor},
+			{actor.UserID, query, *first.NextCursor + "A"},
+		} {
+			identity := actor
+			identity.UserID = invalid.userID
+			if result, err := paging.List(ctx, identity, invalid.query, invalid.cursor); result != nil || !errors.Is(err, domain.ErrInvalidRecentEntryCursor) || *calls != beforeCalls {
+				t.Fatal("无效最近文本游标进入候选读取", err)
+			}
+		}
+	})
 	t.Run("visible pages and access continuation", func(t *testing.T) {
 		listing, _ := makeList(nil)
 		query := recentEntryCandidateQuery(1)
@@ -338,6 +426,19 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		}
 		checkPage(t, next, []uint64{2903, 2901}, false, 0)
 	})
+	t.Run("text budget empty next and end", func(t *testing.T) {
+		paging, calls := makePage()
+		first, err := paging.List(ctx, actor, budgetQuery, "")
+		if err != nil || *calls != 10 {
+			t.Fatal("文本预算空页读取批次错误", err)
+		}
+		checkTextPage(t, budgetQuery, first, nil, 3001)
+		next, err := paging.List(ctx, actor, budgetQuery, *first.NextCursor)
+		if err != nil || *calls != 11 {
+			t.Fatal("文本预算游标续读错误", err)
+		}
+		checkTextPage(t, budgetQuery, next, []uint64{2903, 2901}, 0)
+	})
 	t.Run("short page uses hidden last position", func(t *testing.T) {
 		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET parent_id=12 WHERE id=4000"); err != nil {
 			t.Fatal(err)
@@ -358,6 +459,17 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			t.Fatal(err)
 		}
 		checkPage(t, next, []uint64{2903, 2901}, false, 0)
+		paging, _ := makePage()
+		textFirst, err := paging.List(ctx, actor, budgetQuery, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, budgetQuery, textFirst, []uint64{4000}, 3001)
+		textNext, err := paging.List(ctx, actor, budgetQuery, *textFirst.NextCursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTextPage(t, budgetQuery, textNext, []uint64{2903, 2901}, 0)
 	})
 	t.Run("full page at budget edge", func(t *testing.T) {
 		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET parent_id=12 WHERE id=3001"); err != nil {
@@ -394,5 +506,11 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			t.Fatal("恰好最近预算结束错误", err)
 		}
 		checkPage(t, result, nil, false, 0)
+		paging, textCalls := makePage()
+		textEnd, err := paging.List(ctx, actor, query, "")
+		if err != nil || *textCalls != 10 {
+			t.Fatal("文本分页恰好预算结束错误", err)
+		}
+		checkTextPage(t, query, textEnd, nil, 0)
 	})
 }
