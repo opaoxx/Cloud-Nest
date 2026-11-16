@@ -561,3 +561,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 domain.CreateUploadInput，保存目标目录、原始名称、声明大小及可空的固定 32 字节预期 SHA-256。基础校验接收完整非零目录 ID、非空 UTF-8 名称和 0～16 MiB 声明，完整命名继续复用 ValidateEntryName。十八组声明、四十组大小/目录边界、六组哈希原文保护及九组命名衔接连续三次通过，字段与复验方法见 [第 239 步学习记录](docs/开发学习记录.md#第-239-步定义单文件上传任务的创建输入模型)。
 
 已提供 CreateUploadRequest 和 ParseCreateUploadRequest，按 parent_id、name、size_bytes、sha256 顺序检查创建声明并转换为 domain.CreateUploadInput。必填大小通过指针区分缺失/null 与零字节，SHA-256 接收 64 位大小写十六进制或 null，转换为独立 32 字节数组，声明大小原值由后续服务核对能力上限。DTO、JSON/HTTP 输入、来源副本及并发回归连续三次通过，字段与复验方法见 [第 240 步学习记录](docs/开发学习记录.md#第-240-步定义单文件上传创建请求-dto)。
+
+已提供 service.ValidateCreateUploadInput，按目标目录 ID、完整名称、声明大小顺序校验上传声明，复用 ValidateEntryName 取得展示名，支持零字节及 16 MiB 边界，超限返回 ErrUploadFileTooLarge。成功结果复用 copyOptionalValue 独立复制预期摘要，来源原值与其他结果各自保留。业务校验、JSON/DTO 衔接、副本/并发及既有命名回归连续三次通过，规则与复验方法见 [第 241 步学习记录](docs/开发学习记录.md#第-241-步实现上传创建声明的业务校验)。
