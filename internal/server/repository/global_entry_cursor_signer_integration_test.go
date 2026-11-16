@@ -183,4 +183,44 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 			t.Fatal("真实页错误绑定或篡改游标被接受", err)
 		}
 	}
+
+	// 4. 通过正式文本游标分页入口完成预算空页、正常续页和结束交付。
+	listCalls := 0
+	paging := service.NewGlobalEntryPageService(verifier.Verify,
+		func(current context.Context, currentActor domain.Actor, filters domain.GlobalEntryQuery, before *domain.FileEntryPosition) (*domain.GlobalEntryList, error) {
+			listCalls++
+			return listing.List(current, currentActor, filters, before)
+		}, signer.Sign)
+	pageQuery := query
+	pageQuery.PageSize = 2
+	firstPage, err := paging.List(ctx, actor, pageQuery, "")
+	if err != nil || firstPage == nil || firstPage.Entries == nil || len(firstPage.Entries) != 0 || firstPage.NextCursor == nil || *firstPage.NextCursor != cursor {
+		t.Fatal("正式文本游标首页未保留预算空页位置", err)
+	}
+	pageQuery.PageSize = 1
+	secondPage, err := paging.List(ctx, actor, pageQuery, *firstPage.NextCursor)
+	if err != nil || secondPage == nil || len(secondPage.Entries) != 1 || secondPage.Entries[0].ID != 15 || secondPage.NextCursor == nil || *secondPage.NextCursor != secondCursor {
+		t.Fatal("正式文本游标续页或页大小调整错误", err)
+	}
+	thirdPage, err := paging.List(ctx, actor, pageQuery, *secondPage.NextCursor)
+	if err != nil || thirdPage == nil || len(thirdPage.Entries) != 1 || thirdPage.Entries[0].ID != 13 || thirdPage.NextCursor != nil || listCalls != 3 {
+		t.Fatal("正式文本游标结束或调用次数错误", err)
+	}
+	for _, mode := range []string{"user", "search", "kind", "tampering"} {
+		currentActor, filters, currentCursor := actor, pageQuery, *firstPage.NextCursor
+		switch mode {
+		case "user":
+			currentActor.UserID = 3
+		case "search":
+			filters.Search += " "
+		case "kind":
+			filters.Kind = "image"
+		case "tampering":
+			currentCursor += "="
+		}
+		result, err := paging.List(ctx, currentActor, filters, currentCursor)
+		if result != nil || !errors.Is(err, domain.ErrInvalidGlobalEntryCursor) || listCalls != 3 {
+			t.Fatal("错误文本游标进入了正式列表读取", err)
+		}
+	}
 }
