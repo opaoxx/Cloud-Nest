@@ -183,6 +183,61 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			}
 		}
 	}
+	checkTextPage := func(t *testing.T, query domain.GlobalEntryQuery, cursor string, ids []uint64, nextID uint64) string {
+		t.Helper()
+		// 1. 组合正式校验、同快照可见列表与签名，统计列表调用。
+		listing, _ := makeList(nil)
+		listCalls := 0
+		paging := service.NewSizeEntryPageService(verifier.Verify,
+			func(current context.Context, actor domain.Actor, filters domain.GlobalEntryQuery, before *domain.SizeEntryPosition) (*domain.SizeEntryList, error) {
+				listCalls++
+				return listing.List(current, actor, filters, before)
+			}, signer.Sign)
+		result, err := paging.List(ctx, actor, query, cursor)
+		if err != nil || result == nil || listCalls != 1 || result.Entries == nil {
+			t.Fatal("大小文本分页组合失败", err)
+		}
+		// 2. 对照数据库与独立协议检查，返回实际文本供下页继续读取。
+		listed := &domain.SizeEntryList{Entries: result.Entries, HasMore: result.NextCursor != nil}
+		if result.NextCursor == nil {
+			check(t, listed, ids, nextID)
+			return ""
+		}
+		listed.NextPosition, err = verifier.Verify(actor.UserID, query, *result.NextCursor)
+		if err != nil {
+			t.Fatal("大小分页返回无法校验的游标", err)
+		}
+		check(t, listed, ids, nextID)
+		independent := signPosition(t, query, listed.NextPosition)
+		repeated, err := signer.Sign(actor.UserID, query, *independent)
+		if err != nil || repeated != *result.NextCursor {
+			t.Fatal("大小文本分页与独立协议不符", err)
+		}
+		// 3. 错误用户、范围、筛选及文本在再次调用列表前拒绝。
+		changedSearch, changedKind, changedScope := query, query, query
+		changedSearch.Search += " "
+		changedKind.Kind = "image"
+		if query.Scope == "all" {
+			changedScope.Scope = "starred"
+		} else {
+			changedScope.Scope = "all"
+		}
+		otherActor := actor
+		otherActor.UserID = 3
+		for _, invalid := range []struct {
+			actor  domain.Actor
+			query  domain.GlobalEntryQuery
+			cursor string
+		}{
+			{otherActor, query, *result.NextCursor}, {actor, changedSearch, *result.NextCursor}, {actor, changedKind, *result.NextCursor},
+			{actor, changedScope, *result.NextCursor}, {actor, query, *result.NextCursor + "A"},
+		} {
+			if failed, err := paging.List(ctx, invalid.actor, invalid.query, invalid.cursor); failed != nil || !errors.Is(err, domain.ErrInvalidSizeEntryCursor) || listCalls != 1 {
+				t.Fatal("大小文本分页错误绑定进入列表", err)
+			}
+		}
+		return *result.NextCursor
+	}
 	t.Run("all and starred visible pagination", func(t *testing.T) {
 		for _, scope := range []string{"all", "starred"} {
 			listing, _ := makeList(nil)
@@ -193,6 +248,7 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				expected = [][]uint64{{103, 101}, {107}}
 			}
 			var before *domain.SizeEntryPosition
+			cursor := ""
 			for index, ids := range expected {
 				page, err := listing.List(ctx, actor, query, before)
 				if err != nil {
@@ -204,7 +260,21 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				}
 				check(t, page, ids, nextID)
 				before = signPosition(t, query, page.NextPosition)
+				cursor = checkTextPage(t, query, cursor, ids, nextID)
 			}
+		}
+	})
+	t.Run("text page resized continuation", func(t *testing.T) {
+		for _, scope := range []string{"all", "starred"} {
+			query := sizeEntryCandidateQuery(1)
+			query.Scope = scope
+			cursor := checkTextPage(t, query, "", []uint64{103}, 103)
+			query.PageSize = 100
+			ids := []uint64{101, 105, 109, 107, 14, 12}
+			if scope == "starred" {
+				ids = []uint64{101, 107}
+			}
+			_ = checkTextPage(t, query, cursor, ids, 0)
 		}
 	})
 	t.Run("filters users and account state", func(t *testing.T) {
@@ -227,11 +297,20 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				t.Fatal(err)
 			}
 			check(t, result, fixture.ids, 0)
+			paging := service.NewSizeEntryPageService(verifier.Verify, listing.List, signer.Sign)
+			page, err := paging.List(ctx, identity, query, "")
+			if err != nil || page == nil || page.NextCursor != nil || !reflect.DeepEqual(page.Entries, result.Entries) {
+				t.Fatal("大小文本分页筛选或用户事实错误", err)
+			}
 		}
 		identity := actor
 		identity.UserID = 999
 		if result, err := listing.List(ctx, identity, sizeEntryCandidateQuery(2), nil); result != nil || !errors.Is(err, domain.ErrAccountNotFound) {
 			t.Fatal("大小空页跳过账号检查", err)
+		}
+		paging := service.NewSizeEntryPageService(verifier.Verify, listing.List, signer.Sign)
+		if page, err := paging.List(ctx, identity, sizeEntryCandidateQuery(2), ""); page != nil || !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatal("大小文本空页跳过账号检查", err)
 		}
 		if _, err := pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=5"); err != nil {
 			t.Fatal(err)
@@ -240,6 +319,9 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		identity.UserID = 5
 		if result, err := listing.List(ctx, identity, sizeEntryCandidateQuery(2), nil); result != nil || !errors.Is(err, domain.ErrAccountDisabled) {
 			t.Fatal("大小空页禁用账号被放行", err)
+		}
+		if page, err := paging.List(ctx, identity, sizeEntryCandidateQuery(2), ""); page != nil || !errors.Is(err, domain.ErrAccountDisabled) {
+			t.Fatal("大小文本空页禁用账号被放行", err)
 		}
 	})
 	t.Run("single connection", func(t *testing.T) {
@@ -358,6 +440,8 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				t.Fatal("大小预算续读错误", err)
 			}
 			check(t, next, []uint64{2901, 2903}, 0)
+			cursor := checkTextPage(t, query, "", nil, 3001)
+			_ = checkTextPage(t, query, cursor, []uint64{2901, 2903}, 0)
 		})
 	}
 	t.Run("short page and budget edge", func(t *testing.T) {
@@ -378,6 +462,8 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal(err)
 		}
 		check(t, next, []uint64{2901, 2903}, 0)
+		cursor := checkTextPage(t, query, "", []uint64{4000}, 3001)
+		_ = checkTextPage(t, query, cursor, []uint64{2901, 2903}, 0)
 		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET parent_id=IF(id=3001,12,16) WHERE id IN (4000,3001)"); err != nil {
 			t.Fatal(err)
 		}
@@ -388,6 +474,7 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		}
 		check(t, first, []uint64{3001}, 3001)
 		_ = signPosition(t, query, first.NextPosition)
+		_ = checkTextPage(t, query, "", []uint64{3001}, 3001)
 	})
 	t.Run("exact budget end", func(t *testing.T) {
 		defer restore("UPDATE file_entries SET status='ACTIVE',deleted_at=NULL WHERE id=3000")
@@ -402,5 +489,6 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal("大小恰好预算结束错误", err)
 		}
 		check(t, result, nil, 0)
+		_ = checkTextPage(t, query, "", nil, 0)
 	})
 }

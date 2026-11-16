@@ -263,5 +263,24 @@ func TestListUserSizeEntryCandidatesIntegration(t *testing.T) {
 		if err != nil || result == nil || len(result.Entries) != 3 || result.HasMore || result.NextPosition != nil || result.Entries[0].FileSize != maximum || result.Entries[1].FileSize != 1<<63 || result.Entries[2].FileSize != 0 {
 			t.Fatal("大小可见列表完整无符号边界错误", err)
 		}
+		signer, err := service.NewSizeEntryCursorSigner([]byte(strings.Repeat("s", 32)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := service.NewSizeEntryCursorVerifier([]byte(strings.Repeat("s", 32)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		paging := service.NewSizeEntryPageService(verifier.Verify, listing.List, signer.Sign)
+		cursor := ""
+		for index, entryID := range []uint64{maximum, maximum - 1, maximum - 2} {
+			page, err := paging.List(ctx, domain.Actor{UserID: maximum, DeviceID: 19, SessionID: 17}, sizeEntryCandidateQuery(1), cursor)
+			if err != nil || page == nil || len(page.Entries) != 1 || page.Entries[0].ID != entryID || !reflect.DeepEqual(page.Entries[0], result.Entries[index]) || (page.NextCursor != nil) != (index < 2) {
+				t.Fatal("大小文本分页完整无符号边界错误", err)
+			}
+			if page.NextCursor != nil {
+				cursor = *page.NextCursor
+			}
+		}
 	})
 }
