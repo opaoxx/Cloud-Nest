@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
@@ -60,6 +61,7 @@ func TestListUserSizeEntryCandidatesIntegration(t *testing.T) {
 			}
 		}
 	}
+	t.Run("visible size lists", func(t *testing.T) { verifySizeEntryList(t, ctx, pool, store) })
 	for _, scope := range []string{"all", "starred"} {
 		t.Run("pagination "+scope, func(t *testing.T) {
 			query := sizeEntryCandidateQuery(2)
@@ -251,6 +253,15 @@ func TestListUserSizeEntryCandidatesIntegration(t *testing.T) {
 			check(t, page, []uint64{entryID}, index < 2)
 			last := page.Entries[0]
 			before = &domain.SizeEntryPosition{FileSize: last.FileSize, ID: last.ID}
+		}
+		listing := service.NewSizeEntryListService(func(current context.Context, action func(context.Context, service.SizeEntryListReader) error) error {
+			return store.WithFileEntrySnapshot(current, func(snapshotContext context.Context, reader *Store) error {
+				return action(snapshotContext, reader)
+			})
+		})
+		result, err := listing.List(ctx, domain.Actor{UserID: maximum, DeviceID: 19, SessionID: 17}, sizeEntryCandidateQuery(100), nil)
+		if err != nil || result == nil || len(result.Entries) != 3 || result.HasMore || result.NextPosition != nil || result.Entries[0].FileSize != maximum || result.Entries[1].FileSize != 1<<63 || result.Entries[2].FileSize != 0 {
+			t.Fatal("大小可见列表完整无符号边界错误", err)
 		}
 	})
 }
