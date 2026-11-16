@@ -557,3 +557,5 @@ GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 sco
 已提供 handler.SizeEntryPage，组合可信 Actor、大小查询 DTO、分页服务及成功/错误交付。参数错误定位字段，大小游标及绑定错误返回 INVALID_CURSOR，账号/会话/设备状态复用统一授权响应，交付前核对页大小和用户归属。处理函数专项及真实 JWT/MySQL/HTTP 普通/收藏/同大小/零字节、预算续页和状态联测连续三次通过，调用与复验方法见 [第 237 步学习记录](docs/开发学习记录.md#第-237-步实现大小降序列表-http-处理函数)。
 
 GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例如 scope=all&sort=size_desc 或 scope=starred&sort=size_desc。正式启动通过 RegisterSizeEntryPageRoute 装配五类分页能力，大小候选及祖先读取共享快照，持久化主密钥派生大小用途游标。正式路由及真实启动/重启连续三次通过，普通/收藏/预算/同大小的原游标可跨重启续读，调用与复验方法见 [第 238 步学习记录](docs/开发学习记录.md#第-238-步接入正式大小降序列表路由与启动装配)。
+
+已提供 domain.CreateUploadInput，保存目标目录、原始名称、声明大小及可空的固定 32 字节预期 SHA-256。基础校验接收完整非零目录 ID、非空 UTF-8 名称和 0～16 MiB 声明，完整命名继续复用 ValidateEntryName。十八组声明、四十组大小/目录边界、六组哈希原文保护及九组命名衔接连续三次通过，字段与复验方法见 [第 239 步学习记录](docs/开发学习记录.md#第-239-步定义单文件上传任务的创建输入模型)。
