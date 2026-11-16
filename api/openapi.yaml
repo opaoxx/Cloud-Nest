@@ -1776,6 +1776,69 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    MoveEntryRejected:
+      description: |
+        HTTP 400，路径、幂等头、正文参数、目的地关系、最终深度和子树规模错误使用 INVALID_ARGUMENT。
+        字段错误定位 id、Idempotency-Key、target_parent_id 或 expected_revision，JSON 读取或绑定错误的 details 为 null。
+        文件目的地、自身/后代关系及最终深度定位 target_parent_id，子树规模超限定位源路径 id。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_ARGUMENT
+              message: 目标父目录须为文件夹
+              details:
+                field: target_parent_id
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    MoveEntryConflict:
+      description: |
+        HTTP 409，NAME_CONFLICT 表示活动名称冲突，REVISION_CONFLICT 表示预期版本不一致并携带字符串 details.current_revision。
+        IDEMPOTENCY_CONFLICT 表示同键不同参数，IDEMPOTENCY_EXPIRED 表示记录到期并提示先核对已有资源状态。
+        其余冲突的 details 为 null，响应使用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            revision_conflict:
+              value:
+                error:
+                  code: REVISION_CONFLICT
+                  message: 文件已发生变化，请刷新后重试
+                  details:
+                    current_revision: '3'
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            request_conflict:
+              value:
+                error:
+                  code: IDEMPOTENCY_CONFLICT
+                  message: 幂等键已用于不同请求参数
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RenameEntryRejected:
       description: |
         HTTP 400，路径、幂等头与正文参数错误使用 INVALID_ARGUMENT，完整命名规则不满足使用 INVALID_NAME。
@@ -1803,7 +1866,7 @@ components:
                 field: name
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RootEntryOperationForbidden:
-      description: HTTP 403，根目录禁止重命名使用 ROOT_OPERATION_FORBIDDEN，账号禁用使用 ACCOUNT_DISABLED，来源拒绝使用 CORS_FORBIDDEN。
+      description: HTTP 403，根目录禁止重命名或移动使用 ROOT_OPERATION_FORBIDDEN，账号禁用使用 ACCOUNT_DISABLED，来源拒绝使用 CORS_FORBIDDEN。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

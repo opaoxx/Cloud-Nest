@@ -6,13 +6,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -324,6 +333,108 @@ func TestIdempotentMoveEntryServiceIntegration(t *testing.T) {
 			if body != nil || !errors.Is(callError, domain.ErrInvalidIdempotencyRecordData) {
 				t.Fatal("异常快照未拒绝", callError)
 			}
+		}
+	})
+	// 5. 实际 JWT、认证中间件与 POST 处理函数连接现有用户事务。
+	t.Run("authenticated HTTP handler", func(t *testing.T) {
+		configuration := config.JWTConfig{SigningKey: bytes.Repeat([]byte{9}, 32), Issuer: "cloudnest-test", Audience: "cloudnest-api-test", AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour}
+		signer, err := service.NewAccessTokenSigner(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := service.NewAccessTokenVerifier(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		access, err := signer.Issue(domain.LoginSession{ID: 17, UserID: 1, DeviceID: 13, ExpiresAt: time.Now().Add(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorization := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
+		var disableAfterAuthorization atomic.Bool
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.POST("/test-move-entry/:id", middleware.RequireAuthorization(func(ctx context.Context, token string) (*domain.Actor, error) {
+			current, err := authorization.Authorize(ctx, token)
+			if err == nil && disableAfterAuthorization.Swap(false) {
+				_, err = pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=1")
+			}
+			return current, err
+		}, handler.AuthorizationFailure), handler.MoveEntry(mover.Move))
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 3 * time.Second
+		requestNumber := 0
+		request := func(id, body, key, token string, status int, code string) dto.MoveEntryResponse {
+			t.Helper()
+			requestNumber++
+			requestID := fmt.Sprintf("28ee758a-0727-42de-ae7d-%012d", requestNumber)
+			message, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/test-move-entry/"+id+"?note=private-query", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			message.Header.Set("Content-Type", "application/json")
+			message.Header.Set("X-Request-ID", requestID)
+			if key != "" {
+				message.Header.Set("Idempotency-Key", key)
+			}
+			if token != "" {
+				message.Header.Set("Authorization", "Bearer "+token)
+			}
+			response, err := client.Do(message)
+			if err != nil {
+				t.Fatal("真实移动 HTTP 失败", err)
+			}
+			encoded, readError := io.ReadAll(response.Body)
+			closeError := response.Body.Close()
+			if readError != nil || closeError != nil || response.StatusCode != status || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Content-Type") != "application/json; charset=utf-8" {
+				t.Fatal("真实响应状态或头信息错误", response.StatusCode, readError, closeError)
+			}
+			var result dto.MoveEntryResponse
+			if status == 200 {
+				if json.Unmarshal(encoded, &result) != nil || result.RequestID != requestID {
+					t.Fatal("真实成功响应错误")
+				}
+				return result
+			}
+			var failed dto.ErrorResponse
+			if json.Unmarshal(encoded, &failed) != nil || failed.RequestID != requestID || failed.Error.Code != code {
+				t.Fatal("真实错误响应错误", code)
+			}
+			if code == "REVISION_CONFLICT" && failed.Error.Details["current_revision"] != fmt.Sprint(read(14).Revision) {
+				t.Fatal("真实当前版本错误")
+			}
+			return result
+		}
+		before := read(14)
+		targetID := uint64(16)
+		if *before.ParentID == targetID {
+			targetID = 18
+		}
+		body := fmt.Sprintf(`{"target_parent_id":"%d","expected_revision":"%d"}`, targetID, before.Revision)
+		firstResponse := request("14", body, "http-move-007", access.Token, 200, "")
+		secondResponse := request("14", body, "http-move-007", access.Token, 200, "")
+		if firstResponse.RequestID == secondResponse.RequestID || !reflect.DeepEqual(firstResponse.Data, secondResponse.Data) || read(14).Revision != before.Revision+1 || firstResponse.Data.Entry.ParentID == nil || *firstResponse.Data.Entry.ParentID != fmt.Sprint(targetID) {
+			t.Fatal("真实重试结果、父目录或版本错误")
+		}
+		request("15", body, "http-move-007", access.Token, 409, "IDEMPOTENCY_CONFLICT")
+		changedBody := fmt.Sprintf(`{"target_parent_id":"11","expected_revision":"%d"}`, before.Revision)
+		request("14", changedBody, "http-move-007", access.Token, 409, "IDEMPOTENCY_CONFLICT")
+		request("14", body, "http-stale-version", access.Token, 409, "REVISION_CONFLICT")
+		request("11", `{"target_parent_id":"16","expected_revision":"1"}`, "http-root", access.Token, 403, "ROOT_OPERATION_FORBIDDEN")
+		request("33", `{"target_parent_id":"16","expected_revision":"1"}`, "http-foreign-source", access.Token, 404, "ENTRY_NOT_FOUND")
+		version := read(14).Revision
+		request("14", fmt.Sprintf(`{"target_parent_id":"33","expected_revision":"%d"}`, version), "http-foreign-parent", access.Token, 404, "ENTRY_NOT_FOUND")
+		request("14", fmt.Sprintf(`{"target_parent_id":"14","expected_revision":"%d"}`, version), "http-file-parent", access.Token, 400, "INVALID_ARGUMENT")
+		request("15", `{"target_parent_id":"15","expected_revision":"2"}`, "http-self-parent", access.Token, 400, "INVALID_ARGUMENT")
+		request("15", `{"target_parent_id":"17","expected_revision":"2"}`, "http-descendant", access.Token, 400, "INVALID_ARGUMENT")
+		request("14", fmt.Sprintf(`{"target_parent_id":"19","expected_revision":"%d"}`, version), "http-name-conflict", access.Token, 409, "NAME_CONFLICT")
+		request("14", `{"target_parent_id":"16","expected_revision":"0"}`, "http-invalid-version", access.Token, 400, "INVALID_ARGUMENT")
+		request("0", `{"private-broken":`, "", "", 401, "AUTH_REQUIRED")
+		disableAfterAuthorization.Store(true)
+		request("14", body, "http-move-007", access.Token, 403, "ACCOUNT_DISABLED")
+		if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
+			t.Fatal(err)
 		}
 	})
 	t.Run("maximum unsigned entry parent and revision", func(t *testing.T) {
