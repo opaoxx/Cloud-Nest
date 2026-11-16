@@ -93,6 +93,7 @@ info:
     SetStarredData/SetStarredResponse 定义收藏设置成功数据及 data/request_id 外层，收藏时间采用可空 UTC 微秒值。
     收藏成功交付方法通过测试专用 PUT 入口验证，共享响应见 SetStarredSucceeded，关联当前请求 ID 并禁止缓存。
     收藏处理函数按 Actor、路径、JSON/布尔状态、核心服务及成功交付组合，目标不可见复用 TargetEntryNotFound。
+    PUT /api/v1/entries/{id}/star 已由启动入口绑定共享授权与收藏核心服务，用户事务确认提交后交付偏好。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -143,6 +144,52 @@ paths:
           $ref: '#/components/responses/TargetEntryNotFound'
         '409':
           $ref: '#/components/responses/CreateDirectoryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/entries/{id}/star:
+    put:
+      tags: [Entries]
+      operationId: setEntryStarred
+      summary: 设置当前用户可见目录项的收藏状态
+      description: |
+        Bearer JWT 和数据库授权通过后，按路径 id、JSON 和显式 starred 布尔值的顺序校验。
+        用户事务复查账号、设备和会话，检查目标及全部祖先可见性，支持文件、目录和真实根目录。
+        true 首次填充数据库 UTC 收藏时间，重复 true 沿用原收藏时间，false 返回未收藏状态与空收藏时间。
+        收藏写入偏好表，最近访问及目录项版本按各自业务事实保存，各次响应关联当前 request_id。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetStarredRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SetStarredSucceeded'
+        '400':
+          description: JSON 读取或参数校验失败，INVALID_ARGUMENT，路径与字段错误分别定位 id 或 starred。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
         '413':
           $ref: '#/components/responses/RequestBodyTooLarge'
         '415':

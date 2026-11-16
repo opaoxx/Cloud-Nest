@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -429,3 +429,5 @@ go vet ./...
 已提供 handler.SetStarredSuccess，将已提交收藏偏好转换为公开响应，关联当前请求 ID，以 HTTP 200、UTF-8 JSON 和禁止缓存头交付。取消收藏明确返回 false/null，异常资料或取消沿用统一内部错误，已发送状态按原响应结束。测试专用 PUT 入口及三组真实 HTTP 传输连续三次通过，执行顺序与复验方法见 [第 173 步学习记录](docs/开发学习记录.md#第-173-步实现目录项收藏成功-http-交付)。
 
 已提供 handler.SetStarred，按认证身份、路径、JSON 正文及明确的收藏状态校验，调用收藏核心服务，核对偏好归属与状态并交付成功响应。不可见目标使用统一 404，认证变化和内部故障沿用既有错误映射。测试入口、真实 JWT 与 MySQL 的十四次 PUT 请求验证通过，调用与复验方法见 [第 174 步学习记录](docs/开发学习记录.md#第-174-步实现目录项收藏-http-处理函数)。
+
+PUT /api/v1/entries/{id}/star 已接入正式路由和生产启动装配，复用共享授权及用户事务设置收藏。文件、目录和根目录支持明确 true/false，重复收藏取原时间，取消收藏返回 false/null，详情同步读取偏好。正式启动及重启验证连续三次通过，规则与复验方法见 [第 175 步学习记录](docs/开发学习记录.md#第-175-步接入正式目录项收藏接口与启动装配)。
