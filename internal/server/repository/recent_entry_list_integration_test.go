@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -168,6 +169,30 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || (result.NextCursor != nil) != (nextID != 0) {
 			t.Fatal("真实最近文本分页形状或结束状态错误")
 		}
+		data, err := dto.NewRecentEntryPageData(result)
+		if err != nil || data == nil || data.Items == nil || data.Breadcrumbs == nil || len(data.Items) != len(ids) || len(data.Breadcrumbs) != 0 || (data.NextCursor != nil) != (nextID != 0) {
+			t.Fatal("真实最近分页公开数据或空数组错误", err)
+		}
+		if result.NextCursor != nil && (data.NextCursor == result.NextCursor || *data.NextCursor != *result.NextCursor) {
+			t.Fatal("真实最近分页 DTO 游标副本错误")
+		}
+		const requestID = "28ee758a-0727-42de-ae7d-3bb33155e148"
+		encoded, err := json.Marshal(dto.RecentEntryPageResponse{Data: *data, RequestID: requestID})
+		if err != nil || strings.Contains(string(encoded), `"user_id"`) {
+			t.Fatal("真实最近分页公开 JSON 错误", err)
+		}
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &envelope); err != nil || len(envelope) != 2 || string(envelope["request_id"]) != `"`+requestID+`"` {
+			t.Fatal("真实最近分页响应外层错误", err)
+		}
+		var publicData map[string]json.RawMessage
+		if err := json.Unmarshal(envelope["data"], &publicData); err != nil || len(publicData) != 3 || string(publicData["breadcrumbs"]) != "[]" || (nextID == 0 && string(publicData["next_cursor"]) != "null") {
+			t.Fatal("真实最近分页数据字段或空值错误", err)
+		}
+		var publicItems []map[string]json.RawMessage
+		if err := json.Unmarshal(publicData["items"], &publicItems); err != nil || publicItems == nil || len(publicItems) != len(ids) {
+			t.Fatal("真实最近分页 items 编码错误", err)
+		}
 		for index, candidate := range result.Entries {
 			stored, err := store.FindUserFileEntry(ctx, actor.UserID, candidate.Entry.ID)
 			if err != nil || stored == nil || candidate.Entry.ID != ids[index] || !reflect.DeepEqual(candidate.Entry, *stored) {
@@ -176,6 +201,10 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			preference, err := store.FindUserEntryPreference(ctx, actor.UserID, candidate.Entry.ID)
 			if err != nil || preference == nil || preference.LastOpenedAt == nil || !candidate.LastOpenedAt.Equal(*preference.LastOpenedAt) {
 				t.Fatal("最近文本分页丢失访问事实", err)
+			}
+			item := data.Items[index]
+			if len(publicItems[index]) != 11 || item.ID != strconv.FormatUint(candidate.Entry.ID, 10) || item.ParentID != strconv.FormatUint(*candidate.Entry.ParentID, 10) || item.Revision != strconv.FormatUint(candidate.Entry.Revision, 10) || item.Name != candidate.Entry.Name || item.SizeBytes != candidate.Entry.FileSize || item.EntryType != "FILE" || item.Status != "ACTIVE" || !item.CreatedAt.Equal(candidate.Entry.CreatedAt) || !item.ModifiedAt.Equal(candidate.Entry.ModifiedAt) || !item.UpdatedAt.Equal(candidate.Entry.UpdatedAt) || !item.LastOpenedAt.Equal(candidate.LastOpenedAt) || item.LastOpenedAt.Location() != time.UTC || string(publicItems[index]["last_opened_at"]) != `"`+item.LastOpenedAt.Format(time.RFC3339Nano)+`"` {
+				t.Fatal("真实最近文件十一字段与数据库事实不一致")
 			}
 		}
 		if nextID == 0 {

@@ -503,3 +503,5 @@ GET /api/v1/entries?scope=starred 已接入正式路由，按当前用户的收�
 已提供 RecentEntryCursorVerifier，先核对最近使用专用 HMAC，再检查版本、当前用户、范围、排序、筛选及规范编码，成功还原独立的 UTC 微秒访问位置。格式/签名/绑定异常统一返回最近使用游标错误，合法页大小调整沿用原游标。协议专项、固定向量、用途隔离、副本/并发及真实 MySQL 普通/预算游标校验续读连续三次通过，顺序与复验方法见 [第 210 步学习记录](docs/开发学习记录.md#第-210-步校验最近使用游标并还原访问位置)。
 
 已提供 RecentEntryPageService，组合空游标首页、非空游标校验、最近可见列表读取及下一页签名，返回独立文件/访问事实与可空 NextCursor。预算空页或短页保留文本游标，结束页使用 nil，异常结果和取消整体返回错误。服务专项及正式 MySQL 的首页/续页/结束、合法页大小调整、错误绑定拒绝和预算文本分页连续三次通过，调用与复验方法见 [第 211 步学习记录](docs/开发学习记录.md#第-211-步组合带文本游标的最近使用分页服务)。
+
+已提供 RecentEntrySummary、RecentEntryPageData、RecentEntryPageResponse 和 NewRecentEntryPageData。复用十字段摘要并增加必填 last_opened_at，ID/版本使用字符串，访问时间转换为 UTC 微秒值，空 items/breadcrumbs 为 []，结束游标为 null。精确 JSON、边界、副本及真实 MySQL 文本分页转换连续三次通过，字段与复验方法见 [第 212 步学习记录](docs/开发学习记录.md#第-212-步定义最近使用分页响应-dto)。
