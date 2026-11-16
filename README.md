@@ -447,3 +447,5 @@ PUT /api/v1/entries/{id}/star 已接入正式路由和生产启动装配，复�
 POST /api/v1/entries/{id}/access 已接入正式路由与启动装配，按 preview/open 记录当前用户可见文件的访问时间。用户事务复查账号、设备、会话和完整路径，六十秒内返回原访问时间，成功响应包含 last_opened_at 与当前 request_id。正式启动与重启联测连续三次通过，详情、原收藏、目录项版本、归属及隐藏路径经过对照。调用关系与复验方法见 [第 182 步学习记录](docs/开发学习记录.md#第-182-步接入正式目录项访问记录路由与启动装配)。
 
 已提供 GlobalEntryQuery 与 IsValid，统一表达 all、starred、recent 的内部查询条件，检查范围与排序组合、UTF-8 搜索文本、小写分类及 1～100 的页大小。recent 使用 last_opened_desc 表达访问时间降序，单次全局请求候选扫描预算为 1000。组合、边界、输入保护与并发校验连续三次通过，模型及后续衔接见 [第 183 步学习记录](docs/开发学习记录.md#第-183-步定义全局目录项列表查询模型)。
+
+已提供 Store.ListUserGlobalEntryCandidates，接收已认证用户 ID、GlobalEntryQuery 和可空 FileEntryPosition，读取 all/modified_desc、空筛选的活动普通目录项候选。复用十一列投影及分页结果，按修改时间与 ID 降序翻页，多取一条判断 HasMore，候选完整祖先链可见性由后续服务组合。正式 MySQL 跨目录、隔离、快照与整数/日期边界联测连续三次通过，调用与复验方法见 [第 184 步学习记录](docs/开发学习记录.md#第-184-步按用户读取全局活动目录项候选)。

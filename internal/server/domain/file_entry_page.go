@@ -17,9 +17,10 @@ func (position FileEntryPosition) IsValid() bool {
 	return position.ID != 0 && utcYear >= 1000 && utcYear <= 9999 && position.ModifiedAt.Nanosecond()%1000 == 0
 }
 
-// FileEntryPage 保存活动子项的本页数据及后续页提示。
+// FileEntryPage 保存按修改时间分页的活动目录项及后续页提示。
 type FileEntryPage struct {
-	// Entries 按修改时间及 ID 降序排列，空页使用已初始化的空切片。
+	// Entries 按修改时间及 ID 降序排列，供目录子项及全局候选读取共用。
+	// 空页使用已初始化的空切片。
 	Entries []FileEntry
 	// HasMore 表示本次快照中本页之后还有其他记录。
 	HasMore bool
