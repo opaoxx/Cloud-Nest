@@ -3,10 +3,17 @@ package repository
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +49,79 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		return listing, &calls
 	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
+	masterKey := bytes.Repeat([]byte{11}, 32)
+	signer, err := service.NewNameEntryCursorSigner(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signPosition := func(t *testing.T, query domain.GlobalEntryQuery, position *domain.NameEntryPosition) *domain.NameEntryPosition {
+		t.Helper()
+		if position == nil {
+			return nil
+		}
+		// 1. 使用正式签名器，再独立检查文本编码和名称用途 HMAC。
+		original := domain.NameEntryPosition{NameKey: bytes.Clone(position.NameKey), ID: position.ID}
+		cursor, err := signer.Sign(actor.UserID, query, *position)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := strings.Split(cursor, ".")
+		if len(parts) != 2 || len(cursor) > domain.MaxNameEntryCursorLength || strings.ContainsAny(cursor, "=+/ \r\n") {
+			t.Fatal("真实名称签名游标形状错误")
+		}
+		payloadBytes, err := base64.RawURLEncoding.Strict().DecodeString(parts[0])
+		if err != nil || base64.RawURLEncoding.EncodeToString(payloadBytes) != parts[0] {
+			t.Fatal("真实名称载荷编码错误", err)
+		}
+		signature, err := base64.RawURLEncoding.Strict().DecodeString(parts[1])
+		if err != nil || len(signature) != sha256.Size || base64.RawURLEncoding.EncodeToString(signature) != parts[1] {
+			t.Fatal("真实名称签名编码错误", err)
+		}
+		derivation := hmac.New(sha256.New, masterKey)
+		derivation.Write([]byte("cloudnest/name-entry-cursor/v1"))
+		messageMAC := hmac.New(sha256.New, derivation.Sum(nil))
+		messageMAC.Write([]byte(parts[0]))
+		if !hmac.Equal(signature, messageMAC.Sum(nil)) {
+			t.Fatal("真实名称游标独立 HMAC 不符")
+		}
+
+		// 2. 独立核对七字段、筛选摘要及可逆名称键，并从文本还原位置。
+		var fields map[string]json.RawMessage
+		var payload struct {
+			Version    int    `json:"version"`
+			UserID     string `json:"user_id"`
+			Scope      string `json:"scope"`
+			Sort       string `json:"sort"`
+			FilterHash string `json:"filter_hash"`
+			NameKey    string `json:"name_key"`
+			EntryID    string `json:"entry_id"`
+		}
+		filters, err := json.Marshal(struct {
+			Search string `json:"q"`
+			Kind   string `json:"kind"`
+		}{query.Search, query.Kind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		filterHash := sha256.Sum256(filters)
+		if json.Unmarshal(payloadBytes, &fields) != nil || len(fields) != 7 || json.Unmarshal(payloadBytes, &payload) != nil || payload.Version != 1 || payload.UserID != strconv.FormatUint(actor.UserID, 10) || payload.Scope != query.Scope || payload.Sort != "name_asc" || payload.FilterHash != hex.EncodeToString(filterHash[:]) {
+			t.Fatal("真实名称载荷字段或筛选摘要错误")
+		}
+		nameKey, err := base64.RawURLEncoding.Strict().DecodeString(payload.NameKey)
+		if err != nil || base64.RawURLEncoding.EncodeToString(nameKey) != payload.NameKey {
+			t.Fatal("真实名称键编码错误", err)
+		}
+		entryID, err := strconv.ParseUint(payload.EntryID, 10, 64)
+		if err != nil || payload.EntryID != strconv.FormatUint(original.ID, 10) || !bytes.Equal(nameKey, original.NameKey) || !reflect.DeepEqual(*position, original) {
+			t.Fatal("真实名称位置或输入保护错误", err)
+		}
+		resized := query
+		resized.PageSize = 100
+		if repeated, err := signer.Sign(actor.UserID, resized, original); err != nil || repeated != cursor {
+			t.Fatal("真实名称游标页大小调整改变绑定", err)
+		}
+		return &domain.NameEntryPosition{NameKey: nameKey, ID: entryID}
+	}
 	restore := func(statement string) {
 		t.Helper()
 		if _, err := pool.ExecContext(ctx, statement); err != nil {
@@ -88,7 +168,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 					nextID = ids[len(ids)-1]
 				}
 				check(t, result, ids, nextID)
-				after = result.NextPosition
+				after = signPosition(t, query, result.NextPosition)
 			}
 		}
 	})
@@ -241,7 +321,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				t.Fatal("名称预算扫描批次错误", err)
 			}
 			check(t, first, nil, 3999)
-			next, err := listing.List(ctx, actor, query, first.NextPosition)
+			next, err := listing.List(ctx, actor, query, signPosition(t, query, first.NextPosition))
 			if err != nil || *calls != 11 {
 				t.Fatal("名称预算续读错误", err)
 			}
@@ -261,7 +341,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal(err)
 		}
 		check(t, first, []uint64{3000}, 3999)
-		next, err := listing.List(ctx, actor, query, first.NextPosition)
+		next, err := listing.List(ctx, actor, query, signPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,6 +355,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal(err)
 		}
 		check(t, first, []uint64{3999}, 3999)
+		_ = signPosition(t, query, first.NextPosition)
 	})
 	t.Run("exact budget end", func(t *testing.T) {
 		defer restore("UPDATE file_entries SET status='ACTIVE',deleted_at=NULL WHERE id=4000")

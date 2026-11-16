@@ -519,3 +519,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 Store.ListUserNameEntryCandidates，按认证用户读取 all/starred、name_asc 的活动普通目录项候选，保留独立 name_key 字节并按名称键/ID 双升序续页。复用搜索及分类规则，多取一条判断 HasMore，完整祖先可见性由后续服务组合。专项及正式 MySQL 的同键分页、二进制边界、收藏/筛选、百条页与改名快照连续三次通过，调用与复验方法见 [第 218 步学习记录](docs/开发学习记录.md#第-218-步按用户读取名称升序的全局目录项候选)。
 
 已提供 NameEntryListService，在同一只读快照中组合 all/starred、name_asc 名称候选与完整祖先链可见性，每批最多一百项、一次最多扫描一千项。保留原始名称键，页满保存最后消费位置，预算空页或短页可以继续翻页，结束时 NextPosition 为 nil。专项及正式 MySQL 的同键分页、过滤补读、快照、单连接与预算边界连续三次通过，调用和复验方法见 [第 219 步学习记录](docs/开发学习记录.md#第-219-步组合名称升序可见列表服务)。
+
+已提供 NameEntryCursorSigner，为 all/starred、name_asc 查询生成版本 1 签名游标。采用名称用途派生 HMAC 密钥，绑定用户、范围、排序、原文筛选摘要及名称键/ID，二进制键使用可逆 Base64URL，名称游标上限为 2048 字节。独立固定向量、最长载荷、绑定/用途、副本/并发及正式 MySQL 签名位置续读连续三次通过，协议与复验方法见 [第 220 步学习记录](docs/开发学习记录.md#第-220-步实现名称升序分页游标签名)。
