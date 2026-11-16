@@ -1,5 +1,26 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——大小路由专项草稿误用名称游标错误
+
+### 问题现象
+
+第 238 步检查新增大小路由专项时，游标错误夹具仍返回 ErrInvalidNameEntryCursor，而预期为大小游标的 INVALID_CURSOR 响应。修正前记录于此，接下来将夹具改为大小用途错误并重新核对路由入选和回归。
+
+本轮补充检索启动测试时，命令引用了不存在的 cmd/server/main_test.go。接下来改为按目录和文件模式定位真实启动测试定义。
+
+### 根因与修复方案
+
+复用名称路由测试结构时，游标错误常量保留了名称用途。将夹具改为 ErrInvalidSizeEntryCursor，并核对实际大小处理函数的错误映射。启动测试文件按名称推测失误，改用目录及 -g '*test.go' 搜索，定位到 main_integration_test.go 的实际验证开关和 TestServerCurrentUserIntegration。
+
+### 验证结果
+
+修正后大小四十组路由与七类依赖、原三类注册组合八项主测试连续三次通过。TestServerCurrentUserIntegration 开启真实启动开关后连续三次通过，普通/收藏/预算/同大小首页和原游标跨重启一致，合法调整页大小后继续读取并结束，JSON 入选核对无跳过项。
+
+go test -count=1 ./... 与 go vet ./... 全量通过，OpenAPI 唯一键及 426 处引用、五类响应、十七条路径和十九个操作核对通过。gofmt、git diff --check、学习记录及 PowerShell 示例语法、原迁移摘要检查通过。
+
+
+
+
 ## 2026-11-17——处理函数检索命令使用了 Windows 无效通配路径
 
 ### 问题现象

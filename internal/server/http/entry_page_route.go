@@ -36,11 +36,11 @@ func RegisterEntryPageRoute(
 	}
 
 	// 3. 注册认证后的统一查询分派。
-	registerEntryPageRoute(router, authorize, directoryPage, globalPage, recentPage, namePage)
+	registerEntryPageRoute(router, authorize, directoryPage, globalPage, recentPage, namePage, nil)
 }
 
 // registerEntryPageRoute 复用认证和查询分派，缺省处理能力由目录 DTO 校验输入。
-func registerEntryPageRoute(router *gin.Engine, authorize func(context.Context, string) (*domain.Actor, error), directoryPage, globalPage, recentPage, namePage gin.HandlerFunc) {
+func registerEntryPageRoute(router *gin.Engine, authorize func(context.Context, string) (*domain.Actor, error), directoryPage, globalPage, recentPage, namePage, sizePage gin.HandlerFunc) {
 	// 1. 先构造认证中间件，再识别完整查询中的单个范围。
 	protected := middleware.RequireAuthorization(authorize, handler.AuthorizationFailure)
 	entriesPage := func(requestContext *gin.Context) {
@@ -51,10 +51,14 @@ func registerEntryPageRoute(router *gin.Engine, authorize func(context.Context, 
 		if err == nil && len(scopes) == 1 {
 			switch scopes[0] {
 			case domain.GlobalEntryScopeAll, domain.GlobalEntryScopeStarred:
-				// 1. 单个名称排序进入名称处理，其余排序由全局 DTO 校验。
+				// 1. 单个名称或大小排序进入对应处理，其余排序由全局 DTO 校验。
 				sorts := values["sort"]
 				if namePage != nil && len(sorts) == 1 && sorts[0] == domain.GlobalEntrySortNameAsc {
 					namePage(requestContext)
+					return
+				}
+				if sizePage != nil && len(sorts) == 1 && sorts[0] == domain.GlobalEntrySortSizeDesc {
+					sizePage(requestContext)
 					return
 				}
 				if globalPage != nil {

@@ -290,6 +290,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 3. 组合名称分页服务，交给正式列表路由。
 	namePageService := service.NewNameEntryPageService(nameCursorVerifier.Verify, nameListService.List, nameCursorSigner.Sign)
 
+	// 1. 绑定同一只读快照中的大小候选和祖先读取。
+	sizeListService := service.NewSizeEntryListService(
+		func(ctx context.Context, action func(context.Context, service.SizeEntryListReader) error) error {
+			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+				return action(snapshotContext, snapshotStore)
+			})
+		})
+
+	// 2. 使用持久化主密钥派生大小游标能力。
+	sizeCursorSigner, err := service.NewSizeEntryCursorSigner(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配大小游标签名器失败", "stage", "application", "error", err)
+		return err
+	}
+	sizeCursorVerifier, err := service.NewSizeEntryCursorVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配大小游标校验器失败", "stage", "application", "error", err)
+		return err
+	}
+
+	// 3. 组合大小分页服务，交给正式列表路由。
+	sizePageService := service.NewSizeEntryPageService(sizeCursorVerifier.Verify, sizeListService.List, sizeCursorSigner.Sign)
+
 	// 15. 复用目录快照入口，装配指定目录项详情服务。
 	entryDetailService := service.NewEntryDetailService(
 		func(ctx context.Context, action func(context.Context, service.EntryDetailReader) error) error {
@@ -372,10 +395,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	})
 
-	// 21. 注册业务接口，在列表路径绑定目录、全局、最近及名称分页。
+	// 21. 注册业务接口，在列表路径绑定目录、全局、最近、名称及大小分页。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
-	serverhttp.RegisterEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List)
+	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)

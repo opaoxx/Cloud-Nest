@@ -1410,6 +1410,9 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 正式名称查询组合 all/starred，持久化签名位置用于重启续读。
 	nameBeforeRestart, nameStarredBeforeRestart, nameBudgetBeforeRestart, nameLongBeforeRestart := verifyServerNameEntries(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, *globalBeforeRestart.Data.NextCursor, *recentBeforeRestart.Data.NextCursor, jwtConfig.SigningKey)
 	loginSecrets = append(loginSecrets, *nameBeforeRestart.Data.NextCursor, *nameStarredBeforeRestart.Data.NextCursor, *nameBudgetBeforeRestart.Data.NextCursor, *nameLongBeforeRestart.Data.NextCursor)
+	// 正式大小查询组合五类分派，保存普通、收藏、预算及同大小位置。
+	sizeBeforeRestart, sizeStarredBeforeRestart, sizeBudgetBeforeRestart, sizeTieBeforeRestart := verifyServerSizeEntries(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, *globalBeforeRestart.Data.NextCursor, *recentBeforeRestart.Data.NextCursor, *nameBeforeRestart.Data.NextCursor, jwtConfig.SigningKey)
+	loginSecrets = append(loginSecrets, *sizeBeforeRestart.Data.NextCursor, *sizeStarredBeforeRestart.Data.NextCursor, *sizeBudgetBeforeRestart.Data.NextCursor, *sizeTieBeforeRestart.Data.NextCursor)
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1449,6 +1452,38 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		for index, entryID := range fixture.nextIDs {
 			if next.Data.Items[index].ID != entryID {
 				t.Fatal("名称原游标跨重启读取条目错误")
+			}
+		}
+	}
+
+	// 大小普通、收藏、预算和同大小首页分别复用原文本，并与首次事实对照。
+	for _, fixture := range []struct {
+		raw     string
+		before  dto.GlobalEntryPageResponse
+		nextIDs []string
+	}{
+		{"scope=all&sort=size_desc&kind=document&q=" + url.QueryEscape("全局%_") + "&limit=1", sizeBeforeRestart, []string{"100001"}},
+		{"scope=starred&sort=size_desc&kind=document&q=" + url.QueryEscape("全局%_") + "&limit=1", sizeStarredBeforeRestart, []string{"100001"}},
+		{"scope=all&sort=size_desc&q=size-budget-&kind=document&limit=2", sizeBudgetBeforeRestart, []string{"400001", "400003"}},
+		{"scope=all&sort=size_desc&q=size-tie-&kind=document&limit=1", sizeTieBeforeRestart, []string{"400501"}},
+	} {
+		page := requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, fixture.raw, 200, "", "")
+		if !reflect.DeepEqual(page.Data, fixture.before.Data) || page.RequestID == fixture.before.RequestID {
+			t.Fatal("大小首页、签名或请求 ID 未按预期跨重启保留")
+		}
+		nextQuery, err := url.ParseQuery(fixture.raw)
+		if err != nil {
+			t.Fatal("大小重启续读参数错误", err)
+		}
+		nextQuery.Set("cursor", *fixture.before.Data.NextCursor)
+		nextQuery.Set("limit", "100")
+		next := requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, nextQuery.Encode(), 200, "", "")
+		if len(next.Data.Items) != len(fixture.nextIDs) || next.Data.NextCursor != nil {
+			t.Fatal("大小原游标未跨重启正确结束", len(next.Data.Items), next.Data.NextCursor != nil)
+		}
+		for index, entryID := range fixture.nextIDs {
+			if next.Data.Items[index].ID != entryID {
+				t.Fatal("大小原游标跨重启读取条目错误")
 			}
 		}
 	}
@@ -1594,6 +1629,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=starred&limit=0", 403, "ACCOUNT_DISABLED", "")
 	requestServerRecentEntries(t, "http://"+address, token.Token, "scope=recent&limit=0", 403, "ACCOUNT_DISABLED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=name_asc&limit=0", 403, "ACCOUNT_DISABLED", "")
+	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=size_desc&limit=0", 403, "ACCOUNT_DISABLED", "")
 	listDirectory(t, "parent_id=0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	getEntryDetail(t, "0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
@@ -1614,6 +1650,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=starred&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerRecentEntries(t, "http://"+address, token.Token, "scope=recent&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=name_asc&limit=0", 401, "SESSION_REVOKED", "")
+	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=size_desc&limit=0", 401, "SESSION_REVOKED", "")
 	getEntryDetail(t, "23", token.Token, 401, "SESSION_REVOKED", "")
 	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET expires_at=? WHERE id=17", session.ExpiresAt); err != nil {
 		t.Fatal(err)
@@ -1627,6 +1664,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=starred&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerRecentEntries(t, "http://"+address, token.Token, "scope=recent&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=name_asc&limit=0", 401, "SESSION_REVOKED", "")
+	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=size_desc&limit=0", 401, "SESSION_REVOKED", "")
 	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDirectory(t, directoryNextQuery, token.Token, 401, "SESSION_REVOKED", "")
@@ -1641,6 +1679,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=starred&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerRecentEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=recent&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=all&sort=name_asc&limit=0", 401, "SESSION_REVOKED", "")
+	requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=all&sort=size_desc&limit=0", 401, "SESSION_REVOKED", "")
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
@@ -1750,7 +1789,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-name-cursor", "name-budget-", "name-long-", "private-recent-query", "private-recent-cursor", "最近专用未访问", "private-starred-cursor", "private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-size-cursor", "size-budget-", "size-tie-", "size-zero", "private-name-cursor", "name-budget-", "name-long-", "private-recent-query", "private-recent-cursor", "最近专用未访问", "private-starred-cursor", "private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}
