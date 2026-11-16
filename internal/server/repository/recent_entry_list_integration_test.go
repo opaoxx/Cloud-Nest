@@ -11,14 +11,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -181,6 +188,41 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		if err != nil || strings.Contains(string(encoded), `"user_id"`) {
 			t.Fatal("真实最近分页公开 JSON 错误", err)
 		}
+		// 1. 将真实分页结果交给测试专用 GET 入口，复用正式交付与公共中间件。
+		var logs bytes.Buffer
+		router := serverhttp.NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
+		router.GET("/test-recent-entry-page-success", func(requestContext *gin.Context) {
+			handler.RecentEntryPageSuccess(requestContext, result)
+		}, func(*gin.Context) { t.Error("真实最近分页交付后进入下游") })
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 2 * time.Second
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-recent-entry-page-success", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Request-ID", requestID)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readError := io.ReadAll(response.Body)
+		closeError := response.Body.Close()
+		server.Close()
+
+		// 2. 核对真实传输头、完整 JSON 及请求完成日志，再逐字段对照数据库。
+		if readError != nil || closeError != nil || response.StatusCode != 200 || response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Pragma") != "no-cache" || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Content-Encoding") != "" || response.ContentLength != int64(len(body)) || len(response.Cookies()) != 0 || !bytes.Equal(body, encoded) {
+			t.Fatal("真实最近分页 HTTP 状态、响应头或完整正文错误", readError, closeError)
+		}
+		var completed map[string]any
+		if json.Unmarshal(logs.Bytes(), &completed) != nil || completed["request_id"] != requestID || completed["status"] != float64(200) || completed["method"] != "GET" || completed["path"] != "/test-recent-entry-page-success" {
+			t.Fatal("真实最近分页 HTTP 日志关联错误")
+		}
+		if strings.Contains(logs.String(), "学习笔记") || (result.NextCursor != nil && strings.Contains(logs.String(), *result.NextCursor)) {
+			t.Fatal("真实最近分页完成日志包含业务名称或游标")
+		}
+		encoded = body
 		var envelope map[string]json.RawMessage
 		if err := json.Unmarshal(encoded, &envelope); err != nil || len(envelope) != 2 || string(envelope["request_id"]) != `"`+requestID+`"` {
 			t.Fatal("真实最近分页响应外层错误", err)

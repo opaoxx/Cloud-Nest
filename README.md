@@ -505,3 +505,5 @@ GET /api/v1/entries?scope=starred 已接入正式路由，按当前用户的收�
 已提供 RecentEntryPageService，组合空游标首页、非空游标校验、最近可见列表读取及下一页签名，返回独立文件/访问事实与可空 NextCursor。预算空页或短页保留文本游标，结束页使用 nil，异常结果和取消整体返回错误。服务专项及正式 MySQL 的首页/续页/结束、合法页大小调整、错误绑定拒绝和预算文本分页连续三次通过，调用与复验方法见 [第 211 步学习记录](docs/开发学习记录.md#第-211-步组合带文本游标的最近使用分页服务)。
 
 已提供 RecentEntrySummary、RecentEntryPageData、RecentEntryPageResponse 和 NewRecentEntryPageData。复用十字段摘要并增加必填 last_opened_at，ID/版本使用字符串，访问时间转换为 UTC 微秒值，空 items/breadcrumbs 为 []，结束游标为 null。精确 JSON、边界、副本及真实 MySQL 文本分页转换连续三次通过，字段与复验方法见 [第 212 步学习记录](docs/开发学习记录.md#第-212-步定义最近使用分页响应-dto)。
+
+已提供 handler.RecentEntryPageSuccess，将最近使用分页结果转换为公开 DTO，关联当前 request_id，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。文件保留必填 last_opened_at，预算空页保留续页文本，结束为 null。十六组成功、十五组异常、两组已提交状态及五组真实 GET 专项连续三次通过，正式 MySQL 普通/预算/结束页的真实 HTTP 交付通过。执行顺序与复验方法见 [第 213 步学习记录](docs/开发学习记录.md#第-213-步实现最近使用分页成功-http-交付)。
