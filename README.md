@@ -425,3 +425,5 @@ go vet ./...
 已提供 SetStarredService，在同一已认证用户事务中复用完整路径检查及收藏写入，核对偏好归属、状态与时间，复制结果并确认提交后交付。文件、目录及根目录沿用既有收藏规则，隐藏祖先拒绝写入，异常结果回滚真实偏好及审计时间。服务专项及扩展后的正式 MySQL 联测连续三次通过，调用与复验方法见 [第 171 步学习记录](docs/开发学习记录.md#第-171-步组合目录项收藏核心服务)。
 
 已提供 SetStarredData、SetStarredResponse 和 NewSetStarredData，将已提交收藏偏好转换为 starred、starred_at 及 data/request_id 外层。收藏时间复用 UTC 微秒转换，取消收藏明确返回 false 与 null。精确 JSON、日期边界、副本及真实 MySQL 组合验证通过，字段与复验方法见 [第 172 步学习记录](docs/开发学习记录.md#第-172-步定义目录项收藏成功响应-dto)。
+
+已提供 handler.SetStarredSuccess，将已提交收藏偏好转换为公开响应，关联当前请求 ID，以 HTTP 200、UTF-8 JSON 和禁止缓存头交付。取消收藏明确返回 false/null，异常资料或取消沿用统一内部错误，已发送状态按原响应结束。测试专用 PUT 入口及三组真实 HTTP 传输连续三次通过，执行顺序与复验方法见 [第 173 步学习记录](docs/开发学习记录.md#第-173-步实现目录项收藏成功-http-交付)。

@@ -91,6 +91,7 @@ info:
     PATCH /api/v1/entries/{id} 已由启动入口绑定共享授权、幂等重命名服务与稳定结果编解码，结果快照跨请求及重启复用。
     POST /api/v1/entries/{id}/move 已由启动入口绑定共享授权、用户事务、幂等移动服务及稳定结果编解码，结果快照跨请求及重启复用。
     SetStarredData/SetStarredResponse 定义收藏设置成功数据及 data/request_id 外层，收藏时间采用可空 UTC 微秒值。
+    收藏成功交付方法通过测试专用 PUT 入口验证，共享响应见 SetStarredSucceeded，关联当前请求 ID 并禁止缓存。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -2218,6 +2219,25 @@ components:
               message: 会话不存在
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    SetStarredSucceeded:
+      description: |
+        收藏设置成功 HTTP 200，使用 starred、starred_at 与当前请求 ID，响应采用 no-store 和 Pragma no-cache。
+        由收藏成功交付方法在服务确认提交后发送，收藏时间为 UTC 微秒值，取消收藏明确返回 false 与 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SetStarredResponse'
     RenameDeviceSucceeded:
       description: |
         设备改名成功 HTTP 200，使用 data.device 与本次请求 ID，响应采用 no-store 和 Pragma no-cache。
