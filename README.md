@@ -328,6 +328,8 @@ POST /api/v1/directories 已接入正式路由与生产启动装配，复用共�
 
 已提供 service.BuildRenameEntryRequestHash，将版本化操作名、目标 ID、预期版本及校验后的展示名按固定顺序编码并生成 32 字节 SHA-256 摘要。完整整数以十进制字符串参与编码，首尾空白统一处理，展示名大小写和 Unicode 写法参与请求比较。固定向量、HTTP 参数衔接及并发验证通过，编码约定和复验方法见 [第 147 步学习记录](docs/开发学习记录.md#第-147-步生成目录项重命名请求摘要)。
 
+已提供 RenameEntryData、RenameEntryResponse 和 NewRenameEntryData，复用现有详情 DTO 的十八项字段，生成 data.entry 稳定快照，响应外层关联当前 request_id。真实 MySQL 已验证文件/目录、六类文件、空值、同事务保存、后续变更后的快照及失败回滚，结构与复验方法见 [第 148 步学习记录](docs/开发学习记录.md#第-148-步定义目录项重命名成功响应-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |

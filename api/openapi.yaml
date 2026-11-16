@@ -814,6 +814,55 @@ components:
           starred_at: '2026-11-15T02:30:00.123456Z'
           last_opened_at: '2026-11-15T03:30:00.123456Z'
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RenameEntryData:
+      type: object
+      additionalProperties: false
+      required: [entry]
+      description: 重命名完成时的稳定目录项快照，可在同一事务内保存到幂等结果，提交后交付。
+      properties:
+        entry:
+          allOf:
+            - $ref: '#/components/schemas/EntryDetailData'
+            - type: object
+              properties:
+                parent_id:
+                  $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+                name:
+                  $ref: '#/components/schemas/DirectoryEntrySummary/properties/name'
+          description: 普通活动文件或目录的十八项详情字段，父目录为非零标识字符串，名称非空。
+    RenameEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RenameEntryData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          entry:
+            id: '23'
+            parent_id: '12'
+            name: 学习笔记.PDF
+            kind: document
+            size_bytes: 2048
+            revision: '4'
+            created_at: '2026-11-15T01:30:00.123456Z'
+            modified_at: '2026-11-16T02:30:00.123456Z'
+            updated_at: '2026-11-16T02:30:00.123456Z'
+            status: ACTIVE
+            extension: pdf
+            mime_type: text/markdown
+            color_key: null
+            content_modified_at: '2026-11-15T01:30:00.123456Z'
+            source_device:
+              id: '19'
+              name: '  发布时设备 🎮  '
+            starred: true
+            starred_at: '2026-11-15T02:30:00.123456Z'
+            last_opened_at: '2026-11-15T03:30:00.123456Z'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     DirectoryEntrySummary:
       type: object
       additionalProperties: false
