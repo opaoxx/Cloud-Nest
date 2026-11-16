@@ -915,7 +915,7 @@ components:
       required: [entry]
       description: >
         移动完成时的稳定目录项快照，可在同一事务内保存到幂等结果，提交后交付。
-        复用完整十八项详情字段，所有可空字段显式存在，来源设备对象包含 id 和 name。
+        恢复时核对全部十八项字段，所有可空字段显式存在，来源设备对象包含 id 和 name。
         来源设备信息全部缺失时使用 null，starred 在 starred_at 非 null 时为 true，时间规范为 UTC 微秒。
       properties:
         entry:
