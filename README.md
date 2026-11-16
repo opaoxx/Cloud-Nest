@@ -533,3 +533,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 NameEntryPageQuery 与 ParseNameEntryPageQuery，完整解析名称列表 URL，默认 all/name_asc、每页五十条，接收 all/starred、搜索、分类及最多 2048 字节的解码游标原文。复用领域分类和标准页大小校验，重复值或非法参数返回固定字段提示。专项、HTTP 输入及真实 MySQL 查询到交付闭环连续三次通过，规则与复验方法见 [第 225 步学习记录](docs/开发学习记录.md#第-225-步定义名称升序列表查询参数-dto)。
 
 已提供 handler.NameEntryPage，组合可信 Actor、名称查询 DTO、分页服务和成功/错误交付。格式错误使用固定 INVALID_ARGUMENT，名称游标及绑定错误使用 INVALID_CURSOR，账号/会话/设备错误复用统一授权响应。处理函数专项及真实认证、普通/收藏/长游标、预算空页/短页和状态联测连续三次通过，调用与复验方法见 [第 226 步学习记录](docs/开发学习记录.md#第-226-步实现名称升序列表-http-处理函数)。
+
+GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 scope=all&sort=name_asc 或 scope=starred&sort=name_asc。正式启动装配同快照名称列表及持久化主密钥派生的名称游标，支持搜索、分类、2048 字节游标和预算空页续读。路由及真实启动/重启联测连续三次通过，普通、收藏、预算和长键原游标可跨重启使用，示例与复验方法见 [第 227 步学习记录](docs/开发学习记录.md#第-227-步接入正式名称升序列表路由与启动装配)。

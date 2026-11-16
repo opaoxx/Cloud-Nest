@@ -30,5 +30,5 @@ func RegisterDirectoryPageRoute(
 	}
 
 	// 2. 复用正式列表的认证与查询分派。
-	registerEntryPageRoute(router, authorize, directoryPage, globalPage, nil)
+	registerEntryPageRoute(router, authorize, directoryPage, globalPage, nil, nil)
 }
