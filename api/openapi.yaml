@@ -90,6 +90,7 @@ info:
     EntryRevisionConflict 定义版本冲突的 HTTP 409，details.current_revision 使用字符串保留当前完整版本。
     PATCH /api/v1/entries/{id} 已由启动入口绑定共享授权、幂等重命名服务与稳定结果编解码，结果快照跨请求及重启复用。
     POST /api/v1/entries/{id}/move 已由启动入口绑定共享授权、用户事务、幂等移动服务及稳定结果编解码，结果快照跨请求及重启复用。
+    SetStarredData/SetStarredResponse 定义收藏设置成功数据及 data/request_id 外层，收藏时间采用可空 UTC 微秒值。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1433,6 +1434,35 @@ components:
           description: 明确的目标收藏状态。
       example:
         starred: false
+    SetStarredData:
+      type: object
+      additionalProperties: false
+      required: [starred, starred_at]
+      description: |
+        收藏服务确认提交后的公开偏好，适用于文件、目录及根目录。
+        starred 根据收藏时间是否存在生成，重复收藏沿用原时间，取消收藏返回 false 和 null。
+      properties:
+        starred:
+          $ref: '#/components/schemas/EntryDetailData/properties/starred'
+        starred_at:
+          $ref: '#/components/schemas/EntryDetailData/properties/starred_at'
+      example:
+        starred: true
+        starred_at: '2026-11-16T02:30:00.123456Z'
+    SetStarredResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/SetStarredData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          starred: false
+          starred_at: null
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RenameDeviceRequest:
       type: object
       additionalProperties: false

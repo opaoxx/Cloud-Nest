@@ -2,13 +2,16 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -180,7 +183,62 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 			}
 		}
 	})
-	// 3. 实际写入后外层失败或取消，统一回滚偏好。
+	// 3. 已提交偏好转换为公开响应，核对状态、时间、空值和独立结果。
+	t.Run("response DTO from committed preferences", func(t *testing.T) {
+		for _, entryID := range []uint64{13, 15, 11, 14} {
+			baseBefore, err := store.FindUserFileEntry(ctx, actor.UserID, entryID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot *dto.SetStarredData
+			for _, starred := range []bool{false, true, true, false} {
+				preference, err := set(ctx, entryID, starred)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := dto.NewSetStarredData(preference)
+				if err != nil || data == nil || data.Starred != starred || (data.StarredAt != nil) != starred || !reflect.DeepEqual(preference, read(entryID)) {
+					t.Fatal("已提交收藏偏好转换错误", err)
+				}
+				if starred {
+					if data.StarredAt == preference.StarredAt || !data.StarredAt.Equal(*preference.StarredAt) || data.StarredAt.Location() != time.UTC || data.StarredAt.Nanosecond()%1000 != 0 {
+						t.Fatal("收藏时间事实或独立结果错误")
+					}
+					if snapshot != nil && !snapshot.StarredAt.Equal(*data.StarredAt) {
+						t.Fatal("重复收藏的响应时间错误")
+					}
+					snapshot = data
+					*preference.StarredAt = oldStamp
+					if !data.StarredAt.Equal(*read(entryID).StarredAt) {
+						t.Fatal("来源偏好修改影响响应时间")
+					}
+				}
+				encoded, err := json.Marshal(dto.SetStarredResponse{Data: *data, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e148"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body map[string]json.RawMessage
+				if err := json.Unmarshal(encoded, &body); err != nil || len(body) != 2 || string(body["request_id"]) != `"28ee758a-0727-42de-ae7d-3bb33155e148"` {
+					t.Fatal("收藏响应外层字段错误", err)
+				}
+				var payload map[string]json.RawMessage
+				if err := json.Unmarshal(body["data"], &payload); err != nil || len(payload) != 2 || string(payload["starred"]) != strconv.FormatBool(starred) {
+					t.Fatal("收藏响应公开字段错误", err)
+				}
+				if !starred && string(payload["starred_at"]) != "null" {
+					t.Fatal("取消收藏缺少显式 null")
+				}
+			}
+			baseAfter, err := store.FindUserFileEntry(ctx, actor.UserID, entryID)
+			if err != nil || !reflect.DeepEqual(baseBefore, baseAfter) || snapshot == nil || !snapshot.Starred || snapshot.StarredAt == nil {
+				t.Fatal("收藏响应快照或目录项基础事实错误", err)
+			}
+			if entryID == 15 && !read(entryID).LastOpenedAt.Equal(oldStamp) {
+				t.Fatal("响应转换影响最近访问时间")
+			}
+		}
+	})
+	// 4. 实际写入后外层失败或取消，统一回滚偏好。
 	t.Run("outer failure and cancellation rollback", func(t *testing.T) {
 		failure := errors.New("fixture starred rollback")
 		for _, cancelAfterWrite := range []bool{false, true} {
@@ -313,7 +371,7 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 			t.Fatal("收藏返回了旧快照事实", err)
 		}
 	})
-	// 4. 用户锁协调并发状态设置，单条偏好记录保存实际结果。
+	// 5. 用户锁协调并发状态设置，单条偏好记录保存实际结果。
 	t.Run("concurrent identical and opposite states", func(t *testing.T) {
 		if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET starred_at=NULL WHERE user_id=1 AND entry_id=13"); err != nil {
 			t.Fatal(err)
@@ -373,6 +431,10 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 		}
 		if err := setMaximum(true); err != nil || result == nil || result.UserID != maximum || result.EntryID != maximum || result.StarredAt == nil {
 			t.Fatal("最大标识收藏错误", err)
+		}
+		data, err := dto.NewSetStarredData(result)
+		if err != nil || data == nil || !data.Starred || data.StarredAt == nil || !data.StarredAt.Equal(*result.StarredAt) {
+			t.Fatal("最大标识收藏响应转换错误", err)
 		}
 		maximumOpened := time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC)
 		if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET last_opened_at=? WHERE user_id=? AND entry_id=?", maximumOpened, maximum, maximum); err != nil {
