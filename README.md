@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -367,6 +367,8 @@ PATCH /api/v1/entries/{id} 已接入正式路由与启动装配，绑定共享�
 已提供 IdempotentMoveEntryService.Move，在同一已认证用户事务中先查幂等记录，缺失时组合核心移动、完整详情转换和八天稳定结果保存，已有记录通过复用及快照校验后交付。确认提交后返回独立 JSON，真实 MySQL 已验证单连接、历史结果、双表回滚、身份复查及三类并发，调用过程与复验方法见 [第 166 步学习记录](docs/开发学习记录.md#第-166-步组合目录项移动幂等服务)。
 
 已提供 handler.MoveEntry，按认证身份、源路径、幂等头、移动正文、服务调用及结果核对的顺序处理请求，成功复用 MoveEntrySuccess，领域错误映射统一 400/403/404/409 响应。真实 JWT/MySQL/HTTP 测试入口已验证移动与重试、目录关系、范围及认证后状态复查，参数与错误约定见 [第 167 步学习记录](docs/开发学习记录.md#第-167-步实现目录项移动-http-处理函数)。
+
+已接入正式 POST /api/v1/entries/{id}/move，启动入口复用共享授权、用户事务、移动幂等服务和 DTO 编解码。真实 run 两轮启动已验证文件/目录移动、同位置、冲突、范围、列表/详情及重启后的原始快照复用，接口契约见 [OpenAPI](api/openapi.yaml)，调用与复验方法见 [第 168 步学习记录](docs/开发学习记录.md#第-168-步接入正式目录项移动接口与启动装配)。
 
 ## 本地连接信息
 

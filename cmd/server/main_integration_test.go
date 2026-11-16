@@ -1362,6 +1362,24 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if !foundRenamed {
 		t.Fatal("正式改名未衔接当前列表")
 	}
+	// 正式移动衔接详情、双方列表及后代父链，原始快照跨重启复用。
+	movedEntryBeforeRestart := verifyServerEntryMove(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
+	movedDetailBeforeRestart := getEntryDetail(t, "70001", webRefreshed.Data.AccessToken, 200, "", "")
+	if movedDetailBeforeRestart.Data.ParentID == nil || *movedDetailBeforeRestart.Data.ParentID != "70004" || movedDetailBeforeRestart.Data.Revision != "3" {
+		t.Fatal("正式移动未衔接当前详情")
+	}
+	movedPageBeforeRestart := listDirectory(t, "parent_id=70004", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(movedPageBeforeRestart.Data.Items) != 1 || movedPageBeforeRestart.Data.Items[0].ID != "70001" {
+		t.Fatal("正式移动未衔接目的地列表")
+	}
+	movedSourcePage := listDirectory(t, "parent_id=70002", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(movedSourcePage.Data.Items) != 0 {
+		t.Fatal("原父目录仍列出已移动项")
+	}
+	movedChildPage := listDirectory(t, "parent_id=70005", webRefreshed.Data.AccessToken, 200, "", "")
+	if len(movedChildPage.Data.Items) != 1 || movedChildPage.Data.Items[0].ID != "70006" || len(movedChildPage.Data.Breadcrumbs) != 3 || movedChildPage.Data.Breadcrumbs[1].ID != "70003" || movedChildPage.Data.Breadcrumbs[2].ID != "70005" {
+		t.Fatal("正式目录移动后的后代父链错误")
+	}
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1373,6 +1391,18 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	movedEntryAfterRestart := requestServerMoveEntry(t, "http://"+address, webRefreshed.Data.AccessToken, "70001", serverMoveEntryKey, serverMoveEntryBody, 200, "", "")
+	if !reflect.DeepEqual(movedEntryBeforeRestart.Data, movedEntryAfterRestart.Data) || movedEntryBeforeRestart.RequestID == movedEntryAfterRestart.RequestID {
+		t.Fatal("重启后正式移动快照或当前请求 ID 错误")
+	}
+	movedDetailAfterRestart := getEntryDetail(t, "70001", webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(movedDetailBeforeRestart.Data, movedDetailAfterRestart.Data) {
+		t.Fatal("重启后当前位置事实错误")
+	}
+	movedPageAfterRestart := listDirectory(t, "parent_id=70004", webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(movedPageBeforeRestart.Data, movedPageAfterRestart.Data) {
+		t.Fatal("重启后移动目的地列表错误")
+	}
 	renamedEntryAfterRestart := requestServerRenameEntry(t, "http://"+address, webRefreshed.Data.AccessToken, "42", serverRenameEntryKey, serverRenameEntryBody, 200, "", "")
 	if !reflect.DeepEqual(renamedEntryBeforeRestart.Data, renamedEntryAfterRestart.Data) || renamedEntryBeforeRestart.RequestID == renamedEntryAfterRestart.RequestID {
 		t.Fatal("重启后正式重命名快照或当前请求 ID 错误")
@@ -1579,7 +1609,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", serverCreateDirectoryKey, serverRenameEntryKey, "正式创建 🌱", "正式笔记.PDF", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}

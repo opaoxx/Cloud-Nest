@@ -89,6 +89,7 @@ info:
     重命名正文按 name、expected_revision 顺序定位字段错误，客户端所见版本由已认证用户事务中的服务比对。
     EntryRevisionConflict 定义版本冲突的 HTTP 409，details.current_revision 使用字符串保留当前完整版本。
     PATCH /api/v1/entries/{id} 已由启动入口绑定共享授权、幂等重命名服务与稳定结果编解码，结果快照跨请求及重启复用。
+    POST /api/v1/entries/{id}/move 已由启动入口绑定共享授权、用户事务、幂等移动服务及稳定结果编解码，结果快照跨请求及重启复用。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -139,6 +140,49 @@ paths:
           $ref: '#/components/responses/TargetEntryNotFound'
         '409':
           $ref: '#/components/responses/CreateDirectoryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/entries/{id}/move:
+    post:
+      tags: [Entries]
+      operationId: moveEntry
+      summary: 按预期版本移动当前用户的文件或目录
+      description: |
+        Bearer JWT 和数据库授权通过后解析源 id、Idempotency-Key、目标父目录及预期版本。
+        用户事务复查账号、设备和会话，首次请求检查源与目的地完整路径，拒绝根移动、文件目的地及移入自身或后代。
+        单次源子树包含自身最多 10000 项，移动后最深层级最多 32，活动名称冲突返回 NAME_CONFLICT。
+        实际父目录变化时版本加一，同位置且版本匹配返回当前版本。版本冲突携带字符串 details.current_revision。
+        稳定 data.entry 与位置更新同事务保存八天，同键同参数重试返回当时的 200 快照，各次交付关联当前 request_id。
+        同键不同参数或记录到期返回对应 409，参数摘要包含源、预期版本及目的地。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveEntryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MoveEntrySucceeded'
+        '400':
+          $ref: '#/components/responses/MoveEntryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          $ref: '#/components/responses/RootEntryOperationForbidden'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/MoveEntryConflict'
         '413':
           $ref: '#/components/responses/RequestBodyTooLarge'
         '415':
