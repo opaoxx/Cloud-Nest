@@ -1,5 +1,24 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——处理函数检索命令使用了 Windows 无效通配路径
+
+### 问题现象
+
+第 237 步核对处理函数测试清单时，rg 命令把通配符写进路径参数，Windows 返回文件名语法错误。前面的格式化已经成功，检索只完成 HTTP 文件部分。修正前记录于此，接下来以目录和 -g 模式重新检索并核对完整入选测试。
+
+### 根因与修复方案
+
+命令使用 internal/server/repository/*entry_page_handler* 作为字面路径，当前 PowerShell 调用没有为 rg 展开该通配路径。改为传入 repository 目录，并使用 -g '*entry_page_handler_integration_test.go' 过滤，重新找到四项真实处理函数联测入口，再按精确 Test 名称运行。
+
+### 验证结果
+
+修正后成功检索四项真实处理函数联测入口。十六项处理函数主测试及四项真实 JWT/MySQL/HTTP 联测连续三次通过，JSON 入选清单核对完成且无跳过项，大小处理函数每轮四十二次实际 GET 的正常、认证、游标和状态场景通过。
+
+go test -count=1 ./... 与 go vet ./... 全量通过，OpenAPI 唯一键及 425 处引用、固定错误示例、十七条路径和十九个操作核对通过。gofmt、git diff --check、学习记录及 PowerShell 示例语法、原迁移摘要检查通过。
+
+
+
+
 ## 2026-11-17——大小 HTTP 联测草稿中响应变量重名
 
 ### 问题现象
