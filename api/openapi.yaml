@@ -1419,6 +1419,20 @@ components:
       example:
         target_parent_id: '12'
         expected_revision: '3'
+    SetStarredRequest:
+      type: object
+      additionalProperties: false
+      required: [starred]
+      description: |
+        设置目录项收藏状态的请求 DTO，starred 须显式为 JSON 布尔值。
+        true 表示收藏，false 表示取消收藏，字段缺失或 null 定位 starred 字段错误。
+        目录项 ID 来自路径，用户身份来自认证 Actor，后续用户事务检查归属和完整路径可见性。
+      properties:
+        starred:
+          type: boolean
+          description: 明确的目标收藏状态。
+      example:
+        starred: false
     RenameDeviceRequest:
       type: object
       additionalProperties: false

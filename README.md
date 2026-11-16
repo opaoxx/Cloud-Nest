@@ -370,6 +370,8 @@ PATCH /api/v1/entries/{id} 已接入正式路由与启动装配，绑定共享�
 
 已接入正式 POST /api/v1/entries/{id}/move，启动入口复用共享授权、用户事务、移动幂等服务和 DTO 编解码。真实 run 两轮启动已验证文件/目录移动、同位置、冲突、范围、列表/详情及重启后的原始快照复用，接口契约见 [OpenAPI](api/openapi.yaml)，调用与复验方法见 [第 168 步学习记录](docs/开发学习记录.md#第-168-步接入正式目录项移动接口与启动装配)。
 
+已提供 SetStarredRequest、SetStarredInput 和 ParseSetStarredRequest，用指针布尔值读取明确的收藏状态，true 表示收藏、false 表示取消收藏，缺失或 null 返回 starred 字段错误。独立结果、并发及三十五组真实 HTTP 输入验证通过，类型与调用过程见 [第 169 步学习记录](docs/开发学习记录.md#第-169-步定义目录项收藏请求-dto)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
