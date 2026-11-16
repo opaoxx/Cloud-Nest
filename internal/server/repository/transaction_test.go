@@ -31,6 +31,7 @@ type loginTransactionScript struct {
 	revoke                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	renameEntry                                        func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	moveEntry                                          func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	restore                                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
 	rollbackOnce                                       sync.Once
@@ -66,6 +67,13 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE file_entries SET parent_id ") {
+		connection.script.record("move_entry")
+		if connection.script.moveEntry == nil {
+			return nil, errors.New("测试未登记目录项移动操作")
+		}
+		return connection.script.moveEntry(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "UPDATE file_entries ") {
 		connection.script.record("rename_entry")
 		if connection.script.renameEntry == nil {
