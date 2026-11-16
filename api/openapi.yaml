@@ -67,6 +67,7 @@ info:
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
     GlobalEntryPageData/GlobalEntryPageResponse 定义全局分页响应，复用条目摘要，breadcrumbs 为 []，预算空页保留 next_cursor，结束时返回 null。
+    全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
     目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
@@ -2573,6 +2574,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/EntryDetailResponse'
+    GlobalEntryPageListed:
+      description: 全局分页成功交付，预算空页保留续页文本，正常结束明确返回 next_cursor=null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GlobalEntryPageResponse'
     DirectoryPageListed:
       description: |
         目录列表成功 HTTP 200，返回 items、breadcrumbs、可空 next_cursor 与请求 ID。

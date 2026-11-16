@@ -10,13 +10,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -247,6 +255,48 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 		result, err := paging.List(ctx, currentActor, filters, currentCursor)
 		if result != nil || !errors.Is(err, domain.ErrInvalidGlobalEntryCursor) || listCalls != 3 {
 			t.Fatal("错误文本游标进入了正式列表读取", err)
+		}
+	}
+
+	// 6. 在空闲端口将真实预算空页、续页和结束结果交给 HTTP 成功方法。
+	pages := map[string]*domain.GlobalEntryPageResult{"budget": firstPage, "next": secondPage, "end": thirdPage}
+	var httpLogs bytes.Buffer
+	router := serverhttp.NewRouter(logging.New(&httpLogs), nil, func(context.Context) bool { return true })
+	router.GET("/test-global-entry-page-success/:stage", func(requestContext *gin.Context) {
+		handler.GlobalEntryPageSuccess(requestContext, pages[requestContext.Param("stage")])
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 3 * time.Second
+	for _, stage := range []string{"budget", "next", "end"} {
+		requestID := uuid.NewString()
+		request, err := http.NewRequest("GET", server.URL+"/test-global-entry-page-success/"+stage+"?note=private-global-query", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Request-ID", strings.ToUpper(requestID))
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, readError := io.ReadAll(response.Body)
+		closeError := response.Body.Close()
+		if readError != nil || closeError != nil || response.StatusCode != 200 || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Pragma") != "no-cache" || response.Header.Get("Content-Encoding") != "" || response.ContentLength != int64(len(encoded)) || len(response.Cookies()) != 0 {
+			t.Fatal("真实数据库结果的 HTTP 响应头错误", readError, closeError)
+		}
+		var body dto.GlobalEntryPageResponse
+		if json.Unmarshal(encoded, &body) != nil || body.RequestID != requestID || len(body.Data.Breadcrumbs) != 0 || body.Data.Items == nil || len(body.Data.Items) != len(pages[stage].Entries) || (body.Data.NextCursor != nil) != (pages[stage].NextCursor != nil) {
+			t.Fatal("真实数据库结果的 HTTP JSON 错误")
+		}
+		if pages[stage].NextCursor != nil && *body.Data.NextCursor != *pages[stage].NextCursor {
+			t.Fatal("真实预算或正常续页的游标丢失")
+		}
+	}
+	server.Close()
+	for _, marker := range []string{"private-global-query", "学习%_", cursor, secondCursor} {
+		if strings.Contains(httpLogs.String(), marker) {
+			t.Fatal("真实全局完成日志包含查询、名称或游标")
 		}
 	}
 }
