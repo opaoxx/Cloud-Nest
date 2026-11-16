@@ -1,17 +1,28 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -405,6 +416,120 @@ func TestSetUserEntryStarredIntegration(t *testing.T) {
 			if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM user_entry_preferences WHERE user_id=1 AND entry_id=13").Scan(&count); err != nil || count != 1 {
 				t.Fatal("并发偏好数量错误", err)
 			}
+		}
+	})
+	// 6. 实际 JWT、认证中间件和 PUT 处理函数连接真实收藏事务。
+	t.Run("authenticated HTTP handler", func(t *testing.T) {
+		configuration := config.JWTConfig{SigningKey: bytes.Repeat([]byte{9}, 32), Issuer: "cloudnest-test", Audience: "cloudnest-api-test", AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour}
+		signer, err := service.NewAccessTokenSigner(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := service.NewAccessTokenVerifier(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		access, err := signer.Issue(domain.LoginSession{ID: actor.SessionID, UserID: actor.UserID, DeviceID: actor.DeviceID, ExpiresAt: time.Now().Add(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorization := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
+		var disableAfterAuthorization atomic.Bool
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.PUT("/test-set-starred/:id", middleware.RequireAuthorization(func(ctx context.Context, token string) (*domain.Actor, error) {
+			current, err := authorization.Authorize(ctx, token)
+			if err == nil && disableAfterAuthorization.Swap(false) {
+				_, err = pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=1")
+			}
+			return current, err
+		}, handler.AuthorizationFailure), handler.SetStarred(starredService.Set))
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 3 * time.Second
+		requestNumber := 0
+		request := func(id, body, token string, status int, code, field string) dto.SetStarredResponse {
+			t.Helper()
+			requestNumber++
+			requestID := fmt.Sprintf("28ee758a-0727-42de-ae7d-%012d", requestNumber)
+			message, err := http.NewRequestWithContext(ctx, "PUT", server.URL+"/test-set-starred/"+id+"?note=private-query", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			message.Header.Set("Content-Type", "application/json")
+			message.Header.Set("X-Request-ID", requestID)
+			if token != "" {
+				message.Header.Set("Authorization", "Bearer "+token)
+			}
+			response, err := client.Do(message)
+			if err != nil {
+				t.Fatal("真实收藏 HTTP 失败", err)
+			}
+			encoded, readError := io.ReadAll(response.Body)
+			closeError := response.Body.Close()
+			if readError != nil || closeError != nil || response.StatusCode != status || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Content-Type") != "application/json; charset=utf-8" {
+				t.Fatal("真实收藏响应状态或头信息错误", response.StatusCode, readError, closeError)
+			}
+			var result dto.SetStarredResponse
+			if status == 200 {
+				if json.Unmarshal(encoded, &result) != nil || result.RequestID != requestID {
+					t.Fatal("真实成功响应错误")
+				}
+				return result
+			}
+			var failed dto.ErrorResponse
+			if json.Unmarshal(encoded, &failed) != nil || failed.RequestID != requestID || failed.Error.Code != code {
+				t.Fatal("真实错误响应错误", code)
+			}
+			if field == "" {
+				if failed.Error.Details != nil {
+					t.Fatal("真实错误详情须为 null")
+				}
+			} else if len(failed.Error.Details) != 1 || failed.Error.Details["field"] != field {
+				t.Fatal("真实字段错误位置不符")
+			}
+			return result
+		}
+		first := request("13", `{"starred":true}`, access.Token, 200, "", "")
+		repeated := request("13", `{"starred":true}`, access.Token, 200, "", "")
+		if !first.Data.Starred || first.Data.StarredAt == nil || !reflect.DeepEqual(first.Data, repeated.Data) || first.RequestID == repeated.RequestID || !first.Data.StarredAt.Equal(*read(13).StarredAt) {
+			t.Fatal("真实收藏重试的状态、时间或请求 ID 错误")
+		}
+		unstarred := request("13", `{"starred":false}`, access.Token, 200, "", "")
+		if unstarred.Data.Starred || unstarred.Data.StarredAt != nil || read(13).StarredAt != nil {
+			t.Fatal("真实取消收藏错误")
+		}
+		for _, id := range []string{"15", "11"} {
+			response := request(id, `{"starred":true}`, access.Token, 200, "", "")
+			if !response.Data.Starred || response.Data.StarredAt == nil {
+				t.Fatal("真实目录或根目录收藏错误")
+			}
+		}
+		request("33", `{"starred":true}`, access.Token, 404, "ENTRY_NOT_FOUND", "")
+		request("999", `{"starred":true}`, access.Token, 404, "ENTRY_NOT_FOUND", "")
+		before := read(13)
+		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status='TRASHED',deleted_at=UTC_TIMESTAMP(6) WHERE id=12"); err != nil {
+			t.Fatal(err)
+		}
+		request("13", `{"starred":true}`, access.Token, 404, "ENTRY_NOT_FOUND", "")
+		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status='ACTIVE',deleted_at=NULL WHERE id=12"); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, read(13)) {
+			t.Fatal("祖先不可见时收藏偏好发生改变")
+		}
+		request("0", `{"private-broken":`, access.Token, 400, "INVALID_ARGUMENT", "id")
+		request("13", `{}`, access.Token, 400, "INVALID_ARGUMENT", "starred")
+		request("13", `{"starred":null}`, access.Token, 400, "INVALID_ARGUMENT", "starred")
+		request("0", `{"private-broken":`, "", 401, "AUTH_REQUIRED", "")
+		request("13", `{"starred":true}`, "invalid-access", 401, "AUTH_REQUIRED", "")
+		disableAfterAuthorization.Store(true)
+		request("13", `{"starred":true}`, access.Token, 403, "ACCOUNT_DISABLED", "")
+		if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, read(13)) || !read(15).LastOpenedAt.Equal(oldStamp) {
+			t.Fatal("认证复查或请求处理改变了原有偏好事实")
 		}
 	})
 	t.Run("maximum user target revision and date", func(t *testing.T) {

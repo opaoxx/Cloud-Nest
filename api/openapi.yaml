@@ -92,6 +92,7 @@ info:
     POST /api/v1/entries/{id}/move 已由启动入口绑定共享授权、用户事务、幂等移动服务及稳定结果编解码，结果快照跨请求及重启复用。
     SetStarredData/SetStarredResponse 定义收藏设置成功数据及 data/request_id 外层，收藏时间采用可空 UTC 微秒值。
     收藏成功交付方法通过测试专用 PUT 入口验证，共享响应见 SetStarredSucceeded，关联当前请求 ID 并禁止缓存。
+    收藏处理函数按 Actor、路径、JSON/布尔状态、核心服务及成功交付组合，目标不可见复用 TargetEntryNotFound。
 servers:
   - url: http://127.0.0.1:18081
 tags:

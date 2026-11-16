@@ -427,3 +427,5 @@ go vet ./...
 已提供 SetStarredData、SetStarredResponse 和 NewSetStarredData，将已提交收藏偏好转换为 starred、starred_at 及 data/request_id 外层。收藏时间复用 UTC 微秒转换，取消收藏明确返回 false 与 null。精确 JSON、日期边界、副本及真实 MySQL 组合验证通过，字段与复验方法见 [第 172 步学习记录](docs/开发学习记录.md#第-172-步定义目录项收藏成功响应-dto)。
 
 已提供 handler.SetStarredSuccess，将已提交收藏偏好转换为公开响应，关联当前请求 ID，以 HTTP 200、UTF-8 JSON 和禁止缓存头交付。取消收藏明确返回 false/null，异常资料或取消沿用统一内部错误，已发送状态按原响应结束。测试专用 PUT 入口及三组真实 HTTP 传输连续三次通过，执行顺序与复验方法见 [第 173 步学习记录](docs/开发学习记录.md#第-173-步实现目录项收藏成功-http-交付)。
+
+已提供 handler.SetStarred，按认证身份、路径、JSON 正文及明确的收藏状态校验，调用收藏核心服务，核对偏好归属与状态并交付成功响应。不可见目标使用统一 404，认证变化和内部故障沿用既有错误映射。测试入口、真实 JWT 与 MySQL 的十四次 PUT 请求验证通过，调用与复验方法见 [第 174 步学习记录](docs/开发学习记录.md#第-174-步实现目录项收藏-http-处理函数)。
