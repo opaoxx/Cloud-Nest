@@ -39,6 +39,7 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 	queryFailure, rowFailure := errors.New("fixture query"), errors.New("fixture partial rows")
 	for _, testCase := range []struct {
 		name       string
+		kind       string
 		entries    []domain.RecentEntryCandidate
 		before     *domain.RecentEntryPosition
 		size       int
@@ -49,6 +50,20 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 		invalid    bool
 		more       bool
 	}{
+		{name: "document filter", kind: "document", entries: []domain.RecentEntryCandidate{base}},
+		{name: "image filter", kind: "image", entries: []domain.RecentEntryCandidate{base}},
+		{name: "video filter", kind: "video", entries: []domain.RecentEntryCandidate{base}},
+		{name: "audio filter", kind: "audio", entries: []domain.RecentEntryCandidate{base}},
+		{name: "archive filter", kind: "archive", entries: []domain.RecentEntryCandidate{base}},
+		{name: "other filter", kind: "other", entries: []domain.RecentEntryCandidate{base}},
+		{name: "folder empty intersection", kind: "folder"},
+		{name: "folder seek", kind: "folder", before: before},
+		{name: "folder unexpected row", kind: "folder", entries: []domain.RecentEntryCandidate{base}, invalid: true},
+		{name: "document seek and peek", kind: "document", before: before, entries: []domain.RecentEntryCandidate{base, tied, older}, more: true},
+		{name: "empty image result", kind: "image"},
+		{name: "classified query failure", kind: "document", queryError: queryFailure, wantError: queryFailure},
+		{name: "folder query failure", kind: "folder", queryError: queryFailure, wantError: queryFailure},
+		{name: "classified invalid peek", kind: "document", size: 1, entries: []domain.RecentEntryCandidate{base, tied}, change: func(rows [][]driver.Value) { rows[1][11] = nil }, invalid: true},
 		{name: "empty"},
 		{name: "single file", entries: []domain.RecentEntryCandidate{base}},
 		{name: "same access timestamp", entries: []domain.RecentEntryCandidate{base, tied}},
@@ -102,8 +117,17 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 				expected := "SELECT file_entries.id,file_entries.user_id,file_entries.parent_id,file_entries.name,file_entries.entry_type,file_entries.file_size,file_entries.revision,file_entries.status,file_entries.created_at,file_entries.modified_at,file_entries.updated_at,preferences.last_opened_at FROM file_entries JOIN user_entry_preferences AS preferences ON preferences.user_id = file_entries.user_id AND preferences.entry_id = file_entries.id WHERE "
 				predicate := "file_entries.user_id = ? AND file_entries.status = ? AND file_entries.entry_type = ? AND file_entries.parent_id IS NOT NULL AND preferences.last_opened_at IS NOT NULL"
 				values := []any{uint64(7), "ACTIVE", "FILE"}
+				if testCase.kind != "" || testCase.before != nil {
+					predicate = "(" + predicate + ")"
+				}
+				if testCase.kind == "folder" {
+					predicate += " AND 1 = 0"
+				} else if testCase.kind != "" {
+					predicate += " AND file_entries.category = ?"
+					values = append(values, strings.ToUpper(testCase.kind))
+				}
 				if testCase.before != nil {
-					predicate = "(" + predicate + ") AND ((preferences.last_opened_at < ? OR (preferences.last_opened_at = ? AND file_entries.id < ?)))"
+					predicate += " AND ((preferences.last_opened_at < ? OR (preferences.last_opened_at = ? AND file_entries.id < ?)))"
 					utc := testCase.before.LastOpenedAt.UTC()
 					values = append(values, utc, utc, testCase.before.ID)
 				}
@@ -128,6 +152,7 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 				t.Fatal(err)
 			}
 			query := recentEntryCandidateQuery(size)
+			query.Kind = testCase.kind
 			queryCopy := query
 			var positionCopy domain.RecentEntryPosition
 			if testCase.before != nil {
@@ -180,8 +205,11 @@ func TestListUserRecentEntryCandidatesInput(t *testing.T) {
 		{name: "starred scope", change: func(query *domain.GlobalEntryQuery) { query.Scope = domain.GlobalEntryScopeStarred }},
 		{name: "modified sort", change: func(query *domain.GlobalEntryQuery) { query.Sort = domain.GlobalEntrySortModifiedDesc }},
 		{name: "search pending", change: func(query *domain.GlobalEntryQuery) { query.Search = "学习" }},
-		{name: "classification pending", change: func(query *domain.GlobalEntryQuery) { query.Kind = "document" }},
-		{name: "folder filter pending", change: func(query *domain.GlobalEntryQuery) { query.Kind = "folder" }},
+		{name: "uppercase kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = "DOCUMENT" }},
+		{name: "unknown kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = "private-kind" }},
+		{name: "padded kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = " document " }},
+		{name: "raw file kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = "FILE" }},
+		{name: "injection kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = "document' OR 1=1 --" }},
 		{name: "invalid UTF-8", change: func(query *domain.GlobalEntryQuery) { query.Search = string([]byte{0xff}) }},
 		{name: "zero position ID", before: &domain.RecentEntryPosition{LastOpenedAt: stamp}},
 		{name: "zero position time", before: &domain.RecentEntryPosition{ID: 19}},

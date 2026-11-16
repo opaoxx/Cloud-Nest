@@ -152,6 +152,135 @@ func TestListUserRecentEntryCandidatesIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("classification", func(t *testing.T) {
+		// 1. 在当前正式夹具中补齐六类访问文件，结束时清理新增行。
+		defer func() {
+			for _, statement := range []string{
+				"DELETE FROM user_entry_preferences WHERE user_id=1 AND entry_id BETWEEN 114 AND 117",
+				"DELETE FROM file_entries WHERE user_id=1 AND id BETWEEN 114 AND 117",
+			} {
+				if _, err := pool.ExecContext(ctx, statement); err != nil {
+					t.Error("清理分类夹具失败", err)
+				}
+			}
+		}()
+		for index, category := range []string{"VIDEO", "AUDIO", "ARCHIVE", "OTHER"} {
+			entryID := 114 + index
+			name := "分类-" + category
+			if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size) VALUES(?,1,12,?,?,'FILE',?,41,2048)", entryID, name, []byte(name), category); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,last_opened_at) VALUES(1,?,?)", entryID, stamp.Add(-time.Duration(index+1)*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// 2. 检查所有分类、文件范围交集和其他账号的同类数据。
+		for _, fixture := range []struct {
+			kind string
+			ids  []uint64
+		}{
+			{kind: "", ids: []uint64{103, 101, 113, 105, 114, 115, 116, 117}},
+			{kind: "folder"},
+			{kind: "document", ids: []uint64{103, 101, 113}},
+			{kind: "image", ids: []uint64{105}},
+			{kind: "video", ids: []uint64{114}},
+			{kind: "audio", ids: []uint64{115}},
+			{kind: "archive", ids: []uint64{116}},
+			{kind: "other", ids: []uint64{117}},
+		} {
+			t.Run("kind="+fixture.kind, func(t *testing.T) {
+				filters := query
+				filters.Kind = fixture.kind
+				page, err := store.ListUserRecentEntryCandidates(ctx, 1, filters, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checkIDs(t, page, fixture.ids, false)
+				for _, candidate := range page.Entries {
+					display, err := store.FindUserFileEntryDisplay(ctx, 1, candidate.Entry.ID)
+					if err != nil || display == nil || candidate.Entry.EntryType != "FILE" || (fixture.kind != "" && (display.Category == nil || *display.Category != strings.ToUpper(fixture.kind))) {
+						t.Fatal("分类查询与正式文件事实不一致", err)
+					}
+				}
+				for _, userID := range []uint64{3, 5, 999} {
+					foreign, err := store.ListUserRecentEntryCandidates(ctx, userID, filters, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var ids []uint64
+					if userID == 3 && (fixture.kind == "" || fixture.kind == "document") {
+						ids = []uint64{121}
+					}
+					checkIDs(t, foreign, ids, false)
+				}
+			})
+		}
+		t.Run("filtered pages", func(t *testing.T) {
+			filters := recentEntryCandidateQuery(1)
+			filters.Kind = "document"
+			var before *domain.RecentEntryPosition
+			for index, ids := range [][]uint64{{103}, {101}, {113}, {}} {
+				page, err := store.ListUserRecentEntryCandidates(ctx, 1, filters, before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checkIDs(t, page, ids, index < 2)
+				if len(page.Entries) != 0 {
+					last := page.Entries[0]
+					before = &domain.RecentEntryPosition{ID: last.Entry.ID, LastOpenedAt: last.LastOpenedAt}
+				}
+			}
+			filters.Kind = "image"
+			page, err := store.ListUserRecentEntryCandidates(ctx, 1, filters, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkIDs(t, page, []uint64{105}, false)
+		})
+		t.Run("category changes preserve existing snapshot", func(t *testing.T) {
+			defer func() {
+				if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET category='DOCUMENT' WHERE user_id=1 AND id=103"); err != nil {
+					t.Error("恢复文件分类失败", err)
+				}
+			}()
+			filters := recentEntryCandidateQuery(1)
+			filters.Kind = "document"
+			err := store.WithFileEntrySnapshot(ctx, func(current context.Context, reader *Store) error {
+				first, err := reader.ListUserRecentEntryCandidates(current, 1, filters, nil)
+				if err != nil {
+					return err
+				}
+				checkIDs(t, first, []uint64{103}, true)
+				if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET category='IMAGE' WHERE user_id=1 AND id=103"); err != nil {
+					return err
+				}
+				again, err := reader.ListUserRecentEntryCandidates(current, 1, filters, nil)
+				if err != nil {
+					return err
+				}
+				if !reflect.DeepEqual(first, again) {
+					return fmt.Errorf("分类变化影响已有最近访问快照")
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.ListUserRecentEntryCandidates(ctx, 1, filters, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkIDs(t, current, []uint64{101}, true)
+			filters.Kind, filters.PageSize = "image", 100
+			images, err := store.ListUserRecentEntryCandidates(ctx, 1, filters, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkIDs(t, images, []uint64{103, 105}, false)
+		})
+	})
+
 	// 3. 核对未提交访问写入和已提交变化的快照边界。
 	t.Run("uncommitted access changes", func(t *testing.T) {
 		writer, err := pool.BeginTx(ctx, nil)
@@ -259,6 +388,24 @@ func TestListUserRecentEntryCandidatesIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		checkIDs(t, last, []uint64{1000}, false)
+		// 分类在 LIMIT 前生效，较新的图片不会占用其他文件的百条页。
+		if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id) VALUES(1102,5,55,'批次图片',CAST('批次图片' AS BINARY),'FILE','IMAGE',45)"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,last_opened_at) VALUES(5,1102,?)", stamp.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		filters := query
+		filters.Kind = "other"
+		classified, err := store.ListUserRecentEntryCandidates(ctx, 5, filters, nil)
+		if err != nil || classified == nil || len(classified.Entries) != 100 || !classified.HasMore || classified.Entries[0].Entry.ID != 1100 || classified.Entries[99].Entry.ID != 1001 {
+			t.Fatal("分类后的百条页或额外记录错误", err)
+		}
+		end, err := store.ListUserRecentEntryCandidates(ctx, 5, filters, &domain.RecentEntryPosition{ID: 1001, LastOpenedAt: stamp})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkIDs(t, end, []uint64{1000}, false)
 	})
 
 	// 4. 在普通夹具完成后验证完整无符号整数与数据库日期两端。

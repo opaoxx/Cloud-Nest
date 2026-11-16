@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -11,13 +12,14 @@ import (
 )
 
 // ListUserRecentEntryCandidates 按认证用户读取最近访问过的活动普通文件候选。
-// 当前接收 recent/last_opened_desc、空搜索及空分类，before 为 nil 时读取首页。
+// 当前接收 recent/last_opened_desc、空搜索及合法 kind，before 为 nil 时读取首页。
+// folder 与最近文件范围求交后返回空候选页。
 // 调用方在同一只读快照内检查完整祖先链，再决定交付记录及最后扫描位置。
 func (store *Store) ListUserRecentEntryCandidates(ctx context.Context, userID uint64, query domain.GlobalEntryQuery, before *domain.RecentEntryPosition) (*domain.RecentEntryPage, error) {
 	// 1. 校验用户、查询条件、分页位置与上下文，设置查询期限。
 	if ctx == nil || userID == 0 || !query.IsValid() || query.Scope != domain.GlobalEntryScopeRecent ||
-		query.Sort != domain.GlobalEntrySortLastOpenedDesc || query.Search != "" || query.Kind != "" {
-		return nil, fmt.Errorf("读取最近访问候选需要上下文、非零用户及 recent/last_opened_desc 的空筛选查询")
+		query.Sort != domain.GlobalEntrySortLastOpenedDesc || query.Search != "" {
+		return nil, fmt.Errorf("读取最近访问候选需要上下文、非零用户及 recent/last_opened_desc、空搜索的合法查询")
 	}
 	var upper *domain.RecentEntryPosition
 	if before != nil {
@@ -39,6 +41,12 @@ func (store *Store) ListUserRecentEntryCandidates(ctx context.Context, userID ui
 		Select("file_entries.id", "file_entries.user_id", "file_entries.parent_id", "file_entries.name", "file_entries.entry_type", "file_entries.file_size", "file_entries.revision", "file_entries.status", "file_entries.created_at", "file_entries.modified_at", "file_entries.updated_at", "preferences.last_opened_at").
 		Joins("JOIN user_entry_preferences AS preferences ON preferences.user_id = file_entries.user_id AND preferences.entry_id = file_entries.id").
 		Where("file_entries.user_id = ? AND file_entries.status = ? AND file_entries.entry_type = ? AND file_entries.parent_id IS NOT NULL AND preferences.last_opened_at IS NOT NULL", userID, "ACTIVE", "FILE")
+	// 2.1. 按分类缩小最近文件范围，folder 使用空交集条件。
+	if query.Kind == "folder" {
+		statement = statement.Where("1 = 0")
+	} else if query.Kind != "" {
+		statement = statement.Where("file_entries.category = ?", strings.ToUpper(query.Kind))
+	}
 	if upper != nil {
 		statement = statement.Where("(preferences.last_opened_at < ? OR (preferences.last_opened_at = ? AND file_entries.id < ?))", upper.LastOpenedAt, upper.LastOpenedAt, upper.ID)
 	}
@@ -57,7 +65,8 @@ func (store *Store) ListUserRecentEntryCandidates(ctx context.Context, userID ui
 	}
 
 	// 4. 检查访问时间、文件结构和降序位置，复制候选。
-	if len(records) > query.PageSize+1 {
+	// 4.1. 核对空交集查询没有返回候选。
+	if len(records) > query.PageSize+1 || (query.Kind == "folder" && len(records) != 0) {
 		return nil, domain.ErrInvalidFileEntryData
 	}
 	entries := make([]domain.RecentEntryCandidate, 0, len(records))
