@@ -70,6 +70,8 @@ func TestListUserNameEntryCandidatesIntegration(t *testing.T) {
 		}
 	}
 
+	t.Run("visible name lists", func(t *testing.T) { verifyNameEntryList(t, ctx, pool, store) })
+
 	// 2. 验证跨目录同键的 ID 升序、原始键和值，以及收藏范围。
 	for _, scope := range []string{"all", "starred"} {
 		t.Run("pagination "+scope, func(t *testing.T) {

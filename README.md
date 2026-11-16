@@ -517,3 +517,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 NameEntryPosition，以数据库 name_key 原始字节和完整目录项 ID 表达名称升序分页位置，IsValid 检查非零 ID 及 1～768 字节容量。位置可以保存最后扫描的隐藏候选，名称键生成继续复用 BuildEntryNameKey。边界、借用字节保护、生成键衔接及既有名称键正式表回归连续三次通过，模型与复验方法见 [第 217 步学习记录](docs/开发学习记录.md#第-217-步定义全局名称升序分页位置模型)。
 
 已提供 Store.ListUserNameEntryCandidates，按认证用户读取 all/starred、name_asc 的活动普通目录项候选，保留独立 name_key 字节并按名称键/ID 双升序续页。复用搜索及分类规则，多取一条判断 HasMore，完整祖先可见性由后续服务组合。专项及正式 MySQL 的同键分页、二进制边界、收藏/筛选、百条页与改名快照连续三次通过，调用与复验方法见 [第 218 步学习记录](docs/开发学习记录.md#第-218-步按用户读取名称升序的全局目录项候选)。
+
+已提供 NameEntryListService，在同一只读快照中组合 all/starred、name_asc 名称候选与完整祖先链可见性，每批最多一百项、一次最多扫描一千项。保留原始名称键，页满保存最后消费位置，预算空页或短页可以继续翻页，结束时 NextPosition 为 nil。专项及正式 MySQL 的同键分页、过滤补读、快照、单连接与预算边界连续三次通过，调用和复验方法见 [第 219 步学习记录](docs/开发学习记录.md#第-219-步组合名称升序可见列表服务)。
