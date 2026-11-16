@@ -220,7 +220,31 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	directoryPageService := service.NewDirectoryPageService(directoryCursorVerifier.Verify, directoryListService.List, directoryCursorSigner.Sign)
 
-	// 14. 复用目录快照入口，装配指定目录项详情服务。
+	// 14. 复用只读快照与持久化主密钥，装配全局分页服务。
+	// 1. 绑定同一请求快照中的候选和祖先读取。
+	globalListService := service.NewGlobalEntryListService(
+		func(ctx context.Context, action func(context.Context, service.GlobalEntryListReader) error) error {
+			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+				return action(snapshotContext, snapshotStore)
+			})
+		})
+
+	// 2. 派生全局用途的游标签名及校验能力。
+	globalCursorSigner, err := service.NewGlobalEntryCursorSigner(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配全局游标签名器失败", "stage", "application", "error", err)
+		return err
+	}
+	globalCursorVerifier, err := service.NewGlobalEntryCursorVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配全局游标校验器失败", "stage", "application", "error", err)
+		return err
+	}
+
+	// 3. 组合文本游标分页入口。
+	globalPageService := service.NewGlobalEntryPageService(globalCursorVerifier.Verify, globalListService.List, globalCursorSigner.Sign)
+
+	// 15. 复用目录快照入口，装配指定目录项详情服务。
 	entryDetailService := service.NewEntryDetailService(
 		func(ctx context.Context, action func(context.Context, service.EntryDetailReader) error) error {
 			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
@@ -228,7 +252,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
-	// 15. 绑定用户事务与创建结果编解码，装配幂等创建服务。
+	// 16. 绑定用户事务与创建结果编解码，装配幂等创建服务。
 	createDirectoryService := service.NewIdempotentCreateDirectoryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentCreateDirectoryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -248,7 +272,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 16. 绑定用户事务与重命名结果编解码，装配幂等重命名服务。
+	// 17. 绑定用户事务与重命名结果编解码，装配幂等重命名服务。
 	renameEntryService := service.NewIdempotentRenameEntryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentRenameEntryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -268,7 +292,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 17. 绑定用户事务与移动结果编解码，装配幂等移动服务。
+	// 18. 绑定用户事务与移动结果编解码，装配幂等移动服务。
 	moveEntryService := service.NewIdempotentMoveEntryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentMoveEntryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -288,24 +312,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 18. 绑定当前用户事务，装配收藏核心服务。
+	// 19. 绑定当前用户事务，装配收藏核心服务。
 	setStarredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
 			return action(txContext, txStore)
 		})
 	})
 
-	// 19. 绑定当前用户事务，装配访问记录核心服务。
+	// 20. 绑定当前用户事务，装配访问记录核心服务。
 	recordAccessService := service.NewRecordAccessService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RecordAccessTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
 			return action(txContext, txStore)
 		})
 	})
 
-	// 20. 注册业务接口，挂载正式访问记录路由。
+	// 21. 注册业务接口，在列表路径绑定目录及全局分页。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
-	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List)
+	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
@@ -327,7 +351,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 21. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 22. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

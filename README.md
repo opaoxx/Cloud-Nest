@@ -473,3 +473,5 @@ POST /api/v1/entries/{id}/access 已接入正式路由与启动装配，按 prev
 已提供 GlobalEntryPageQuery 与 ParseGlobalEntryPageQuery，完整解析全局列表 RawQuery，默认 all/modified_desc 和每页五十条，保留有效 UTF-8 搜索原文并复用分类规则及页大小校验。重复值、格式和能力边界按固定字段错误返回，游标原文进入分页服务完成签名及筛选绑定校验。参数、HTTP 测试入口与正式 MySQL 三页闭环验证通过，执行顺序和复验方法见 [第 195 步学习记录](docs/开发学习记录.md#第-195-步定义全局列表查询参数-dto)。
 
 已提供 handler.GlobalEntryPage，组合认证 Actor、全局查询 DTO、文本分页服务及成功交付，检查请求取消、结果数量及当前用户归属。无效全局游标返回 INVALID_CURSOR 400 并定位 cursor，账号/会话状态复用已有认证响应，内部故障使用统一 500。处理函数专项及真实 JWT/MySQL/HTTP 二十四次 GET 闭环连续三次通过，调用与复验方法见 [第 196 步学习记录](docs/开发学习记录.md#第-196-步实现全局列表-http-处理函数)。
+
+GET /api/v1/entries 已支持正式全局查询，单个 scope=all 使用当前用户的全局可见项，支持名称搜索、kind 分类及修改时间降序游标分页，breadcrumbs 为 []。省略 scope 时采用 directory，parent_id 必填；全局扫描预算耗尽时空页保留 next_cursor。生产启动已装配同请求只读快照和独立用途游标签名，正式启动/重启及原游标续读连续三次通过，示例及复验方法见 [第 197 步学习记录](docs/开发学习记录.md#第-197-步接入正式全局列表路由与启动装配)。

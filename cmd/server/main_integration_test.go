@@ -496,7 +496,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		{query: "", status: 400, code: "INVALID_ARGUMENT", field: "parent_id"},
 		{query: "parent_id=12&limit=0", status: 400, code: "INVALID_ARGUMENT", field: "limit"},
 		{query: "parent_id=12&cursor=private-directory-cursor", status: 400, code: "INVALID_CURSOR", field: "cursor"},
-		{query: "parent_id=12&scope=all", status: 400, code: "INVALID_ARGUMENT", field: "scope"},
+		{query: "parent_id=12&scope=starred", status: 400, code: "INVALID_ARGUMENT", field: "scope"},
 		{query: "parent_id=12&sort=name_asc", status: 400, code: "INVALID_ARGUMENT", field: "sort"},
 		{query: "parent_id=12&q=private-directory-query", status: 400, code: "INVALID_ARGUMENT", field: "q"},
 		{query: "parent_id=12&kind=FILE", status: 400, code: "INVALID_ARGUMENT", field: "kind"},
@@ -1399,6 +1399,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal("正式访问未衔接详情事实")
 	}
 
+	// 正式全局查询连接跨目录分页和预算空页，保存原游标供重启续用。
+	globalBeforeRestart, globalBudgetBeforeRestart := verifyServerGlobalEntries(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, jwtConfig.SigningKey)
+	loginSecrets = append(loginSecrets, *globalBeforeRestart.Data.NextCursor, *globalBudgetBeforeRestart.Data.NextCursor)
+
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
 	before, err := os.Stat(secretPath)
@@ -1409,6 +1413,19 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	globalFilters := "scope=all&kind=document&q=" + url.QueryEscape("全局%_")
+	globalAfterRestart := requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, globalFilters+"&limit=1", 200, "", "")
+	if !reflect.DeepEqual(globalBeforeRestart.Data, globalAfterRestart.Data) || globalBeforeRestart.RequestID == globalAfterRestart.RequestID {
+		t.Fatal("重启后的正式全局首页、签名或请求 ID 错误")
+	}
+	globalNextAfterRestart := requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, globalFilters+"&cursor="+url.QueryEscape(*globalBeforeRestart.Data.NextCursor), 200, "", "")
+	if len(globalNextAfterRestart.Data.Items) != 1 || globalNextAfterRestart.Data.Items[0].ID != "100001" || globalNextAfterRestart.Data.NextCursor != nil {
+		t.Fatal("重启后原全局游标续读错误")
+	}
+	globalBudgetAfterRestart := requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=all&kind=document&q="+url.QueryEscape("预算%_")+"&cursor="+url.QueryEscape(*globalBudgetBeforeRestart.Data.NextCursor), 200, "", "")
+	if len(globalBudgetAfterRestart.Data.Items) != 1 || globalBudgetAfterRestart.Data.Items[0].ID != "100008" || globalBudgetAfterRestart.Data.NextCursor != nil {
+		t.Fatal("重启后预算空页游标续读错误")
+	}
 	accessAfterRestart := requestServerRecordAccess(t, "http://"+address, webRefreshed.Data.AccessToken, "90001", `{"purpose":"preview"}`, 200, "", "")
 	if !reflect.DeepEqual(accessBeforeRestart.Data, accessAfterRestart.Data) || accessBeforeRestart.RequestID == accessAfterRestart.RequestID {
 		t.Fatal("重启后访问时间或当前请求 ID 错误")
@@ -1655,7 +1672,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}

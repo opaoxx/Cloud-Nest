@@ -70,13 +70,14 @@ info:
     全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     GlobalEntryScope/GlobalEntrySort/GlobalEntrySearch/GlobalEntryKind/GlobalEntryCursor/GlobalEntryLimit 定义全局查询 DTO 输入，默认 all/modified_desc、每页 50 条。
     全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略。
-    全局页处理函数组合认证 Actor、查询 DTO、分页服务及成功交付，输入/游标错误见 GlobalEntryQueryRejected，结果核对当前用户和请求页大小，正式全局入口将在路由装配时连接。
+    全局页处理函数组合认证 Actor、查询 DTO、分页服务及成功交付，输入/游标错误见 GlobalEntryQueryRejected，结果核对当前用户和请求页大小。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
     目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
     当前查询条件为 directory、modified_desc 和空 q/kind，重复值及不匹配条件返回固定字段错误。
     目录页处理函数组合 Actor、查询 DTO、分页服务和交付，输入/游标错误见 DirectoryQueryRejected，不可见目录见 TargetEntryNotFound。
-    GET /api/v1/entries 已由启动入口绑定共享授权、同请求只读快照及持久化主密钥派生的目录游标签名配置。
+    GET /api/v1/entries 由启动入口绑定共享授权及目录/全局分页，单个 scope=all 进入全局查询，省略 scope 使用目录查询。
+    两类分页均使用同请求只读快照及持久化主密钥派生的独立用途游标，正式共享响应见 EntryPagesListed/EntryListQueryRejected。
     EntryID 定义文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
     EntryDetailData/EntryDetailResponse 定义指定目录项的完整公开详情，kind 映射文件类别，来源设备及历史空值按实际数据返回。
     详情成功交付方法通过测试专用 GET 入口验证，共享响应见 EntryDetailRetrieved，交付 UTF-8 JSON、请求 ID 和禁止缓存头。
@@ -381,33 +382,35 @@ paths:
     get:
       tags: [Entries]
       operationId: listDirectoryEntries
-      summary: 分页读取当前用户可见目录的活动子项
+      summary: 分页读取当前用户的目录子项或全局可见项
       description: |
-        Bearer JWT 和数据库授权通过后解析查询，parent_id 必填，根目录 ID 从 GET /api/v1/me 获取。
-        当前支持 scope=directory、sort=modified_desc 和空 q/kind，省略时使用这些默认条件。
-        父目录与祖先须属于当前用户且均为活动目录，路径及子项在同一只读快照内读取。
-        子项按 modified_at、id 降序分页，limit 默认 50、上限 100，末页和空页的 next_cursor 为 null。
-        首次请求省略 cursor 或传空值，后续请求原样使用返回游标，校验用户、父目录、排序与筛选范围。
-        同一用户的有效会话可共用游标，沿用同一持久化签名配置重启后可继续使用。
+        Bearer JWT 和数据库授权通过后按完整查询分派，单个解码后 scope=all 进入全局查询，其余输入由目录查询 DTO 校验。
+        省略 scope 时默认 directory，parent_id 必填，根目录 ID 从 GET /api/v1/me 获取，q/kind 须为空。
+        directory 的父目录与祖先须属于当前用户且均为活动目录，路径及子项在同一只读快照内读取，响应包含根到当前目录的面包屑。
+        all 支持单个有效 UTF-8 名称搜索及小写 kind 分类，保留搜索原文，parent_id 作为额外字段处理，breadcrumbs 为 []。
+        全局候选按当前用户、活动状态、搜索与分类查询，交付前批量检查完整祖先路径，根目录通过资料接口获取。
+        两类查询均按 modified_at、id 降序分页，sort 默认 modified_desc，limit 默认 50、上限 100，候选耗尽时 next_cursor 为 null。
+        全局每次最多扫描 1000 个候选，预算耗尽时允许短页或空页带 next_cursor，客户端继续使用该游标翻页。
+        首次请求省略 cursor 或传空值，后续原样使用返回游标，校验用户、实际范围、排序、筛选及目录绑定。
+        目录与全局游标使用独立用途密钥，同一用户的有效会话可共用所属范围的游标，持久化签名配置重启后可继续使用。
         跨请求采用弱一致性分页，客户端按 ID 合并去重，查询条件变化时重新读取首页。
-        不可见、跨账号或不存在的目标统一返回 ENTRY_NOT_FOUND，可见文件父项定位 parent_id 输入错误。
-        当前交付基础 entry_type 元数据、真实根目录到当前目录的面包屑和可空下一页游标。
+        directory 中不可见、跨账号或不存在的父目录统一返回 ENTRY_NOT_FOUND，可见文件父项定位 parent_id 输入错误。
       security:
         - BearerAuth: []
       parameters:
         - $ref: '#/components/parameters/RequestID'
-        - $ref: '#/components/parameters/DirectoryScope'
-        - $ref: '#/components/parameters/DirectoryParentID'
-        - $ref: '#/components/parameters/DirectorySearch'
-        - $ref: '#/components/parameters/DirectoryKind'
+        - $ref: '#/components/parameters/EntryListScope'
+        - $ref: '#/components/parameters/EntryListParentID'
+        - $ref: '#/components/parameters/EntryListSearch'
+        - $ref: '#/components/parameters/EntryListKind'
         - $ref: '#/components/parameters/DirectorySort'
-        - $ref: '#/components/parameters/DirectoryCursor'
+        - $ref: '#/components/parameters/EntryListCursor'
         - $ref: '#/components/parameters/DirectoryLimit'
       responses:
         '200':
-          $ref: '#/components/responses/DirectoryPageListed'
+          $ref: '#/components/responses/EntryPagesListed'
         '400':
-          $ref: '#/components/responses/DirectoryQueryRejected'
+          $ref: '#/components/responses/EntryListQueryRejected'
         '401':
           $ref: '#/components/responses/AuthorizationRejected'
         '403':
@@ -2295,6 +2298,42 @@ components:
                   message: 幂等记录已到期，请先核对已有资源状态
                   details: null
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    EntryListQueryRejected:
+      description: |
+        HTTP 400，目录/全局查询参数错误使用 INVALID_ARGUMENT，details.field 定位公开字段。
+        游标的签名、范围、用户或筛选绑定无效使用 INVALID_CURSOR，定位 cursor，提示按当前查询范围确定。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            global_cursor:
+              value:
+                error:
+                  code: INVALID_CURSOR
+                  message: 全局分页游标无效，请重新查询
+                  details:
+                    field: cursor
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            directory_cursor:
+              value:
+                error:
+                  code: INVALID_CURSOR
+                  message: 目录分页游标无效，请重新查询
+                  details:
+                    field: cursor
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     GlobalEntryQueryRejected:
       description: |
         HTTP 400，查询格式及字段使用 INVALID_ARGUMENT，游标签名/用户/范围/筛选绑定无效使用 INVALID_CURSOR。
@@ -2613,6 +2652,27 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/EntryDetailResponse'
+    EntryPagesListed:
+      description: |
+        目录与全局分页共用 HTTP 200、items、breadcrumbs、next_cursor 及 request_id。
+        directory 的面包屑包含真实根到当前目录路径，all 的面包屑为 []，全局预算空页保留 next_cursor。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/DirectoryPageResponse'
+              - $ref: '#/components/schemas/GlobalEntryPageResponse'
     GlobalEntryPageListed:
       description: 全局分页成功交付，预算空页保留续页文本，正常结束明确返回 next_cursor=null。
       headers:
@@ -3053,6 +3113,55 @@ components:
       schema:
         $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
       example: '23'
+    EntryListScope:
+      name: scope
+      in: query
+      required: false
+      description: |
+        省略时为 directory，显式单个 all 进入全局查询，支持 URL 编码后的键和值。
+        空值、重复或其他范围定位 scope，完整查询编码错误定位 query。
+      schema:
+        type: string
+        enum: [directory, all]
+        default: directory
+    EntryListParentID:
+      name: parent_id
+      in: query
+      required: false
+      description: |
+        directory 要求单个非零 uint64 标准十进制 ID，根目录 ID 从资料接口取得。
+        all 将 parent_id 作为额外字段处理，用户归属来自认证 Actor。
+      schema:
+        $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+      example: '12'
+    EntryListSearch:
+      name: q
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        all 接收单个有效 UTF-8 名称搜索文本，保留解码后的空白、Unicode 形式及特殊字符。
+        directory 要求省略或单个空值，空搜索读取当前范围内的全部名称。
+      schema:
+        $ref: '#/components/parameters/GlobalEntrySearch/schema'
+    EntryListKind:
+      name: kind
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: all 支持单个空值、folder 或公开小写文件类别，directory 要求省略或单个空值。
+      schema:
+        $ref: '#/components/parameters/GlobalEntryKind/schema'
+    EntryListCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个原始游标文本，省略或空值表示首页，解码后最多 1024 字节。
+        目录及全局游标绑定各自实际范围、用户、排序及筛选，目录游标另绑定 parent_id。
+      schema:
+        $ref: '#/components/parameters/GlobalEntryCursor/schema'
     DirectoryParentID:
       name: parent_id
       in: query
