@@ -344,6 +344,8 @@ PATCH /api/v1/entries/{id} 已接入正式路由与启动装配，绑定共享�
 
 已提供 MoveEntryRequest、MoveEntryInput 和 ParseMoveEntryRequest，按 target_parent_id、expected_revision 顺序解析非零 uint64 标准十进制字符串，完整保留高位整数。测试 POST 入口已验证认证、源路径、幂等头、JSON 绑定和字段错误，参数边界及复验方法见 [第 155 步学习记录](docs/开发学习记录.md#第-155-步定义目录项移动请求-dto)。
 
+已提供 EntryMoveTargetService.Check，复用同一读取范围内的源路径与目标父目录路径，检查根目录、目标类型、共同根目录及自身/子树关系，返回独立 EntryMovePaths。真实 MySQL 已验证单连接、隐藏链、账号范围、快照一致性、取消和完整标识，规则与复验方法见 [第 156 步学习记录](docs/开发学习记录.md#第-156-步校验移动源与目标父目录关系)。
+
 ## 本地连接信息
 
 | 组件 | 本机地址 | 账号 | 密码 |
