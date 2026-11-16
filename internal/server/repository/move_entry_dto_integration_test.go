@@ -111,6 +111,13 @@ func TestMoveEntryDataIntegration(t *testing.T) {
 		if saved == nil || saved.ResourceID == nil || *saved.ResourceID != entryID || saved.Operation != domain.MoveEntryOperation || saved.ResponseStatus != 200 {
 			t.Fatal("数据库快照记录错误")
 		}
+		hash, err := service.BuildMoveEntryRequestHash(entryID, revision, targetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.ValidateMoveEntryReplay(saved, actor.UserID, entryID, targetID, key, hash, time.Now()); err != nil {
+			t.Fatal("已保存移动结果复用校验失败", err)
+		}
 		decoded, restoreError := dto.RestoreMoveEntryData(saved.ResponseBody)
 		if restoreError != nil || !reflect.DeepEqual(data, decoded) {
 			t.Fatal("数据库快照恢复错误", restoreError)
@@ -185,6 +192,13 @@ func TestMoveEntryDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		hash, err := service.BuildMoveEntryRequestHash(14, 3, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.ValidateMoveEntryReplay(record, 1, 14, 16, "move-file-007", hash, time.Now()); err != nil {
+			t.Fatal("原请求复用校验失败", err)
+		}
 		decoded, restoreError := dto.RestoreMoveEntryData(record.ResponseBody)
 		if restoreError != nil || !reflect.DeepEqual(firstData, decoded) || *decoded.Entry.ParentID != "16" || decoded.Entry.Revision != "4" || !decoded.Entry.Starred {
 			t.Fatal("首次快照混入后续状态", restoreError)
@@ -192,6 +206,76 @@ func TestMoveEntryDataIntegration(t *testing.T) {
 		current, err := store.FindUserFileEntry(ctx, 1, 14)
 		if err != nil || current.ParentID == nil || *current.ParentID != 11 || current.Revision <= 4 {
 			t.Fatal("当前状态对照错误", err)
+		}
+	})
+	t.Run("replay scope expiry and saved parent", func(t *testing.T) {
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(2)
+		err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			record, err := txStore.FindUserIdempotencyRecord(txContext, actor.UserID, domain.MoveEntryOperation, "move-file-007")
+			if err != nil {
+				return err
+			}
+			for _, request := range []struct {
+				entryID, revision, parentID uint64
+				same                        bool
+			}{
+				{14, 3, 16, true}, {15, 3, 16, false}, {14, 4, 16, false}, {14, 3, 11, false}, {14, 3, 14, false},
+			} {
+				hash, err := service.BuildMoveEntryRequestHash(request.entryID, request.revision, request.parentID)
+				if err != nil {
+					return err
+				}
+				validationError := service.ValidateMoveEntryReplay(record, actor.UserID, request.entryID, request.parentID, record.IdempotencyKey, hash, time.Now())
+				if !request.same {
+					if !errors.Is(validationError, domain.ErrIdempotencyRequestConflict) {
+						return fmt.Errorf("移动参数变化的复用结果错误: %w", validationError)
+					}
+					continue
+				}
+				if validationError != nil {
+					return validationError
+				}
+				data, err := dto.RestoreMoveEntryData(record.ResponseBody)
+				if err != nil || !reflect.DeepEqual(data, firstData) {
+					return fmt.Errorf("相同移动请求恢复快照错误: %w", err)
+				}
+			}
+			if err := service.ValidateMoveEntryReplay(record, actor.UserID, 14, 16, record.IdempotencyKey, record.RequestHash, record.ExpiresAt.Add(-time.Nanosecond)); err != nil {
+				return err
+			}
+			for _, moment := range []time.Time{record.ExpiresAt, record.ExpiresAt.Add(time.Nanosecond)} {
+				if err := service.ValidateMoveEntryReplay(record, actor.UserID, 14, 16, record.IdempotencyKey, record.RequestHash, moment); !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+					return fmt.Errorf("移动记录到期边界错误: %w", err)
+				}
+			}
+			// 持久化一个结构有效且目的地发生变化的快照，核对请求绑定。
+			var payload map[string]map[string]any
+			if err := json.Unmarshal(record.ResponseBody, &payload); err != nil {
+				return err
+			}
+			payload["entry"]["parent_id"] = "11"
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			if err := txStore.database.WithContext(txContext).Exec("UPDATE idempotency_records SET response_body=? WHERE id=?", string(encoded), record.ID).Error; err != nil {
+				return err
+			}
+			changed, err := txStore.FindUserIdempotencyRecord(txContext, actor.UserID, domain.MoveEntryOperation, record.IdempotencyKey)
+			if err != nil {
+				return err
+			}
+			if _, err := dto.RestoreMoveEntryData(changed.ResponseBody); err != nil {
+				return err
+			}
+			if err := service.ValidateMoveEntryReplay(changed, actor.UserID, 14, 16, record.IdempotencyKey, record.RequestHash, time.Now()); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+				return fmt.Errorf("快照目的地与请求不一致时的结果错误: %w", err)
+			}
+			return txStore.database.WithContext(txContext).Exec("UPDATE idempotency_records SET response_body=? WHERE id=?", string(record.ResponseBody), record.ID).Error
+		})
+		if err != nil {
+			t.Fatal("真实移动记录复用校验失败", err)
 		}
 	})
 	// 3. 转换失败或保存后外层失败时，移动和结果记录一起回滚。
