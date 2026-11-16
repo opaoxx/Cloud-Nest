@@ -27,11 +27,13 @@ type loginTransactionScript struct {
 	sessionQuery                                       func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	preferenceQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	rotate                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	revoke                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	insert                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	renameEntry                                        func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	moveEntry                                          func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	setStarred                                         func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	restore                                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	rolledBack                                         chan struct{}
 	rollbackOnce                                       sync.Once
@@ -67,6 +69,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if (strings.HasPrefix(statement, "INSERT INTO user_entry_preferences ") || strings.HasPrefix(statement, "UPDATE user_entry_preferences ")) && connection.script.setStarred != nil {
+		connection.script.record("set_starred")
+		return connection.script.setStarred(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "UPDATE file_entries SET parent_id ") {
 		connection.script.record("move_entry")
 		if connection.script.moveEntry == nil {
@@ -144,6 +150,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 	script.rolledBack = make(chan struct{})
 	connector := &loginTransactionConnector{script: script}
 	connector.deviceConnector.accountConnector.query = func(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
+		if strings.Contains(query, "user_entry_preferences") && script.preferenceQuery != nil {
+			script.record("preference")
+			return script.preferenceQuery(ctx, query, arguments)
+		}
 		if strings.Contains(query, "idempotency_records") && script.idempotencyQuery != nil {
 			script.record("idempotency")
 			return script.idempotencyQuery(ctx, query, arguments)
