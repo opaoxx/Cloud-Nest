@@ -13,6 +13,9 @@ const CreateDirectoryOperation = "v1.directories.create"
 // RenameEntryOperation 是目录项重命名摘要与幂等记录共用的版本化操作名。
 const RenameEntryOperation = "v1.entries.rename"
 
+// MoveEntryOperation 是目录项移动摘要与幂等记录共用的版本化操作名。
+const MoveEntryOperation = "v1.entries.move"
+
 // ErrIdempotencyRecordNotFound 表示指定用户、操作和键的记录不存在。
 var ErrIdempotencyRecordNotFound = errors.New("幂等记录不存在")
 
