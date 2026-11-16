@@ -507,3 +507,5 @@ GET /api/v1/entries?scope=starred 已接入正式路由，按当前用户的收�
 已提供 RecentEntrySummary、RecentEntryPageData、RecentEntryPageResponse 和 NewRecentEntryPageData。复用十字段摘要并增加必填 last_opened_at，ID/版本使用字符串，访问时间转换为 UTC 微秒值，空 items/breadcrumbs 为 []，结束游标为 null。精确 JSON、边界、副本及真实 MySQL 文本分页转换连续三次通过，字段与复验方法见 [第 212 步学习记录](docs/开发学习记录.md#第-212-步定义最近使用分页响应-dto)。
 
 已提供 handler.RecentEntryPageSuccess，将最近使用分页结果转换为公开 DTO，关联当前 request_id，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。文件保留必填 last_opened_at，预算空页保留续页文本，结束为 null。十六组成功、十五组异常、两组已提交状态及五组真实 GET 专项连续三次通过，正式 MySQL 普通/预算/结束页的真实 HTTP 交付通过。执行顺序与复验方法见 [第 213 步学习记录](docs/开发学习记录.md#第-213-步实现最近使用分页成功-http-交付)。
+
+已提供 RecentEntryPageQuery 与 ParseRecentEntryPageQuery，完整解析最近使用列表 RawQuery，默认 recent/last_opened_desc 和每页五十条。搜索原文保留，分类及页大小复用既有规则，游标检查单值与解码后的字节长度，再交由分页服务校验签名和绑定。参数/HTTP 专项及真实 MySQL 普通、预算、结束分页连续三次通过，执行顺序与复验方法见 [第 214 步学习记录](docs/开发学习记录.md#第-214-步定义最近使用列表查询参数-dto)。

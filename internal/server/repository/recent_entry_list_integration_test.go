@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -171,6 +172,17 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		listing, calls := makeList(nil)
 		return service.NewRecentEntryPageService(cursorVerifier.Verify, listing.List, cursorSigner.Sign), calls
 	}
+	listParsedPage := func(t *testing.T, paging *service.RecentEntryPageService, query domain.GlobalEntryQuery, cursor string) (*domain.RecentEntryPageResult, error) {
+		t.Helper()
+		// 1. 解析当前查询的真实 URL 表达，附加身份字段仍由认证 Actor 确定归属。
+		values := url.Values{"scope": {query.Scope}, "sort": {query.Sort}, "q": {query.Search}, "kind": {query.Kind}, "limit": {strconv.Itoa(query.PageSize)}, "cursor": {cursor}, "user_id": {"3"}, "parent_id": {"private-parent"}}
+		input, fieldError := dto.ParseRecentEntryPageQuery(values.Encode())
+		if fieldError != nil || input == nil || input.Query != query || input.Cursor != cursor {
+			t.Fatal("真实最近分页 URL 条件、原文或游标解析错误", fieldError)
+		}
+		// 2. 将解析结果与当前可信身份传入正式文本分页服务。
+		return paging.List(ctx, actor, input.Query, input.Cursor)
+	}
 	checkTextPage := func(t *testing.T, query domain.GlobalEntryQuery, result *domain.RecentEntryPageResult, ids []uint64, nextID uint64) {
 		t.Helper()
 		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || (result.NextCursor != nil) != (nextID != 0) {
@@ -264,7 +276,7 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 	t.Run("text page first next end and binding", func(t *testing.T) {
 		paging, calls := makePage()
 		query := recentEntryCandidateQuery(1)
-		first, err := paging.List(ctx, actor, query, "")
+		first, err := listParsedPage(t, paging, query, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,24 +284,24 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		// 有效页大小变化可复用原文本，第二页在隐藏过滤后填满两项。
 		resized := query
 		resized.PageSize = 2
-		resizedPage, err := paging.List(ctx, actor, resized, *first.NextCursor)
+		resizedPage, err := listParsedPage(t, paging, resized, *first.NextCursor)
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkTextPage(t, resized, resizedPage, []uint64{101, 105}, 0)
-		second, err := paging.List(ctx, actor, query, *first.NextCursor)
+		second, err := listParsedPage(t, paging, query, *first.NextCursor)
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkTextPage(t, query, second, []uint64{101}, 101)
-		third, err := paging.List(ctx, actor, query, *second.NextCursor)
+		third, err := listParsedPage(t, paging, query, *second.NextCursor)
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkTextPage(t, query, third, []uint64{105}, 0)
 		emptyQuery := query
 		emptyQuery.Search = "没有匹配的最近文件"
-		empty, err := paging.List(ctx, actor, emptyQuery, "")
+		empty, err := listParsedPage(t, paging, emptyQuery, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -499,12 +511,12 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 	})
 	t.Run("text budget empty next and end", func(t *testing.T) {
 		paging, calls := makePage()
-		first, err := paging.List(ctx, actor, budgetQuery, "")
+		first, err := listParsedPage(t, paging, budgetQuery, "")
 		if err != nil || *calls != 10 {
 			t.Fatal("文本预算空页读取批次错误", err)
 		}
 		checkTextPage(t, budgetQuery, first, nil, 3001)
-		next, err := paging.List(ctx, actor, budgetQuery, *first.NextCursor)
+		next, err := listParsedPage(t, paging, budgetQuery, *first.NextCursor)
 		if err != nil || *calls != 11 {
 			t.Fatal("文本预算游标续读错误", err)
 		}
@@ -531,12 +543,12 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		}
 		checkPage(t, next, []uint64{2903, 2901}, false, 0)
 		paging, _ := makePage()
-		textFirst, err := paging.List(ctx, actor, budgetQuery, "")
+		textFirst, err := listParsedPage(t, paging, budgetQuery, "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkTextPage(t, budgetQuery, textFirst, []uint64{4000}, 3001)
-		textNext, err := paging.List(ctx, actor, budgetQuery, *textFirst.NextCursor)
+		textNext, err := listParsedPage(t, paging, budgetQuery, *textFirst.NextCursor)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -578,7 +590,7 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		}
 		checkPage(t, result, nil, false, 0)
 		paging, textCalls := makePage()
-		textEnd, err := paging.List(ctx, actor, query, "")
+		textEnd, err := listParsedPage(t, paging, query, "")
 		if err != nil || *textCalls != 10 {
 			t.Fatal("文本分页恰好预算结束错误", err)
 		}

@@ -70,6 +70,7 @@ info:
     RecentEntrySummary/RecentEntryPageData/RecentEntryPageResponse 定义后续最近使用分页响应，文件摘要增加必填 last_opened_at，breadcrumbs 为 []，空页可携带游标。
     全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     最近使用分页成功交付通过测试专用 GET 入口验证，共享响应见 RecentEntryPageListed，关联当前 request_id 并设置禁止缓存头。
+    RecentEntryScope/RecentEntrySort/RecentEntrySearch/RecentEntryKind/RecentEntryCursor/RecentEntryLimit 定义最近使用查询 DTO 输入，默认 recent/last_opened_desc、每页 50 条，搜索原文保留。
     GlobalEntryScope/GlobalEntrySort/GlobalEntrySearch/GlobalEntryKind/GlobalEntryCursor/GlobalEntryLimit 定义全局查询 DTO 输入，接收 all/starred，默认 all/modified_desc、每页 50 条。
     收藏查询通过正式 GET /api/v1/entries?scope=starred 验证，并与已有 PUT 收藏写入衔接。
     全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略。
@@ -3320,6 +3321,49 @@ components:
         type: string
         enum: ['']
         default: ''
+    RecentEntryScope:
+      name: scope
+      in: query
+      required: false
+      description: 最近使用查询 DTO 的范围，省略时为 recent，显式值须为单个 recent。正式列表分派在后续路由装配时接入。
+      schema:
+        type: string
+        enum: [recent]
+        default: recent
+    RecentEntrySort:
+      name: sort
+      in: query
+      required: false
+      description: 最近使用查询 DTO 的排序，省略时为 last_opened_desc，显式值须单个匹配。
+      schema:
+        type: string
+        enum: [last_opened_desc]
+        default: last_opened_desc
+    RecentEntrySearch:
+      $ref: '#/components/parameters/GlobalEntrySearch'
+    RecentEntryKind:
+      name: kind
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: 最近文件的单个小写分类，空值表示全部文件，folder 与最近文件范围求交后为空页。
+      schema:
+        $ref: '#/components/parameters/GlobalEntryKind/schema'
+    RecentEntryCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个最近使用游标原文，省略或显式空值表示首页，解码后最多 1024 字节。
+        查询 DTO 检查重复和字节长度，分页服务校验签名、用户及查询绑定。
+        额外字段沿用忽略策略，parent_id 和 user_id 等值作为额外字段处理。
+      schema:
+        type: string
+        maxLength: 1024
+        default: ''
+    RecentEntryLimit:
+      $ref: '#/components/parameters/GlobalEntryLimit'
     GlobalEntryScope:
       name: scope
       in: query
