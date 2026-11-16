@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -193,25 +194,36 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 		}
 	}
 
-	// 4. 通过正式文本游标分页入口完成预算空页、正常续页和结束交付。
+	// 4. 解析实际 URL 查询条件，通过文本游标分页入口完成三类页面。
 	listCalls := 0
 	paging := service.NewGlobalEntryPageService(verifier.Verify,
 		func(current context.Context, currentActor domain.Actor, filters domain.GlobalEntryQuery, before *domain.FileEntryPosition) (*domain.GlobalEntryList, error) {
 			listCalls++
 			return listing.List(current, currentActor, filters, before)
 		}, signer.Sign)
-	pageQuery := query
-	pageQuery.PageSize = 2
-	firstPage, err := paging.List(ctx, actor, pageQuery, "")
+	parsePageQuery := func(size int, currentCursor string) *dto.GlobalEntryPageQuery {
+		t.Helper()
+		values := url.Values{"scope": {query.Scope}, "sort": {query.Sort}, "q": {query.Search}, "kind": {query.Kind}, "limit": {strconv.Itoa(size)}, "cursor": {currentCursor}, "user_id": {"3"}}
+		input, fieldError := dto.ParseGlobalEntryPageQuery(values.Encode())
+		expected := query
+		expected.PageSize = size
+		if fieldError != nil || input == nil || input.Query != expected || input.Cursor != currentCursor {
+			t.Fatal("真实分页的 URL 查询条件或游标解析错误", fieldError)
+		}
+		return input
+	}
+	input := parsePageQuery(2, "")
+	firstPage, err := paging.List(ctx, actor, input.Query, input.Cursor)
 	if err != nil || firstPage == nil || firstPage.Entries == nil || len(firstPage.Entries) != 0 || firstPage.NextCursor == nil || *firstPage.NextCursor != cursor {
 		t.Fatal("正式文本游标首页未保留预算空页位置", err)
 	}
-	pageQuery.PageSize = 1
-	secondPage, err := paging.List(ctx, actor, pageQuery, *firstPage.NextCursor)
+	input = parsePageQuery(1, *firstPage.NextCursor)
+	secondPage, err := paging.List(ctx, actor, input.Query, input.Cursor)
 	if err != nil || secondPage == nil || len(secondPage.Entries) != 1 || secondPage.Entries[0].ID != 15 || secondPage.NextCursor == nil || *secondPage.NextCursor != secondCursor {
 		t.Fatal("正式文本游标续页或页大小调整错误", err)
 	}
-	thirdPage, err := paging.List(ctx, actor, pageQuery, *secondPage.NextCursor)
+	input = parsePageQuery(1, *secondPage.NextCursor)
+	thirdPage, err := paging.List(ctx, actor, input.Query, input.Cursor)
 	if err != nil || thirdPage == nil || len(thirdPage.Entries) != 1 || thirdPage.Entries[0].ID != 13 || thirdPage.NextCursor != nil || listCalls != 3 {
 		t.Fatal("正式文本游标结束或调用次数错误", err)
 	}
@@ -241,7 +253,7 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 		}
 	}
 	for _, mode := range []string{"user", "search", "kind", "tampering"} {
-		currentActor, filters, currentCursor := actor, pageQuery, *firstPage.NextCursor
+		currentActor, filters, currentCursor := actor, query, *firstPage.NextCursor
 		switch mode {
 		case "user":
 			currentActor.UserID = 3

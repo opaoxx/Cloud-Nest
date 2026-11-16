@@ -469,3 +469,5 @@ POST /api/v1/entries/{id}/access 已接入正式路由与启动装配，按 prev
 已提供 GlobalEntryPageData、GlobalEntryPageResponse 和 NewGlobalEntryPageData，复用十字段条目摘要及 UTC 微秒转换。全局 breadcrumbs 使用 []，预算空页保留 next_cursor，结束时输出 null，ID/版本采用完整字符串、大小采用安全 JSON 整数。目录与全局摘要共用转换方法，原目录回归及真实全局分页 JSON 验证通过，格式与复验方法见 [第 193 步学习记录](docs/开发学习记录.md#第-193-步定义全局分页响应-dto)。
 
 已提供 handler.GlobalEntryPageSuccess，将全局分页结果转换为 DTO，关联当前 request_id 并以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。预算空页保留续页文本，取消及异常结果沿用统一内部错误，响应状态边界、实际 GET 传输及真实数据库结果交付验证通过，执行顺序与复验方法见 [第 194 步学习记录](docs/开发学习记录.md#第-194-步实现全局分页成功-http-交付)。
+
+已提供 GlobalEntryPageQuery 与 ParseGlobalEntryPageQuery，完整解析全局列表 RawQuery，默认 all/modified_desc 和每页五十条，保留有效 UTF-8 搜索原文并复用分类规则及页大小校验。重复值、格式和能力边界按固定字段错误返回，游标原文进入分页服务完成签名及筛选绑定校验。参数、HTTP 测试入口与正式 MySQL 三页闭环验证通过，执行顺序和复验方法见 [第 195 步学习记录](docs/开发学习记录.md#第-195-步定义全局列表查询参数-dto)。

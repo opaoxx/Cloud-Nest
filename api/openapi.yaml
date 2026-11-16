@@ -68,6 +68,8 @@ info:
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
     GlobalEntryPageData/GlobalEntryPageResponse 定义全局分页响应，复用条目摘要，breadcrumbs 为 []，预算空页保留 next_cursor，结束时返回 null。
     全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
+    GlobalEntryScope/GlobalEntrySort/GlobalEntrySearch/GlobalEntryKind/GlobalEntryCursor/GlobalEntryLimit 定义全局查询 DTO 输入，默认 all/modified_desc、每页 50 条。
+    全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略，正式全局入口将在处理函数及路由装配时连接。
     目录列表使用 items、breadcrumbs、可空 next_cursor 和统一 data/request_id，ID 与 revision 为字符串。
     目录页成功交付方法通过测试专用 GET 入口验证，共享响应见 DirectoryPageListed。
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
@@ -3076,6 +3078,62 @@ components:
         type: string
         enum: ['']
         default: ''
+    GlobalEntryScope:
+      name: scope
+      in: query
+      required: false
+      description: 全局查询 DTO 的范围，省略时为 all，显式值须单个 all。
+      schema:
+        type: string
+        enum: [all]
+        default: all
+    GlobalEntrySort:
+      name: sort
+      in: query
+      required: false
+      description: 全局查询 DTO 的排序，省略时为 modified_desc，显式值须单个匹配。
+      schema:
+        type: string
+        enum: [modified_desc]
+        default: modified_desc
+    GlobalEntrySearch:
+      name: q
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个有效 UTF-8 搜索文本，省略或单个空值表示全部名称。
+        URL 解码后的空白、Unicode 形式及特殊字符保留，百分号和下划线按名称原文包含匹配。
+        搜索原文参与游标筛选摘要，筛选变化时重新从首页查询。
+      schema:
+        type: string
+        default: ''
+      example: 学习%_
+    GlobalEntryKind:
+      name: kind
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: 单个公开小写分类，空值表示全部类型，folder 为文件夹，其余为文件类别。
+      schema:
+        type: string
+        enum: ['', folder, document, image, video, audio, archive, other]
+        default: ''
+    GlobalEntryCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个全局游标原文，省略或显式空值表示首页，解码后最多 1024 字节。
+        查询 DTO 检查重复和长度，分页服务校验签名、用户及查询绑定。
+        全局查询 DTO 的额外字段采用忽略策略，parent_id 和 user_id 等值均作为额外字段处理。
+      schema:
+        type: string
+        maxLength: 1024
+        default: ''
+    GlobalEntryLimit:
+      $ref: '#/components/parameters/UserDeviceLimit'
     UserDeviceID:
       name: id
       in: path
