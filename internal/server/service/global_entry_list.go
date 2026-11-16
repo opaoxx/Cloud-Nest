@@ -29,14 +29,14 @@ func NewGlobalEntryListService(withSnapshot func(context.Context, func(context.C
 	return &GlobalEntryListService{withSnapshot: withSnapshot}
 }
 
-// List 读取 all/modified_desc 的可见列表，支持已有 Search 和 Kind 条件。
+// List 读取 all/starred 的修改时间降序可见列表，支持已有 Search 和 Kind 条件。
 // 每批至多一百项，单次至多检查一千个候选，页满时保留批次余项供下次重新读取。
 // 失败或取消返回 nil，续页位置来自最后消费的候选并允许空页继续翻页。
 func (listService *GlobalEntryListService) List(ctx context.Context, actor domain.Actor, query domain.GlobalEntryQuery, before *domain.FileEntryPosition) (*domain.GlobalEntryList, error) {
-	// 1. 校验身份、查询条件和翻页位置。
+	// 1. 校验身份、查询条件和翻页位置，接收 all/starred 的修改时间降序查询。
 	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 || !query.IsValid() ||
-		query.Scope != domain.GlobalEntryScopeAll || query.Sort != domain.GlobalEntrySortModifiedDesc {
-		return nil, fmt.Errorf("全局列表需要上下文、完整身份及 all/modified_desc 的合法查询")
+		(query.Scope != domain.GlobalEntryScopeAll && query.Scope != domain.GlobalEntryScopeStarred) || query.Sort != domain.GlobalEntrySortModifiedDesc {
+		return nil, fmt.Errorf("全局列表需要上下文、完整身份及 all/starred、modified_desc 的合法查询")
 	}
 	upper := copyOptionalValue(before)
 	if upper != nil {
@@ -59,7 +59,7 @@ func (listService *GlobalEntryListService) List(ctx context.Context, actor domai
 		remaining := domain.MaxGlobalEntryCandidates
 		seenIDs := make(map[uint64]bool)
 		for remaining > 0 {
-			// 3. 分批读取候选，核对范围与严格排序。
+			// 3. 分批读取候选，保留原范围和筛选条件，核对范围与严格排序。
 			if err := snapshotContext.Err(); err != nil {
 				return err
 			}

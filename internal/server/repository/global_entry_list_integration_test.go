@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
+	"github.com/opaoxx/cloud-nest/migrations"
 )
 
 type globalEntryListSnapshotReader struct {
@@ -28,6 +30,15 @@ func (reader *globalEntryListSnapshotReader) ListUserGlobalEntryCandidates(ctx c
 }
 
 func TestGlobalEntryListServiceIntegration(t *testing.T) {
+	testGlobalEntryListServiceIntegration(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryListServiceIntegration(t *testing.T) {
+	testGlobalEntryListServiceIntegration(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryListServiceIntegration(t *testing.T, scope string) {
+	t.Helper()
 	// 1. 准备正式表候选及真实快照服务装配。
 	pool := userProfileDatabase(t)
 	pool.SetMaxOpenConns(2)
@@ -53,6 +64,30 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 	}
 	if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET modified_at=? WHERE id=16", stamp.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
+	}
+	if scope == domain.GlobalEntryScopeStarred {
+		start := strings.Index(migrations.InitialSQL, "CREATE TABLE user_entry_preferences (")
+		if start < 0 {
+			t.Fatal("未找到正式偏好表")
+		}
+		end := strings.Index(migrations.InitialSQL[start:], "CREATE TABLE upload_tasks (")
+		if end < 0 {
+			t.Fatal("未找到偏好表结束边界")
+		}
+		if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:start+end]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,starred_at) SELECT user_id,id,? FROM file_entries", stamp); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size,created_at,modified_at,updated_at) VALUES(18,1,12,'学习未收藏.md',CAST('学习未收藏.md' AS BINARY),'FILE','DOCUMENT',41,2048,?,?,?)", stamp, stamp.Add(time.Second), stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queryForPage := func(size int) domain.GlobalEntryQuery {
+		query := globalEntryCandidateQuery(size)
+		query.Scope = scope
+		return query
 	}
 	store, err := NewStore(pool)
 	if err != nil {
@@ -86,7 +121,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 	// 2. 验证页内截断、续页、分类、搜索与账号范围。
 	t.Run("unconsumed candidates and tuple continuation", func(t *testing.T) {
 		listing, _ := makeList(nil)
-		query := globalEntryCandidateQuery(1)
+		query := queryForPage(1)
 		query.Kind = "document"
 		first, err := listing.List(ctx, actor, query, nil)
 		if err != nil {
@@ -109,7 +144,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 	})
 	t.Run("all types search and empty account checks", func(t *testing.T) {
 		listing, _ := makeList(nil)
-		query := globalEntryCandidateQuery(2)
+		query := queryForPage(2)
 		first, err := listing.List(ctx, actor, query, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -151,7 +186,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 		pool.SetMaxOpenConns(1)
 		defer pool.SetMaxOpenConns(2)
 		listing, _ := makeList(nil)
-		query := globalEntryCandidateQuery(100)
+		query := queryForPage(100)
 		query.Kind = "document"
 		result, err := listing.List(ctx, actor, query, nil)
 		if err != nil {
@@ -169,7 +204,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 			_, err := pool.ExecContext(ctx, "UPDATE file_entries SET parent_id=14 WHERE id=15")
 			return err
 		})
-		query := globalEntryCandidateQuery(100)
+		query := queryForPage(100)
 		query.Kind = "document"
 		original, err := listing.List(ctx, actor, query, nil)
 		if err != nil || !changed {
@@ -186,6 +221,61 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 		}
 	})
 
+	if scope == domain.GlobalEntryScopeStarred {
+		t.Run("ancestors need no favorite", func(t *testing.T) {
+			if _, err := pool.ExecContext(ctx, "DELETE FROM user_entry_preferences WHERE user_id=1 AND entry_id IN (12,14)"); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if _, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,starred_at) VALUES(1,12,?),(1,14,?)", stamp, stamp); err != nil {
+					t.Error("恢复祖先收藏夹具失败", err)
+				}
+			}()
+			listing, _ := makeList(nil)
+			query := queryForPage(100)
+			query.Kind = "document"
+			result, err := listing.List(ctx, actor, query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkPage(t, result, []uint64{15, 13}, false, 0)
+		})
+		t.Run("favorite changes after candidate read", func(t *testing.T) {
+			defer func() {
+				if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET starred_at=? WHERE user_id=1 AND entry_id=15", stamp); err != nil {
+					t.Error("恢复文档收藏失败", err)
+				}
+				if _, err := pool.ExecContext(ctx, "DELETE FROM user_entry_preferences WHERE user_id=1 AND entry_id=18"); err != nil {
+					t.Error("移除新增收藏夹具失败", err)
+				}
+			}()
+			changed := false
+			listing, _ := makeList(func() error {
+				if changed {
+					return nil
+				}
+				changed = true
+				if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET starred_at=NULL WHERE user_id=1 AND entry_id=15"); err != nil {
+					return err
+				}
+				_, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,starred_at) VALUES(1,18,?)", stamp)
+				return err
+			})
+			query := queryForPage(100)
+			query.Kind = "document"
+			original, err := listing.List(ctx, actor, query, nil)
+			if err != nil || !changed {
+				t.Fatal("读取后的收藏变化未成功提交", err)
+			}
+			checkPage(t, original, []uint64{15, 13}, false, 0)
+			current, err := listing.List(ctx, actor, query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkPage(t, current, []uint64{18, 13}, false, 0)
+		})
+	}
+
 	// 4. 验证千项预算的空页、短页及边界续页。
 	writer, err := pool.BeginTx(ctx, nil)
 	if err != nil {
@@ -201,9 +291,14 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 	if err := writer.Commit(); err != nil {
 		t.Fatal(err)
 	}
+	if scope == domain.GlobalEntryScopeStarred {
+		if _, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,starred_at) SELECT user_id,id,? FROM file_entries WHERE id BETWEEN 1000 AND 2000", stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Run("empty budget page continues to visible entries", func(t *testing.T) {
 		listing, calls := makeList(nil)
-		query := globalEntryCandidateQuery(2)
+		query := queryForPage(2)
 		query.Kind = "document"
 		first, err := listing.List(ctx, actor, query, nil)
 		if err != nil || *calls != 10 {
@@ -221,7 +316,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		listing, _ := makeList(nil)
-		query := globalEntryCandidateQuery(3)
+		query := queryForPage(3)
 		query.Kind = "document"
 		first, err := listing.List(ctx, actor, query, nil)
 		if err != nil {
@@ -242,7 +337,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		listing, calls := makeList(nil)
-		query := globalEntryCandidateQuery(1)
+		query := queryForPage(1)
 		query.Kind = "document"
 		first, err := listing.List(ctx, actor, query, nil)
 		if err != nil || *calls != 10 {
@@ -263,7 +358,7 @@ func TestGlobalEntryListServiceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		listing, calls := makeList(nil)
-		query := globalEntryCandidateQuery(2)
+		query := queryForPage(2)
 		query.Search, query.Kind = "blocked-", "document"
 		result, err := listing.List(ctx, actor, query, nil)
 		if err != nil || *calls != 10 {

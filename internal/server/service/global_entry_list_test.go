@@ -76,6 +76,15 @@ func globalEntryListFixture(count int, hidden func(int) bool) (domain.Actor, *gl
 }
 
 func TestGlobalEntryListServiceResults(t *testing.T) {
+	testGlobalEntryListServiceResults(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryListServiceResults(t *testing.T) {
+	testGlobalEntryListServiceResults(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryListServiceResults(t *testing.T, scope string) {
+	t.Helper()
 	for _, fixture := range []struct {
 		name      string
 		count     int
@@ -102,6 +111,7 @@ func TestGlobalEntryListServiceResults(t *testing.T) {
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 组合一次快照中的候选与真实可见性函数。
 			actor, reader, query := globalEntryListFixture(fixture.count, fixture.hidden)
+			query.Scope = scope
 			if fixture.pageSize != 0 {
 				query.PageSize = fixture.pageSize
 			}
@@ -141,8 +151,18 @@ func TestGlobalEntryListServiceResults(t *testing.T) {
 }
 
 func TestGlobalEntryListServiceContinuationAndCopies(t *testing.T) {
+	testGlobalEntryListServiceContinuationAndCopies(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryListServiceContinuationAndCopies(t *testing.T) {
+	testGlobalEntryListServiceContinuationAndCopies(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryListServiceContinuationAndCopies(t *testing.T, scope string) {
+	t.Helper()
 	// 1. 页内提前填满后，下一页重新取得未消费的可见项。
 	actor, reader, query := globalEntryListFixture(6, func(index int) bool { return index%2 == 0 })
+	query.Scope = scope
 	listing := NewGlobalEntryListService(func(ctx context.Context, action func(context.Context, GlobalEntryListReader) error) error {
 		return action(ctx, reader)
 	})
@@ -170,10 +190,20 @@ func TestGlobalEntryListServiceContinuationAndCopies(t *testing.T) {
 }
 
 func TestGlobalEntryListServiceFailures(t *testing.T) {
+	testGlobalEntryListServiceFailures(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryListServiceFailures(t *testing.T) {
+	testGlobalEntryListServiceFailures(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryListServiceFailures(t *testing.T, scope string) {
+	t.Helper()
 	readFailure, finishFailure := errors.New("fixture read failure"), errors.New("fixture snapshot finish failure")
 	for _, mode := range []string{"nil page", "short has more", "too many", "wrong owner", "inactive", "zero id", "zero revision", "nil parent", "zero parent", "empty name", "invalid time", "submicrosecond", "ascending ids", "ascending times", "duplicate id older time", "cross batch duplicate", "read failure", "later read failure", "disabled empty", "snapshot failure", "no callback", "nil snapshot context", "nil reader", "cancelled snapshot", "cancel after read", "cancel after failed read", "cancel after callback"} {
 		t.Run(mode, func(t *testing.T) {
 			actor, reader, query := globalEntryListFixture(2, nil)
+			query.Scope = scope
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			want := error(domain.ErrInvalidFileEntryData)
@@ -276,9 +306,19 @@ func TestGlobalEntryListServiceFailures(t *testing.T) {
 }
 
 func TestGlobalEntryListServiceInputs(t *testing.T) {
-	for _, mode := range []string{"nil context", "zero user", "zero device", "zero session", "invalid query", "starred scope", "name sort", "zero position id", "zero position time", "position precision", "cancelled", "expired"} {
+	testGlobalEntryListServiceInputs(t, domain.GlobalEntryScopeAll)
+}
+
+func TestStarredGlobalEntryListServiceInputs(t *testing.T) {
+	testGlobalEntryListServiceInputs(t, domain.GlobalEntryScopeStarred)
+}
+
+func testGlobalEntryListServiceInputs(t *testing.T, scope string) {
+	t.Helper()
+	for _, mode := range []string{"nil context", "zero user", "zero device", "zero session", "invalid query", "recent scope", "starred name sort", "name sort", "zero position id", "zero position time", "position precision", "cancelled", "expired"} {
 		t.Run(mode, func(t *testing.T) {
 			actor, _, query := globalEntryListFixture(0, nil)
+			query.Scope = scope
 			var ctx context.Context = context.Background()
 			var before *domain.FileEntryPosition
 			var want error
@@ -293,8 +333,10 @@ func TestGlobalEntryListServiceInputs(t *testing.T) {
 				actor.SessionID = 0
 			case "invalid query":
 				query.PageSize = 0
-			case "starred scope":
-				query.Scope = domain.GlobalEntryScopeStarred
+			case "recent scope":
+				query.Scope, query.Sort = domain.GlobalEntryScopeRecent, domain.GlobalEntrySortLastOpenedDesc
+			case "starred name sort":
+				query.Scope, query.Sort = domain.GlobalEntryScopeStarred, domain.GlobalEntrySortNameAsc
 			case "name sort":
 				query.Sort = domain.GlobalEntrySortNameAsc
 			case "zero position id":
