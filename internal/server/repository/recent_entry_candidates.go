@@ -12,14 +12,15 @@ import (
 )
 
 // ListUserRecentEntryCandidates 按认证用户读取最近访问过的活动普通文件候选。
-// 当前接收 recent/last_opened_desc、空搜索及合法 kind，before 为 nil 时读取首页。
+// 当前接收 recent/last_opened_desc、名称关键词及合法 kind，before 为 nil 时读取首页。
+// 搜索原文按 name 的排序规则做包含匹配，模式字符使用显式转义。
 // folder 与最近文件范围求交后返回空候选页。
 // 调用方在同一只读快照内检查完整祖先链，再决定交付记录及最后扫描位置。
 func (store *Store) ListUserRecentEntryCandidates(ctx context.Context, userID uint64, query domain.GlobalEntryQuery, before *domain.RecentEntryPosition) (*domain.RecentEntryPage, error) {
 	// 1. 校验用户、查询条件、分页位置与上下文，设置查询期限。
 	if ctx == nil || userID == 0 || !query.IsValid() || query.Scope != domain.GlobalEntryScopeRecent ||
-		query.Sort != domain.GlobalEntrySortLastOpenedDesc || query.Search != "" {
-		return nil, fmt.Errorf("读取最近访问候选需要上下文、非零用户及 recent/last_opened_desc、空搜索的合法查询")
+		query.Sort != domain.GlobalEntrySortLastOpenedDesc {
+		return nil, fmt.Errorf("读取最近访问候选需要上下文、非零用户及 recent/last_opened_desc 的合法查询")
 	}
 	var upper *domain.RecentEntryPosition
 	if before != nil {
@@ -46,6 +47,11 @@ func (store *Store) ListUserRecentEntryCandidates(ctx context.Context, userID ui
 		statement = statement.Where("1 = 0")
 	} else if query.Kind != "" {
 		statement = statement.Where("file_entries.category = ?", strings.ToUpper(query.Kind))
+	}
+	// 2.2. 转义搜索原文中的模式字符，在排序和分页前绑定名称包含条件。
+	if query.Search != "" {
+		escapedSearch := strings.NewReplacer("=", "==", "%", "=%", "_", "=_").Replace(query.Search)
+		statement = statement.Where("file_entries.name LIKE ? ESCAPE '='", "%"+escapedSearch+"%")
 	}
 	if upper != nil {
 		statement = statement.Where("(preferences.last_opened_at < ? OR (preferences.last_opened_at = ? AND file_entries.id < ?))", upper.LastOpenedAt, upper.LastOpenedAt, upper.ID)

@@ -281,6 +281,10 @@ func TestListUserRecentEntryCandidatesIntegration(t *testing.T) {
 		})
 	})
 
+	t.Run("name search", func(t *testing.T) {
+		verifyRecentEntryCandidateSearch(t, ctx, pool, store, stamp)
+	})
+
 	// 3. 核对未提交访问写入和已提交变化的快照边界。
 	t.Run("uncommitted access changes", func(t *testing.T) {
 		writer, err := pool.BeginTx(ctx, nil)

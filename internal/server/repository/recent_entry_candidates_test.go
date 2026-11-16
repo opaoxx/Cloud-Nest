@@ -40,6 +40,8 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string
 		kind       string
+		search     string
+		pattern    string
 		entries    []domain.RecentEntryCandidate
 		before     *domain.RecentEntryPosition
 		size       int
@@ -50,6 +52,25 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 		invalid    bool
 		more       bool
 	}{
+		{name: "Chinese search", search: "学习", pattern: "%学习%", entries: []domain.RecentEntryCandidate{base}},
+		{name: "Unicode emoji search", search: "🌱", pattern: "%🌱%", entries: []domain.RecentEntryCandidate{base}},
+		{name: "preserved whitespace", search: " 学习\t ", pattern: "% 学习\t %"},
+		{name: "literal percent", search: "%", pattern: "%=%%"},
+		{name: "literal percent prefix", search: "100%", pattern: "%100=%%"},
+		{name: "literal underscore", search: "_", pattern: "%=_%"},
+		{name: "literal escape", search: "=", pattern: "%==%"},
+		{name: "literal backslash", search: "\\", pattern: "%\\%"},
+		{name: "literal quote", search: "'", pattern: "%'%"},
+		{name: "literal placeholder", search: "?", pattern: "%?%"},
+		{name: "combined escapes", search: "=%_\\", pattern: "%===%=_\\%", kind: "archive"},
+		{name: "SQL text", search: "' OR TRUE --", pattern: "%' OR TRUE --%"},
+		{name: "embedded zero", search: "\x00", pattern: "%\x00%"},
+		{name: "long keyword", search: strings.Repeat("界", 1024), pattern: "%" + strings.Repeat("界", 1024) + "%"},
+		{name: "decomposed Unicode", search: "Cafe\u0301", pattern: "%Cafe\u0301%"},
+		{name: "search classified seek", search: "学习", pattern: "%学习%", kind: "document", before: before, entries: []domain.RecentEntryCandidate{base, tied, older}, more: true},
+		{name: "search folder empty", search: "%_", pattern: "%=%=_%", kind: "folder"},
+		{name: "search query failure", search: "学习", pattern: "%学习%", queryError: queryFailure, wantError: queryFailure},
+		{name: "search invalid peek", search: "学习", pattern: "%学习%", size: 1, entries: []domain.RecentEntryCandidate{base, tied}, change: func(rows [][]driver.Value) { rows[1][11] = nil }, invalid: true},
 		{name: "document filter", kind: "document", entries: []domain.RecentEntryCandidate{base}},
 		{name: "image filter", kind: "image", entries: []domain.RecentEntryCandidate{base}},
 		{name: "video filter", kind: "video", entries: []domain.RecentEntryCandidate{base}},
@@ -117,7 +138,7 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 				expected := "SELECT file_entries.id,file_entries.user_id,file_entries.parent_id,file_entries.name,file_entries.entry_type,file_entries.file_size,file_entries.revision,file_entries.status,file_entries.created_at,file_entries.modified_at,file_entries.updated_at,preferences.last_opened_at FROM file_entries JOIN user_entry_preferences AS preferences ON preferences.user_id = file_entries.user_id AND preferences.entry_id = file_entries.id WHERE "
 				predicate := "file_entries.user_id = ? AND file_entries.status = ? AND file_entries.entry_type = ? AND file_entries.parent_id IS NOT NULL AND preferences.last_opened_at IS NOT NULL"
 				values := []any{uint64(7), "ACTIVE", "FILE"}
-				if testCase.kind != "" || testCase.before != nil {
+				if testCase.kind != "" || testCase.search != "" || testCase.before != nil {
 					predicate = "(" + predicate + ")"
 				}
 				if testCase.kind == "folder" {
@@ -125,6 +146,10 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 				} else if testCase.kind != "" {
 					predicate += " AND file_entries.category = ?"
 					values = append(values, strings.ToUpper(testCase.kind))
+				}
+				if testCase.search != "" {
+					predicate += " AND file_entries.name LIKE ? ESCAPE '='"
+					values = append(values, testCase.pattern)
 				}
 				if testCase.before != nil {
 					predicate += " AND ((preferences.last_opened_at < ? OR (preferences.last_opened_at = ? AND file_entries.id < ?)))"
@@ -153,6 +178,7 @@ func TestListUserRecentEntryCandidatesResults(t *testing.T) {
 			}
 			query := recentEntryCandidateQuery(size)
 			query.Kind = testCase.kind
+			query.Search = testCase.search
 			queryCopy := query
 			var positionCopy domain.RecentEntryPosition
 			if testCase.before != nil {
@@ -204,7 +230,7 @@ func TestListUserRecentEntryCandidatesInput(t *testing.T) {
 		{name: "all scope", change: func(query *domain.GlobalEntryQuery) { query.Scope = domain.GlobalEntryScopeAll }},
 		{name: "starred scope", change: func(query *domain.GlobalEntryQuery) { query.Scope = domain.GlobalEntryScopeStarred }},
 		{name: "modified sort", change: func(query *domain.GlobalEntryQuery) { query.Sort = domain.GlobalEntrySortModifiedDesc }},
-		{name: "search pending", change: func(query *domain.GlobalEntryQuery) { query.Search = "学习" }},
+		{name: "truncated UTF-8", change: func(query *domain.GlobalEntryQuery) { query.Search = string([]byte{0xe4, 0xb8}) }},
 		{name: "uppercase kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = "DOCUMENT" }},
 		{name: "unknown kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = "private-kind" }},
 		{name: "padded kind", change: func(query *domain.GlobalEntryQuery) { query.Kind = " document " }},
