@@ -11,14 +11,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -209,9 +216,42 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if err != nil {
 			t.Fatal(err)
 		}
-		var response map[string]json.RawMessage
+		// 3. 通过系统分配端口交付真实查询结果，核对传输和请求日志。
+		var logs bytes.Buffer
+		router := serverhttp.NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
+		router.GET("/test-name-entry-page-success", func(requestContext *gin.Context) {
+			handler.NameEntryPageSuccess(requestContext, result)
+		}, func(*gin.Context) { t.Error("真实名称分页交付后进入下游") })
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 2 * time.Second
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/test-name-entry-page-success", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Request-ID", strings.ToUpper(requestID))
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readError := io.ReadAll(response.Body)
+		closeError := response.Body.Close()
+		server.Close()
+		if readError != nil || closeError != nil || response.StatusCode != 200 || response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Pragma") != "no-cache" || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Content-Encoding") != "" || response.ContentLength != int64(len(body)) || len(response.Cookies()) != 0 || !bytes.Equal(body, encoded) {
+			t.Fatal("真实名称分页 HTTP 状态、响应头或完整正文错误", readError, closeError)
+		}
+		var completed map[string]any
+		if json.Unmarshal(logs.Bytes(), &completed) != nil || completed["request_id"] != requestID || completed["status"] != float64(200) || completed["method"] != "GET" || completed["path"] != "/test-name-entry-page-success" {
+			t.Fatal("真实名称分页 HTTP 日志关联错误")
+		}
+		if result.NextCursor != nil && strings.Contains(logs.String(), *result.NextCursor) {
+			t.Fatal("真实名称分页完成日志包含游标")
+		}
+		encoded = body
+		var envelope map[string]json.RawMessage
 		var payload map[string]json.RawMessage
-		if json.Unmarshal(encoded, &response) != nil || len(response) != 2 || string(response["request_id"]) != strconv.Quote(requestID) || json.Unmarshal(response["data"], &payload) != nil || len(payload) != 3 || string(payload["breadcrumbs"]) != "[]" {
+		if json.Unmarshal(encoded, &envelope) != nil || len(envelope) != 2 || string(envelope["request_id"]) != strconv.Quote(requestID) || json.Unmarshal(envelope["data"], &payload) != nil || len(payload) != 3 || string(payload["breadcrumbs"]) != "[]" {
 			t.Fatal("真实名称分页响应外层或导航错误")
 		}
 		var items []map[string]json.RawMessage
@@ -252,7 +292,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				t.Fatal("真实名称分页 DTO 游标修改影响来源")
 			}
 		}
-		// 3. 与数据库事实和原独立协议检查对照，再把实际文本交给下页。
+		// 4. 与数据库事实和原独立协议检查对照，再把实际文本交给下页。
 		listed := &domain.NameEntryList{Entries: result.Entries, HasMore: result.NextCursor != nil}
 		if result.NextCursor == nil {
 			check(t, listed, ids, 0)

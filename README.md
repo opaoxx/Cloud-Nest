@@ -527,3 +527,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 已提供 NameEntryPageService，组合 all/starred、name_asc 的首页、游标校验、可见列表读取及下一页签名，输出独立目录项与可空文本游标。名称键/ID 严格升序，预算空页及短页保留最后消费位置，名称文本容量沿用 2048 字节。服务组合与真实 MySQL 普通/收藏、长二进制键、页大小调整及预算续读连续三次通过，调用与复验方法见 [第 222 步学习记录](docs/开发学习记录.md#第-222-步组合带文本游标的名称升序分页服务)。
 
 已提供 NameEntryPageData、NameEntryPageResponse 和 NewNameEntryPageData，将名称文本分页结果转换为十字段条目摘要、空 breadcrumbs 及可空 next_cursor。复用完整 ID/版本字符串、JSON 安全字节数和 UTC 微秒时间，名称游标按最多 2048 字节检查。精确 JSON、边界、错误及副本专项和真实 MySQL 普通/预算/长游标响应转换连续三次通过，字段与复验方法见 [第 223 步学习记录](docs/开发学习记录.md#第-223-步定义名称升序分页响应-dto)。
+
+已提供 handler.NameEntryPageSuccess，接收已确认的名称分页结果，转换 DTO、关联当前 request_id 并完整编码 JSON，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。异常及取消复用统一错误，交付过程核对响应提交状态。专项与真实 MySQL 普通/收藏/预算/长游标结果的实际 GET 交付连续三次通过，调用与复验方法见 [第 224 步学习记录](docs/开发学习记录.md#第-224-步实现名称升序分页成功-http-交付)。
