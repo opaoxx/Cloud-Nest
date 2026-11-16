@@ -185,6 +185,50 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			}
 		}
 	}
+	checkTextPage := func(t *testing.T, listing *service.NameEntryListService, query domain.GlobalEntryQuery, cursor string, ids []uint64, nextID uint64) string {
+		t.Helper()
+		// 1. 组合正式能力，并统计错误绑定是否在列表读取前被拒绝。
+		listCalls := 0
+		paging := service.NewNameEntryPageService(verifier.Verify,
+			func(current context.Context, identity domain.Actor, filters domain.GlobalEntryQuery, after *domain.NameEntryPosition) (*domain.NameEntryList, error) {
+				listCalls++
+				return listing.List(current, identity, filters, after)
+			}, signer.Sign)
+		result, err := paging.List(ctx, actor, query, cursor)
+		if err != nil || result == nil || result.Entries == nil || (result.NextCursor != nil) != (nextID != 0) || listCalls != 1 {
+			t.Fatal("名称文本分页结果错误", err)
+		}
+		// 2. 与数据库事实和原独立协议检查对照，再把实际文本交给下页。
+		listed := &domain.NameEntryList{Entries: result.Entries, HasMore: result.NextCursor != nil}
+		if result.NextCursor == nil {
+			check(t, listed, ids, 0)
+			return ""
+		}
+		listed.NextPosition, err = verifier.Verify(actor.UserID, query, *result.NextCursor)
+		if err != nil {
+			t.Fatal("名称分页返回无法校验的文本", err)
+		}
+		check(t, listed, ids, nextID)
+		independent := signPosition(t, query, listed.NextPosition)
+		repeated, err := signer.Sign(actor.UserID, query, *independent)
+		if err != nil || repeated != *result.NextCursor {
+			t.Fatal("名称文本分页与独立协议对照不符", err)
+		}
+		resized := query
+		resized.PageSize = 100
+		if position, err := verifier.Verify(actor.UserID, resized, *result.NextCursor); err != nil || !reflect.DeepEqual(position, independent) {
+			t.Fatal("名称文本分页不能调整合法页大小", err)
+		}
+		changed := query
+		changed.Search += " "
+		if failed, err := paging.List(ctx, actor, changed, *result.NextCursor); failed != nil || !errors.Is(err, domain.ErrInvalidNameEntryCursor) || listCalls != 1 {
+			t.Fatal("名称文本分页错误筛选进入列表", err)
+		}
+		if failed, err := paging.List(ctx, actor, query, *result.NextCursor+"A"); failed != nil || !errors.Is(err, domain.ErrInvalidNameEntryCursor) || listCalls != 1 {
+			t.Fatal("名称文本分页篡改游标进入列表", err)
+		}
+		return *result.NextCursor
+	}
 	t.Run("all and starred visible pagination", func(t *testing.T) {
 		for _, scope := range []string{"all", "starred"} {
 			listing, _ := makeList(nil)
@@ -195,6 +239,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				expected = [][]uint64{{107, 101}, {103}}
 			}
 			var after *domain.NameEntryPosition
+			cursor := ""
 			for index, ids := range expected {
 				result, err := listing.List(ctx, actor, query, after)
 				if err != nil {
@@ -206,6 +251,10 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				}
 				check(t, result, ids, nextID)
 				after = signPosition(t, query, result.NextPosition)
+				cursor = checkTextPage(t, listing, query, cursor, ids, nextID)
+			}
+			if cursor != "" {
+				t.Fatal("名称文本结束页仍有游标")
 			}
 		}
 	})
@@ -232,6 +281,11 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				t.Fatal(err)
 			}
 			check(t, result, fixture.ids, 0)
+			paging := service.NewNameEntryPageService(verifier.Verify, listing.List, signer.Sign)
+			page, err := paging.List(ctx, identity, query, "")
+			if err != nil || page == nil || page.NextCursor != nil || !reflect.DeepEqual(page.Entries, result.Entries) {
+				t.Fatal("名称文本分页用户或筛选事实错误", err)
+			}
 		}
 		identity := actor
 		identity.UserID = 999
@@ -256,6 +310,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal(err)
 		}
 		check(t, result, []uint64{105, 107, 12, 14, 101, 103, 109}, 0)
+		_ = checkTextPage(t, listing, nameEntryCandidateQuery(100), "", []uint64{105, 107, 12, 14, 101, 103, 109}, 0)
 	})
 	t.Run("parent move snapshot", func(t *testing.T) {
 		defer restore("UPDATE file_entries SET parent_id=11 WHERE id=14")
@@ -313,6 +368,36 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		check(t, result, []uint64{103, 107}, 0)
 	})
 
+	t.Run("long binary text cursor and resized page", func(t *testing.T) {
+		// 1. 保存两个同键项，令实际文本游标超过一千零二十四字节。
+		defer restore("DELETE FROM file_entries WHERE user_id=1 AND id IN (501,502)")
+		defer restore("DELETE FROM user_entry_preferences WHERE user_id=1 AND entry_id IN (501,502)")
+		key := bytes.Repeat([]byte{0xff}, 768)
+		for _, entry := range []struct {
+			entryID  uint64
+			parentID uint64
+		}{{501, 12}, {502, 14}} {
+			if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size) VALUES(?,1,?,?,?,'FILE','DOCUMENT',41,2048)", entry.entryID, entry.parentID, fmt.Sprintf("name-text-long-%d", entry.entryID), key); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.ExecContext(ctx, "INSERT INTO user_entry_preferences(user_id,entry_id,starred_at) VALUES(1,?,UTC_TIMESTAMP(6))", entry.entryID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, scope := range []string{"all", "starred"} {
+			listing, _ := makeList(nil)
+			query := nameEntryCandidateQuery(1)
+			query.Scope, query.Search = scope, "name-text-long-"
+			cursor := checkTextPage(t, listing, query, "", []uint64{501}, 501)
+			if len(cursor) <= 1024 || len(cursor) > domain.MaxNameEntryCursorLength {
+				t.Fatal("名称最长键未经过正确文本容量边界")
+			}
+			// 2. 使用原文本调整页大小，继续同键下一个 ID。
+			query.PageSize = 100
+			_ = checkTextPage(t, listing, query, cursor, []uint64{502}, 0)
+		}
+	})
+
 	// 2. 准备一千零一项隐藏候选，验证有界补读及最后消费位置。
 	writer, err := pool.BeginTx(ctx, nil)
 	if err != nil {
@@ -363,6 +448,11 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 				t.Fatal("名称预算续读错误", err)
 			}
 			check(t, next, []uint64{2901, 2903}, 0)
+			cursor := checkTextPage(t, listing, query, "", nil, 3999)
+			_ = checkTextPage(t, listing, query, cursor, []uint64{2901, 2903}, 0)
+			if *calls != 22 {
+				t.Fatal("名称文本预算分页未按十批加一批读取", *calls)
+			}
 		})
 	}
 	t.Run("short page and budget edge", func(t *testing.T) {
@@ -383,6 +473,8 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal(err)
 		}
 		check(t, next, []uint64{2901, 2903}, 0)
+		cursor := checkTextPage(t, listing, query, "", []uint64{3000}, 3999)
+		_ = checkTextPage(t, listing, query, cursor, []uint64{2901, 2903}, 0)
 		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET parent_id=IF(id=3999,12,16) WHERE id IN (3000,3999)"); err != nil {
 			t.Fatal(err)
 		}
@@ -393,6 +485,7 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		}
 		check(t, first, []uint64{3999}, 3999)
 		_ = signPosition(t, query, first.NextPosition)
+		_ = checkTextPage(t, listing, query, "", []uint64{3999}, 3999)
 	})
 	t.Run("exact budget end", func(t *testing.T) {
 		defer restore("UPDATE file_entries SET status='ACTIVE',deleted_at=NULL WHERE id=4000")
@@ -407,5 +500,9 @@ func verifyNameEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 			t.Fatal("名称恰好预算结束错误", err)
 		}
 		check(t, result, nil, 0)
+		_ = checkTextPage(t, listing, query, "", nil, 0)
+		if *calls != 20 {
+			t.Fatal("名称文本恰好预算结束的扫描批次错误", *calls)
+		}
 	})
 }
