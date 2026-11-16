@@ -106,6 +106,9 @@ func TestRenameEntryDataIntegration(t *testing.T) {
 		if saved == nil || saved.ResourceID == nil || *saved.ResourceID != entryID || saved.Operation != domain.RenameEntryOperation || saved.ResponseStatus != 200 {
 			t.Fatal("数据库快照记录错误")
 		}
+		if err := service.ValidateRenameEntryReplay(saved, actor.UserID, entryID, key, saved.RequestHash, time.Now()); err != nil {
+			t.Fatal("已保存重命名结果复用校验失败", err)
+		}
 		decoded, restoreError := dto.RestoreRenameEntryData(saved.ResponseBody)
 		if restoreError != nil || !reflect.DeepEqual(data, decoded) {
 			t.Fatal("数据库快照读回错误")
@@ -169,6 +172,56 @@ func TestRenameEntryDataIntegration(t *testing.T) {
 		current, err := store.FindUserFileEntry(ctx, 1, 14)
 		if err != nil || current.Name == decoded.Entry.Name || fmt.Sprint(current.Revision) == decoded.Entry.Revision {
 			t.Fatal("当前状态对照错误", err)
+		}
+	})
+	t.Run("replay request scope and expiry", func(t *testing.T) {
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(2)
+		err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			record, err := txStore.FindUserIdempotencyRecord(txContext, actor.UserID, domain.RenameEntryOperation, "rename-file-007")
+			if err != nil {
+				return err
+			}
+			for _, request := range []struct {
+				entryID, revision uint64
+				name              string
+				same              bool
+			}{
+				{14, 3, "Cafe\u0301.PDF", true}, {14, 3, "  Cafe\u0301.PDF\u3000", true},
+				{15, 3, "Cafe\u0301.PDF", false}, {14, 4, "Cafe\u0301.PDF", false},
+				{14, 3, "其他.PDF", false}, {14, 3, "CAFE\u0301.PDF", false}, {14, 3, "Café.PDF", false},
+			} {
+				hash, err := service.BuildRenameEntryRequestHash(request.entryID, request.revision, request.name)
+				if err != nil {
+					return err
+				}
+				validationError := service.ValidateRenameEntryReplay(record, actor.UserID, request.entryID, record.IdempotencyKey, hash, time.Now())
+				if !request.same {
+					if !errors.Is(validationError, domain.ErrIdempotencyRequestConflict) {
+						return fmt.Errorf("参数变化的复用结果错误: %w", validationError)
+					}
+					continue
+				}
+				if validationError != nil {
+					return validationError
+				}
+				data, err := dto.RestoreRenameEntryData(record.ResponseBody)
+				if err != nil || !reflect.DeepEqual(data, firstData) {
+					return fmt.Errorf("相同请求恢复快照错误: %w", err)
+				}
+			}
+			if err := service.ValidateRenameEntryReplay(record, actor.UserID, 14, record.IdempotencyKey, record.RequestHash, record.ExpiresAt.Add(-time.Nanosecond)); err != nil {
+				return err
+			}
+			for _, moment := range []time.Time{record.ExpiresAt, record.ExpiresAt.Add(time.Nanosecond)} {
+				if err := service.ValidateRenameEntryReplay(record, actor.UserID, 14, record.IdempotencyKey, record.RequestHash, moment); !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+					return fmt.Errorf("到期边界错误: %w", err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal("真实记录复用校验失败", err)
 		}
 	})
 
