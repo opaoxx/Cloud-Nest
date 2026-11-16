@@ -43,6 +43,17 @@ func TestGlobalEntryPageHandlerIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:start+end]); err != nil {
 		t.Fatal(err)
 	}
+	preferencesStart := strings.Index(migrations.InitialSQL, "CREATE TABLE user_entry_preferences (")
+	if preferencesStart < 0 {
+		t.Fatal("未找到正式偏好表")
+	}
+	preferencesEnd := strings.Index(migrations.InitialSQL[preferencesStart:], "CREATE TABLE upload_tasks (")
+	if preferencesEnd < 0 {
+		t.Fatal("未找到正式偏好表结束边界")
+	}
+	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[preferencesStart:preferencesStart+preferencesEnd]); err != nil {
+		t.Fatal(err)
+	}
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash) VALUES(1,'fixture_one','全局处理用户','fixture_hash'),(3,'fixture_three','其他用户','fixture_hash')",
 		"INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(41,1,'MINIO','fixture-bucket','fixture-global-handler',2048),(43,3,'MINIO','fixture-bucket','fixture-global-foreign',2048)",
@@ -219,10 +230,15 @@ func TestGlobalEntryPageHandlerIntegration(t *testing.T) {
 		t.Fatal("真实用户范围隔离错误")
 	}
 
+	starred := request(caller, "scope=starred", "", 200, 1, "", "")
+	if len(starred.Data.Items) != 0 || starred.Data.NextCursor != nil {
+		t.Fatal("当前支持的收藏范围未返回空结束页")
+	}
+
 	// 4. 验证认证先行、参数定位及游标的用户/筛选/用途绑定。
 	request("", "limit=0", "", 401, 0, "AUTH_REQUIRED", "")
 	request(caller, "limit=0", "", 400, 0, "INVALID_ARGUMENT", "limit")
-	request(caller, "scope=starred", "", 400, 0, "INVALID_ARGUMENT", "scope")
+	request(caller, "scope=recent", "", 400, 0, "INVALID_ARGUMENT", "scope")
 	request(caller, "q=%FF", "", 400, 0, "INVALID_ARGUMENT", "q")
 	request(caller, "note=%ZZ", "", 400, 0, "INVALID_ARGUMENT", "query")
 	request(caller, "cursor=a&cursor=b", "", 400, 0, "INVALID_ARGUMENT", "cursor")

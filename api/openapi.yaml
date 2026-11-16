@@ -71,6 +71,7 @@ info:
     全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     最近使用分页成功交付通过测试专用 GET 入口验证，共享响应见 RecentEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     RecentEntryScope/RecentEntrySort/RecentEntrySearch/RecentEntryKind/RecentEntryCursor/RecentEntryLimit 定义最近使用查询 DTO 输入，默认 recent/last_opened_desc、每页 50 条，搜索原文保留。
+    最近使用处理函数通过测试专用 GET 入口组合认证 Actor、查询 DTO、分页服务和成功交付，输入/游标错误见 RecentEntryQueryRejected。
     GlobalEntryScope/GlobalEntrySort/GlobalEntrySearch/GlobalEntryKind/GlobalEntryCursor/GlobalEntryLimit 定义全局查询 DTO 输入，接收 all/starred，默认 all/modified_desc、每页 50 条。
     收藏查询通过正式 GET /api/v1/entries?scope=starred 验证，并与已有 PUT 收藏写入衔接。
     全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略。
@@ -2439,6 +2440,42 @@ components:
                 error:
                   code: INVALID_CURSOR
                   message: 全局分页游标无效，请重新查询
+                  details:
+                    field: cursor
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            invalid_search:
+              value:
+                error:
+                  code: INVALID_ARGUMENT
+                  message: 搜索条件须为单个有效 UTF-8 文本
+                  details:
+                    field: q
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RecentEntryQueryRejected:
+      description: |
+        HTTP 400，查询格式及字段使用 INVALID_ARGUMENT，游标签名/用户/范围/筛选绑定无效使用 INVALID_CURSOR。
+        details.field 定位 query、scope、sort、q、kind、cursor 或 limit，返回固定提示，适用于 recent 的访问时间降序分页。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalid_cursor:
+              value:
+                error:
+                  code: INVALID_CURSOR
+                  message: 最近使用分页游标无效，请重新查询
                   details:
                     field: cursor
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
