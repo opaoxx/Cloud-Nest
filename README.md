@@ -559,3 +559,5 @@ GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 sco
 GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例如 scope=all&sort=size_desc 或 scope=starred&sort=size_desc。正式启动通过 RegisterSizeEntryPageRoute 装配五类分页能力，大小候选及祖先读取共享快照，持久化主密钥派生大小用途游标。正式路由及真实启动/重启连续三次通过，普通/收藏/预算/同大小的原游标可跨重启续读，调用与复验方法见 [第 238 步学习记录](docs/开发学习记录.md#第-238-步接入正式大小降序列表路由与启动装配)。
 
 已提供 domain.CreateUploadInput，保存目标目录、原始名称、声明大小及可空的固定 32 字节预期 SHA-256。基础校验接收完整非零目录 ID、非空 UTF-8 名称和 0～16 MiB 声明，完整命名继续复用 ValidateEntryName。十八组声明、四十组大小/目录边界、六组哈希原文保护及九组命名衔接连续三次通过，字段与复验方法见 [第 239 步学习记录](docs/开发学习记录.md#第-239-步定义单文件上传任务的创建输入模型)。
+
+已提供 CreateUploadRequest 和 ParseCreateUploadRequest，按 parent_id、name、size_bytes、sha256 顺序检查创建声明并转换为 domain.CreateUploadInput。必填大小通过指针区分缺失/null 与零字节，SHA-256 接收 64 位大小写十六进制或 null，转换为独立 32 字节数组，声明大小原值由后续服务核对能力上限。DTO、JSON/HTTP 输入、来源副本及并发回归连续三次通过，字段与复验方法见 [第 240 步学习记录](docs/开发学习记录.md#第-240-步定义单文件上传创建请求-dto)。
