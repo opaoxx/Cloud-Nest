@@ -1,10 +1,18 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +49,68 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		return listing, &calls
 	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
+	masterKey := bytes.Repeat([]byte{11}, 32)
+	cursorSigner, err := service.NewRecentEntryCursorSigner(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signPosition := func(t *testing.T, query domain.GlobalEntryQuery, position *domain.RecentEntryPosition) *domain.RecentEntryPosition {
+		t.Helper()
+		if position == nil {
+			t.Fatal("真实最近列表缺少续页位置")
+		}
+		original := *position
+		cursor, err := cursorSigner.Sign(actor.UserID, query, original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := strings.Split(cursor, ".")
+		if len(parts) != 2 || len(cursor) > domain.MaxRecentEntryCursorLength {
+			t.Fatal("真实最近签名游标形状错误")
+		}
+		payloadBytes, err := base64.RawURLEncoding.Strict().DecodeString(parts[0])
+		if err != nil || base64.RawURLEncoding.EncodeToString(payloadBytes) != parts[0] {
+			t.Fatal("真实最近游标载荷编码错误", err)
+		}
+		signature, err := base64.RawURLEncoding.Strict().DecodeString(parts[1])
+		if err != nil || len(signature) != sha256.Size || base64.RawURLEncoding.EncodeToString(signature) != parts[1] {
+			t.Fatal("真实最近游标签名编码错误", err)
+		}
+		derivation := hmac.New(sha256.New, masterKey)
+		derivation.Write([]byte("cloudnest/recent-entry-cursor/v1"))
+		messageMAC := hmac.New(sha256.New, derivation.Sum(nil))
+		messageMAC.Write([]byte(parts[0]))
+		if !hmac.Equal(signature, messageMAC.Sum(nil)) {
+			t.Fatal("真实最近游标独立 HMAC 核对失败")
+		}
+		filters, err := json.Marshal(struct {
+			Search string `json:"q"`
+			Kind   string `json:"kind"`
+		}{query.Search, query.Kind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(filters)
+		var fields map[string]any
+		if err := json.Unmarshal(payloadBytes, &fields); err != nil || len(fields) != 7 || fields["version"] != float64(1) || fields["user_id"] != strconv.FormatUint(actor.UserID, 10) || fields["scope"] != "recent" || fields["sort"] != "last_opened_desc" || fields["filter_hash"] != hex.EncodeToString(hash[:]) || fields["entry_id"] != strconv.FormatUint(original.ID, 10) || fields["last_opened_at"] != original.LastOpenedAt.UTC().Format("2006-01-02T15:04:05.000000Z") {
+			t.Fatal("真实最近游标字段或访问位置错误", err)
+		}
+		openedAt, err := time.Parse("2006-01-02T15:04:05.000000Z", fields["last_opened_at"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entryID, err := strconv.ParseUint(fields["entry_id"].(string), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored := &domain.RecentEntryPosition{ID: entryID, LastOpenedAt: openedAt}
+		resized := query
+		resized.PageSize = 100
+		if again, err := cursorSigner.Sign(actor.UserID, resized, original); err != nil || again != cursor || *position != original || restored.ID != original.ID || !restored.LastOpenedAt.Equal(original.LastOpenedAt) || !restored.IsValid() {
+			t.Fatal("真实最近游标页大小调整、位置还原或输入保护错误", err)
+		}
+		return restored
+	}
 	checkPage := func(t *testing.T, result *domain.RecentEntryList, ids []uint64, more bool, nextID uint64) {
 		t.Helper()
 		if result == nil || result.Entries == nil || len(result.Entries) != len(ids) || result.HasMore != more || (result.NextPosition != nil) != more {
@@ -73,6 +143,10 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			if len(result.Entries) > 0 {
 				last := result.Entries[0]
 				before = &domain.RecentEntryPosition{ID: last.Entry.ID, LastOpenedAt: last.LastOpenedAt.In(time.FixedZone("fixture", 8*3600))}
+				if result.NextPosition != nil {
+					before = signPosition(t, query, result.NextPosition)
+					before.LastOpenedAt = before.LastOpenedAt.In(time.FixedZone("fixture", 8*3600))
+				}
 				if last.Entry.ID == 103 && !last.LastOpenedAt.Equal(stamp.Add(2*time.Second)) {
 					t.Fatal("最近列表丢失原访问时间")
 				}
@@ -226,7 +300,7 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		if !first.NextPosition.LastOpenedAt.Equal(stamp.Add(3 * time.Second)) {
 			t.Fatal("隐藏末项访问时间丢失")
 		}
-		next, err := listing.List(ctx, actor, budgetQuery, first.NextPosition)
+		next, err := listing.List(ctx, actor, budgetQuery, signPosition(t, budgetQuery, first.NextPosition))
 		if err != nil || *calls != 11 {
 			t.Fatal("最近预算空页续读错误", err)
 		}
@@ -247,7 +321,7 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			t.Fatal(err)
 		}
 		checkPage(t, first, []uint64{4000}, true, 3001)
-		next, err := listing.List(ctx, actor, budgetQuery, first.NextPosition)
+		next, err := listing.List(ctx, actor, budgetQuery, signPosition(t, budgetQuery, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -270,7 +344,7 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 			t.Fatal("预算边界满页错误", err)
 		}
 		checkPage(t, first, []uint64{3001}, true, 3001)
-		next, err := listing.List(ctx, actor, query, first.NextPosition)
+		next, err := listing.List(ctx, actor, query, signPosition(t, query, first.NextPosition))
 		if err != nil {
 			t.Fatal(err)
 		}
