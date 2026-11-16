@@ -537,3 +537,5 @@ GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at �
 GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 scope=all&sort=name_asc 或 scope=starred&sort=name_asc。正式启动装配同快照名称列表及持久化主密钥派生的名称游标，支持搜索、分类、2048 字节游标和预算空页续读。路由及真实启动/重启联测连续三次通过，普通、收藏、预算和长键原游标可跨重启使用，示例与复验方法见 [第 227 步学习记录](docs/开发学习记录.md#第-227-步接入正式名称升序列表路由与启动装配)。
 
 已提供 SizeEntryPosition，以完整无符号 FileSize 和目录项 ID 表达大小/ID 双降序的内部续页位置。IsValid 检查非零 ID，大小接受零字节至 uint64 最大值，可保存最后扫描候选。四十五组边界、四组基础记录/副本及既有大小读取正式表回归连续三次通过，模型与复验方法见 [第 228 步学习记录](docs/开发学习记录.md#第-228-步定义全局大小降序分页位置模型)。
+
+已提供 Store.ListUserSizeEntryCandidates，读取 all/starred、size_desc 的活动普通目录项候选，组合搜索、分类及大小/ID 双降序续页条件，多取一条判断 HasMore，返回复用的 FileEntryPage。候选及额外项核对归属、结构、严格顺序和重复 ID，结果父目录独立复制。专项与真实 MySQL 的同大小/零字节、收藏/筛选、快照、百条页及完整无符号边界连续三次通过，调用与复验方法见 [第 229 步学习记录](docs/开发学习记录.md#第-229-步按用户读取大小降序的全局目录项候选)。
