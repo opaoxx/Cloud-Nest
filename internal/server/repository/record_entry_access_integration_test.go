@@ -13,6 +13,20 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
+// recordAccessResultStore 在真实访问写入后注入异常，验证核心服务的校验和回滚。
+type recordAccessResultStore struct {
+	*Store
+	afterRecord func(*domain.EntryPreference)
+}
+
+func (store *recordAccessResultStore) RecordUserEntryAccess(ctx context.Context, entryID uint64) (*domain.EntryPreference, error) {
+	preference, err := store.Store.RecordUserEntryAccess(ctx, entryID)
+	if err == nil && store.afterRecord != nil {
+		store.afterRecord(preference)
+	}
+	return preference, err
+}
+
 func TestRecordUserEntryAccessIntegration(t *testing.T) {
 	// 1. 正式表独占库准备身份、文件及不同偏好状态。
 	pool := userProfileDatabase(t)
@@ -50,23 +64,13 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
-	record := func(callContext context.Context, entryID uint64) (*domain.EntryPreference, error) {
-		var prepared *domain.EntryPreference
-		err := store.WithUserTransaction(callContext, actor, func(txContext context.Context, txStore *Store) error {
-			paths := service.NewFileEntryPathService(func(ctx context.Context, action func(context.Context, service.FileEntryPathReader) error) error {
-				return action(ctx, txStore)
-			})
-			if _, err := paths.Get(txContext, actor, entryID); err != nil {
-				return err
-			}
-			var err error
-			prepared, err = txStore.RecordUserEntryAccess(txContext, entryID)
-			return err
+	accessService := service.NewRecordAccessService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RecordAccessTransaction) error) error {
+		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			return action(txContext, txStore)
 		})
-		if err != nil {
-			return nil, err
-		}
-		return prepared, nil
+	})
+	record := func(callContext context.Context, entryID uint64) (*domain.EntryPreference, error) {
+		return accessService.Record(callContext, actor, entryID, "preview")
 	}
 	read := func(entryID uint64) *domain.EntryPreference {
 		t.Helper()
@@ -318,6 +322,74 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 			t.Fatal("并发收藏与访问事实错误")
 		}
 	})
+	t.Run("service invalid result and cancellation rollback", func(t *testing.T) {
+		for _, mode := range []string{"wrong owner", "wrong target", "missing access", "zero time", "cancel after write", "outer callback failure"} {
+			t.Run(mode, func(t *testing.T) {
+				if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET last_opened_at=?,updated_at=? WHERE user_id=1 AND entry_id=13", old, old); err != nil {
+					t.Fatal(err)
+				}
+				before, beforeAudit := read(13), audit(13)
+				callContext, cancelCall := context.WithCancel(ctx)
+				defer cancelCall()
+				failure := errors.New("fixture access outer failure")
+				injected := service.NewRecordAccessService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RecordAccessTransaction) error) error {
+					return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+						err := action(txContext, &recordAccessResultStore{Store: txStore, afterRecord: func(preference *domain.EntryPreference) {
+							switch mode {
+							case "wrong owner":
+								preference.UserID++
+							case "wrong target":
+								preference.EntryID++
+							case "missing access":
+								preference.LastOpenedAt = nil
+							case "zero time":
+								*preference.LastOpenedAt = time.Time{}
+							case "cancel after write":
+								cancelCall()
+							}
+						}})
+						if err == nil && mode == "outer callback failure" {
+							return failure
+						}
+						return err
+					})
+				})
+				result, err := injected.Record(callContext, actor, 13, "open")
+				want := domain.ErrInvalidFileEntryData
+				if mode == "cancel after write" {
+					want = context.Canceled
+				}
+				if mode == "outer callback failure" {
+					want = failure
+				}
+				if result != nil || !errors.Is(err, want) || !reflect.DeepEqual(read(13), before) || audit(13) != beforeAudit {
+					t.Fatal("服务写后失败未完整回滚", err)
+				}
+			})
+		}
+	})
+	t.Run("service confirmed commit then canceled", func(t *testing.T) {
+		callContext, cancelCall := context.WithCancel(ctx)
+		defer cancelCall()
+		committed := service.NewRecordAccessService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RecordAccessTransaction) error) error {
+			err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error { return action(txContext, txStore) })
+			if err == nil {
+				cancelCall()
+			}
+			return err
+		})
+		result, err := committed.Record(callContext, actor, 13, "open")
+		if err != nil || result == nil || callContext.Err() != context.Canceled || !reflect.DeepEqual(result, read(13)) {
+			t.Fatal("已确认提交后的访问结果错误", err)
+		}
+	})
+	t.Run("service rejects purpose before transaction", func(t *testing.T) {
+		before, beforeAudit := read(13), audit(13)
+		result, err := accessService.Record(ctx, actor, 13, "download")
+		if result != nil || !errors.Is(err, domain.ErrInvalidEntryAccessPurpose) || !reflect.DeepEqual(before, read(13)) || audit(13) != beforeAudit {
+			t.Fatal("非法访问用途未拒绝", err)
+		}
+	})
 	t.Run("maximum identifiers revision and dates", func(t *testing.T) {
 		maximum := ^uint64(0)
 		for _, statement := range []struct {
@@ -337,11 +409,9 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 		maximumActor := domain.Actor{UserID: maximum, DeviceID: maximum, SessionID: maximum}
 		var result *domain.EntryPreference
 		invoke := func() error {
-			return store.WithUserTransaction(ctx, maximumActor, func(txContext context.Context, txStore *Store) error {
-				var err error
-				result, err = txStore.RecordUserEntryAccess(txContext, maximum)
-				return err
-			})
+			var err error
+			result, err = accessService.Record(ctx, maximumActor, maximum, "open")
+			return err
 		}
 		if err := invoke(); err != nil || result == nil || result.UserID != maximum || result.EntryID != maximum || result.LastOpenedAt == nil {
 			t.Fatal("最大标识访问错误", err)

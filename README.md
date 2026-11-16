@@ -435,3 +435,5 @@ PUT /api/v1/entries/{id}/star 已接入正式路由和生产启动装配，复�
 已提供 RecordAccessRequest、RecordAccessInput 和 ParseRecordAccessRequest，明确接受 preview/open 两种访问用途，缺失、null 或其他文本定位 purpose 字段错误。解析后取得独立字符串参数，认证、路径及正文顺序通过三十九组真实 POST 输入验证，字段与复验方法见 [第 176 步学习记录](docs/开发学习记录.md#第-176-步定义目录项访问记录请求-dto)。
 
 已提供 Store.RecordUserEntryAccess，在已认证用户事务内记录活动文件最近访问时间，首次填充数据库 UTC 时间，满六十秒更新，窗口内复用原值并保留收藏事实。精确微秒边界、回滚、身份复查、旧快照与并发经过真实 MySQL 验证，调用前置条件与复验方法见 [第 177 步学习记录](docs/开发学习记录.md#第-177-步在已认证用户事务内记录目录项最近访问)。
+
+已提供 RecordAccessService，在同一已认证用户事务中校验用途、完整路径和文件类型，调用最近访问写入，核对偏好并确认提交后交付独立结果。用途规则由 Domain 供 DTO/服务共用，服务专项和扩展后的真实 MySQL 联测连续三次通过，调用与复验方法见 [第 178 步学习记录](docs/开发学习记录.md#第-178-步组合目录项访问记录核心服务)。
