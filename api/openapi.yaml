@@ -94,6 +94,7 @@ info:
     收藏成功交付方法通过测试专用 PUT 入口验证，共享响应见 SetStarredSucceeded，关联当前请求 ID 并禁止缓存。
     收藏处理函数按 Actor、路径、JSON/布尔状态、核心服务及成功交付组合，目标不可见复用 TargetEntryNotFound。
     PUT /api/v1/entries/{id}/star 已由启动入口绑定共享授权与收藏核心服务，用户事务确认提交后交付偏好。
+    RecordAccessRequest 定义后续访问记录请求，purpose 须明确为 preview/open，通过测试专用 POST 入口验证输入。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1469,6 +1470,21 @@ components:
       example:
         target_parent_id: '12'
         expected_revision: '3'
+    RecordAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [purpose]
+      description: |
+        目录项访问记录请求 DTO，purpose 须明确为 preview 或 open，分别表示预览和打开。
+        按准确小写值校验，字段缺失、null 或其他文本定位 purpose 字段错误。
+        目标来自路径，用户身份来自认证 Actor，后续服务核对归属、可见性及访问条件。
+      properties:
+        purpose:
+          type: string
+          enum: [preview, open]
+          description: 明确的访问用途。
+      example:
+        purpose: preview
     SetStarredRequest:
       type: object
       additionalProperties: false
