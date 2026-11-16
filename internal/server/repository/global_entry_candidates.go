@@ -12,13 +12,14 @@ import (
 )
 
 // ListUserGlobalEntryCandidates 按认证用户读取全局活动普通目录项候选。
-// 当前支持 all/modified_desc、空搜索及合法 kind，before 为 nil 时从首页开始。
+// 当前支持 all/modified_desc、名称关键词及合法 kind，before 为 nil 时从首页开始。
+// 搜索词按原文做包含匹配，模式字符使用显式转义，匹配沿用 name 的排序规则。
 // 调用方在同一快照内检查候选及完整祖先链，再决定对外交付的记录和翻页位置。
 func (store *Store) ListUserGlobalEntryCandidates(ctx context.Context, userID uint64, query domain.GlobalEntryQuery, before *domain.FileEntryPosition) (*domain.FileEntryPage, error) {
 	// 1. 检查查询条件、用户、翻页位置和上下文，设置查询期限。
 	if ctx == nil || userID == 0 || !query.IsValid() || query.Scope != domain.GlobalEntryScopeAll ||
-		query.Sort != domain.GlobalEntrySortModifiedDesc || query.Search != "" {
-		return nil, fmt.Errorf("读取全局候选需要上下文、非零用户及 all/modified_desc、空搜索的合法查询")
+		query.Sort != domain.GlobalEntrySortModifiedDesc {
+		return nil, fmt.Errorf("读取全局候选需要上下文、非零用户及 all/modified_desc 的合法查询")
 	}
 
 	var upper *domain.FileEntryPosition
@@ -48,6 +49,11 @@ func (store *Store) ListUserGlobalEntryCandidates(ctx context.Context, userID ui
 	} else if query.Kind != "" {
 		entryType = "FILE"
 		statement = statement.Where("entry_type = ? AND category = ?", entryType, strings.ToUpper(query.Kind))
+	}
+	// 2.2. 转义搜索词中的模式字符，绑定名称包含匹配条件。
+	if query.Search != "" {
+		escapedSearch := strings.NewReplacer("=", "==", "%", "=%", "_", "=_").Replace(query.Search)
+		statement = statement.Where("name LIKE ? ESCAPE '='", "%"+escapedSearch+"%")
 	}
 	if upper != nil {
 		statement = statement.Where("(modified_at < ? OR (modified_at = ? AND id < ?))", upper.ModifiedAt, upper.ModifiedAt, upper.ID)

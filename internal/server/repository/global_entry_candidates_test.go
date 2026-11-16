@@ -52,6 +52,8 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 		queryError, rowError, wantError error
 		want                            *domain.FileEntryPage
 		kind                            string
+		search                          string
+		pattern                         string
 	}{
 		{name: "empty page", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
 		{name: "single file", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
@@ -106,6 +108,22 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 		{name: "archive filter seek", kind: "archive", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
 		{name: "other filter first", kind: "other", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
 		{name: "other filter seek", kind: "other", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "Chinese search first", search: "笔记", pattern: "%笔记%", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "Chinese search seek", search: "笔记", pattern: "%笔记%", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "folder and search", kind: "folder", search: "资料", pattern: "%资料%", entries: []domain.FileEntry{directory}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{directory}}},
+		{name: "category search seek", kind: "document", search: "笔记", pattern: "%笔记%", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "literal percent", search: "%", pattern: "%=%%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "literal underscore", search: "_", pattern: "%=_%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "literal escape", search: "=", pattern: "%==%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "literal backslash", search: "\\", pattern: "%\\%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "combined escapes", search: "=%_\\", pattern: "%===%=_\\%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "repeated escape", search: "==%%__", pattern: "%=====%=%=_=_%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "literal SQL text", search: "' OR TRUE --", pattern: "%' OR TRUE --%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "literal placeholder", search: "?", pattern: "%?%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "preserve whitespace", search: " 笔记 ", pattern: "% 笔记 %", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "preserve decomposed Unicode", search: "Cafe\u0301", pattern: "%Cafe\u0301%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "preserve embedded zero", search: "\x00", pattern: "%\x00%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
+		{name: "long keyword", search: strings.Repeat("界", 1024), pattern: "%" + strings.Repeat("界", 1024) + "%", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
 		{name: "folder filter receives file", kind: "folder", entries: []domain.FileEntry{base}, wantError: domain.ErrInvalidFileEntryData},
 		{name: "file filter receives directory", kind: "document", entries: []domain.FileEntry{directory}, wantError: domain.ErrInvalidFileEntryData},
 		{name: "folder extra row receives file", kind: "folder", pageSize: 1, entries: []domain.FileEntry{directory, sameTime}, wantError: domain.ErrInvalidFileEntryData},
@@ -138,7 +156,7 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 				head := "SELECT id,user_id,parent_id,name,entry_type,file_size,revision,status,created_at,modified_at,updated_at FROM file_entries WHERE "
 				predicates := []string{"user_id = ? AND status = ? AND parent_id IS NOT NULL"}
 				values := []any{userID, "ACTIVE"}
-				if testCase.kind != "" || testCase.before != nil {
+				if testCase.kind != "" || testCase.search != "" || testCase.before != nil {
 					predicates[0] = "(" + predicates[0] + ")"
 				}
 				if testCase.kind == "folder" {
@@ -147,6 +165,10 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 				} else if testCase.kind != "" {
 					predicates = append(predicates, "(entry_type = ? AND category = ?)")
 					values = append(values, "FILE", strings.ToUpper(testCase.kind))
+				}
+				if testCase.search != "" {
+					predicates = append(predicates, "name LIKE ? ESCAPE '='")
+					values = append(values, testCase.pattern)
 				}
 				if testCase.before != nil {
 					predicates = append(predicates, "((modified_at < ? OR (modified_at = ? AND id < ?)))")
@@ -177,7 +199,7 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 
 			// 2. 核对完整页、HasMore 或错误，失败时丢弃部分结果。
 			query := globalEntryCandidateQuery(pageSize)
-			query.Kind = testCase.kind
+			query.Kind, query.Search = testCase.kind, testCase.search
 			queryBefore := query
 			page, err := store.ListUserGlobalEntryCandidates(context.Background(), userID, query, testCase.before)
 			if query != queryBefore {
@@ -247,7 +269,7 @@ func TestListUserGlobalEntryCandidatesInput(t *testing.T) {
 }
 
 func TestListUserGlobalEntryCandidatesQueryBounds(t *testing.T) {
-	for _, mode := range []string{"zero query", "directory scope", "starred scope", "recent scope", "name sort", "size sort", "nonempty search", "invalid encoding", "invalid kind", "uppercase kind", "padded kind", "raw file kind", "injection kind"} {
+	for _, mode := range []string{"zero query", "directory scope", "starred scope", "recent scope", "name sort", "size sort", "invalid encoding", "invalid kind", "uppercase kind", "padded kind", "raw file kind", "injection kind"} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 检查当前读取能力支持的查询组合，提前拒绝其余条件。
 			query := globalEntryCandidateQuery(2)
@@ -264,8 +286,6 @@ func TestListUserGlobalEntryCandidatesQueryBounds(t *testing.T) {
 				query.Sort = domain.GlobalEntrySortNameAsc
 			case "size sort":
 				query.Sort = domain.GlobalEntrySortSizeDesc
-			case "nonempty search":
-				query.Search = "笔记"
 			case "invalid encoding":
 				query.Search = string([]byte{0xff})
 			case "invalid kind":

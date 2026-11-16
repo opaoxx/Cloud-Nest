@@ -451,3 +451,5 @@ POST /api/v1/entries/{id}/access 已接入正式路由与启动装配，按 prev
 已提供 Store.ListUserGlobalEntryCandidates，接收已认证用户 ID、GlobalEntryQuery 和可空 FileEntryPosition，读取 all/modified_desc、空筛选的活动普通目录项候选。复用十一列投影及分页结果，按修改时间与 ID 降序翻页，多取一条判断 HasMore，候选完整祖先链可见性由后续服务组合。正式 MySQL 跨目录、隔离、快照与整数/日期边界联测连续三次通过，调用与复验方法见 [第 184 步学习记录](docs/开发学习记录.md#第-184-步按用户读取全局活动目录项候选)。
 
 全局候选读取已支持 kind 分类筛选，空值查询全部类型，folder 绑定 DIR，document/image/video/audio/archive/other 绑定 FILE 及对应大写 category。筛选条件在排序和分页前进入 SQL，复用已有用户范围、位置和 HasMore，返回记录核对文件/目录类型。分类、续页、隔离及分类变更快照经过正式 MySQL 三次验证，调用与复验方法见 [第 185 步学习记录](docs/开发学习记录.md#第-185-步为全局目录项候选增加分类筛选)。
+
+全局候选读取已支持 Search 名称关键词，按名称包含匹配，并与 kind 条件共同在数据库排序和分页前执行。搜索原文保留，使用绑定参数及显式 LIKE ESCAPE 处理百分号、下划线和转义符，匹配沿用 name 字段的排序规则。特殊字符、分类组合、续页、名称变更快照及 NO_BACKSLASH_ESCAPES 模式经过正式 MySQL 三次验证，调用与复验方法见 [第 186 步学习记录](docs/开发学习记录.md#第-186-步为全局目录项候选增加名称搜索)。
