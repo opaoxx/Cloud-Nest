@@ -54,6 +54,10 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 	if err != nil {
 		t.Fatal(err)
 	}
+	cursorVerifier, err := service.NewRecentEntryCursorVerifier(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	signPosition := func(t *testing.T, query domain.GlobalEntryQuery, position *domain.RecentEntryPosition) *domain.RecentEntryPosition {
 		t.Helper()
 		if position == nil {
@@ -103,11 +107,39 @@ func verifyRecentEntryList(t *testing.T, ctx context.Context, pool *sql.DB, stor
 		if err != nil {
 			t.Fatal(err)
 		}
-		restored := &domain.RecentEntryPosition{ID: entryID, LastOpenedAt: openedAt}
+		independent := domain.RecentEntryPosition{ID: entryID, LastOpenedAt: openedAt}
 		resized := query
 		resized.PageSize = 100
+		restored, err := cursorVerifier.Verify(actor.UserID, resized, cursor)
+		if err != nil || restored == nil || *restored != independent || restored == position || restored.LastOpenedAt.Location() != time.UTC {
+			t.Fatal("正式最近使用校验器与独立位置不一致", err)
+		}
 		if again, err := cursorSigner.Sign(actor.UserID, resized, original); err != nil || again != cursor || *position != original || restored.ID != original.ID || !restored.LastOpenedAt.Equal(original.LastOpenedAt) || !restored.IsValid() {
 			t.Fatal("真实最近游标页大小调整、位置还原或输入保护错误", err)
+		}
+		current, err := cursorVerifier.Verify(actor.UserID, query, cursor)
+		if err != nil || current == nil || *current != *restored || current == restored {
+			t.Fatal("当前页大小校验或结果副本错误", err)
+		}
+		// 在实际候选续读前，核对错误用户、筛选和文本均被拒绝。
+		changedSearch, changedKind, changedScope := query, query, query
+		changedSearch.Search += " "
+		changedKind.Kind = "image"
+		changedScope.Scope, changedScope.Sort = domain.GlobalEntryScopeAll, domain.GlobalEntrySortModifiedDesc
+		for _, invalid := range []struct {
+			userID uint64
+			query  domain.GlobalEntryQuery
+			cursor string
+		}{
+			{3, query, cursor},
+			{actor.UserID, changedSearch, cursor},
+			{actor.UserID, changedKind, cursor},
+			{actor.UserID, changedScope, cursor},
+			{actor.UserID, query, cursor + "A"},
+		} {
+			if result, err := cursorVerifier.Verify(invalid.userID, invalid.query, invalid.cursor); result != nil || !errors.Is(err, domain.ErrInvalidRecentEntryCursor) {
+				t.Fatal("真实最近游标的错误绑定或文本通过校验", err)
+			}
 		}
 		return restored
 	}
