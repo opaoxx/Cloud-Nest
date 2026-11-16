@@ -244,6 +244,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 3. 组合文本游标分页入口。
 	globalPageService := service.NewGlobalEntryPageService(globalCursorVerifier.Verify, globalListService.List, globalCursorSigner.Sign)
 
+	// 1. 绑定同一只读快照内的最近候选和祖先读取。
+	recentListService := service.NewRecentEntryListService(
+		func(ctx context.Context, action func(context.Context, service.RecentEntryListReader) error) error {
+			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+				return action(snapshotContext, snapshotStore)
+			})
+		})
+
+	// 2. 使用持久化主密钥派生最近使用游标能力。
+	recentCursorSigner, err := service.NewRecentEntryCursorSigner(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配最近使用游标签名器失败", "stage", "application", "error", err)
+		return err
+	}
+	recentCursorVerifier, err := service.NewRecentEntryCursorVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配最近使用游标校验器失败", "stage", "application", "error", err)
+		return err
+	}
+
+	// 3. 组合分页服务，注册认证后的查询分派。
+	recentPageService := service.NewRecentEntryPageService(recentCursorVerifier.Verify, recentListService.List, recentCursorSigner.Sign)
+
 	// 15. 复用目录快照入口，装配指定目录项详情服务。
 	entryDetailService := service.NewEntryDetailService(
 		func(ctx context.Context, action func(context.Context, service.EntryDetailReader) error) error {
@@ -329,7 +352,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 21. 注册业务接口，在列表路径绑定目录及全局分页。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
-	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List)
+	serverhttp.RegisterEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)

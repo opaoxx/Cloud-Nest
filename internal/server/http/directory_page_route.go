@@ -2,12 +2,10 @@ package http
 
 import (
 	"context"
-	"net/url"
 
 	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
-	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
 )
 
 // RegisterDirectoryPageRoute 注册目录列表路径，可追加一个全局分页服务。
@@ -25,24 +23,12 @@ func RegisterDirectoryPageRoute(
 	if len(globalPages) > 1 {
 		panic("列表路由最多绑定一个全局分页服务")
 	}
-	protected := middleware.RequireAuthorization(authorize, handler.AuthorizationFailure)
 	directoryPage := handler.DirectoryPage(listPage)
-
-	// 2. 识别单个 all/starred，选择全局或目录处理函数。
-	entriesPage := directoryPage
+	var globalPage gin.HandlerFunc
 	if len(globalPages) == 1 {
-		globalPage := handler.GlobalEntryPage(globalPages[0])
-		entriesPage = func(requestContext *gin.Context) {
-			values, err := url.ParseQuery(requestContext.Request.URL.RawQuery)
-			scopes := values["scope"]
-			if err == nil && len(scopes) == 1 && (scopes[0] == domain.GlobalEntryScopeAll || scopes[0] == domain.GlobalEntryScopeStarred) {
-				globalPage(requestContext)
-				return
-			}
-			directoryPage(requestContext)
-		}
+		globalPage = handler.GlobalEntryPage(globalPages[0])
 	}
 
-	// 3. 将认证和查询分派挂载到正式列表路径。
-	router.GET("/api/v1/entries", protected, entriesPage)
+	// 2. 复用正式列表的认证与查询分派。
+	registerEntryPageRoute(router, authorize, directoryPage, globalPage, nil)
 }

@@ -51,7 +51,7 @@ func TestRegisterGlobalEntryPageRoute(t *testing.T) {
 		{name: "budget empty", raw: "scope=all", budget: true, bearer: true, status: 200, auth: 1, globals: 1, size: 50},
 		{name: "missing scope and parent", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "parent_id"},
 		{name: "empty scope", raw: "scope=&parent_id=12", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
-		{name: "unsupported scope", raw: "scope=recent", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
+		{name: "unsupported scope", raw: "scope=unknown", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
 		{name: "uppercase scope", raw: "scope=ALL", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
 		{name: "uppercase key", raw: "SCOPE=all&parent_id=12", bearer: true, status: 200, auth: 1, directories: 1, parentID: 12, size: 50},
 		{name: "duplicate all", raw: "scope=all&scope=all", bearer: true, status: 400, auth: 1, code: "INVALID_ARGUMENT", field: "scope"},
@@ -93,7 +93,7 @@ func TestRegisterGlobalEntryPageRoute(t *testing.T) {
 					t.Error("列表路由缺少准确身份或请求 ID")
 				}
 			}
-			RegisterDirectoryPageRoute(router, authorize,
+			RegisterEntryPageRoute(router, authorize,
 				func(ctx context.Context, received domain.Actor, parentID uint64, cursor string, size int) (*domain.DirectoryPageResult, error) {
 					directoryCalls++
 					checkActor(ctx, received)
@@ -116,6 +116,9 @@ func TestRegisterGlobalEntryPageRoute(t *testing.T) {
 						result.Entries = nil
 					}
 					return result, testCase.serviceError
+				}, func(context.Context, domain.Actor, domain.GlobalEntryQuery, string) (*domain.RecentEntryPageResult, error) {
+					t.Error("原目录/全局/收藏请求进入最近服务")
+					return nil, nil
 				})
 			RegisterEntryDetailRoute(router, authorize, func(context.Context, domain.Actor, uint64) (*domain.EntryDetail, error) {
 				detailCalls++

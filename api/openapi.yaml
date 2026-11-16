@@ -67,11 +67,11 @@ info:
     UserDeviceID 定义后续设备操作的路径参数，使用非零 uint64 的标准十进制字符串，字段错误定位 id。
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
     GlobalEntryPageData/GlobalEntryPageResponse 定义全局分页响应，复用条目摘要，breadcrumbs 为 []，预算空页保留 next_cursor，结束时返回 null。
-    RecentEntrySummary/RecentEntryPageData/RecentEntryPageResponse 定义后续最近使用分页响应，文件摘要增加必填 last_opened_at，breadcrumbs 为 []，空页可携带游标。
+    RecentEntrySummary/RecentEntryPageData/RecentEntryPageResponse 定义最近使用分页响应，文件摘要增加必填 last_opened_at，breadcrumbs 为 []，空页可携带游标。
     全局分页成功交付通过测试专用 GET 入口验证，共享响应见 GlobalEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     最近使用分页成功交付通过测试专用 GET 入口验证，共享响应见 RecentEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     RecentEntryScope/RecentEntrySort/RecentEntrySearch/RecentEntryKind/RecentEntryCursor/RecentEntryLimit 定义最近使用查询 DTO 输入，默认 recent/last_opened_desc、每页 50 条，搜索原文保留。
-    最近使用处理函数通过测试专用 GET 入口组合认证 Actor、查询 DTO、分页服务和成功交付，输入/游标错误见 RecentEntryQueryRejected。
+    最近使用处理函数通过正式 GET /api/v1/entries?scope=recent 组合认证 Actor、查询 DTO、分页服务和成功交付，输入/游标错误见 RecentEntryQueryRejected。
     GlobalEntryScope/GlobalEntrySort/GlobalEntrySearch/GlobalEntryKind/GlobalEntryCursor/GlobalEntryLimit 定义全局查询 DTO 输入，接收 all/starred，默认 all/modified_desc、每页 50 条。
     收藏查询通过正式 GET /api/v1/entries?scope=starred 验证，并与已有 PUT 收藏写入衔接。
     全局查询参数按 query、scope、sort、q、kind、cursor、limit 定位固定字段错误，搜索原文保留，额外字段沿用忽略策略。
@@ -81,8 +81,8 @@ info:
     DirectoryParentID/DirectoryCursor/DirectoryLimit 定义当前目录列表输入，默认每页 50 条。
     当前查询条件为 directory、modified_desc 和空 q/kind，重复值及不匹配条件返回固定字段错误。
     目录页处理函数组合 Actor、查询 DTO、分页服务和交付，输入/游标错误见 DirectoryQueryRejected，不可见目录见 TargetEntryNotFound。
-    GET /api/v1/entries 由启动入口绑定共享授权及目录/全局分页，单个 scope=all/starred 进入全局分页，省略 scope 使用目录查询。
-    两类分页均使用同请求只读快照及持久化主密钥派生的独立用途游标，正式共享响应见 EntryPagesListed/EntryListQueryRejected。
+    GET /api/v1/entries 由启动入口绑定共享授权及目录/全局/最近分页，单个 scope=all/starred 进入全局分页，scope=recent 进入最近分页，省略 scope 使用目录查询。
+    目录、全局及最近分页均使用同请求只读快照及持久化主密钥派生的独立用途游标，正式共享响应见 EntryPagesListed/EntryListQueryRejected。
     EntryID 定义文件或目录操作的路径 id，路由解码后按非零 uint64 标准十进制校验。
     EntryDetailData/EntryDetailResponse 定义指定目录项的完整公开详情，kind 映射文件类别，来源设备及历史空值按实际数据返回。
     详情成功交付方法通过测试专用 GET 入口验证，共享响应见 EntryDetailRetrieved，交付 UTF-8 JSON、请求 ID 和禁止缓存头。
@@ -387,18 +387,20 @@ paths:
     get:
       tags: [Entries]
       operationId: listDirectoryEntries
-      summary: 分页读取当前用户的目录子项、全部可见项或收藏项
+      summary: 分页读取当前用户的目录子项、全部可见项、收藏或最近文件
       description: |
-        Bearer JWT 和数据库授权通过后按完整查询分派，单个解码后 scope=all/starred 进入全局分页，其余输入由目录查询 DTO 校验。
+        Bearer JWT 和数据库授权通过后按完整查询分派，单个解码后 scope=all/starred 进入全局分页，scope=recent 进入最近使用分页，其余输入由目录查询 DTO 校验。
         省略 scope 时默认 directory，parent_id 必填，根目录 ID 从 GET /api/v1/me 获取，q/kind 须为空。
         directory 的父目录与祖先须属于当前用户且均为活动目录，路径及子项在同一只读快照内读取，响应包含根到当前目录的面包屑。
-        all/starred 支持单个有效 UTF-8 名称搜索及小写 kind 分类，保留搜索原文，parent_id 作为额外字段处理，breadcrumbs 为 []。
+        all/starred/recent 支持单个有效 UTF-8 名称搜索及小写 kind 分类，保留搜索原文，parent_id 作为额外字段处理，breadcrumbs 为 []。
         starred 进一步要求当前用户在 user_entry_preferences 中对该项具有非空 starred_at，完整父链须可见。
         全局候选按当前用户、活动状态、搜索与分类查询，交付前批量检查完整祖先路径，根目录通过资料接口获取。
-        各范围均按 modified_at、id 降序分页，sort 默认 modified_desc，limit 默认 50、上限 100，候选耗尽时 next_cursor 为 null。
+        directory/all/starred 按 modified_at、id 降序分页，sort 默认 modified_desc。recent 按 last_opened_at、id 降序，sort 默认 last_opened_desc。
+        recent 要求当前用户具有非空 last_opened_at，返回可见活动文件及必填 UTC 微秒 last_opened_at，folder 分类返回空页。
+        limit 默认 50、上限 100，候选耗尽时 next_cursor 为 null。
         全局每次最多扫描 1000 个候选，预算耗尽时允许短页或空页带 next_cursor，客户端继续使用该游标翻页。
         首次请求省略 cursor 或传空值，后续原样使用返回游标，校验用户、实际范围、排序、筛选及目录绑定。
-        目录与全局游标使用独立用途密钥，同一用户的有效会话可共用所属范围的游标，持久化签名配置重启后可继续使用。
+        目录、全局及最近使用游标使用各自独立用途密钥，同一用户的有效会话可共用所属范围的游标，持久化签名配置重启后可继续使用。
         跨请求采用弱一致性分页，客户端按 ID 合并去重，查询条件变化时重新读取首页。
         directory 中不可见、跨账号或不存在的父目录统一返回 ENTRY_NOT_FOUND，可见文件父项定位 parent_id 输入错误。
       security:
@@ -409,7 +411,7 @@ paths:
         - $ref: '#/components/parameters/EntryListParentID'
         - $ref: '#/components/parameters/EntryListSearch'
         - $ref: '#/components/parameters/EntryListKind'
-        - $ref: '#/components/parameters/DirectorySort'
+        - $ref: '#/components/parameters/EntryListSort'
         - $ref: '#/components/parameters/EntryListCursor'
         - $ref: '#/components/parameters/DirectoryLimit'
       responses:
@@ -2381,7 +2383,7 @@ components:
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     EntryListQueryRejected:
       description: |
-        HTTP 400，目录/全局查询参数错误使用 INVALID_ARGUMENT，details.field 定位公开字段。
+        HTTP 400，目录/全局/最近查询参数错误使用 INVALID_ARGUMENT，details.field 定位公开字段。
         游标的签名、范围、用户或筛选绑定无效使用 INVALID_CURSOR，定位 cursor，提示按当前查询范围确定。
       headers:
         X-Request-ID:
@@ -2412,6 +2414,14 @@ components:
                 error:
                   code: INVALID_CURSOR
                   message: 目录分页游标无效，请重新查询
+                  details:
+                    field: cursor
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            recent_cursor:
+              value:
+                error:
+                  code: INVALID_CURSOR
+                  message: 最近使用分页游标无效，请重新查询
                   details:
                     field: cursor
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
@@ -2771,8 +2781,9 @@ components:
             $ref: '#/components/schemas/EntryDetailResponse'
     EntryPagesListed:
       description: |
-        目录与全局分页共用 HTTP 200、items、breadcrumbs、next_cursor 及 request_id。
-        directory 的面包屑包含真实根到当前目录路径，all/starred 的面包屑为 []，全局预算空页保留 next_cursor。
+        目录、全局及最近分页共用 HTTP 200、items、breadcrumbs、next_cursor 及 request_id。
+        directory 的面包屑包含真实根到当前目录路径，all/starred/recent 的面包屑为 []，预算空页保留 next_cursor。最近文件增加必填 last_opened_at。
+        anyOf 接收相应分页响应，空的全局页与最近页使用相同公共形状。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -2787,9 +2798,10 @@ components:
       content:
         application/json:
           schema:
-            oneOf:
+            anyOf:
               - $ref: '#/components/schemas/DirectoryPageResponse'
               - $ref: '#/components/schemas/GlobalEntryPageResponse'
+              - $ref: '#/components/schemas/RecentEntryPageResponse'
     GlobalEntryPageListed:
       description: 全局分页成功交付，预算空页保留续页文本，正常结束明确返回 next_cursor=null。
       headers:
@@ -3252,11 +3264,11 @@ components:
       in: query
       required: false
       description: |
-        省略时为 directory，显式单个 all/starred 进入全局分页，starred 按当前用户收藏过滤，支持 URL 编码后的键和值。
+        省略时为 directory，显式单个 all/starred 进入全局分页，recent 进入最近文件分页，支持 URL 编码后的键和值。
         空值、重复或其他范围定位 scope，完整查询编码错误定位 query。
       schema:
         type: string
-        enum: [directory, all, starred]
+        enum: [directory, all, starred, recent]
         default: directory
     EntryListParentID:
       name: parent_id
@@ -3264,7 +3276,7 @@ components:
       required: false
       description: |
         directory 要求单个非零 uint64 标准十进制 ID，根目录 ID 从资料接口取得。
-        all/starred 将 parent_id 作为额外字段处理，用户归属来自认证 Actor。
+        all/starred/recent 将 parent_id 作为额外字段处理，用户归属来自认证 Actor。
       schema:
         $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
       example: '12'
@@ -3274,7 +3286,7 @@ components:
       required: false
       allowEmptyValue: true
       description: |
-        all/starred 接收单个有效 UTF-8 名称搜索文本，保留解码后的空白、Unicode 形式及特殊字符。
+        all/starred/recent 接收单个有效 UTF-8 名称搜索文本，保留解码后的空白、Unicode 形式及特殊字符。
         directory 要求省略或单个空值，空搜索读取当前范围内的全部名称。
       schema:
         $ref: '#/components/parameters/GlobalEntrySearch/schema'
@@ -3283,9 +3295,17 @@ components:
       in: query
       required: false
       allowEmptyValue: true
-      description: all/starred 支持单个空值、folder 或公开小写文件类别，directory 要求省略或单个空值。
+      description: all/starred/recent 支持单个空值、folder 或公开小写文件类别，recent 的 folder 交集为空，directory 要求省略或单个空值。
       schema:
         $ref: '#/components/parameters/GlobalEntryKind/schema'
+    EntryListSort:
+      name: sort
+      in: query
+      required: false
+      description: directory/all/starred 省略时为 modified_desc，recent 省略时为 last_opened_desc，显式值须单个匹配相应范围。
+      schema:
+        type: string
+        enum: [modified_desc, last_opened_desc]
     EntryListCursor:
       name: cursor
       in: query
@@ -3293,7 +3313,7 @@ components:
       allowEmptyValue: true
       description: |
         单个原始游标文本，省略或空值表示首页，解码后最多 1024 字节。
-        目录及全局游标绑定各自实际范围、用户、排序及筛选，目录游标另绑定 parent_id。
+        目录、全局及最近游标绑定各自实际范围、用户、排序及筛选，目录游标另绑定 parent_id。
       schema:
         $ref: '#/components/parameters/GlobalEntryCursor/schema'
     DirectoryParentID:
@@ -3362,7 +3382,7 @@ components:
       name: scope
       in: query
       required: false
-      description: 最近使用查询 DTO 的范围，省略时为 recent，显式值须为单个 recent。正式列表分派在后续路由装配时接入。
+      description: 最近使用查询 DTO 的范围，省略时为 recent，显式值须为单个 recent。正式列表通过显式 scope=recent 选择此范围。
       schema:
         type: string
         enum: [recent]

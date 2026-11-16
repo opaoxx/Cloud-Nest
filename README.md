@@ -511,3 +511,5 @@ GET /api/v1/entries?scope=starred 已接入正式路由，按当前用户的收�
 已提供 RecentEntryPageQuery 与 ParseRecentEntryPageQuery，完整解析最近使用列表 RawQuery，默认 recent/last_opened_desc 和每页五十条。搜索原文保留，分类及页大小复用既有规则，游标检查单值与解码后的字节长度，再交由分页服务校验签名和绑定。参数/HTTP 专项及真实 MySQL 普通、预算、结束分页连续三次通过，执行顺序与复验方法见 [第 214 步学习记录](docs/开发学习记录.md#第-214-步定义最近使用列表查询参数-dto)。
 
 已提供 handler.RecentEntryPage，组合认证 Actor、最近查询 DTO、文本分页服务和成功交付。参数错误定位字段，无效最近游标返回 INVALID_CURSOR 400，账号/会话状态复用既有响应，异常结果检查数量及当前用户归属。五十四组流程及真实 JWT/MySQL/HTTP 每轮二十四次 GET 连续三次通过，调用与复验方法见 [第 215 步学习记录](docs/开发学习记录.md#第-215-步实现最近使用列表-http-处理函数)。
+
+GET /api/v1/entries 已支持 scope=recent，按当前用户的 last_opened_at 与 ID 降序查询可见活动文件，支持名称搜索、kind 分类和文本游标分页，返回必填 UTC 微秒访问时间。启动入口装配只读快照及最近使用独立用途游标，正式访问写入、预算空页、用户/用途隔离与真实启动重启续页连续三次通过。执行顺序与复验方法见 [第 216 步学习记录](docs/开发学习记录.md#第-216-步接入正式最近使用列表路由与启动装配)。
