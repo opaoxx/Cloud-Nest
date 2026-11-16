@@ -51,6 +51,7 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 		change                          func([][]driver.Value)
 		queryError, rowError, wantError error
 		want                            *domain.FileEntryPage
+		kind                            string
 	}{
 		{name: "empty page", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
 		{name: "single file", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
@@ -91,6 +92,24 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 		{name: "duplicate row", entries: []domain.FileEntry{base, base}, wantError: domain.ErrInvalidFileEntryData},
 		{name: "bound id repeated", before: &domain.FileEntryPosition{ModifiedAt: stamp, ID: 19}, entries: []domain.FileEntry{base}, wantError: domain.ErrInvalidFileEntryData},
 		{name: "newer than time bound", before: &domain.FileEntryPosition{ModifiedAt: stamp.Add(-time.Second), ID: 100}, entries: []domain.FileEntry{base}, wantError: domain.ErrInvalidFileEntryData},
+		{name: "folder filter first", kind: "folder", entries: []domain.FileEntry{directory}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{directory}}},
+		{name: "folder filter seek", kind: "folder", before: position, entries: []domain.FileEntry{directory}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{directory}}},
+		{name: "document filter first", kind: "document", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "document filter seek", kind: "document", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "image filter first", kind: "image", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "image filter seek", kind: "image", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "video filter first", kind: "video", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "video filter seek", kind: "video", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "audio filter first", kind: "audio", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "audio filter seek", kind: "audio", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "archive filter first", kind: "archive", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "archive filter seek", kind: "archive", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "other filter first", kind: "other", entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "other filter seek", kind: "other", before: position, entries: []domain.FileEntry{base}, want: &domain.FileEntryPage{Entries: []domain.FileEntry{base}}},
+		{name: "folder filter receives file", kind: "folder", entries: []domain.FileEntry{base}, wantError: domain.ErrInvalidFileEntryData},
+		{name: "file filter receives directory", kind: "document", entries: []domain.FileEntry{directory}, wantError: domain.ErrInvalidFileEntryData},
+		{name: "folder extra row receives file", kind: "folder", pageSize: 1, entries: []domain.FileEntry{directory, sameTime}, wantError: domain.ErrInvalidFileEntryData},
+		{name: "empty folder filter", kind: "folder", want: &domain.FileEntryPage{Entries: []domain.FileEntry{}}},
 		{name: "invalid extra row", pageSize: 1, entries: []domain.FileEntry{base, sameTime}, change: func(rows [][]driver.Value) { rows[1][2] = "0" }, wantError: domain.ErrInvalidFileEntryData},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -117,13 +136,24 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 			connector := &deviceConnector{accountConnector: accountConnector{query: func(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Rows, error) {
 				queries++
 				head := "SELECT id,user_id,parent_id,name,entry_type,file_size,revision,status,created_at,modified_at,updated_at FROM file_entries WHERE "
-				predicate := "user_id = ? AND status = ? AND parent_id IS NOT NULL"
+				predicates := []string{"user_id = ? AND status = ? AND parent_id IS NOT NULL"}
 				values := []any{userID, "ACTIVE"}
+				if testCase.kind != "" || testCase.before != nil {
+					predicates[0] = "(" + predicates[0] + ")"
+				}
+				if testCase.kind == "folder" {
+					predicates = append(predicates, "entry_type = ?")
+					values = append(values, "DIR")
+				} else if testCase.kind != "" {
+					predicates = append(predicates, "(entry_type = ? AND category = ?)")
+					values = append(values, "FILE", strings.ToUpper(testCase.kind))
+				}
 				if testCase.before != nil {
-					predicate = "(" + predicate + ") AND ((modified_at < ? OR (modified_at = ? AND id < ?)))"
+					predicates = append(predicates, "((modified_at < ? OR (modified_at = ? AND id < ?)))")
 					utc := testCase.before.ModifiedAt.UTC()
 					values = append(values, utc, utc, testCase.before.ID)
 				}
+				predicate := strings.Join(predicates, " AND ")
 				values = append(values, int64(pageSize+1))
 				expectedArguments := make([]driver.NamedValue, len(values))
 				for index, value := range values {
@@ -146,7 +176,13 @@ func TestListUserGlobalEntryCandidatesResults(t *testing.T) {
 			}
 
 			// 2. 核对完整页、HasMore 或错误，失败时丢弃部分结果。
-			page, err := store.ListUserGlobalEntryCandidates(context.Background(), userID, globalEntryCandidateQuery(pageSize), testCase.before)
+			query := globalEntryCandidateQuery(pageSize)
+			query.Kind = testCase.kind
+			queryBefore := query
+			page, err := store.ListUserGlobalEntryCandidates(context.Background(), userID, query, testCase.before)
+			if query != queryBefore {
+				t.Fatal("读取修改了查询条件")
+			}
 			if testCase.want != nil {
 				if err != nil || !reflect.DeepEqual(page, testCase.want) {
 					t.Fatal("候选字段或分页结果错误", err)
@@ -211,7 +247,7 @@ func TestListUserGlobalEntryCandidatesInput(t *testing.T) {
 }
 
 func TestListUserGlobalEntryCandidatesQueryBounds(t *testing.T) {
-	for _, mode := range []string{"zero query", "directory scope", "starred scope", "recent scope", "name sort", "size sort", "nonempty search", "nonempty kind", "invalid encoding", "invalid kind"} {
+	for _, mode := range []string{"zero query", "directory scope", "starred scope", "recent scope", "name sort", "size sort", "nonempty search", "invalid encoding", "invalid kind", "uppercase kind", "padded kind", "raw file kind", "injection kind"} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 检查当前读取能力支持的查询组合，提前拒绝其余条件。
 			query := globalEntryCandidateQuery(2)
@@ -230,12 +266,18 @@ func TestListUserGlobalEntryCandidatesQueryBounds(t *testing.T) {
 				query.Sort = domain.GlobalEntrySortSizeDesc
 			case "nonempty search":
 				query.Search = "笔记"
-			case "nonempty kind":
-				query.Kind = "document"
 			case "invalid encoding":
 				query.Search = string([]byte{0xff})
 			case "invalid kind":
 				query.Kind = "private-kind"
+			case "uppercase kind":
+				query.Kind = "DOCUMENT"
+			case "padded kind":
+				query.Kind = " document "
+			case "raw file kind":
+				query.Kind = "FILE"
+			case "injection kind":
+				query.Kind = "document' OR 1=1 --"
 			}
 			connector := &deviceConnector{}
 			pool := sql.OpenDB(connector)

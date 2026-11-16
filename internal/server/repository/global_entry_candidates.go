@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -11,13 +12,13 @@ import (
 )
 
 // ListUserGlobalEntryCandidates 按认证用户读取全局活动普通目录项候选。
-// 当前支持 all/modified_desc 和空搜索、空分类，before 为 nil 时从首页开始。
+// 当前支持 all/modified_desc、空搜索及合法 kind，before 为 nil 时从首页开始。
 // 调用方在同一快照内检查候选及完整祖先链，再决定对外交付的记录和翻页位置。
 func (store *Store) ListUserGlobalEntryCandidates(ctx context.Context, userID uint64, query domain.GlobalEntryQuery, before *domain.FileEntryPosition) (*domain.FileEntryPage, error) {
 	// 1. 检查查询条件、用户、翻页位置和上下文，设置查询期限。
 	if ctx == nil || userID == 0 || !query.IsValid() || query.Scope != domain.GlobalEntryScopeAll ||
-		query.Sort != domain.GlobalEntrySortModifiedDesc || query.Search != "" || query.Kind != "" {
-		return nil, fmt.Errorf("读取全局候选需要上下文、非零用户及 all/modified_desc、空筛选的合法查询")
+		query.Sort != domain.GlobalEntrySortModifiedDesc || query.Search != "" {
+		return nil, fmt.Errorf("读取全局候选需要上下文、非零用户及 all/modified_desc、空搜索的合法查询")
 	}
 
 	var upper *domain.FileEntryPosition
@@ -39,6 +40,15 @@ func (store *Store) ListUserGlobalEntryCandidates(ctx context.Context, userID ui
 	statement := store.database.WithContext(queryContext).
 		Select("id", "user_id", "parent_id", "name", "entry_type", "file_size", "revision", "status", "created_at", "modified_at", "updated_at").
 		Where("user_id = ? AND status = ? AND parent_id IS NOT NULL", userID, "ACTIVE")
+	// 2.1. 按合法 kind 绑定目录类型或文件分类。
+	entryType := ""
+	if query.Kind == "folder" {
+		entryType = "DIR"
+		statement = statement.Where("entry_type = ?", entryType)
+	} else if query.Kind != "" {
+		entryType = "FILE"
+		statement = statement.Where("entry_type = ? AND category = ?", entryType, strings.ToUpper(query.Kind))
+	}
 	if upper != nil {
 		statement = statement.Where("(modified_at < ? OR (modified_at = ? AND id < ?))", upper.ModifiedAt, upper.ModifiedAt, upper.ID)
 	}
@@ -60,6 +70,10 @@ func (store *Store) ListUserGlobalEntryCandidates(ctx context.Context, userID ui
 	entries := make([]domain.FileEntry, 0, len(records))
 	for _, record := range records {
 		position := domain.FileEntryPosition{ModifiedAt: record.ModifiedAt, ID: record.ID}
+		// 4.1. 核对返回记录与请求的文件/目录类型一致。
+		if entryType != "" && record.EntryType != entryType {
+			return nil, domain.ErrInvalidFileEntryData
+		}
 		if record.UserID != userID || record.ParentID == nil || *record.ParentID == 0 || *record.ParentID == record.ID || record.Status != "ACTIVE" || record.Revision == 0 || !position.IsValid() {
 			return nil, domain.ErrInvalidFileEntryData
 		}
