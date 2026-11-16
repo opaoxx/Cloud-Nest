@@ -1392,6 +1392,13 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal("正式收藏目录列表错误")
 	}
 
+	// 正式访问衔接详情，数据库访问时间及原收藏跨服务重启复验。
+	accessBeforeRestart := verifyServerRecordAccess(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
+	accessDetailBeforeRestart := getEntryDetail(t, "90001", webRefreshed.Data.AccessToken, 200, "", "")
+	if accessDetailBeforeRestart.Data.LastOpenedAt == nil || !accessDetailBeforeRestart.Data.LastOpenedAt.Equal(accessBeforeRestart.Data.LastOpenedAt) || !accessDetailBeforeRestart.Data.Starred || accessDetailBeforeRestart.Data.Revision != "9" {
+		t.Fatal("正式访问未衔接详情事实")
+	}
+
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
 	before, err := os.Stat(secretPath)
@@ -1402,6 +1409,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	accessAfterRestart := requestServerRecordAccess(t, "http://"+address, webRefreshed.Data.AccessToken, "90001", `{"purpose":"preview"}`, 200, "", "")
+	if !reflect.DeepEqual(accessBeforeRestart.Data, accessAfterRestart.Data) || accessBeforeRestart.RequestID == accessAfterRestart.RequestID {
+		t.Fatal("重启后访问时间或当前请求 ID 错误")
+	}
+	accessDetailAfterRestart := getEntryDetail(t, "90001", webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(accessDetailBeforeRestart.Data, accessDetailAfterRestart.Data) {
+		t.Fatal("重启后访问详情事实错误")
+	}
 	starredAfterRestart := requestServerSetStarred(t, "http://"+address, webRefreshed.Data.AccessToken, "80001", `{"starred":true}`, 200, "", "")
 	if !reflect.DeepEqual(starredBeforeRestart.Data, starredAfterRestart.Data) || starredBeforeRestart.RequestID == starredAfterRestart.RequestID {
 		t.Fatal("重启后收藏时间或当前请求 ID 错误")
@@ -1492,6 +1507,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	request(t, "/api/v1/me", token.Token, 403)
 	requestServerSetStarred(t, "http://"+address, token.Token, "80001", `{"starred":true}`, 403, "ACCOUNT_DISABLED", "")
+	requestServerRecordAccess(t, "http://"+address, token.Token, "90001", `{"purpose":"open"}`, 403, "ACCOUNT_DISABLED", "")
 	listDirectory(t, "parent_id=0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	getEntryDetail(t, "0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
@@ -1508,6 +1524,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	listDirectory(t, directoryNextQuery, token.Token, 401, "SESSION_REVOKED", "")
 	requestServerSetStarred(t, "http://"+address, token.Token, "80001", `{"starred":false}`, 401, "SESSION_REVOKED", "")
+	requestServerRecordAccess(t, "http://"+address, token.Token, "90001", `{"purpose":"open"}`, 401, "SESSION_REVOKED", "")
 	getEntryDetail(t, "23", token.Token, 401, "SESSION_REVOKED", "")
 	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET expires_at=? WHERE id=17", session.ExpiresAt); err != nil {
 		t.Fatal(err)
@@ -1517,6 +1534,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	request(t, "/api/v1/me", token.Token, 401)
 	requestServerSetStarred(t, "http://"+address, token.Token, "80001", `{"starred":false}`, 401, "SESSION_REVOKED", "")
+	requestServerRecordAccess(t, "http://"+address, token.Token, "90001", `{"purpose":"preview"}`, 401, "SESSION_REVOKED", "")
 	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDirectory(t, directoryNextQuery, token.Token, 401, "SESSION_REVOKED", "")
@@ -1527,6 +1545,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 设备撤销后重新登录复用设备 ID，旧会话保持撤销。
 	revokeDevice(t, "13", nativeLogin.Data.AccessToken, 200, "", "")
 	requestServerSetStarred(t, "http://"+address, webRefreshed.Data.AccessToken, "80001", `{"starred":false}`, 401, "SESSION_REVOKED", "")
+	requestServerRecordAccess(t, "http://"+address, webRefreshed.Data.AccessToken, "90001", `{"purpose":"preview"}`, 401, "SESSION_REVOKED", "")
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
@@ -1636,7 +1655,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}

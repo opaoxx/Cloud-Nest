@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -443,3 +443,5 @@ PUT /api/v1/entries/{id}/star 已接入正式路由和生产启动装配，复�
 已提供 handler.RecordAccessSuccess，将已提交访问偏好转换为公开响应，关联当前请求 ID，以 HTTP 200、UTF-8 JSON 和禁止缓存头交付。异常偏好或取消沿用统一内部错误，测试专用 POST 入口及四组真实 HTTP 传输连续三次通过，执行顺序与复验方法见 [第 180 步学习记录](docs/开发学习记录.md#第-180-步实现目录项访问记录成功-http-交付)。
 
 已提供 handler.RecordAccess，按 Actor、路径、JSON 正文及用途校验，调用访问核心服务并核对偏好后交付。目录目标定位 id，用途错误定位 purpose，不可见目标使用统一 404。测试入口及真实 JWT/MySQL 的十四次 POST 请求验证通过，调用与复验方法见 [第 181 步学习记录](docs/开发学习记录.md#第-181-步实现目录项访问记录-http-处理函数)。
+
+POST /api/v1/entries/{id}/access 已接入正式路由与启动装配，按 preview/open 记录当前用户可见文件的访问时间。用户事务复查账号、设备、会话和完整路径，六十秒内返回原访问时间，成功响应包含 last_opened_at 与当前 request_id。正式启动与重启联测连续三次通过，详情、原收藏、目录项版本、归属及隐藏路径经过对照。调用关系与复验方法见 [第 182 步学习记录](docs/开发学习记录.md#第-182-步接入正式目录项访问记录路由与启动装配)。

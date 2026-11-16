@@ -94,10 +94,11 @@ info:
     收藏成功交付方法通过测试专用 PUT 入口验证，共享响应见 SetStarredSucceeded，关联当前请求 ID 并禁止缓存。
     收藏处理函数按 Actor、路径、JSON/布尔状态、核心服务及成功交付组合，目标不可见复用 TargetEntryNotFound。
     PUT /api/v1/entries/{id}/star 已由启动入口绑定共享授权与收藏核心服务，用户事务确认提交后交付偏好。
-    RecordAccessRequest 定义后续访问记录请求，purpose 须明确为 preview/open，通过测试专用 POST 入口验证输入。
+    RecordAccessRequest 定义访问记录请求，purpose 须明确为 preview/open，通过测试专用 POST 入口验证输入。
     RecordAccessData/RecordAccessResponse 定义访问记录成功数据，last_opened_at 为必需 UTC 微秒时间，外层关联当前 request_id。
     访问成功交付方法通过测试专用 POST 入口验证，共享响应见 RecordAccessSucceeded，关联当前请求 ID 并禁止缓存。
     访问处理函数组合 Actor、路径、用途 DTO、核心服务及成功交付，目录目标定位 id，用途错误定位 purpose，不可见目标复用 TargetEntryNotFound。
+    POST /api/v1/entries/{id}/access 已由启动入口绑定共享授权及用户事务，按 preview/open 记录文件访问，六十秒内合并并返回已存时间。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -148,6 +149,53 @@ paths:
           $ref: '#/components/responses/TargetEntryNotFound'
         '409':
           $ref: '#/components/responses/CreateDirectoryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/entries/{id}/access:
+    post:
+      tags: [Entries]
+      operationId: recordEntryAccess
+      summary: 记录当前用户可见文件的授权访问时间
+      description: |
+        Bearer JWT 和数据库授权通过后，依次校验路径 id、JSON 正文及明确的小写 purpose。
+        preview 表示预览，open 表示打开，用户事务复查账号、设备、会话及完整祖先链可见性。
+        目标须为活动文件，目录及根目录返回 INVALID_ARGUMENT 并定位 id。
+        首次访问填充数据库 UTC 微秒时间，已有时间满六十秒时更新，窗口内复用已存时间。
+        访问偏好保留已有收藏与创建时间，成功响应关联当前 request_id。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordAccessRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/RecordAccessSucceeded'
+        '400':
+          description: JSON 读取或参数校验失败，INVALID_ARGUMENT，路径或文件类型错误定位 id，用途错误定位 purpose。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
         '413':
           $ref: '#/components/responses/RequestBodyTooLarge'
         '415':

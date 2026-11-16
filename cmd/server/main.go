@@ -295,7 +295,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	})
 
-	// 19. 注册已有业务接口及正式目录项收藏接口。
+	// 19. 绑定当前用户事务，装配访问记录核心服务。
+	recordAccessService := service.NewRecordAccessService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RecordAccessTransaction) error) error {
+		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+			return action(txContext, txStore)
+		})
+	})
+
+	// 20. 注册业务接口，挂载正式访问记录路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterDirectoryPageRoute(router, authorizationService.Authorize, directoryPageService.List)
@@ -304,6 +311,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
+	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
 	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
@@ -319,7 +327,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 20. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 21. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
