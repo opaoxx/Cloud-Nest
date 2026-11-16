@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -131,7 +133,52 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 		}
 	})
 
-	// 3. 仅在测试事务连接固定数据库时钟，精确核对微秒级窗口边界。
+	// 3. 服务提交后转换访问响应，对照收藏、访问及基础事实。
+	t.Run("response DTO from committed accesses", func(t *testing.T) {
+		for _, entryID := range []uint64{13, 14, 15} {
+			baseBefore, err := store.FindUserFileEntry(ctx, actor.UserID, entryID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			starBefore := read(entryID).StarredAt
+			if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET last_opened_at=NULL,updated_at=? WHERE user_id=1 AND entry_id=?", old, entryID); err != nil {
+				t.Fatal(err)
+			}
+			var previousData *dto.RecordAccessData
+			for _, purpose := range []string{"preview", "open"} {
+				preference, err := accessService.Record(ctx, actor, entryID, purpose)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := dto.NewRecordAccessData(preference)
+				if err != nil || data == nil || !data.LastOpenedAt.Equal(*read(entryID).LastOpenedAt) || data.LastOpenedAt.Location() != time.UTC || data.LastOpenedAt.Nanosecond()%1000 != 0 {
+					t.Fatal("已提交访问响应时间错误", err)
+				}
+				if previousData != nil && !reflect.DeepEqual(previousData, data) {
+					t.Fatal("合并访问响应时间错误")
+				}
+				previousData = data
+				*preference.LastOpenedAt = old
+				if !data.LastOpenedAt.Equal(*read(entryID).LastOpenedAt) {
+					t.Fatal("来源偏好修改影响访问响应")
+				}
+				encoded, err := json.Marshal(dto.RecordAccessResponse{Data: *data, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e148"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var outer map[string]json.RawMessage
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(encoded, &outer) != nil || len(outer) != 2 || string(outer["request_id"]) != `"28ee758a-0727-42de-ae7d-3bb33155e148"` || json.Unmarshal(outer["data"], &fields) != nil || len(fields) != 1 || string(fields["last_opened_at"]) != `"`+data.LastOpenedAt.Format(time.RFC3339Nano)+`"` {
+					t.Fatal("访问响应公开字段错误")
+				}
+			}
+			baseAfter, err := store.FindUserFileEntry(ctx, actor.UserID, entryID)
+			if err != nil || !reflect.DeepEqual(baseBefore, baseAfter) || !reflect.DeepEqual(starBefore, read(entryID).StarredAt) {
+				t.Fatal("响应转换与基础或收藏事实混用", err)
+			}
+		}
+	})
+	// 4. 仅在测试事务连接固定数据库时钟，精确核对微秒级窗口边界。
 	t.Run("exact sixty second boundaries", func(t *testing.T) {
 		var fixed time.Time
 		if err := pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&fixed); err != nil {
@@ -170,6 +217,10 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 				if err != nil || preference == nil || preference.LastOpenedAt == nil || !preference.LastOpenedAt.Equal(wantOpened) || !preference.StarredAt.Equal(old) || !audit(13)[1].Equal(wantUpdated) {
 					t.Fatal("六十秒精确边界错误", err)
 				}
+				data, err := dto.NewRecordAccessData(preference)
+				if err != nil || data == nil || !data.LastOpenedAt.Equal(wantOpened) {
+					t.Fatal("精确窗口结果的访问响应错误", err)
+				}
 			})
 		}
 	})
@@ -200,7 +251,7 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 		}
 	})
 
-	// 4. 实际写入后失败或取消回滚，认证状态变化由事务复查。
+	// 5. 实际写入后失败或取消回滚，认证状态变化由事务复查。
 	t.Run("rollback after write", func(t *testing.T) {
 		for _, cancelAfter := range []bool{false, true} {
 			if _, err := pool.ExecContext(ctx, "UPDATE user_entry_preferences SET last_opened_at=?,updated_at=? WHERE user_id=1 AND entry_id=13", old, old); err != nil {
@@ -251,7 +302,7 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 			}
 		}
 	})
-	// 5. 旧快照后当前读回与并发访问复用同一数据库事实。
+	// 6. 旧快照后当前读回与并发访问复用同一数据库事实。
 	t.Run("current read over old snapshot", func(t *testing.T) {
 		var current *domain.EntryPreference
 		newOpened := time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC)
@@ -422,6 +473,10 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 		}
 		if err := invoke(); err != nil || result.StarredAt == nil || !result.StarredAt.Equal(minimumStar) || !result.LastOpenedAt.Equal(maximumOpened) {
 			t.Fatal("日期边界或未来访问事实错误", err)
+		}
+		data, err := dto.NewRecordAccessData(result)
+		if err != nil || data == nil || !data.LastOpenedAt.Equal(maximumOpened) {
+			t.Fatal("最大标识及最高日期响应错误", err)
 		}
 	})
 }

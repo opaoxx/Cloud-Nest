@@ -437,3 +437,5 @@ PUT /api/v1/entries/{id}/star 已接入正式路由和生产启动装配，复�
 已提供 Store.RecordUserEntryAccess，在已认证用户事务内记录活动文件最近访问时间，首次填充数据库 UTC 时间，满六十秒更新，窗口内复用原值并保留收藏事实。精确微秒边界、回滚、身份复查、旧快照与并发经过真实 MySQL 验证，调用前置条件与复验方法见 [第 177 步学习记录](docs/开发学习记录.md#第-177-步在已认证用户事务内记录目录项最近访问)。
 
 已提供 RecordAccessService，在同一已认证用户事务中校验用途、完整路径和文件类型，调用最近访问写入，核对偏好并确认提交后交付独立结果。用途规则由 Domain 供 DTO/服务共用，服务专项和扩展后的真实 MySQL 联测连续三次通过，调用与复验方法见 [第 178 步学习记录](docs/开发学习记录.md#第-178-步组合目录项访问记录核心服务)。
+
+已提供 RecordAccessData、RecordAccessResponse 和 NewRecordAccessData，将已提交访问偏好映射为必填 last_opened_at 及 data/request_id 外层。时间复用 UTC 微秒转换，缺失或异常访问时间使用统一目录项数据错误。精确 JSON、日期、副本和真实 MySQL 组合验证通过，字段与复验方法见 [第 179 步学习记录](docs/开发学习记录.md#第-179-步定义目录项访问记录成功响应-dto)。

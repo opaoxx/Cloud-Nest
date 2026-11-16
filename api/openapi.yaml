@@ -95,6 +95,7 @@ info:
     收藏处理函数按 Actor、路径、JSON/布尔状态、核心服务及成功交付组合，目标不可见复用 TargetEntryNotFound。
     PUT /api/v1/entries/{id}/star 已由启动入口绑定共享授权与收藏核心服务，用户事务确认提交后交付偏好。
     RecordAccessRequest 定义后续访问记录请求，purpose 须明确为 preview/open，通过测试专用 POST 入口验证输入。
+    RecordAccessData/RecordAccessResponse 定义访问记录成功数据，last_opened_at 为必需 UTC 微秒时间，外层关联当前 request_id。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -1470,6 +1471,31 @@ components:
       example:
         target_parent_id: '12'
         expected_revision: '3'
+    RecordAccessData:
+      type: object
+      additionalProperties: false
+      required: [last_opened_at]
+      description: 服务确认提交后的访问时间，六十秒合并窗口内返回当前记录的原时间。
+      properties:
+        last_opened_at:
+          type: string
+          format: date-time
+          description: 已记录的访问时间，UTC 微秒精度，年份为 1000～9999。
+      example:
+        last_opened_at: '2026-11-16T02:30:00.123456Z'
+    RecordAccessResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RecordAccessData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          last_opened_at: '2026-11-16T02:30:00.123456Z'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RecordAccessRequest:
       type: object
       additionalProperties: false
