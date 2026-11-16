@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -64,6 +65,10 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	verifier, err := service.NewGlobalEntryCursorVerifier(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
 	query := globalEntryCandidateQuery(2)
 	query.Search, query.Kind = "学习%_", "document"
@@ -72,7 +77,7 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 		t.Fatal("真实预算空页位置错误", err)
 	}
 
-	// 2. 对真实空页位置签名，独立核对载荷、摘要与 HMAC。
+	// 2. 对真实空页位置签名，独立核对载荷、摘要与 HMAC，并通过正式校验器还原。
 	readPosition := func(cursor string) domain.FileEntryPosition {
 		t.Helper()
 		parts := strings.Split(cursor, ".")
@@ -119,7 +124,11 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 		if !position.IsValid() {
 			t.Fatal("签名位置数据错误")
 		}
-		return position
+		verified, err := verifier.Verify(actor.UserID, query, cursor)
+		if err != nil || verified == nil || *verified != position {
+			t.Fatal("正式校验器与独立解析的位置不一致", err)
+		}
+		return *verified
 	}
 	cursor, err := signer.Sign(actor.UserID, query, *first.NextPosition)
 	if err != nil {
@@ -130,10 +139,13 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 		t.Fatal("签名未保留空页最后消费位置")
 	}
 
-	// 3. 从测试内已核对的位置继续分页，验证页大小调整和稳定签名。
+	// 3. 从正式校验器还原的位置继续分页，验证页大小调整和稳定签名。
 	query.PageSize = 1
 	if resized, err := signer.Sign(actor.UserID, query, position); err != nil || resized != cursor {
 		t.Fatal("合法页大小调整改变了查询绑定", err)
+	}
+	if verified, err := verifier.Verify(actor.UserID, query, cursor); err != nil || verified == nil || *verified != position {
+		t.Fatal("调整合法页大小后校验失败", err)
 	}
 	second, err := listing.List(ctx, actor, query, &position)
 	if err != nil || second == nil || len(second.Entries) != 1 || second.Entries[0].ID != 15 || !second.HasMore || second.NextPosition == nil || second.NextPosition.ID != 15 {
@@ -154,5 +166,21 @@ func TestGlobalEntryCursorSignerIntegration(t *testing.T) {
 	}
 	if again, err := recreated.Sign(actor.UserID, query, position); err != nil || again != cursor {
 		t.Fatal("相同主密钥重建后签名不稳定", err)
+	}
+	for _, mode := range []string{"user", "search", "kind", "tampering"} {
+		userID, currentQuery, currentCursor := actor.UserID, query, cursor
+		switch mode {
+		case "user":
+			userID = 3
+		case "search":
+			currentQuery.Search += " "
+		case "kind":
+			currentQuery.Kind = "image"
+		case "tampering":
+			currentCursor += "="
+		}
+		if verified, err := verifier.Verify(userID, currentQuery, currentCursor); verified != nil || !errors.Is(err, domain.ErrInvalidGlobalEntryCursor) {
+			t.Fatal("真实页错误绑定或篡改游标被接受", err)
+		}
 	}
 }
