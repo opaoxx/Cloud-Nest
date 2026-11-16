@@ -85,9 +85,10 @@ info:
     创建处理按认证、幂等头、JSON 和字段校验、幂等服务、结果核对与交付的顺序执行。
     CreateDirectoryRejected/CreateDirectoryConflict 定义创建参数错误、名称冲突、幂等参数冲突及记录到期的公开响应。
     POST /api/v1/directories 已由启动入口绑定共享授权、用户事务、幂等创建服务及稳定结果编解码。
-    RenameEntryRequest 定义后续目录项重命名正文，name 保留原文，expected_revision 使用非零 uint64 的标准十进制字符串。
-    重命名正文按 name、expected_revision 顺序定位字段错误，客户端所见版本由后续持锁事务比对。
-    EntryRevisionConflict 定义后续版本冲突的 HTTP 409，details.current_revision 使用字符串保留当前完整版本。
+    RenameEntryRequest 定义目录项重命名正文，name 保留原文，expected_revision 使用非零 uint64 的标准十进制字符串。
+    重命名正文按 name、expected_revision 顺序定位字段错误，客户端所见版本由已认证用户事务中的服务比对。
+    EntryRevisionConflict 定义版本冲突的 HTTP 409，details.current_revision 使用字符串保留当前完整版本。
+    PATCH /api/v1/entries/{id} 已由启动入口绑定共享授权、幂等重命名服务与稳定结果编解码，结果快照跨请求及重启复用。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -145,6 +146,48 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/entries/{id}:
+    patch:
+      tags: [Entries]
+      operationId: renameEntry
+      summary: 按预期版本重命名当前用户的文件或目录
+      description: |
+        Bearer JWT 和数据库授权通过后解析目标 id、Idempotency-Key 及 JSON 正文。
+        用户事务复查当前账号、设备和会话，首次请求检查目标及完整祖先路径，按预期版本更新名称、扩展名和分类。
+        名称保留去首尾空白后的展示写法，根目录禁止重命名，活动名称冲突返回 NAME_CONFLICT。
+        实际名称变化时版本加一，同名且版本匹配返回当前版本。版本冲突携带字符串 details.current_revision。
+        稳定 data.entry 与目录项同事务保存八天，同键同参数重试返回当次 200 快照，各次交付关联当前 request_id。
+        同键不同参数或记录到期返回对应 409，参数摘要保留目标、预期版本及展示写法。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameEntryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/RenameEntrySucceeded'
+        '400':
+          $ref: '#/components/responses/RenameEntryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          $ref: '#/components/responses/RootEntryOperationForbidden'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/RenameEntryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
     get:
       tags: [Entries]
       operationId: getEntryDetail
@@ -1691,7 +1734,7 @@ components:
                 field: name
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RootEntryOperationForbidden:
-      description: HTTP 403，真实根目录禁止重命名，响应使用 no-store 和 Pragma no-cache。
+      description: HTTP 403，根目录禁止重命名使用 ROOT_OPERATION_FORBIDDEN，账号禁用使用 ACCOUNT_DISABLED，来源拒绝使用 CORS_FORBIDDEN。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -1753,7 +1796,7 @@ components:
       description: |
         HTTP 409，REVISION_CONFLICT，客户端预期版本与当前可见目录项版本不一致。
         固定提示为文件已发生变化，请刷新后重试。details.current_revision 为非零 uint64 的标准十进制字符串。
-        版本比对与更新在后续持锁事务内执行，响应使用 no-store 和 Pragma no-cache。
+        版本比对与更新在同一已认证用户事务内执行，响应使用 no-store 和 Pragma no-cache。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

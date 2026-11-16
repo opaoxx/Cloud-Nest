@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -339,6 +339,8 @@ POST /api/v1/directories 已接入正式路由与生产启动装配，复用共�
 已提供 IdempotentRenameEntryService，在同一已认证用户事务中查询幂等记录，已有记录经复用及完整快照校验后返回，首次请求则连接核心改名、完整详情读取、DTO 编码及八天结果保存。真实 MySQL 已验证单连接、同名、后续变更、五类回滚、身份失效、三类并发及完整无符号整数，调用与复验方法见 [第 152 步学习记录](docs/开发学习记录.md#第-152-步组合目录项重命名幂等服务)。
 
 已提供 handler.RenameEntry，连接已认证身份、目标路径、幂等键、重命名正文、幂等服务及 200 交付。错误按既有契约映射，版本冲突携带完整当前版本字符串，根目录改名返回 403，成功快照核对目标、名称和合法版本关系。测试 PATCH 入口已通过真实 JWT/MySQL 联测，执行顺序与复验方法见 [第 153 步学习记录](docs/开发学习记录.md#第-153-步实现目录项重命名-http-处理函数)。
+
+PATCH /api/v1/entries/{id} 已接入正式路由与启动装配，绑定共享授权、已认证用户事务、幂等重命名服务及 DTO 编解码。真实 run 启动已验证文件/目录、同名、名称/版本/幂等冲突、列表/详情衔接，以及服务重启后的原始快照复用。正式参数与响应见 [OpenAPI](api/openapi.yaml)，执行顺序与复验方法见 [第 154 步学习记录](docs/开发学习记录.md#第-154-步接入正式目录项重命名接口与启动装配)。
 
 ## 本地连接信息
 

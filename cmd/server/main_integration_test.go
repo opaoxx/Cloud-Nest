@@ -1346,6 +1346,22 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if createdDetailBeforeRestart.Data.Name != "正式创建后改名" || len(createdDirectoryPage.Data.Items) != 1 || createdDirectoryPage.Data.Items[0].ID != createdDirectoryBeforeRestart.Data.Entry.ID {
 		t.Fatal("正式创建的目录未衔接列表与详情读取")
 	}
+	// 正式改名覆盖文件与目录，重启后继续复用首次快照。
+	renamedEntryBeforeRestart := verifyServerEntryRename(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
+	renamedDetailBeforeRestart := getEntryDetail(t, "42", webRefreshed.Data.AccessToken, 200, "", "")
+	if renamedDetailBeforeRestart.Data.Name != "正式后续.ZIP" || renamedDetailBeforeRestart.Data.Revision != "3" || renamedDetailBeforeRestart.Data.Kind != "archive" {
+		t.Fatal("正式改名未衔接当前详情")
+	}
+	renamedPage := listDirectory(t, "parent_id=11", webRefreshed.Data.AccessToken, 200, "", "")
+	foundRenamed := false
+	for _, entry := range renamedPage.Data.Items {
+		if entry.ID == "42" && entry.Name == "正式后续.ZIP" && entry.Revision == "3" {
+			foundRenamed = true
+		}
+	}
+	if !foundRenamed {
+		t.Fatal("正式改名未衔接当前列表")
+	}
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1357,6 +1373,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	renamedEntryAfterRestart := requestServerRenameEntry(t, "http://"+address, webRefreshed.Data.AccessToken, "42", serverRenameEntryKey, serverRenameEntryBody, 200, "", "")
+	if !reflect.DeepEqual(renamedEntryBeforeRestart.Data, renamedEntryAfterRestart.Data) || renamedEntryBeforeRestart.RequestID == renamedEntryAfterRestart.RequestID {
+		t.Fatal("重启后正式重命名快照或当前请求 ID 错误")
+	}
+	renamedDetailAfterRestart := getEntryDetail(t, "42", webRefreshed.Data.AccessToken, 200, "", "")
+	if !reflect.DeepEqual(renamedDetailBeforeRestart.Data, renamedDetailAfterRestart.Data) {
+		t.Fatal("重启后当前改名事实错误")
+	}
 	createdDirectoryAfterRestart := requestServerCreateDirectory(t, "http://"+address, webRefreshed.Data.AccessToken, serverCreateDirectoryKey, serverCreateDirectoryBody, 201, "", "")
 	if !reflect.DeepEqual(createdDirectoryBeforeRestart.Data, createdDirectoryAfterRestart.Data) || createdDirectoryBeforeRestart.RequestID == createdDirectoryAfterRestart.RequestID {
 		t.Fatal("重启后正式创建幂等快照或当前请求 ID 错误")
@@ -1555,7 +1579,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", serverCreateDirectoryKey, "正式创建 🌱", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", serverCreateDirectoryKey, serverRenameEntryKey, "正式创建 🌱", "正式笔记.PDF", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}
