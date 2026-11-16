@@ -1,5 +1,24 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——响应摘要代码检查误写文件路径
+
+### 问题现象
+
+第 234 步读取既有摘要转换代码时，检查命令引用了不存在的 internal/server/http/dto/directory_entry_summary.go。该次读取失败，后续检查命令继续输出。修正前记录于此，接下来通过 rg 定位真实定义文件并重新读取。
+
+### 根因与修复方案
+
+检查命令按类型名称推测文件路径。通过 rg 定位到 directory_page_response.go，重新读取 DirectoryEntrySummary、DirectoryBreadcrumb 和 newDirectoryEntrySummary 的真实定义及转换规则，再复用已有实现开发大小分页 DTO。
+
+### 验证结果
+
+修正后已读取真实摘要定义及 listResponseTime 规则。四项大小 DTO 专项与五类响应共二十项主测试连续三次通过，覆盖精确 JSON、标识/字节数/时间边界、错误及副本。四项正式 MySQL 分页到 DTO/JSON 的组合回归连续三次通过，经 JSON 入选核对且无跳过项。
+
+go test -count=1 ./... 与 go vet ./... 全量通过，OpenAPI 唯一键及 418 处引用、示例、十七条路径和十九个操作核对通过。gofmt、git diff --check、学习记录及 PowerShell 示例语法、原迁移摘要检查通过。
+
+
+
+
 ## 2026-11-17——大小签名专项草稿残留名称键断言
 
 ### 问题现象

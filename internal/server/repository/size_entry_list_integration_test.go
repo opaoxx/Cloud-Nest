@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -197,7 +198,55 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if err != nil || result == nil || listCalls != 1 || result.Entries == nil {
 			t.Fatal("大小文本分页组合失败", err)
 		}
-		// 2. 对照数据库与独立协议检查，返回实际文本供下页继续读取。
+		// 2. 转换公开 DTO，核对十字段摘要、空面包屑和游标副本。
+		data, err := dto.NewSizeEntryPageData(result)
+		if err != nil || data == nil || data.Items == nil || len(data.Items) != len(result.Entries) || data.Breadcrumbs == nil || len(data.Breadcrumbs) != 0 {
+			t.Fatal("真实大小分页 DTO 转换失败", err)
+		}
+		const requestID = "28ee758a-0727-42de-ae7d-3bb33155e148"
+		encoded, err := json.Marshal(dto.SizeEntryPageResponse{Data: *data, RequestID: requestID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]json.RawMessage
+		var payload map[string]json.RawMessage
+		if json.Unmarshal(encoded, &response) != nil || len(response) != 2 || string(response["request_id"]) != strconv.Quote(requestID) ||
+			json.Unmarshal(response["data"], &payload) != nil || len(payload) != 3 || string(payload["breadcrumbs"]) != "[]" {
+			t.Fatal("真实大小分页公开 JSON 形状错误")
+		}
+		var items []map[string]json.RawMessage
+		if json.Unmarshal(payload["items"], &items) != nil || items == nil || len(items) != len(result.Entries) {
+			t.Fatal("真实大小分页 items 数组错误")
+		}
+		for index, item := range data.Items {
+			entry := result.Entries[index]
+			if len(items[index]) != 10 || item.ID != strconv.FormatUint(entry.ID, 10) || item.ParentID != strconv.FormatUint(*entry.ParentID, 10) ||
+				item.Name != entry.Name || item.EntryType != entry.EntryType || item.SizeBytes != entry.FileSize || item.Revision != strconv.FormatUint(entry.Revision, 10) || item.Status != entry.Status {
+				t.Fatal("真实大小分页条目摘要或顺序错误")
+			}
+			for _, stamp := range []struct{ source, converted time.Time }{
+				{entry.CreatedAt, item.CreatedAt}, {entry.ModifiedAt, item.ModifiedAt}, {entry.UpdatedAt, item.UpdatedAt},
+			} {
+				if stamp.converted.Location() != time.UTC || stamp.converted.Nanosecond()%1000 != 0 || !stamp.converted.Equal(stamp.source.UTC().Truncate(time.Microsecond)) {
+					t.Fatal("真实大小分页 UTC 微秒时间错误")
+				}
+			}
+		}
+		cursorJSON := "null"
+		if result.NextCursor != nil {
+			cursorJSON = strconv.Quote(*result.NextCursor)
+			if data.NextCursor == nil || data.NextCursor == result.NextCursor || *data.NextCursor != *result.NextCursor {
+				t.Fatal("真实大小分页游标副本错误")
+			}
+			*data.NextCursor = "local-size-cursor"
+			if strconv.Quote(*result.NextCursor) != cursorJSON {
+				t.Fatal("真实大小分页 DTO 修改影响游标来源")
+			}
+		}
+		if string(payload["next_cursor"]) != cursorJSON || (data.NextCursor == nil) != (result.NextCursor == nil) {
+			t.Fatal("真实大小分页游标文本或 null 错误")
+		}
+		// 3. 对照数据库与独立协议检查，返回实际文本供下页继续读取。
 		listed := &domain.SizeEntryList{Entries: result.Entries, HasMore: result.NextCursor != nil}
 		if result.NextCursor == nil {
 			check(t, listed, ids, nextID)
@@ -213,7 +262,7 @@ func verifySizeEntryList(t *testing.T, ctx context.Context, pool *sql.DB, store 
 		if err != nil || repeated != *result.NextCursor {
 			t.Fatal("大小文本分页与独立协议不符", err)
 		}
-		// 3. 错误用户、范围、筛选及文本在再次调用列表前拒绝。
+		// 4. 错误用户、范围、筛选及文本在再次调用列表前拒绝。
 		changedSearch, changedKind, changedScope := query, query, query
 		changedSearch.Search += " "
 		changedKind.Kind = "image"

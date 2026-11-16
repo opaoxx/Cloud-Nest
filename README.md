@@ -547,3 +547,5 @@ GET /api/v1/entries 已接入 all/starred 的 name_asc 名称排序，例如 sco
 已提供 SizeEntryCursorVerifier，先核对大小用途 HMAC，再检查版本、当前用户、all/starred、size_desc、筛选及规范编码，返回独立完整大小/ID 位置。零字节和完整 uint64 可还原，合法页大小调整复用原文本，异常统一返回大小游标错误。协议边界、固定向量、副本/并发及真实 MySQL 普通/预算校验续读连续三次通过，顺序与复验方法见 [第 232 步学习记录](docs/开发学习记录.md#第-232-步实现大小游标校验与位置还原)。
 
 已提供 SizeEntryPageService，组合 all/starred、size_desc 的首页、游标校验、可见列表和下一页签名，返回独立目录项及可空 NextCursor。大小/ID 严格降序，预算空页和短页保留最后消费位置，结束时游标为 nil。服务专项与真实 MySQL 普通/收藏、合法页大小调整、零字节、预算及完整无符号文本分页连续三次通过，调用与复验方法见 [第 233 步学习记录](docs/开发学习记录.md#第-233-步组合带文本游标的大小降序分页服务)。
+
+已提供 SizeEntryPageData、SizeEntryPageResponse 和 NewSizeEntryPageData，将大小文本分页结果转换为十字段条目摘要、空 breadcrumbs 及可空 next_cursor。复用完整 ID/版本字符串、JSON 安全字节数和 UTC 微秒时间，大小游标按最多 1024 字节检查。精确 JSON、边界、错误与副本专项及真实 MySQL 普通/收藏/预算分页转换连续三次通过，字段与复验方法见 [第 234 步学习记录](docs/开发学习记录.md#第-234-步定义大小降序分页响应-dto)。

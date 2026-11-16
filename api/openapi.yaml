@@ -68,6 +68,7 @@ info:
     DirectoryEntrySummary/DirectoryBreadcrumb/DirectoryPageData/DirectoryPageResponse 定义后续基础目录列表响应。
     GlobalEntryPageData/GlobalEntryPageResponse 定义全局分页响应，复用条目摘要，breadcrumbs 为 []，预算空页保留 next_cursor，结束时返回 null。
     NameEntryPageData/NameEntryPageResponse 定义名称升序分页响应，条目复用基础摘要，breadcrumbs 为 []，名称游标最多 2048 字节，预算空页保留 next_cursor。
+    SizeEntryPageData/SizeEntryPageResponse 定义大小降序分页响应，条目复用基础摘要，breadcrumbs 为 []，大小游标最多 1024 字节，预算空页保留 next_cursor，结束时返回 null。
     名称升序分页通过正式 GET /api/v1/entries?scope=all/starred&sort=name_asc 交付，共享响应见 NameEntryPageListed，关联当前 request_id 并设置禁止缓存头。
     NameEntryScope/NameEntrySort/NameEntrySearch/NameEntryKind/NameEntryCursor/NameEntryLimit 定义名称升序查询 DTO 输入，默认 all/name_asc、每页 50 条，搜索和游标保留解码原文。
     名称升序处理函数通过正式列表入口组合认证 Actor、查询 DTO、分页服务和成功交付，输入与游标错误见 NameEntryQueryRejected。
@@ -1256,6 +1257,37 @@ components:
           items: []
           breadcrumbs: []
           next_cursor: fixture-signed-name-cursor
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    SizeEntryPageData:
+      type: object
+      additionalProperties: false
+      required: [items, breadcrumbs, next_cursor]
+      description: 大小降序可见分页数据，公开条目采用基础摘要，空数组及预算续页沿用全局视图约定。
+      properties:
+        items:
+          $ref: '#/components/schemas/GlobalEntryPageData/properties/items'
+        breadcrumbs:
+          $ref: '#/components/schemas/GlobalEntryPageData/properties/breadcrumbs'
+        next_cursor:
+          $ref: '#/components/schemas/GlobalEntryPageData/properties/next_cursor'
+      example:
+        items: []
+        breadcrumbs: []
+        next_cursor: null
+    SizeEntryPageResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/SizeEntryPageData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          items: []
+          breadcrumbs: []
+          next_cursor: fixture-signed-size-cursor
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RecentEntrySummary:
       type: object
