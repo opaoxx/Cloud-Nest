@@ -1,16 +1,27 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -439,6 +450,116 @@ func TestRecordUserEntryAccessIntegration(t *testing.T) {
 		result, err := accessService.Record(ctx, actor, 13, "download")
 		if result != nil || !errors.Is(err, domain.ErrInvalidEntryAccessPurpose) || !reflect.DeepEqual(before, read(13)) || audit(13) != beforeAudit {
 			t.Fatal("非法访问用途未拒绝", err)
+		}
+	})
+	// 7. 实际 JWT、认证中间件与 POST 处理函数连接真实访问事务。
+	t.Run("authenticated HTTP handler", func(t *testing.T) {
+		configuration := config.JWTConfig{SigningKey: bytes.Repeat([]byte{9}, 32), Issuer: "cloudnest-test", Audience: "cloudnest-api-test", AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour}
+		signer, err := service.NewAccessTokenSigner(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := service.NewAccessTokenVerifier(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		access, err := signer.Issue(domain.LoginSession{ID: actor.SessionID, UserID: actor.UserID, DeviceID: actor.DeviceID, ExpiresAt: time.Now().Add(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorization := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
+		var disableAfterAuthorization atomic.Bool
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.POST("/test-record-access/:id", middleware.RequireAuthorization(func(ctx context.Context, token string) (*domain.Actor, error) {
+			current, err := authorization.Authorize(ctx, token)
+			if err == nil && disableAfterAuthorization.Swap(false) {
+				_, err = pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=1")
+			}
+			return current, err
+		}, handler.AuthorizationFailure), handler.RecordAccess(accessService.Record))
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 3 * time.Second
+		requestNumber := 0
+		request := func(id, body, token string, status int, code, field string) dto.RecordAccessResponse {
+			t.Helper()
+			requestNumber++
+			requestID := fmt.Sprintf("28ee758a-0727-42de-ae7d-%012d", requestNumber)
+			message, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/test-record-access/"+id+"?note=private-query", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			message.Header.Set("Content-Type", "application/json")
+			message.Header.Set("X-Request-ID", requestID)
+			if token != "" {
+				message.Header.Set("Authorization", "Bearer "+token)
+			}
+			response, err := client.Do(message)
+			if err != nil {
+				t.Fatal("真实访问 POST 失败", err)
+			}
+			encoded, readError := io.ReadAll(response.Body)
+			closeError := response.Body.Close()
+			if readError != nil || closeError != nil || response.StatusCode != status || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Content-Type") != "application/json; charset=utf-8" {
+				t.Fatal("真实访问响应状态或头错误", response.StatusCode, readError, closeError)
+			}
+			var result dto.RecordAccessResponse
+			if status == 200 {
+				if json.Unmarshal(encoded, &result) != nil || result.RequestID != requestID || result.Data.LastOpenedAt.IsZero() {
+					t.Fatal("真实成功响应错误")
+				}
+				return result
+			}
+			var failed dto.ErrorResponse
+			if json.Unmarshal(encoded, &failed) != nil || failed.RequestID != requestID || failed.Error.Code != code {
+				t.Fatal("真实错误响应错误", code)
+			}
+			if field == "" {
+				if failed.Error.Details != nil {
+					t.Fatal("真实错误详情须为 null")
+				}
+			} else if len(failed.Error.Details) != 1 || failed.Error.Details["field"] != field {
+				t.Fatal("真实字段错误位置不符")
+			}
+			return result
+		}
+		starBefore := read(13).StarredAt
+		baseBefore, err := store.FindUserFileEntry(ctx, 1, 13)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := request("13", `{"purpose":"preview"}`, access.Token, 200, "", "")
+		repeated := request("13", `{"purpose":"open"}`, access.Token, 200, "", "")
+		if !reflect.DeepEqual(first.Data, repeated.Data) || first.RequestID == repeated.RequestID || !first.Data.LastOpenedAt.Equal(*read(13).LastOpenedAt) {
+			t.Fatal("真实访问合并或当前请求 ID 错误")
+		}
+		request("12", `{"purpose":"open"}`, access.Token, 400, "INVALID_ARGUMENT", "id")
+		request("11", `{"purpose":"preview"}`, access.Token, 400, "INVALID_ARGUMENT", "id")
+		request("33", `{"purpose":"open"}`, access.Token, 404, "ENTRY_NOT_FOUND", "")
+		request("999", `{"purpose":"open"}`, access.Token, 404, "ENTRY_NOT_FOUND", "")
+		before := read(13)
+		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status='TRASHED',deleted_at=UTC_TIMESTAMP(6) WHERE id=12"); err != nil {
+			t.Fatal(err)
+		}
+		request("13", `{"purpose":"preview"}`, access.Token, 404, "ENTRY_NOT_FOUND", "")
+		if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status='ACTIVE',deleted_at=NULL WHERE id=12"); err != nil {
+			t.Fatal(err)
+		}
+		request("0", `{"private-broken":`, access.Token, 400, "INVALID_ARGUMENT", "id")
+		request("13", `{}`, access.Token, 400, "INVALID_ARGUMENT", "purpose")
+		request("13", `{"purpose":null}`, access.Token, 400, "INVALID_ARGUMENT", "purpose")
+		request("13", `{"purpose":"download"}`, access.Token, 400, "INVALID_ARGUMENT", "purpose")
+		request("0", `{"private-broken":`, "", 401, "AUTH_REQUIRED", "")
+		request("13", `{"purpose":"open"}`, "invalid-access", 401, "AUTH_REQUIRED", "")
+		disableAfterAuthorization.Store(true)
+		request("13", `{"purpose":"open"}`, access.Token, 403, "ACCOUNT_DISABLED", "")
+		if _, err := pool.ExecContext(ctx, "UPDATE users SET status='ACTIVE' WHERE id=1"); err != nil {
+			t.Fatal(err)
+		}
+		baseAfter, err := store.FindUserFileEntry(ctx, 1, 13)
+		if err != nil || !reflect.DeepEqual(baseBefore, baseAfter) || !reflect.DeepEqual(starBefore, read(13).StarredAt) || !reflect.DeepEqual(before, read(13)) {
+			t.Fatal("真实访问错误边界或原有事实不符", err)
 		}
 	})
 	t.Run("maximum identifiers revision and dates", func(t *testing.T) {

@@ -441,3 +441,5 @@ PUT /api/v1/entries/{id}/star 已接入正式路由和生产启动装配，复�
 已提供 RecordAccessData、RecordAccessResponse 和 NewRecordAccessData，将已提交访问偏好映射为必填 last_opened_at 及 data/request_id 外层。时间复用 UTC 微秒转换，缺失或异常访问时间使用统一目录项数据错误。精确 JSON、日期、副本和真实 MySQL 组合验证通过，字段与复验方法见 [第 179 步学习记录](docs/开发学习记录.md#第-179-步定义目录项访问记录成功响应-dto)。
 
 已提供 handler.RecordAccessSuccess，将已提交访问偏好转换为公开响应，关联当前请求 ID，以 HTTP 200、UTF-8 JSON 和禁止缓存头交付。异常偏好或取消沿用统一内部错误，测试专用 POST 入口及四组真实 HTTP 传输连续三次通过，执行顺序与复验方法见 [第 180 步学习记录](docs/开发学习记录.md#第-180-步实现目录项访问记录成功-http-交付)。
+
+已提供 handler.RecordAccess，按 Actor、路径、JSON 正文及用途校验，调用访问核心服务并核对偏好后交付。目录目标定位 id，用途错误定位 purpose，不可见目标使用统一 404。测试入口及真实 JWT/MySQL 的十四次 POST 请求验证通过，调用与复验方法见 [第 181 步学习记录](docs/开发学习记录.md#第-181-步实现目录项访问记录-http-处理函数)。

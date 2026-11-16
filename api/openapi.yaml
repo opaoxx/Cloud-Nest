@@ -97,6 +97,7 @@ info:
     RecordAccessRequest 定义后续访问记录请求，purpose 须明确为 preview/open，通过测试专用 POST 入口验证输入。
     RecordAccessData/RecordAccessResponse 定义访问记录成功数据，last_opened_at 为必需 UTC 微秒时间，外层关联当前 request_id。
     访问成功交付方法通过测试专用 POST 入口验证，共享响应见 RecordAccessSucceeded，关联当前请求 ID 并禁止缓存。
+    访问处理函数组合 Actor、路径、用途 DTO、核心服务及成功交付，目录目标定位 id，用途错误定位 purpose，不可见目标复用 TargetEntryNotFound。
 servers:
   - url: http://127.0.0.1:18081
 tags:
