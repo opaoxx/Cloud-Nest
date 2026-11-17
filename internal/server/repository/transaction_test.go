@@ -30,6 +30,7 @@ type loginTransactionScript struct {
 	uploadQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	leaseClockQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	claimUploadLease                                   func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	orphanStagedObject                                 func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	quotaQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	reserveStorage                                     func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
@@ -76,6 +77,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE stored_objects SET status = 'ORPHANED'") && connection.script.orphanStagedObject != nil {
+		connection.script.record("orphan_object")
+		return connection.script.orphanStagedObject(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "UPDATE upload_tasks SET lease_owner = ") && connection.script.claimUploadLease != nil {
 		connection.script.record("claim_upload_lease")
 		return connection.script.claimUploadLease(ctx, statement, arguments)
