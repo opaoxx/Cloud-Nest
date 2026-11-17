@@ -585,3 +585,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。RegisterUploadTaskRoute 组合既有 RequireAuthorization 与 UploadTask，启动时绑定 Store.FindUserUploadTask 和 UploadTaskService.Get。正式路由、十状态、路径/账号边界、跨设备、重启数据及授权状态联测连续三次通过，使用与复验方法见 [第 251 步学习记录](docs/开发学习记录.md#第-251-步接入正式上传任务查询路由与启动装配)。
 
 已提供 domain.StoredObjectStatus，以精确字符串常量表达物理对象六种状态，IsValid 对齐正式迁移的状态约束。六个合法值、三十九个非法值及默认 STAGING 对照连续三次通过，状态含义与复验方法见 [第 252 步学习记录](docs/开发学习记录.md#第-252-步定义存储对象状态模型)。
+
+已提供 domain.StoredObject，保存物理对象十七项内部事实，包含可信归属、不可变存储位置、大小、验证结果、去重生成列读取值、状态及回收时间。字段/空值/生成列对照及三组上传声明到暂存对象和任务的组装验证连续三次通过，模型与复验方法见 [第 253 步学习记录](docs/开发学习记录.md#第-253-步定义存储对象基础记录模型)。
