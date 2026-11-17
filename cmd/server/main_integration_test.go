@@ -162,6 +162,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "false")
+	uploadDirectory := filepath.Join(t.TempDir(), "上传 临时目录")
+	t.Setenv("CLOUDNEST_TEMP_DIR", uploadDirectory)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +211,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		return shutdown
 	}
 	stopFirst := start()
+	uploadEntries, err := os.ReadDir(uploadDirectory)
+	if err != nil || len(uploadEntries) != 0 {
+		t.Fatal("启动 HTTP 前未完成临时目录初始化和探测清理", err)
+	}
+	uploadNeighbor := filepath.Join(uploadDirectory, "startup-keep.txt")
+	if err := os.WriteFile(uploadNeighbor, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	request := func(t *testing.T, path, tokenText string, expectedStatus int) []byte {
 		t.Helper()
 		request, err := http.NewRequest(http.MethodGet, "http://"+address+path, nil)
@@ -1794,6 +1804,15 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	revokeDevice(t, deviceTarget.Data.Device.ID, nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", foreignToken.Token, 200, "", "")
 	stopSecond()
+	uploadEntries, err = os.ReadDir(uploadDirectory)
+	uploadContent, uploadReadError := os.ReadFile(uploadNeighbor)
+	if err != nil || len(uploadEntries) != 1 || uploadReadError != nil || string(uploadContent) != "keep" {
+		t.Fatal("重启临时目录检查留下探测文件或改变已有内容", err, uploadReadError)
+	}
+	startupSegments := strings.Split(logs.String(), "准备启动 HTTP 服务")
+	if len(startupSegments) != 3 || strings.Count(logs.String(), "上传临时目录检查通过") != 2 || !strings.Contains(startupSegments[0], "上传临时目录检查通过") || !strings.Contains(startupSegments[1], "上传临时目录检查通过") {
+		t.Fatal("两轮临时目录检查未先于 HTTP 启动")
+	}
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("生产启动流程重写了已有密钥")

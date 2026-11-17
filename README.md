@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -657,3 +657,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 config.LoadUploadTempConfig，读取 CLOUDNEST_TEMP_DIR，默认采用系统临时目录下的 CloudNest/uploads。显式配置保留路径文本，支持中文、空格与相对路径，解析为本机绝对路径，拒绝空值、无效 UTF-8 和控制字符。目录创建与可用性检查由后续初始化步骤完成。配置包及启动入口回归通过，规则与复验方法见 [第 287 步学习记录](docs/开发学习记录.md#第-287-步读取并校验上传临时目录配置)。
 
 已提供 storage.PrepareUploadTempDirectory，根据绝对目录配置创建所需目录并检查类型，再用随机探测文件验证写入、同步和读回，返回前关闭并删除探测文件。重复/并发初始化、文件冲突、取消与配置到实际文件接收的联测通过，调用和复验方法见 [第 288 步学习记录](docs/开发学习记录.md#第-288-步创建并检查上传临时目录)。
+
+后端启动现已读取 CLOUDNEST_TEMP_DIR，先完成目录创建、类型与探测文件读写检查，再继续 JWT、数据库和 HTTP 启动。配置错误记录 config 阶段，初始化错误记录 upload_temp 阶段并结束启动，成功记录已解析目录。独占数据库、隔离临时目录和空闲端口的实际启动/重启验证通过，使用方法与验证见 [第 289 步学习记录](docs/开发学习记录.md#第-289-步将上传临时目录检查接入启动流程)。

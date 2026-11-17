@@ -74,7 +74,25 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("前端来源白名单读取成功", "allowed_origins", allowedOrigins)
 
-	// 5. 加载环境密钥或本地持久化 JWT 配置。
+	// 5. 读取并校验上传临时目录配置。
+	uploadTempConfig, err := config.LoadUploadTempConfig()
+	if err != nil {
+		logger.Error("读取上传临时目录配置失败", "stage", "config", "error", err)
+		return err
+	}
+
+	// 6. 创建目录并验证读写，失败时结束启动。
+	if err := storage.PrepareUploadTempDirectory(ctx, uploadTempConfig); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			logger.Error("上传临时目录初始化失败", "stage", "upload_temp", "error", err)
+		}
+		return err
+	}
+
+	// 7. 记录检查通过，继续后续启动流程。
+	logger.Info("上传临时目录检查通过", "directory", uploadTempConfig.Directory)
+
+	// 8. 加载环境密钥或本地持久化 JWT 配置。
 	jwtConfig, err := config.LoadServerJWTConfig()
 	if err != nil {
 		logger.Error("读取 JWT 配置失败", "stage", "config", "error", err)
@@ -87,7 +105,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 
-	// 6. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
+	// 9. 建立连接池并检查连通性，成功后登记退出此方法时的关闭操作。
 	connectionPool, err := repository.OpenMySQL(ctx, databaseConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -104,7 +122,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MySQL 连接检查通过", "address", databaseConfig.Address, "database", databaseConfig.DatabaseName)
 
-	// 7. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
+	// 10. 只读检查迁移版本、状态和摘要，不兼容时返回并关闭连接池。
 	if err := repository.CheckSchema(ctx, connectionPool); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			logger.Error("数据库迁移检查失败", "stage", "schema", "database", databaseConfig.DatabaseName, "error", err)
@@ -113,7 +131,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("数据库迁移检查通过", "database", databaseConfig.DatabaseName)
 
-	// 8. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
+	// 11. 创建存储客户端并只读检查已有桶，使用结束后释放空闲连接。
 	storageClient, err := storage.NewClient(ctx, storageConfig)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -127,7 +145,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 	logger.Info("MinIO 桶访问检查通过", "bucket", storageConfig.Bucket)
 
-	// 9. 复用连接池，构造令牌校验、请求授权、用户资料、会话及设备列表服务。
+	// 12. 复用连接池，构造令牌校验、请求授权、用户资料、会话及设备列表服务。
 	store, err := repository.NewStore(connectionPool)
 	if err != nil {
 		logger.Error("装配数据访问入口失败", "stage", "application", "error", err)
@@ -143,7 +161,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	sessionListService := service.NewUserSessionService(store.ListUserSessions)
 	deviceListService := service.NewUserDeviceService(store.ListUserDevices)
 
-	// 10. 装配真实凭证、共享失败限流及登录会话、令牌服务。
+	// 13. 装配真实凭证、共享失败限流及登录会话、令牌服务。
 	credentialService := service.NewCredentialService(store.FindLoginAccountByUsername)
 	loginLimiter := service.NewLoginFailureLimiter()
 	loginGate := security.NewLoginAttemptGate(loginLimiter.Begin, credentialService.Authenticate)
@@ -164,7 +182,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	loginTokens := service.NewLoginTokenService(sessionService.Create, signer.Issue)
 
-	// 11. 复用已有 Store、刷新用户事务和签发器，装配刷新凭证服务。
+	// 14. 复用已有 Store、刷新用户事务和签发器，装配刷新凭证服务。
 	refreshCredentials := service.NewRefreshCredentialService(store.FindRefreshSession)
 	refreshSessions := service.NewRefreshSessionService(refreshCredentials.Verify,
 		func(ctx context.Context, verified domain.VerifiedRefreshSession, action func(context.Context, service.RefreshSessionTransaction, domain.VerifiedRefreshSession) error) error {
@@ -174,7 +192,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	refreshTokens := service.NewRefreshTokenService(refreshSessions.Refresh, signer.Issue)
 
-	// 12. 复用已认证用户事务，装配退出、会话撤销、设备改名及撤销服务。
+	// 15. 复用已认证用户事务，装配退出、会话撤销、设备改名及撤销服务。
 	logoutService := service.NewLogoutService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.LogoutTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -201,7 +219,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
-	// 13. 复用目录快照入口与持久化签名配置，装配目录分页服务。
+	// 16. 复用目录快照入口与持久化签名配置，装配目录分页服务。
 	directoryListService := service.NewDirectoryListService(
 		func(ctx context.Context, action func(context.Context, service.DirectoryListReader) error) error {
 			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
@@ -220,7 +238,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	directoryPageService := service.NewDirectoryPageService(directoryCursorVerifier.Verify, directoryListService.List, directoryCursorSigner.Sign)
 
-	// 14. 复用只读快照与持久化主密钥，装配全局分页服务。
+	// 17. 复用只读快照与持久化主密钥，装配全局分页服务。
 	// 1. 绑定同一请求快照中的候选和祖先读取。
 	globalListService := service.NewGlobalEntryListService(
 		func(ctx context.Context, action func(context.Context, service.GlobalEntryListReader) error) error {
@@ -313,7 +331,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 3. 组合大小分页服务，交给正式列表路由。
 	sizePageService := service.NewSizeEntryPageService(sizeCursorVerifier.Verify, sizeListService.List, sizeCursorSigner.Sign)
 
-	// 15. 复用目录快照入口，装配指定目录项详情服务。
+	// 18. 复用目录快照入口，装配指定目录项详情服务。
 	entryDetailService := service.NewEntryDetailService(
 		func(ctx context.Context, action func(context.Context, service.EntryDetailReader) error) error {
 			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
@@ -321,7 +339,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			})
 		})
 
-	// 16. 绑定用户事务与创建结果编解码，装配幂等创建服务。
+	// 19. 绑定用户事务与创建结果编解码，装配幂等创建服务。
 	createDirectoryService := service.NewIdempotentCreateDirectoryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentCreateDirectoryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -341,7 +359,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 17. 绑定用户事务与重命名结果编解码，装配幂等重命名服务。
+	// 20. 绑定用户事务与重命名结果编解码，装配幂等重命名服务。
 	renameEntryService := service.NewIdempotentRenameEntryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentRenameEntryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -361,7 +379,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 18. 绑定用户事务与移动结果编解码，装配幂等移动服务。
+	// 21. 绑定用户事务与移动结果编解码，装配幂等移动服务。
 	moveEntryService := service.NewIdempotentMoveEntryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentMoveEntryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -381,24 +399,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 19. 绑定当前用户事务，装配收藏核心服务。
+	// 22. 绑定当前用户事务，装配收藏核心服务。
 	setStarredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
 			return action(txContext, txStore)
 		})
 	})
 
-	// 20. 绑定当前用户事务，装配访问记录核心服务。
+	// 23. 绑定当前用户事务，装配访问记录核心服务。
 	recordAccessService := service.NewRecordAccessService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.RecordAccessTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
 			return action(txContext, txStore)
 		})
 	})
 
-	// 21. 绑定已有用户范围查询，装配上传任务读取服务。
+	// 24. 绑定已有用户范围查询，装配上传任务读取服务。
 	uploadTaskService := service.NewUploadTaskService(store.FindUserUploadTask)
 
-	// 22. 复用存储配置、用户事务及稳定结果编解码，装配幂等上传创建服务。
+	// 25. 复用存储配置、用户事务及稳定结果编解码，装配幂等上传创建服务。
 	createUploadService := service.NewIdempotentCreateUploadService(storageConfig.Provider, storageConfig.Bucket,
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentCreateUploadTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -418,7 +436,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 23. 注册业务接口，在列表路径绑定目录、全局、最近、名称及大小分页。
+	// 26. 注册业务接口，在列表路径绑定目录、全局、最近、名称及大小分页。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
@@ -445,7 +463,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 24. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 27. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
