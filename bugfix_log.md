@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——上传任务创建检查引用了推测的路径读取文件名
+
+### 问题现象
+
+第 260 步检索目标目录路径能力时引用了不存在的 repository/file_entry_path.go。修正前记录于此，接下来先按实际文件清单和方法检索定位已有能力，再依据现有分层完成本轮创建方法。
+
+### 根因与修复方案
+
+按领域概念推测了 Repository 文件名。通过 rg --files 和方法检索定位实际 service/file_entry_path.go，读取 FileEntryPathService 和 FileEntryPathReader 后，确认路径组合位于 Service。本轮 Repository 创建复用已存在的 FindUserFileEntry、FindUserStoredObject 和 FindUserUploadTask，完整命名及祖先可见性沿用上层服务的组合职责。
+
+### 验证结果
+
+实际服务路径文件已读取并确认接口职责。上传创建三十九组结果、十六类输入/事务边界、十一类取消及两类途中到期连续三次通过，新旧创建/映射/认证事务共十一项主测试及二十六项领域主测试回归通过。真实 MySQL 任务创建、暂存创建和任务映射三项联测连续三次通过，JSON 入选无跳过项。go test -count=1 ./...、go vet ./...、gofmt、git diff --check、文档示例语法和迁移/API 基线检查通过。
+
 ## 2026-11-17——暂存对象创建首次事务验证失败
 
 ### 问题现象
