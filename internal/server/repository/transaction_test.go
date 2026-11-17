@@ -28,6 +28,8 @@ type loginTransactionScript struct {
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	objectQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	uploadQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	leaseClockQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	claimUploadLease                                   func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	quotaQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	reserveStorage                                     func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
@@ -74,6 +76,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE upload_tasks SET lease_owner = ") && connection.script.claimUploadLease != nil {
+		connection.script.record("claim_upload_lease")
+		return connection.script.claimUploadLease(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "UPDATE users SET reserved_storage = ") && connection.script.reserveStorage != nil {
 		connection.script.record("reserve")
 		return connection.script.reserveStorage(ctx, statement, arguments)
@@ -163,6 +169,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 	script.rolledBack = make(chan struct{})
 	connector := &loginTransactionConnector{script: script}
 	connector.deviceConnector.accountConnector.query = func(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
+		if query == "SELECT UTC_TIMESTAMP(6)" && script.leaseClockQuery != nil {
+			script.record("lease_clock")
+			return script.leaseClockQuery(ctx, query, arguments)
+		}
 		if strings.Contains(query, "storage_quota AS quota_bytes") && script.quotaQuery != nil {
 			script.record("quota")
 			return script.quotaQuery(ctx, query, arguments)
