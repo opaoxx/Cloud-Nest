@@ -44,20 +44,27 @@ func (service *UploadContentFileService) WithFile(ctx context.Context, source io
 		return err
 	}
 
-	// 2. 预占本次声明大小。
+	// 2. 领取共享接收名额，返回及 panic 展开时释放。
+	releaseReceiver, err := service.space.acquireReceiver(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseReceiver()
+
+	// 3. 预占本次声明大小。
 	release, err := service.space.Reserve(ctx, declaredSize)
 	if err != nil {
 		return err
 	}
 
-	// 3. 复用临时文件接收，清理成功时释放预算。
+	// 4. 复用临时文件接收，清理成功时释放预算。
 	return withUploadContentFile(ctx, service.directory, source, declaredSize, expected, use, func(file *os.File, cleaned bool) {
 		if cleaned {
 			release()
 			return
 		}
 
-		// 4. 清理失败时登记待回收文件，保留预算。
+		// 5. 清理失败时登记待回收文件，保留预算。
 		service.cleanupMutex.Lock()
 		defer service.cleanupMutex.Unlock()
 		service.pending[file] = release

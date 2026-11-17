@@ -3805,6 +3805,29 @@ components:
               message: JSON 请求正文不能超过 1 MiB
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadReceiverBusy:
+      description: 同一进程的共享上传临时区已有三个在途接收调用时返回 HTTP 409。名额在文件创建及正文读取前领取，满额时立即拒绝。各接收调用在完成本次清理及失败登记后释放名额。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UPLOAD_BUSY
+              message: 上传接收繁忙，请稍后重试
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadTempSpaceExhausted:
       description: 共享上传临时区的剩余预占预算不足以接收本次声明大小时，返回 HTTP 507。容量检查在文件创建及正文读取前完成，使用固定提示。
       headers:

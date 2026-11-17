@@ -14,10 +14,12 @@ const uploadTempCapacityBytes uint64 = 128 * 1024 * 1024
 // UploadTempSpace 并发安全地保存同一临时区的在途字节预算，零值可用。
 // 同一进程的临时区使用同一实例，首次使用后通过指针共享。
 type UploadTempSpace struct {
-	// mutex 保护预占计数，锁内只执行计数检查与更新。
+	// mutex 保护字节及接收名额计数，锁内只执行计数检查与更新。
 	mutex sync.Mutex
 	// reservedBytes 是尚未确认清理完成的预占总字节数。
 	reservedBytes uint64
+	// activeReceivers 是持有接收名额、尚未结束本次清理及登记的调用数。
+	activeReceivers int
 }
 
 // NewUploadTempSpace 创建容量为 128 MiB 的空预算。

@@ -37,7 +37,7 @@ func TestNewUploadContentFileService(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || service == nil || service.space != space || service.directory != directory || service.pending == nil || len(service.pending) != 0 || space.reservedBytes != 0 {
+			if err != nil || service == nil || service.space != space || service.directory != directory || service.pending == nil || len(service.pending) != 0 || space.reservedBytes != 0 || space.activeReceivers != 0 {
 				t.Fatal("构造结果错误", err)
 			}
 		})
@@ -124,7 +124,7 @@ func TestUploadContentFileServiceFlow(t *testing.T) {
 				})
 			}()
 			entries, readError := os.ReadDir(directory)
-			if !errors.Is(err, fixture.want) || calls != fixture.calls || readError != nil || len(entries) != 0 || len(service.pending) != 0 || space.reservedBytes != 0 || tracked.closes != 0 {
+			if !errors.Is(err, fixture.want) || calls != fixture.calls || readError != nil || len(entries) != 0 || len(service.pending) != 0 || space.reservedBytes != 0 || space.activeReceivers != 0 || tracked.closes != 0 {
 				t.Fatal("结果、清理或预算释放错误", err, readError, space.reservedBytes)
 			}
 			if fixture.name == "panic in consumer" {
@@ -195,7 +195,7 @@ func TestUploadContentFileServiceInputsAndCapacity(t *testing.T) {
 				t.Fatal("参数或容量拒绝顺序错误", err)
 			}
 			entries, readError := os.ReadDir(directory)
-			if readError != nil || len(entries) != 0 || len(service.pending) != 0 || space.reservedBytes != uploadTempCapacityBytes || source.closes != 0 {
+			if readError != nil || len(entries) != 0 || len(service.pending) != 0 || space.reservedBytes != uploadTempCapacityBytes || space.activeReceivers != 0 || source.closes != 0 {
 				t.Fatal("拒绝或零字节改变原预算/文件", readError)
 			}
 		})
@@ -241,16 +241,16 @@ func TestUploadContentFileServiceCleanup(t *testing.T) {
 					return useFailure
 				})
 			}()
-			if (panicInConsumer && recovered != "cleanup panic") || (!panicInConsumer && (recovered != nil || !errors.Is(err, useFailure))) || len(service.pending) != 1 || space.reservedBytes != 3 {
+			if (panicInConsumer && recovered != "cleanup panic") || (!panicInConsumer && (recovered != nil || !errors.Is(err, useFailure))) || len(service.pending) != 1 || space.reservedBytes != 3 || space.activeReceivers != 0 {
 				t.Fatal("失败清理登记或原始原因错误", err, recovered)
 			}
 			// 1. 回收仍失败或请求取消时，保留记录和预占。
-			if err := service.RetryCleanup(context.Background()); err == nil || len(service.pending) != 1 || space.reservedBytes != 3 {
+			if err := service.RetryCleanup(context.Background()); err == nil || len(service.pending) != 1 || space.reservedBytes != 3 || space.activeReceivers != 0 {
 				t.Fatal("失败回收提前释放预算", err)
 			}
 			canceled, cancel := context.WithCancel(context.Background())
 			cancel()
-			if err := service.RetryCleanup(canceled); !errors.Is(err, context.Canceled) || len(service.pending) != 1 || space.reservedBytes != 3 {
+			if err := service.RetryCleanup(canceled); !errors.Is(err, context.Canceled) || len(service.pending) != 1 || space.reservedBytes != 3 || space.activeReceivers != 0 {
 				t.Fatal("取消回收改变记录", err)
 			}
 			// 2. 其他接收可以正常完成，保留旧失败尝试的预算。
@@ -270,7 +270,7 @@ func TestUploadContentFileServiceCleanup(t *testing.T) {
 				})
 			}
 			callers.Wait()
-			if len(service.pending) != 0 || space.reservedBytes != 0 {
+			if len(service.pending) != 0 || space.reservedBytes != 0 || space.activeReceivers != 0 {
 				t.Fatal("完成回收后仍保留记录或预算")
 			}
 			if err := os.WriteFile(blockedPath, []byte("replacement"), 0600); err != nil {
@@ -328,19 +328,19 @@ func TestUploadContentFileServiceConcurrent(t *testing.T) {
 			if !entered {
 				attempted.Done()
 			}
-			if (entered && err != nil) || (!entered && !errors.Is(err, domain.ErrUploadTempSpaceExhausted)) {
+			if (entered && err != nil) || (!entered && !errors.Is(err, domain.ErrUploadReceiverBusy)) {
 				t.Error("并发接收结果错误", err)
 			}
 		})
 	}
 	attempted.Wait()
-	if accepted.Load() != 8 || space.reservedBytes != uploadTempCapacityBytes {
+	if accepted.Load() != 3 || space.activeReceivers != 3 || space.reservedBytes != 3*domain.MaxSingleUploadSizeBytes {
 		t.Error("并发接收突破容量或过早释放", accepted.Load(), space.reservedBytes)
 	}
 	close(proceed)
 	callers.Wait()
 	entries, readError := os.ReadDir(directory)
-	if readError != nil || len(entries) != 0 || len(service.pending) != 0 || space.reservedBytes != 0 {
+	if readError != nil || len(entries) != 0 || len(service.pending) != 0 || space.reservedBytes != 0 || space.activeReceivers != 0 {
 		t.Fatal("并发接收结束后的文件或预算错误", readError)
 	}
 }
