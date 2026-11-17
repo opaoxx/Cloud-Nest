@@ -1416,6 +1416,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 
 	// 正式任务查询贯穿已有授权与持久记录，保存结果供重启后对照。
 	uploadBeforeRestart, completedUploadBeforeRestart := verifyServerUploadTasks(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, nativeRefreshed.Data.AccessToken, foreignToken.Token)
+	// 上传创建使用既有账号 3，独立对照配额、任务与稳定结果。
+	createdUploadBeforeRestart, uploadCreationBeforeRestart := verifyServerUploadCreation(t, ctx, pool, "http://"+address, foreignToken.Token, webRefreshed.Data.AccessToken)
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1427,6 +1429,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
 	// 两类任务数据跨真实服务重启保持一致，各次请求使用当前请求 ID。
 	for _, fixture := range []dto.UploadTaskResponse{uploadBeforeRestart, completedUploadBeforeRestart} {
 		after := requestServerUploadTask(t, "http://"+address, webRefreshed.Data.AccessToken, fixture.Data.ID, 200, "", "")
@@ -1803,7 +1806,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-upload-query", "private-upload-cookie", "private-upload-diagnostic", "upload-route-", "private-size-cursor", "size-budget-", "size-tie-", "size-zero", "private-name-cursor", "name-budget-", "name-long-", "private-recent-query", "private-recent-cursor", "最近专用未访问", "private-starred-cursor", "private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-upload-create-query", "private-upload-create-cookie", "private-invalid-sha", serverCreateUploadKey, "server-upload-", "正式上传 🌱.bin", "private-upload-query", "private-upload-cookie", "private-upload-diagnostic", "upload-route-", "private-size-cursor", "size-budget-", "size-tie-", "size-zero", "private-name-cursor", "name-budget-", "name-long-", "private-recent-query", "private-recent-cursor", "最近专用未访问", "private-starred-cursor", "private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}

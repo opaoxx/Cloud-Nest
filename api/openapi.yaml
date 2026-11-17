@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的上传任务查询、目录列表及详情、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的上传创建与任务查询、目录列表及详情、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -134,6 +134,55 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/uploads:
+    post:
+      tags: [Uploads]
+      operationId: createUpload
+      summary: 在当前用户的可见目录中创建上传任务
+      description: |
+        Bearer JWT 和数据库授权通过后，依次解析 Idempotency-Key、受限 JSON 和上传声明。
+        parent_id 使用完整标准十进制字符串，用户及来源设备取自可信 Actor。
+        首期 SINGLE 支持 0～16777216 字节，sha256 可空或为 64 位十六进制声明。
+        同一用户事务复查身份、目录完整路径及新增文件深度，预占空间并创建 STAGING 对象和 UPLOADING 任务。
+        稳定结果与创建数据同时提交并保留八天，有效期内同键同参数返回原始 201 快照，各次交付关联当前 request_id。
+        同键不同参数及记录保留期到期分别返回 IDEMPOTENCY_CONFLICT 和 IDEMPOTENCY_EXPIRED。
+        成功返回 task、SINGLE、content_path 和 expires_at，任务期限按默认值在创建时计算为 24 小时。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUploadRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/CreateUploadSucceeded'
+        '400':
+          $ref: '#/components/responses/CreateUploadRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/CreateUploadConflict'
+        '413':
+          $ref: '#/components/responses/CreateUploadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '507':
+          $ref: '#/components/responses/CreateUploadQuotaExceeded'
   /api/v1/uploads/{id}:
     get:
       tags: [Uploads]

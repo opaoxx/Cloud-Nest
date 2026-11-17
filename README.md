@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -621,3 +621,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 handler.CreateUploadSuccess，恢复已确认提交的稳定上传快照，关联当前请求 ID 并预先编码，以 HTTP 201、UTF-8 JSON、no-store 和 Pragma no-cache 交付。成功/异常/取消/已发送及真实 POST 专项和正式 MySQL 幂等创建到实际 HTTP 交付连续三次通过，OpenAPI 补充 CreateUploadSucceeded，共 453 处本地引用核对通过。调用与复验方法见 [第 269 步学习记录](docs/开发学习记录.md#第-269-步实现上传创建成功-http-交付)。
 
 已提供 handler.CreateUpload，按认证身份、幂等头、JSON/DTO、幂等服务和成功交付顺序处理上传创建请求，核对返回声明并映射 400/401/403/404/409/413/507/500。FILE_TOO_LARGE 提供 details.field=size_bytes 和 max_size_bytes=16777216。专项与真实 JWT/MySQL/HTTP 每轮三十次 POST 连续三次通过，OpenAPI 增加四类错误响应，461 处本地引用检查通过。调用与复验方法见 [第 270 步学习记录](docs/开发学习记录.md#第-270-步实现上传创建-http-处理函数)。
+
+已注册正式 POST /api/v1/uploads，启动时将已校验存储配置、用户事务及上传 DTO 编解码绑定至幂等创建服务，再挂载授权和处理函数。路由、创建/查询及真实 run 启动/重启专项连续三次通过，OpenAPI 正式操作与注册一致，共十九条路径、二十一个操作和 474 处本地引用。调用与运行方法见 [第 271 步学习记录](docs/开发学习记录.md#第-271-步注册正式上传创建路由并完成启动装配)。
