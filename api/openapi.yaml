@@ -97,6 +97,7 @@ info:
     详情处理函数组合 Actor、路径 DTO、详情服务及成功交付，路径错误定位 id，不可见目标复用 TargetEntryNotFound。
     GET /api/v1/entries/{id} 已由启动入口绑定共享授权与真实详情快照服务，支持文件、目录和根目录读取。
     CreateUploadRequest 定义单文件上传创建请求 DTO，必填 parent_id/name/size_bytes，可空 sha256 转换为固定摘要，声明原值交给上传服务核对。
+    CreateUploadData/CreateUploadResponse 定义上传创建稳定快照，包含公开任务、SINGLE 上传方式、应用内容路径和一致的到期时间。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
     IdempotencyKey 定义后续业务写请求的 Idempotency-Key 请求头，单值及字符错误定位 Idempotency-Key。
@@ -1797,6 +1798,82 @@ components:
           expires_at: '2026-11-18T08:00:00.123456Z'
           completed_at: null
           last_error: null
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateUploadData:
+      type: object
+      additionalProperties: false
+      required: [task, upload_mode, content_path, expires_at]
+      description: 上传创建时可持久化的稳定结果。任务快照为 SINGLE/UPLOADING，四个可空公开结果字段显式为 null，外层上传方式和到期时间与 task 一致。
+      properties:
+        task:
+          allOf:
+            - $ref: '#/components/schemas/UploadTaskData'
+            - type: object
+              properties:
+                upload_mode:
+                  type: string
+                  enum: [SINGLE]
+                status:
+                  type: string
+                  enum: [UPLOADING]
+                size_bytes:
+                  type: integer
+                  minimum: 0
+                  maximum: 16777216
+                resolved_name:
+                  type: string
+                  nullable: true
+                  enum: [null]
+                result_entry_id:
+                  type: string
+                  nullable: true
+                  enum: [null]
+                completed_at:
+                  type: string
+                  nullable: true
+                  enum: [null]
+                last_error:
+                  type: object
+                  nullable: true
+                  enum: [null]
+        upload_mode:
+          type: string
+          enum: [SINGLE]
+        content_path:
+          type: string
+          pattern: '^/api/v1/uploads/[1-9][0-9]{0,19}/content$'
+          description: 通过认证后向该应用路径 PUT application/octet-stream 内容，路径包含 task.id 的完整标准十进制值，上限为 18446744073709551615。
+        expires_at:
+          $ref: '#/components/schemas/UploadTaskData/properties/expires_at'
+    CreateUploadResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      description: 上传创建成功响应，data 保存创建时稳定快照，request_id 关联当前请求。
+      properties:
+        data:
+          $ref: '#/components/schemas/CreateUploadData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          task:
+            id: '19'
+            parent_id: '13'
+            requested_name: 学习笔记.MD
+            resolved_name: null
+            size_bytes: 2048
+            upload_mode: SINGLE
+            status: UPLOADING
+            result_entry_id: null
+            created_at: '2026-11-17T02:30:00.123456Z'
+            updated_at: '2026-11-17T02:30:01.123456Z'
+            expires_at: '2026-11-18T02:30:00.123456Z'
+            completed_at: null
+            last_error: null
+          upload_mode: SINGLE
+          content_path: /api/v1/uploads/19/content
+          expires_at: '2026-11-18T02:30:00.123456Z'
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateUploadRequest:
       type: object
