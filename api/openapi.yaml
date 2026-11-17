@@ -3579,6 +3579,19 @@ components:
         maxLength: 128
         pattern: '^[\x21-\x2B\x2D-\x7E]{1,128}(?![\s\S])'
       example: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadTaskID:
+      name: id
+      in: path
+      required: true
+      description: |
+        上传任务 ID，范围为 1～18446744073709551615，使用标准十进制字符串。
+        路由解码后校验，零、前导零、符号、空白、小数、残留编码和溢出按 id 字段错误处理。
+        字段提示为“上传任务 ID 须为 1～18446744073709551615 的标准十进制整数”。
+        最多 20 位的数字仍须满足上述 uint64 上限，服务端执行范围检查。
+        用户身份由 Bearer 认证提供，任务归属由后续服务检查。
+      schema:
+        $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+      example: '19'
     EntryID:
       name: id
       in: path
