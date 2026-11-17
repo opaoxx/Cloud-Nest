@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
@@ -67,6 +68,50 @@ func TestCreateUserStagedObjectIntegration(t *testing.T) {
 	}
 
 	// 2. 正式写入、单连接回读与默认值验证。
+	t.Run("generated keys preserve independent attempts", func(t *testing.T) {
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(3)
+		for _, current := range []domain.Actor{actor, other} {
+			// 每次暂存尝试使用独立键，提交后回读保持原位置。
+			var firstKey string
+			for attempt := 0; attempt < 2; attempt++ {
+				key, err := service.GenerateUploadObjectKey(current.UserID)
+				if err != nil || key == firstKey {
+					t.Fatal("暂存尝试对象键生成错误", err)
+				}
+				input := inputFor(key)
+				created, err := create(ctx, current, input)
+				if err != nil || created == nil || created.OwnerUserID != current.UserID || created.ObjectKey != key {
+					t.Fatal("生成键的暂存对象写入错误", err)
+				}
+				read, err := store.FindUserStoredObject(ctx, current.UserID, created.ID)
+				if err != nil || !reflect.DeepEqual(created, read) {
+					t.Fatal("生成键的暂存对象回读错误", err)
+				}
+				if duplicate, err := create(ctx, current, input); duplicate != nil || !errors.Is(err, domain.ErrStoredObjectLocationConflict) {
+					t.Fatal("重复对象位置应返回既有冲突", err)
+				}
+				firstKey = key
+			}
+		}
+
+		// 创建后外层失败，生成键对应的对象随事务回滚。
+		key, err := service.GenerateUploadObjectKey(actor.UserID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rollbackError := errors.New("generated object rollback fixture")
+		err = store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			if _, err := txStore.CreateUserStagedObject(txContext, inputFor(key)); err != nil {
+				return err
+			}
+			return rollbackError
+		})
+		if !errors.Is(err, rollbackError) {
+			t.Fatal("生成键对象的外层回滚原因错误", err)
+		}
+		checkMissing(t, key)
+	})
 	t.Run("one connection and zero-byte defaults", func(t *testing.T) {
 		pool.SetMaxOpenConns(1)
 		defer pool.SetMaxOpenConns(3)
@@ -242,10 +287,14 @@ func TestCreateUserStagedObjectIntegration(t *testing.T) {
 		if _, err := pool.ExecContext(ctx, "ALTER TABLE stored_objects AUTO_INCREMENT = 9223372036854775810"); err != nil {
 			t.Fatal(err)
 		}
-		input := inputFor("staged/maximum")
+		key, err := service.GenerateUploadObjectKey(maximum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := inputFor(key)
 		input.SizeBytes = maximum
 		created, err := create(ctx, domain.Actor{UserID: maximum, DeviceID: maximum, SessionID: maximum}, input)
-		if err != nil || created == nil || created.ID < uint64(1)<<63 || created.OwnerUserID != maximum || created.FileSize != maximum {
+		if err != nil || created == nil || created.ID < uint64(1)<<63 || created.OwnerUserID != maximum || created.FileSize != maximum || created.ObjectKey != key || !strings.HasPrefix(key, "users/18446744073709551615/objects/") {
 			t.Fatal("高位自增对象、完整身份或字节数丢失", err)
 		}
 	})
