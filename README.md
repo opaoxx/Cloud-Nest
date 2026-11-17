@@ -617,3 +617,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 ValidateCreateUploadReplay，按用户/上传创建操作/键范围、保留期限、请求摘要和 UPLOAD_TASK/201/正文任务标识顺序校验已存结果，到期采用 now >= expires_at，完整快照继续由 RestoreCreateUploadData 恢复。范围/期限/冲突/资源与并发专项，以及正式 MySQL 历史结果、参数变化和异常持久关联连续三次通过，规则和复验方法见 [第 267 步学习记录](docs/开发学习记录.md#第-267-步校验上传创建幂等结果的复用条件)。
 
 已提供 IdempotentCreateUploadService，首次请求在同一用户事务中创建预占、对象、任务并保存八天稳定结果；同键同参数重试校验后复用原快照，返回独立 JSON。服务专项与正式 MySQL 单连接、同账号其他设备、跨账号、历史恢复、四项回滚及三类并发连续三次通过，调用与复验方法见 [第 268 步学习记录](docs/开发学习记录.md#第-268-步组合上传创建幂等服务)。
+
+已提供 handler.CreateUploadSuccess，恢复已确认提交的稳定上传快照，关联当前请求 ID 并预先编码，以 HTTP 201、UTF-8 JSON、no-store 和 Pragma no-cache 交付。成功/异常/取消/已发送及真实 POST 专项和正式 MySQL 幂等创建到实际 HTTP 交付连续三次通过，OpenAPI 补充 CreateUploadSucceeded，共 453 处本地引用核对通过。调用与复验方法见 [第 269 步学习记录](docs/开发学习记录.md#第-269-步实现上传创建成功-http-交付)。

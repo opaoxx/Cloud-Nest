@@ -98,6 +98,7 @@ info:
     GET /api/v1/entries/{id} 已由启动入口绑定共享授权与真实详情快照服务，支持文件、目录和根目录读取。
     CreateUploadRequest 定义单文件上传创建请求 DTO，必填 parent_id/name/size_bytes，可空 sha256 转换为固定摘要，声明原值交给上传服务核对。
     CreateUploadData/CreateUploadResponse 定义上传创建稳定快照，包含公开任务、SINGLE 上传方式、应用内容路径和一致的到期时间。
+    CreateUploadSucceeded 定义上传创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
     IdempotencyKey 定义后续业务写请求的 Idempotency-Key 请求头，单值及字符错误定位 Idempotency-Key。
@@ -3139,6 +3140,26 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RevokeSessionResponse'
+    CreateUploadSucceeded:
+      description: |
+        上传创建成功 HTTP 201，使用创建时稳定快照与当前请求 ID。
+        交付前恢复已确认提交且通过复用条件检查的稳定 JSON，关联 task、SINGLE、content_path 和 expires_at。
+        响应采用 no-store 和 Pragma no-cache，字段和时间规则沿用 CreateUploadResponse。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CreateUploadResponse'
     CreateDirectorySucceeded:
       description: |
         创建文件夹成功 HTTP 201，使用 data.entry 创建快照与当前请求 ID。

@@ -6,14 +6,22 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -239,6 +247,100 @@ func TestIdempotentCreateUploadServiceIntegration(t *testing.T) {
 		}
 		if err != nil || !bytes.Equal(first, replayed) || readState(actor.UserID) != before {
 			t.Fatal("重建后未复用历史创建快照", err)
+		}
+	})
+
+	t.Run("committed upload result delivered through HTTP", func(t *testing.T) {
+		var logs bytes.Buffer
+		const origin = "http://127.0.0.1:5173"
+		router := serverhttp.NewRouter(logging.New(&logs), []string{origin}, func(context.Context) bool { return true })
+		router.POST("/test-create-upload-success/:mode", func(requestContext *gin.Context) {
+			input := inputFor()
+			mode := requestContext.Param("mode")
+			key := "delivery-" + mode
+			switch mode {
+			case "zero":
+				input.SizeBytes = 0
+			case "limit":
+				input.SizeBytes = domain.MaxSingleUploadSizeBytes
+			case "history":
+				key = "idempotent-upload-ordinary"
+			}
+			stableBody, err := creator.Create(requestContext.Request.Context(), actor, input, key)
+			if err != nil {
+				handler.InternalError(requestContext, nil)
+				return
+			}
+			requestContext.Header("Content-Length", "3")
+			requestContext.Header("Content-Encoding", "gzip")
+			handler.CreateUploadSuccess(requestContext, stableBody)
+		}, func(*gin.Context) { t.Error("上传创建交付后进入下游") })
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 3 * time.Second
+		sequence := 0
+		for _, mode := range []string{"ordinary", "zero", "limit", "history"} {
+			var previousData *dto.CreateUploadData
+			var afterFirst uploadState
+			before := readState(actor.UserID)
+			for attempt := 0; attempt < 2; attempt++ {
+				sequence++
+				request, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/test-create-upload-success/"+mode+"?note=private-delivery-query", strings.NewReader("private-delivery-body"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				requestID := "28ee758a-0727-42de-ae7d-" + strconv.FormatInt(300000000000+int64(sequence), 10)
+				request.Header.Set("X-Request-ID", strings.ToUpper(requestID))
+				request.Header.Set("Origin", origin)
+				request.Header.Set("Authorization", "Bearer private-delivery-access")
+				request.Header.Set("Idempotency-Key", "private-delivery-key")
+				request.AddCookie(&http.Cookie{Name: handler.RefreshCookieName, Value: "private-delivery-cookie"})
+				response, err := client.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				encoded, readError := io.ReadAll(response.Body)
+				closeError := response.Body.Close()
+				if readError != nil || closeError != nil || response.StatusCode != 201 || response.ContentLength != int64(len(encoded)) ||
+					response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Content-Encoding") != "" ||
+					response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Pragma") != "no-cache" || response.Header.Get("X-Request-ID") != requestID ||
+					response.Header.Get("Access-Control-Allow-Origin") != origin || len(response.Cookies()) != 0 {
+					t.Fatal("正式创建结果 HTTP 状态、正文或响应头错误", readError, closeError)
+				}
+				var body dto.CreateUploadResponse
+				if json.Unmarshal(encoded, &body) != nil || body.RequestID != requestID || body.Data.Task.Status != "UPLOADING" || strings.Contains(string(encoded), "private-delivery") {
+					t.Fatal("正式上传创建成功 JSON 错误")
+				}
+				current := readState(actor.UserID)
+				if attempt == 0 {
+					previousData = &body.Data
+					afterFirst = current
+					if mode == "history" {
+						if current != before {
+							t.Fatal("历史快照交付产生了重复创建")
+						}
+					} else if current.tasks != before.tasks+1 || current.objects != before.objects+1 || current.records != before.records+1 || current.reserved != before.reserved+body.Data.Task.SizeBytes || current.reserved != current.taskReserved {
+						t.Fatal("成功交付前四项创建事实不一致")
+					}
+				} else if !reflect.DeepEqual(previousData, &body.Data) || current != afterFirst {
+					t.Fatal("同快照再次交付发生变化或重复预占")
+				}
+			}
+		}
+		lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
+		if len(lines) != sequence {
+			t.Fatal("真实创建交付完成日志数量错误")
+		}
+		for index, line := range lines {
+			var completed map[string]any
+			expectedID := "28ee758a-0727-42de-ae7d-" + strconv.FormatInt(300000000001+int64(index), 10)
+			if json.Unmarshal(line, &completed) != nil || completed["status"] != float64(201) || completed["method"] != "POST" || completed["level"] != "INFO" || completed["request_id"] != expectedID {
+				t.Fatal("真实创建交付完成日志错误")
+			}
+		}
+		if strings.Contains(logs.String(), "private-delivery") || strings.Contains(logs.String(), "学习.bin") {
+			t.Fatal("完成日志包含原始请求或业务字段")
 		}
 	})
 
