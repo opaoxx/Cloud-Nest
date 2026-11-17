@@ -26,6 +26,7 @@ type loginTransactionScript struct {
 	deviceQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	sessionQuery                                       func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	objectQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	preferenceQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	rotate                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -166,6 +167,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 		if strings.Contains(query, "file_entries") && script.entryQuery != nil {
 			script.record("entry")
 			return script.entryQuery(ctx, query, arguments)
+		}
+		if strings.Contains(query, "stored_objects") && script.objectQuery != nil {
+			script.record("object")
+			return script.objectQuery(ctx, query, arguments)
 		}
 		if strings.Contains(query, "auth_sessions") && script.sessionQuery != nil {
 			script.record("session")

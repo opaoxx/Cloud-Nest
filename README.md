@@ -595,3 +595,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 domain.CreateStagedObjectInput，保存服务端 Provider、Bucket、ObjectKey 和完整 SizeBytes。IsValid 检查必填 ASCII 文本及 32/63/255 列宽，大小保留 uint64 原值，上传上限继续由已有声明校验执行。字段/边界及现有 JSON→上传声明→暂存参数→对象/任务组装连续三次通过，模型与复验方法见 [第 256 步学习记录](docs/开发学习记录.md#第-256-步定义暂存对象创建输入模型)。
 
 已提供 models.NewStagedObject，创建时显式映射可信用户、Provider、Bucket、ObjectKey、FileSize 和 Status 六列，采用 <-:create 权限，标识及记录时间由数据库生成。六列解析、七组插入/更新 SQL 检查及真实 MySQL 默认值、位置唯一键、用户外键和完整无符号参数连续三次通过，模型与复验方法见 [第 257 步学习记录](docs/开发学习记录.md#第-257-步定义暂存对象创建数据库映射)。
+
+已提供 Store.CreateUserStagedObject，在已认证用户事务中校验暂存参数、固定 STAGING 插入六列，按归属及位置取得 ID，再复用完整对象读取核对初始事实。重复位置返回 ErrStoredObjectLocationConflict，错误交由外层回滚，提交成功后确认结果。创建/取消专项和真实 MySQL 单连接、范围隔离、回滚、授权复查、并发位置竞争及高位 ID 连续三次通过，调用与复验方法见 [第 258 步学习记录](docs/开发学习记录.md#第-258-步在已认证用户事务中创建暂存对象)。

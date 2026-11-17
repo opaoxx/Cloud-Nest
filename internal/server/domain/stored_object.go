@@ -12,6 +12,9 @@ var ErrStoredObjectNotFound = errors.New("存储对象不存在")
 // ErrInvalidStoredObjectData 表示存储对象的归属、位置或生命周期事实异常。
 var ErrInvalidStoredObjectData = errors.New("存储对象数据异常")
 
+// ErrStoredObjectLocationConflict 表示创建时的存储位置已被对象记录占用。
+var ErrStoredObjectLocationConflict = errors.New("存储对象位置已存在")
+
 // StoredObject 保存物理对象的内部记录，供上传、发布和回收流程使用。
 type StoredObject struct {
 	// 1. 保存对象标识、归属及不可变存储位置。
