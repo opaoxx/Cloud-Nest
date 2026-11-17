@@ -16,6 +16,9 @@ const RenameEntryOperation = "v1.entries.rename"
 // MoveEntryOperation 是目录项移动摘要与幂等记录共用的版本化操作名。
 const MoveEntryOperation = "v1.entries.move"
 
+// CreateUploadOperation 是上传创建摘要与幂等记录共用的版本化操作名。
+const CreateUploadOperation = "v1.uploads.create"
+
 // ErrIdempotencyRecordNotFound 表示指定用户、操作和键的记录不存在。
 var ErrIdempotencyRecordNotFound = errors.New("幂等记录不存在")
 

@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——上传摘要检查使用了推测的输入模型文件名
+
+### 问题现象
+
+第 262 步读取输入模型时，使用不存在的 internal/server/domain/create_upload.go，命令提示找不到路径。修正前先记录现象，接下来依据 rg --files 已列出的 create_upload_input.go 读取真实定义。
+
+### 根因与修复方案
+
+读取命令根据功能名推测了文件名，遗漏实际路径中的 _input。依据 rg --files 结果改为 internal/server/domain/create_upload_input.go，并核对 CreateUploadInput 的字段与 ValidateCreateUploadInput 的校验顺序。
+
+### 验证结果
+
+实际输入模型读取成功，摘要生产方法编译通过。服务二十三项及 HTTP 五项主测试连续三次通过，固定向量与规范化差异符合约定。go test -count=1 ./... 全量通过，Repository 包耗时 114.542 秒，go vet ./... 通过。gofmt、文档示例和 Git 差异检查通过。
+
 ## 2026-11-17——配额预占联测格式化发现闭包未闭合
 
 ### 问题现象

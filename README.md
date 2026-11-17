@@ -603,3 +603,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 Store.CreateUserUploadTask，在已认证用户事务中核对声明、到期时间、目标目录及初始暂存对象，固定 SINGLE/UPLOADING 插入十一列，再定位并回读完整任务。预期摘要独立复制，重复暂存引用使用 ErrUploadTaskStagedObjectConflict，结果由外层提交确认。专项及真实 MySQL 单连接组合、回滚、授权、并发引用和高位标识连续三次通过，调用与复验方法见 [第 260 步学习记录](docs/开发学习记录.md#第-260-步在已认证用户事务中创建-single-上传任务)。
 
 已提供 Store.ReserveUserUploadSpace，在已认证用户事务中当前读锁定配额，用安全减法判断剩余空间，零字节核对后成功，正值按原有配额条件更新 reserved_storage 和 UTC 时间。空间不足使用 ErrQuotaExceeded，外层失败可回滚。专项及真实 MySQL 边界、并发防超额、单连接重复累加和预占/对象/任务组合连续三次通过，调用与复验方法见 [第 261 步学习记录](docs/开发学习记录.md#第-261-步在已认证用户事务中预占上传空间)。
+
+已提供 BuildCreateUploadRequestHash 和 v1.uploads.create 操作名，复用上传声明校验后，按固定字段顺序编码目录、展示名、字节数及可空 SHA-256，计算 32 字节请求摘要。目录及大小使用十进制文本，哈希使用小写十六进制并区分 null 与全零值。独立固定向量、参数/边界/并发及 HTTP 解析比较连续三次通过，规则和复验方法见 [第 262 步学习记录](docs/开发学习记录.md#第-262-步实现上传创建的幂等请求摘要)。
