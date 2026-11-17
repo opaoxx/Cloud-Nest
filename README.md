@@ -573,3 +573,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 Store.FindUserUploadTask，按可信用户和任务 ID 绑定查询二十八列，核对记录范围、上传方式、状态、预占、发布结果及 UTC 微秒时间，返回独立的领域任务副本。缺失或跨账号目标使用 ErrUploadTaskNotFound，异常记录使用 ErrInvalidUploadTaskData。专项及真实 MySQL 的十状态、空值、到期/终态、跨账号、写锁期间读取与完整无符号范围连续三次通过，调用与复验方法见 [第 245 步学习记录](docs/开发学习记录.md#第-245-步按用户归属读取指定上传任务)。
 
 已提供 UploadTaskService.Get，接收可信 Actor 和任务 ID，绑定 Actor.UserID 读取任务，核对交付范围及状态，复用 copyOptionalValue 复制十三项可空字段。同账号其他设备可查询任务，来源设备、到期及终态事实保留。服务专项及真实 MySQL 组合联测连续三次通过，调用与复验方法见 [第 246 步学习记录](docs/开发学习记录.md#第-246-步组合上传任务读取服务)。
+
+已提供 UploadTaskData、UploadTaskResponse 及 NewUploadTaskData，交付十三个公开任务字段，ID 使用十进制字符串，大小遵守 JSON 安全整数，时间转换为 UTC 微秒，可空字段明确为 null。last_error 按已批准业务码生成固定提示，未知码统一为 INTERNAL_ERROR。DTO、OpenAPI 及真实 MySQL→Service→DTO→JSON 联测连续三次通过，字段与复验方法见 [第 247 步学习记录](docs/开发学习记录.md#第-247-步定义上传任务查询响应-dto)。

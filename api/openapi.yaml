@@ -1668,6 +1668,101 @@ components:
             status: ACTIVE
             color_key: green
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadTaskErrorSummary:
+      type: object
+      nullable: true
+      additionalProperties: false
+      required: [code, message]
+      description: 最近一次任务错误的公开摘要，未记录错误码时为 null。message 由服务端按公开码生成固定提示。
+      properties:
+        code:
+          type: string
+          enum: [TARGET_UNAVAILABLE, BODY_SIZE_MISMATCH, FILE_TOO_LARGE, CHECKSUM_MISMATCH, QUOTA_EXCEEDED, TEMP_SPACE_EXHAUSTED, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, INTERNAL_ERROR]
+          description: 未知或空的内部错误码统一转换为 INTERNAL_ERROR。
+        message:
+          type: string
+          enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常']
+          description: 按 code 生成的固定中文提示。
+    UploadTaskData:
+      type: object
+      additionalProperties: false
+      required: [id, parent_id, requested_name, resolved_name, size_bytes, upload_mode, status, result_entry_id, created_at, updated_at, expires_at, completed_at, last_error]
+      description: 已通过用户归属检查的任务查询数据，保留到期和终态事实，可空字段明确返回 null。
+      properties:
+        id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        requested_name:
+          type: string
+          minLength: 1
+          description: 已校验的请求展示名。
+        resolved_name:
+          type: string
+          nullable: true
+          minLength: 1
+          description: 发布时选定的最终名称。
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: 声明大小，零字节有效，采用 JSON 安全整数范围。
+        upload_mode:
+          type: string
+          enum: [SINGLE, MULTIPART]
+        status:
+          type: string
+          enum: [CREATING, UPLOADING, COMPLETING, VERIFYING, COMPLETED, CANCELLING, CANCELLED, EXPIRING, EXPIRED, FAILED]
+        result_entry_id:
+          type: string
+          nullable: true
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 发布后的目录项 ID，使用完整非零 uint64 标准十进制字符串，上限为 18446744073709551615。
+        created_at:
+          type: string
+          format: date-time
+          description: UTC 微秒创建时间，年份为 1000～9999。
+        updated_at:
+          type: string
+          format: date-time
+          description: UTC 微秒更新时间，年份为 1000～9999。
+        expires_at:
+          type: string
+          format: date-time
+          description: UTC 微秒任务到期时间，保留已到期事实。
+        completed_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: UTC 微秒任务终结时间。COMPLETED 必须提供 result_entry_id 和 completed_at。
+        last_error:
+          $ref: '#/components/schemas/UploadTaskErrorSummary'
+    UploadTaskResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/UploadTaskData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          id: '19'
+          parent_id: '13'
+          requested_name: 学习笔记.MD
+          resolved_name: null
+          size_bytes: 2048
+          upload_mode: SINGLE
+          status: UPLOADING
+          result_entry_id: null
+          created_at: '2026-11-17T08:00:00.123456Z'
+          updated_at: '2026-11-17T08:00:00.123456Z'
+          expires_at: '2026-11-18T08:00:00.123456Z'
+          completed_at: null
+          last_error: null
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateUploadRequest:
       type: object
       additionalProperties: false
