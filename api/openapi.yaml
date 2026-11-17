@@ -3805,6 +3805,29 @@ components:
               message: JSON 请求正文不能超过 1 MiB
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentChecksumMismatch:
+      description: 完整接收且实际大小符合声明后，客户端提供的预期 SHA256 与实际内容摘要不一致时返回 HTTP 422。省略预期摘要时通过该比较，显式全零摘要仍参与比较。响应只包含固定提示。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: CHECKSUM_MISMATCH
+              message: 文件校验失败，请重新上传
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadContentActualSizeMismatch:
       description: 原始文件流按任务声明受限读取，正常到达 EOF 时实际字节偏短，或额外检测到至少一个字节时，返回固定 HTTP 413。大小错误先于后续存储写入和发布，读取/写入故障由对应错误流程处理。
       headers:

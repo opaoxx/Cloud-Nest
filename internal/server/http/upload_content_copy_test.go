@@ -36,6 +36,10 @@ func (reader *uploadCopyHTTPReader) Read(buffer []byte) (int, error) {
 }
 
 func TestCopyUploadContentRealHTTP(t *testing.T) {
+	matching := sha256.Sum256([]byte{0, 0xff, 0xfe, 1})
+	wrong := sha256.Sum256([]byte("different fixture content"))
+	empty := sha256.Sum256(nil)
+	zero := [sha256.Size]byte{}
 	for _, fixture := range []struct {
 		name         string
 		payload      []byte
@@ -45,21 +49,30 @@ func TestCopyUploadContentRealHTTP(t *testing.T) {
 		copyCalled   bool
 		readFailure  bool
 		closedTarget bool
+		expected     *[sha256.Size]byte
 	}{
-		{"known binary", []byte{0, 0xff, 0xfe, 1}, 4, false, 204, true, false, false},
-		{"chunked binary", []byte{0, 0xff, 0xfe, 1}, 4, true, 204, true, false, false},
-		{"chunked short", []byte{0, 0xff, 1}, 4, true, 413, true, false, false},
-		{"chunked long", []byte{0, 0xff, 0xfe, 1, 2, 3, 4}, 4, true, 413, true, false, false},
-		{"known empty", nil, 0, false, 204, true, false, false},
-		{"chunked empty", nil, 0, true, 204, true, false, false},
-		{"nonempty for zero", []byte{1}, 0, true, 413, true, false, false},
-		{"known mismatch before copy", []byte{1, 2, 3, 4}, 3, false, 413, false, false, false},
-		{"body read failure", []byte{1, 2, 3}, 3, false, 500, true, true, false},
-		{"closed temporary target", []byte{1, 2, 3}, 3, false, 500, true, false, true},
-		{"above JSON limit", bytes.Repeat([]byte{0xff}, int(binding.MaxJSONBodyBytes)+7), uint64(binding.MaxJSONBodyBytes) + 7, true, 204, true, false, false},
+		{"known binary", []byte{0, 0xff, 0xfe, 1}, 4, false, 204, true, false, false, nil},
+		{"chunked binary", []byte{0, 0xff, 0xfe, 1}, 4, true, 204, true, false, false, nil},
+		{"chunked short", []byte{0, 0xff, 1}, 4, true, 413, true, false, false, nil},
+		{"chunked long", []byte{0, 0xff, 0xfe, 1, 2, 3, 4}, 4, true, 413, true, false, false, nil},
+		{"known empty", nil, 0, false, 204, true, false, false, nil},
+		{"chunked empty", nil, 0, true, 204, true, false, false, nil},
+		{"nonempty for zero", []byte{1}, 0, true, 413, true, false, false, nil},
+		{"known mismatch before copy", []byte{1, 2, 3, 4}, 3, false, 413, false, false, false, nil},
+		{"body read failure", []byte{1, 2, 3}, 3, false, 500, true, true, false, nil},
+		{"closed temporary target", []byte{1, 2, 3}, 3, false, 500, true, false, true, nil},
+		{"above JSON limit", bytes.Repeat([]byte{0xff}, int(binding.MaxJSONBodyBytes)+7), uint64(binding.MaxJSONBodyBytes) + 7, true, 204, true, false, false, nil},
+		{"matching checksum", []byte{0, 0xff, 0xfe, 1}, 4, false, 204, true, false, false, &matching},
+		{"chunked checksum mismatch", []byte{0, 0xff, 0xfe, 1}, 4, true, 422, true, false, false, &wrong},
+		{"explicit zero checksum", []byte{0, 0xff, 0xfe, 1}, 4, false, 422, true, false, false, &zero},
+		{"empty matching checksum", nil, 0, true, 204, true, false, false, &empty},
+		{"empty checksum mismatch", nil, 0, false, 422, true, false, false, &wrong},
+		{"size error before checksum", []byte{1, 2, 3}, 4, true, 413, true, false, false, &wrong},
+		{"IO error before checksum", []byte{1, 2, 3}, 3, false, 500, true, true, false, &wrong},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 原始 HTTP 流先经过认证及头/长度校验，再写入调用方拥有的文件。
+			checksumCalls := 0
 			directory := t.TempDir()
 			var logs bytes.Buffer
 			router := NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
@@ -120,7 +133,23 @@ func TestCopyUploadContentRealHTTP(t *testing.T) {
 					handler.InternalError(requestContext, nil)
 					return
 				}
-				// 3. 同一文件描述符继续同步、定位和读取，核对磁盘内容与摘要。
+				// 3. 完整复制成功后比较任务声明的摘要，错误按公开契约交付。
+				checksumCalls++
+				if err := service.ValidateUploadContentChecksum(result.SHA256, fixture.expected); err != nil {
+					if !errors.Is(err, domain.ErrUploadChecksumMismatch) {
+						t.Error("未知摘要校验错误", err)
+						handler.InternalError(requestContext, nil)
+						return
+					}
+					requestContext.Header("Cache-Control", "no-store")
+					requestContext.Header("Pragma", "no-cache")
+					requestContext.AbortWithStatusJSON(http.StatusUnprocessableEntity, dto.ErrorResponse{
+						Error:     dto.ErrorDetail{Code: "CHECKSUM_MISMATCH", Message: err.Error(), Details: nil},
+						RequestID: requestcontext.RequestID(requestContext.Request.Context()),
+					})
+					return
+				}
+				// 4. 同一文件描述符继续同步、定位和读取，核对磁盘内容与摘要。
 				if err := file.Sync(); err != nil {
 					t.Error(err)
 				}
@@ -154,10 +183,26 @@ func TestCopyUploadContentRealHTTP(t *testing.T) {
 			if response.StatusCode != fixture.status || readError != nil || closeError != nil {
 				t.Fatal("实际流复制 HTTP 交付错误", response.StatusCode, readError, closeError)
 			}
+			wantChecksumCalls := 0
+			if fixture.status == 204 || fixture.status == 422 {
+				wantChecksumCalls = 1
+			}
+			if checksumCalls != wantChecksumCalls {
+				t.Fatal("摘要比较调用顺序错误", checksumCalls)
+			}
 			if fixture.status != 204 {
 				var result dto.ErrorResponse
 				if err := json.Unmarshal(body, &result); err != nil || result.RequestID != response.Header.Get("X-Request-ID") || result.Error.Details != nil {
 					t.Fatal("流复制错误结构或请求 ID 错误", err)
+				}
+				if response.Header.Get("Cache-Control") != "no-store" || !strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
+					t.Fatal("错误响应头不符合契约")
+				}
+				if (fixture.status == 413 || fixture.status == 422) && response.Header.Get("Pragma") != "no-cache" {
+					t.Fatal("上传校验错误缺少禁止缓存头")
+				}
+				if fixture.status == 422 && (result.Error.Code != "CHECKSUM_MISMATCH" || result.Error.Message != "文件校验失败，请重新上传") {
+					t.Fatal("摘要错误码或固定提示不符")
 				}
 				if fixture.status == 413 && result.Error.Code != "BODY_SIZE_MISMATCH" {
 					t.Fatal("大小错误码不符")
