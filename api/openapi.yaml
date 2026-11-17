@@ -3805,6 +3805,52 @@ components:
               message: JSON 请求正文不能超过 1 MiB
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentBodySizeMismatch:
+      description: 上传内容请求的已知 Content-Length 与当前用户任务的 file_size 不一致时返回 HTTP 413。使用 net/http 解析后的 ContentLength，未知长度继续由实际读取阶段计数校验。错误在正文读取前交付。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: BODY_SIZE_MISMATCH
+              message: 请求正文长度与上传声明不一致
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentInvalidLength:
+      description: 上传内容绑定时，已解析 ContentLength 小于 -1 属于无效长度元数据，返回固定 HTTP 400。该内部字段中 -1 表示未知长度，零及正值表示已知长度。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_ARGUMENT
+              message: 请求正文长度无效
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadContentUnsupportedMediaType:
       description: 原始文件内容接收入口要求单个 application/octet-stream Content-Type，允许格式正确的媒体参数。Content-Encoding 可省略或为单个 identity。缺失、空值、重复或无效媒体类型以及压缩/多重编码返回 HTTP 415，校验先于租约准备和正文读取。
       headers:
