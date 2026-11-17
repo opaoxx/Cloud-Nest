@@ -33,6 +33,7 @@ type loginTransactionScript struct {
 	orphanStagedObject                                 func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	replaceUploadObject                                func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	recordUploadObject                                 func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	beginUploadVerification                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	quotaQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	reserveStorage                                     func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
@@ -79,6 +80,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE upload_tasks AS upload_task JOIN stored_objects AS stored_object ") && connection.script.beginUploadVerification != nil {
+		connection.script.record("begin_upload_verification")
+		return connection.script.beginUploadVerification(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "UPDATE stored_objects AS stored_object JOIN upload_tasks AS upload_task ") && connection.script.recordUploadObject != nil {
 		connection.script.record("record_upload_object")
 		return connection.script.recordUploadObject(ctx, statement, arguments)
