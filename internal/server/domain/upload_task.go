@@ -18,6 +18,12 @@ var ErrUploadTaskStagedObjectConflict = errors.New("暂存对象已关联上传�
 // ErrUploadTaskNotReady 表示任务方式、阶段或期限不满足当前内容接收条件。
 var ErrUploadTaskNotReady = errors.New("上传任务当前不可接收文件内容")
 
+// ErrUploadTaskBusy 表示当前任务仍由有效租约持有者处理。
+var ErrUploadTaskBusy = errors.New("上传任务正在处理中")
+
+// ErrUploadLeaseVersionExhausted 表示租约版本已达 uint64 上限，无法继续递增。
+var ErrUploadLeaseVersionExhausted = errors.New("上传租约版本已达上限")
+
 // UploadTask 保存上传任务的内部记录，供后续持久化、发布和恢复流程使用。
 type UploadTask struct {
 	// 1. 保存任务标识、归属及当前暂存对象。

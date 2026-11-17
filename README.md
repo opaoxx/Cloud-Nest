@@ -627,3 +627,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 ValidateUploadContentState，按调用参数、任务范围/记录、SINGLE/UPLOADING/期限及大小/完整预占/接收字段顺序校验。其他有效阶段或到期返回 ErrUploadTaskNotReady，输入异常沿用数据错误，零字节与可空摘要有效。状态/边界/并发专项及正式 MySQL 读取组合连续三次通过，规则和复验方法见 [第 272 步学习记录](docs/开发学习记录.md#第-272-步校验上传内容接收前的任务状态)。
 
 已提供 Store.LockUserUploadTask，在已认证用户事务中按可信用户及任务 ID 执行完整二十八列 FOR UPDATE 当前读，复用原任务校验和独立副本交付。真实 MySQL 核对已有快照后的最新事实、持锁阻塞、提交/回滚释放、取消及跨账号范围，专项连续三次通过。调用和复验方法见 [第 273 步学习记录](docs/开发学习记录.md#第-273-步在已认证用户事务中加锁读取上传任务)。
+
+已提供 ValidateUploadContentLease，复用内容接收阶段判断，再核对租约配对、持有者、期限和版本。有效租约返回 ErrUploadTaskBusy，已达无符号上限的版本返回 ErrUploadLeaseVersionExhausted。恰好到期允许继续判断。业务专项及正式 MySQL 已认证事务、当前读和租约校验组合连续三次通过，边界与复验方法见 [第 274 步学习记录](docs/开发学习记录.md#第-274-步校验上传接收租约的可领取条件)。
