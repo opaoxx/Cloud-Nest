@@ -575,3 +575,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 UploadTaskService.Get，接收可信 Actor 和任务 ID，绑定 Actor.UserID 读取任务，核对交付范围及状态，复用 copyOptionalValue 复制十三项可空字段。同账号其他设备可查询任务，来源设备、到期及终态事实保留。服务专项及真实 MySQL 组合联测连续三次通过，调用与复验方法见 [第 246 步学习记录](docs/开发学习记录.md#第-246-步组合上传任务读取服务)。
 
 已提供 UploadTaskData、UploadTaskResponse 及 NewUploadTaskData，交付十三个公开任务字段，ID 使用十进制字符串，大小遵守 JSON 安全整数，时间转换为 UTC 微秒，可空字段明确为 null。last_error 按已批准业务码生成固定提示，未知码统一为 INTERNAL_ERROR。DTO、OpenAPI 及真实 MySQL→Service→DTO→JSON 联测连续三次通过，字段与复验方法见 [第 247 步学习记录](docs/开发学习记录.md#第-247-步定义上传任务查询响应-dto)。
+
+已提供 handler.UploadTaskSuccess，将任务服务结果转换为公开 DTO，关联当前 request_id，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。DTO 异常及取消复用统一错误响应，已提交响应通过 Written 检查结束处理。交付专项及真实 MySQL/Service/HTTP 每轮十三次 GET 连续三次通过，顺序与复验方法见 [第 248 步学习记录](docs/开发学习记录.md#第-248-步实现上传任务查询成功-http-交付)。

@@ -3037,6 +3037,26 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/MoveEntryResponse'
+    UploadTaskRetrieved:
+      description: |
+        上传任务查询成功 HTTP 200，使用 UploadTaskResponse 和本次请求 ID。
+        响应采用 no-store 和 Pragma no-cache，任务数据保留明确 null、到期和终态事实。
+        last_error 使用固定公开码与提示，字段及数值范围沿用 UploadTaskData。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UploadTaskResponse'
     EntryDetailRetrieved:
       description: |
         指定目录项详情成功 HTTP 200，使用完整 EntryDetailResponse 和本次请求 ID。
