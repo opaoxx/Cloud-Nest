@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——上传映射检查读取了错误的事务测试文件名
+
+### 问题现象
+
+第 244 步检索已定位 loginTransactionDatabase 位于 transaction_integration_test.go，后续读取却引用了不存在的 login_transaction_integration_test.go。修正前记录于此，接下来按检索返回的实际路径读取并继续核对映射验证方式。
+
+### 根因与修复方案
+
+检索后再次按测试函数名推测文件名。改为读取实际命中的 transaction_integration_test.go，并核对现有单行结果及连接器实现。映射专项复用 fileEntryRows 和 deviceConnector，使用 GORM 解析及 SQL 行扫描验证当前映射。
+
+### 验证结果
+
+实际事务夹具文件读取成功。映射解析与十二组扫描、领域十八项、上传业务校验五项及 DTO 五项主测试连续三次通过，JSON 入选核对无跳过项。go test -count=1 ./...、go vet ./...、gofmt 和 git diff --check 通过，学习记录历史前缀、唯一标题、围栏及两段 PowerShell 示例语法检查通过，API 文本基线及原迁移摘要核对通过。
+
 ## 2026-11-17——上传任务字段对照测试的列提取不完整
 
 ### 问题现象
