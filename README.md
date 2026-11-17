@@ -565,3 +565,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 service.ValidateCreateUploadInput，按目标目录 ID、完整名称、声明大小顺序校验上传声明，复用 ValidateEntryName 取得展示名，支持零字节及 16 MiB 边界，超限返回 ErrUploadFileTooLarge。成功结果复用 copyOptionalValue 独立复制预期摘要，来源原值与其他结果各自保留。业务校验、JSON/DTO 衔接、副本/并发及既有命名回归连续三次通过，规则与复验方法见 [第 241 步学习记录](docs/开发学习记录.md#第-241-步实现上传创建声明的业务校验)。
 
 已提供 domain.UploadStatus，以精确字符串常量表达上传任务十种状态，IsValid 检查合法值，IsTerminal 识别 COMPLETED、CANCELLED、EXPIRED、FAILED 四种终态。正常值、非法编码/写法及正式迁移状态/终态约束对照连续三次通过，模型与复验方法见 [第 242 步学习记录](docs/开发学习记录.md#第-242-步定义上传任务状态模型)。
+
+已提供 domain.UploadTask，完整保存上传任务的二十八项内部事实，包含可信归属、暂存/发布对象、声明、状态、预占、租约、重试及时间。BIGINT UNSIGNED 使用 uint64，两个 INT UNSIGNED 使用 uint32，可空列使用指针，状态复用 UploadStatus。正式迁移字段/空值对照及三组 JSON/DTO/业务声明衔接连续三次通过，字段与复验方法见 [第 243 步学习记录](docs/开发学习记录.md#第-243-步定义上传任务基础记录模型)。
