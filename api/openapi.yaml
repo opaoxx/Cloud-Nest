@@ -2810,6 +2810,53 @@ components:
                   details:
                     field: parent_id
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadTaskQueryRejected:
+      description: HTTP 400，路径 id 无效时返回 INVALID_ARGUMENT，details.field 为 id，使用固定路径规则提示。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_ARGUMENT
+              message: 上传任务 ID 须为 1～18446744073709551615 的标准十进制整数
+              details:
+                field: id
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadTaskNotFound:
+      description: HTTP 404，指定用户范围内任务缺失或跨账号目标返回 UPLOAD_NOT_FOUND，details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UPLOAD_NOT_FOUND
+              message: 上传任务不存在
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TargetEntryNotFound:
       description: |
         HTTP 404，ENTRY_NOT_FOUND，目标缺失、跨账号或路径回收/清理中时返回同一公开响应。

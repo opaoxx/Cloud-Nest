@@ -579,3 +579,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 handler.UploadTaskSuccess，将任务服务结果转换为公开 DTO，关联当前 request_id，以 HTTP 200、UTF-8 JSON、no-store 和 Pragma no-cache 交付。DTO 异常及取消复用统一错误响应，已提交响应通过 Written 检查结束处理。交付专项及真实 MySQL/Service/HTTP 每轮十三次 GET 连续三次通过，顺序与复验方法见 [第 248 步学习记录](docs/开发学习记录.md#第-248-步实现上传任务查询成功-http-交付)。
 
 已提供 UploadTaskPath 与 ParseUploadTaskPath，复用 parsePathID 将路由已解码的 id 转为完整非零 uint64，格式错误返回固定 id 字段提示。合法/非法路径、独立结果与错误对象、认证先行、查询参数及编码边界连续三次通过，OpenAPI 增加 UploadTaskID 参数，规则与复验方法见 [第 249 步学习记录](docs/开发学习记录.md#第-249-步定义上传任务查询路径参数-dto)。
+
+已提供 handler.UploadTask，组合认证上下文、上传路径 DTO、任务服务和成功交付。路径错误定位 id，缺失及跨账号目标使用 UPLOAD_NOT_FOUND 404，授权错误复用已有响应，异常结果与取消使用统一错误交付。专项及真实 JWT/MySQL/TCP 每轮二十八次 GET 连续三次通过，调用与复验方法见 [第 250 步学习记录](docs/开发学习记录.md#第-250-步实现上传任务查询-http-处理函数)。
