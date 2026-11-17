@@ -90,6 +90,9 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			if _, err := dto.RestoreCreateUploadData(encoded); err != nil {
+				return err
+			}
 			saved, err = txStore.CreateUserIdempotencyRecord(txContext, domain.IdempotencyResultInput{
 				Operation: domain.CreateUploadOperation, IdempotencyKey: key, RequestHash: requestHash, ResourceType: "UPLOAD_TASK", ResourceID: &task.ID, ResponseStatus: 201, ResponseBody: encoded, ExpiresAt: time.Now().Add(8 * 24 * time.Hour),
 			})
@@ -144,11 +147,11 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 			if err != nil || record.ResponseStatus != 201 || record.ResourceType != "UPLOAD_TASK" {
 				t.Fatal("上传资源范围或成功状态保存错误", err)
 			}
-			var restored dto.CreateUploadData
-			if json.Unmarshal(record.ResponseBody, &restored) != nil || !reflect.DeepEqual(*data, restored) {
+			restored, err := dto.RestoreCreateUploadData(record.ResponseBody)
+			if err != nil || !reflect.DeepEqual(data, restored) {
 				t.Fatal("持久 JSON 公开字段与原始 DTO 不一致")
 			}
-			encoded, err := json.Marshal(dto.CreateUploadResponse{Data: restored, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e148"})
+			encoded, err := json.Marshal(dto.CreateUploadResponse{Data: *restored, RequestID: "28ee758a-0727-42de-ae7d-3bb33155e148"})
 			if err != nil || strings.Contains(string(encoded), "object_key") || strings.Contains(string(encoded), "private-create") || strings.Contains(string(record.ResponseBody), "request_id") {
 				t.Fatal("公开 JSON 字段范围错误", err)
 			}
@@ -167,8 +170,8 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var restored dto.CreateUploadData
-		if json.Unmarshal(record.ResponseBody, &restored) != nil || !reflect.DeepEqual(*data, restored) || restored.Task.Status != "UPLOADING" {
+		restored, err := dto.RestoreCreateUploadData(record.ResponseBody)
+		if err != nil || !reflect.DeepEqual(data, restored) || restored.Task.Status != "UPLOADING" {
 			t.Fatal("任务后续变化改写了创建快照")
 		}
 		task, err := store.FindUserUploadTask(ctx, actor.UserID, *saved.ResourceID)
@@ -177,6 +180,67 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 		}
 		if current, err := dto.NewCreateUploadData(task); current != nil || !errors.Is(err, domain.ErrInvalidUploadTaskData) {
 			t.Fatal("后续阶段任务误作创建快照", err)
+		}
+	})
+	t.Run("invalid persisted snapshots", func(t *testing.T) {
+		input := domain.CreateUploadInput{ParentID: 11, Name: "invalid-snapshot.bin", SizeBytes: 40}
+		data, saved, err := create(actor, input, "create-dto-invalid-snapshots", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := readState()
+		for _, mode := range []string{"wrong path", "wrong mode", "wrong expiry", "missing null", "extra internal field"} {
+			var payload map[string]json.RawMessage
+			if json.Unmarshal(saved.ResponseBody, &payload) != nil {
+				t.Fatal("保存快照夹具解析失败")
+			}
+			switch mode {
+			case "wrong path":
+				payload["content_path"] = json.RawMessage(`"https://private.example/content"`)
+			case "wrong mode":
+				payload["upload_mode"] = json.RawMessage(`"MULTIPART"`)
+			case "wrong expiry":
+				payload["expires_at"], err = json.Marshal(data.ExpiresAt.Add(time.Nanosecond))
+			case "missing null", "extra internal field":
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(payload["task"], &fields) != nil {
+					t.Fatal("任务夹具解析失败")
+				}
+				if mode == "missing null" {
+					delete(fields, "last_error")
+				} else {
+					fields["object_key"] = json.RawMessage(`"private-object"`)
+				}
+				payload["task"], err = json.Marshal(fields)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=? WHERE id=?", encoded, saved.ID); err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, "create-dto-invalid-snapshots")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restored, err := dto.RestoreCreateUploadData(record.ResponseBody); restored != nil || !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) || readState() != before {
+				t.Fatal("异常持久快照未被识别或恢复改变了业务事实", err)
+			}
+		}
+		if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=? WHERE id=?", saved.ResponseBody, saved.ID); err != nil {
+			t.Fatal(err)
+		}
+		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, "create-dto-invalid-snapshots")
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := dto.RestoreCreateUploadData(record.ResponseBody)
+		if err != nil || !reflect.DeepEqual(data, restored) {
+			t.Fatal("合法持久快照未准确恢复", err)
 		}
 	})
 	for _, mode := range []string{"invalid DTO", "outer failure", "duplicate result"} {
