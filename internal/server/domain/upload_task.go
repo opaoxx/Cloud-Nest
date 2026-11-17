@@ -2,8 +2,15 @@ package domain
 
 import (
 	"crypto/sha256"
+	"errors"
 	"time"
 )
+
+// ErrUploadTaskNotFound 表示在指定用户范围内未找到上传任务。
+var ErrUploadTaskNotFound = errors.New("上传任务不存在")
+
+// ErrInvalidUploadTaskData 表示上传任务的归属、声明或状态事实异常。
+var ErrInvalidUploadTaskData = errors.New("上传任务数据异常")
 
 // UploadTask 保存上传任务的内部记录，供后续持久化、发布和恢复流程使用。
 type UploadTask struct {

@@ -569,3 +569,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 domain.UploadTask，完整保存上传任务的二十八项内部事实，包含可信归属、暂存/发布对象、声明、状态、预占、租约、重试及时间。BIGINT UNSIGNED 使用 uint64，两个 INT UNSIGNED 使用 uint32，可空列使用指针，状态复用 UploadStatus。正式迁移字段/空值对照及三组 JSON/DTO/业务声明衔接连续三次通过，字段与复验方法见 [第 243 步学习记录](docs/开发学习记录.md#第-243-步定义上传任务基础记录模型)。
 
 已提供 models.UploadTask，通过 TableName 和显式 GORM 列标签映射 upload_tasks 二十八列，沿用只读查询投影。预期摘要用可空字节切片承接，状态保留数据库文本，为后续领域校验及副本转换提供原始值。GORM 映射解析及十二组 SQL 测试连接器扫描连续三次通过，职责与复验方法见 [第 244 步学习记录](docs/开发学习记录.md#第-244-步定义上传任务数据库映射)。
+
+已提供 Store.FindUserUploadTask，按可信用户和任务 ID 绑定查询二十八列，核对记录范围、上传方式、状态、预占、发布结果及 UTC 微秒时间，返回独立的领域任务副本。缺失或跨账号目标使用 ErrUploadTaskNotFound，异常记录使用 ErrInvalidUploadTaskData。专项及真实 MySQL 的十状态、空值、到期/终态、跨账号、写锁期间读取与完整无符号范围连续三次通过，调用与复验方法见 [第 245 步学习记录](docs/开发学习记录.md#第-245-步按用户归属读取指定上传任务)。
