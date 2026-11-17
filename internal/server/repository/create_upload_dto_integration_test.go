@@ -99,6 +99,9 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			if err := service.ValidateCreateUploadReplay(saved, current.UserID, key, requestHash, time.Now()); err != nil {
+				return err
+			}
 			if mode == "outer failure" {
 				return outerFailure
 			}
@@ -147,6 +150,10 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 			if err != nil || record.ResponseStatus != 201 || record.ResourceType != "UPLOAD_TASK" {
 				t.Fatal("上传资源范围或成功状态保存错误", err)
 			}
+			requestHash, err := service.BuildCreateUploadRequestHash(input)
+			if err != nil || service.ValidateCreateUploadReplay(record, actor.UserID, key, requestHash, time.Now()) != nil {
+				t.Fatal("已提交记录复用条件校验失败", err)
+			}
 			restored, err := dto.RestoreCreateUploadData(record.ResponseBody)
 			if err != nil || !reflect.DeepEqual(data, restored) {
 				t.Fatal("持久 JSON 公开字段与原始 DTO 不一致")
@@ -169,6 +176,9 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, "create-dto-history")
 		if err != nil {
 			t.Fatal(err)
+		}
+		if err := service.ValidateCreateUploadReplay(record, actor.UserID, "create-dto-history", saved.RequestHash, record.CreatedAt.Add(25*time.Hour)); err != nil {
+			t.Fatal("保留窗口内的历史创建结果未通过", err)
 		}
 		restored, err := dto.RestoreCreateUploadData(record.ResponseBody)
 		if err != nil || !reflect.DeepEqual(data, restored) || restored.Task.Status != "UPLOADING" {
@@ -266,6 +276,81 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("replay scope conflict expiry and resource", func(t *testing.T) {
+		input := domain.CreateUploadInput{ParentID: 11, Name: "replay.bin", SizeBytes: 40}
+		const key = "create-dto-replay"
+		_, saved, err := create(actor, input, key, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := readState()
+		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, checkTime := range []time.Time{record.ExpiresAt.Add(-time.Nanosecond), record.ExpiresAt, record.ExpiresAt.Add(time.Nanosecond)} {
+			err := service.ValidateCreateUploadReplay(record, actor.UserID, key, saved.RequestHash, checkTime)
+			if checkTime.Before(record.ExpiresAt) {
+				if err != nil {
+					t.Fatal("保留截止前一纳秒未通过", err)
+				}
+			} else if !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+				t.Fatal("保留截止点未识别为到期", err)
+			}
+		}
+		for _, changed := range []domain.CreateUploadInput{
+			{ParentID: 11, Name: "  replay.bin  ", SizeBytes: 40},
+			{ParentID: 12, Name: "replay.bin", SizeBytes: 40},
+			{ParentID: 11, Name: "REPLAY.bin", SizeBytes: 40},
+			{ParentID: 11, Name: "replay.bin", SizeBytes: 41},
+			{ParentID: 11, Name: "replay.bin", SizeBytes: 40, ExpectedSHA256: new([sha256.Size]byte)},
+		} {
+			hash, err := service.BuildCreateUploadRequestHash(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = service.ValidateCreateUploadReplay(record, actor.UserID, key, hash, record.CreatedAt.Add(time.Hour))
+			if hash == saved.RequestHash {
+				if err != nil {
+					t.Fatal("规范化后相同参数未通过", err)
+				}
+			} else if !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+				t.Fatal("实际参数变化未产生请求冲突", err)
+			}
+		}
+		if err := service.ValidateCreateUploadReplay(record, 3, key, saved.RequestHash, time.Now()); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+			t.Fatal("其他用户范围未拒绝", err)
+		}
+		if err := service.ValidateCreateUploadReplay(record, actor.UserID, strings.ToUpper(key), saved.RequestHash, time.Now()); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+			t.Fatal("不同大小写的键范围未拒绝", err)
+		}
+		for _, mode := range []string{"resource type", "resource ID", "success status", "body task ID"} {
+			if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET resource_type=?,resource_id=?,response_status=?,response_body=? WHERE id=?", saved.ResourceType, *saved.ResourceID, saved.ResponseStatus, saved.ResponseBody, saved.ID); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "resource type":
+				_, err = pool.ExecContext(ctx, "UPDATE idempotency_records SET resource_type='ENTRY' WHERE id=?", saved.ID)
+			case "resource ID":
+				_, err = pool.ExecContext(ctx, "UPDATE idempotency_records SET resource_id=? WHERE id=?", *saved.ResourceID+1, saved.ID)
+			case "success status":
+				_, err = pool.ExecContext(ctx, "UPDATE idempotency_records SET response_status=200 WHERE id=?", saved.ID)
+			case "body task ID":
+				otherID := strconv.FormatUint(*saved.ResourceID+1, 10)
+				_, err = pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=JSON_SET(response_body,'$.task.id',?,'$.content_path',?) WHERE id=?", otherID, "/api/v1/uploads/"+otherID+"/content", saved.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			invalid, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.ValidateCreateUploadReplay(invalid, actor.UserID, key, saved.RequestHash, time.Now()); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) || readState() != before {
+				t.Fatal("异常持久结果关联未拒绝或校验修改了业务事实", err)
+			}
+		}
+	})
 	t.Run("maximum task and parent IDs", func(t *testing.T) {
 		maximum := ^uint64(0)
 		if _, err := pool.ExecContext(ctx, "INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(?,'create_dto_max','完整用户','fixture_hash',?)", maximum, maximum); err != nil {

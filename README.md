@@ -613,3 +613,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 CreateUploadData、CreateUploadResponse 和 NewCreateUploadData，复用十三字段公开任务快照，返回 SINGLE、应用内容路径和一致的 UTC 微秒到期时间。完整 ID、显式 null、大小/时间边界和副本专项，以及正式 MySQL 创建、稳定结果保存、历史快照与四项回滚连续三次通过。OpenAPI 已补充响应 schema 和完整示例，规则及复验方法见 [第 265 步学习记录](docs/开发学习记录.md#第-265-步定义上传创建成功响应-dto)。
 
 已提供 RestoreCreateUploadData，恢复稳定创建 JSON，核对外层四字段、任务十三字段及四项初始 null，校验完整标识、SINGLE/UPLOADING、16 MiB 大小、精确内容路径和到期时刻一致性，再转换 UTC 微秒。结构/值变异、历史快照、时间/副本/并发专项及正式 MySQL 持久异常快照识别连续三次通过，规则和复验方法见 [第 266 步学习记录](docs/开发学习记录.md#第-266-步恢复并校验上传创建响应快照)。
+
+已提供 ValidateCreateUploadReplay，按用户/上传创建操作/键范围、保留期限、请求摘要和 UPLOAD_TASK/201/正文任务标识顺序校验已存结果，到期采用 now >= expires_at，完整快照继续由 RestoreCreateUploadData 恢复。范围/期限/冲突/资源与并发专项，以及正式 MySQL 历史结果、参数变化和异常持久关联连续三次通过，规则和复验方法见 [第 267 步学习记录](docs/开发学习记录.md#第-267-步校验上传创建幂等结果的复用条件)。
