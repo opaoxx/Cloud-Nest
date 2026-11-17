@@ -48,6 +48,18 @@ func (taskService *UploadTaskService) Get(ctx context.Context, actor domain.Acto
 	}
 
 	// 4. 复制摘要与全部可空字段。
+	result := copyUploadTask(task)
+
+	// 5. 复查取消，返回独立任务结果。
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// copyUploadTask 复制非空任务及全部可空字段，供查询和接收准备共同使用。
+func copyUploadTask(task *domain.UploadTask) *domain.UploadTask {
+	// 1. 按值复制记录，再独立持有摘要与可空标量。
 	result := *task
 	result.StorageUploadID = copyOptionalValue(task.StorageUploadID)
 	result.ExpectedSHA256 = copyOptionalValue(task.ExpectedSHA256)
@@ -62,10 +74,5 @@ func (taskService *UploadTaskService) Get(ctx context.Context, actor domain.Acto
 	result.LastErrorCode = copyOptionalValue(task.LastErrorCode)
 	result.LastErrorMessage = copyOptionalValue(task.LastErrorMessage)
 	result.CompletedAt = copyOptionalValue(task.CompletedAt)
-
-	// 5. 复查取消，返回独立任务结果。
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	return &result
 }
