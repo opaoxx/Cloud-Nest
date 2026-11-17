@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——上传创建响应衔接检查误用了 DTO 文件名
+
+### 问题现象
+
+第 264 步检查下一步响应 DTO 的既有写法时，读取了不存在的 create_directory_result.go。随后文件清单和 Test-Path 确认真实文件是 create_directory_response.go。继续读取前先记录现象，后续按实际路径核对响应模式。
+
+### 根因与修复方案
+
+读取命令根据功能名称推测了 DTO 文件名。依据 rg --files 的真实结果改为 internal/server/http/dto/create_directory_response.go，已读取现有稳定结果与响应转换写法，为下一小步 DTO 衔接准备依据。
+
+### 验证结果
+
+真实 DTO 文件读取成功，已核对稳定结果模式。核心服务与相关二十七项服务主测试连续三次通过，正式 MySQL 核心创建、任务创建和配额预占三项联测连续三次通过。go test -count=1 ./... 全量通过，Repository 包耗时 119.567 秒；go vet ./...、gofmt、Git 差异检查和文档示例语法检查通过。
+
 ## 2026-11-17——上传摘要检查使用了推测的输入模型文件名
 
 ### 问题现象
