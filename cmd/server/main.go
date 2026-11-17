@@ -395,11 +395,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	})
 
-	// 21. 注册业务接口，在列表路径绑定目录、全局、最近、名称及大小分页。
+	// 21. 绑定已有用户范围查询，装配上传任务读取服务。
+	uploadTaskService := service.NewUploadTaskService(store.FindUserUploadTask)
+
+	// 22. 注册业务接口，在列表路径绑定目录、全局、最近、名称及大小分页。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
+	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)
@@ -420,7 +424,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 22. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 23. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

@@ -1414,6 +1414,9 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	sizeBeforeRestart, sizeStarredBeforeRestart, sizeBudgetBeforeRestart, sizeTieBeforeRestart := verifyServerSizeEntries(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, *globalBeforeRestart.Data.NextCursor, *recentBeforeRestart.Data.NextCursor, *nameBeforeRestart.Data.NextCursor, jwtConfig.SigningKey)
 	loginSecrets = append(loginSecrets, *sizeBeforeRestart.Data.NextCursor, *sizeStarredBeforeRestart.Data.NextCursor, *sizeBudgetBeforeRestart.Data.NextCursor, *sizeTieBeforeRestart.Data.NextCursor)
 
+	// 正式任务查询贯穿已有授权与持久记录，保存结果供重启后对照。
+	uploadBeforeRestart, completedUploadBeforeRestart := verifyServerUploadTasks(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, nativeRefreshed.Data.AccessToken, foreignToken.Token)
+
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
 	before, err := os.Stat(secretPath)
@@ -1424,6 +1427,13 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	// 两类任务数据跨真实服务重启保持一致，各次请求使用当前请求 ID。
+	for _, fixture := range []dto.UploadTaskResponse{uploadBeforeRestart, completedUploadBeforeRestart} {
+		after := requestServerUploadTask(t, "http://"+address, webRefreshed.Data.AccessToken, fixture.Data.ID, 200, "", "")
+		if !reflect.DeepEqual(after.Data, fixture.Data) || after.RequestID == fixture.RequestID {
+			t.Fatal("正式上传任务的重启数据或请求 ID 错误")
+		}
+	}
 	// 名称普通、收藏、预算和长键首页分别复用原文本，并与首次事实对照。
 	for _, fixture := range []struct {
 		raw     string
@@ -1630,6 +1640,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerRecentEntries(t, "http://"+address, token.Token, "scope=recent&limit=0", 403, "ACCOUNT_DISABLED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=name_asc&limit=0", 403, "ACCOUNT_DISABLED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=size_desc&limit=0", 403, "ACCOUNT_DISABLED", "")
+	requestServerUploadTask(t, "http://"+address, token.Token, "0", 403, "ACCOUNT_DISABLED", "")
 	listDirectory(t, "parent_id=0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	getEntryDetail(t, "0", token.Token, 403, "ACCOUNT_DISABLED", "")
 	list(t, "", token.Token, 403, "ACCOUNT_DISABLED", "")
@@ -1651,6 +1662,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerRecentEntries(t, "http://"+address, token.Token, "scope=recent&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=name_asc&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=size_desc&limit=0", 401, "SESSION_REVOKED", "")
+	requestServerUploadTask(t, "http://"+address, token.Token, "500002", 401, "SESSION_REVOKED", "")
 	getEntryDetail(t, "23", token.Token, 401, "SESSION_REVOKED", "")
 	if _, err := pool.ExecContext(ctx, "UPDATE auth_sessions SET expires_at=? WHERE id=17", session.ExpiresAt); err != nil {
 		t.Fatal(err)
@@ -1665,6 +1677,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerRecentEntries(t, "http://"+address, token.Token, "scope=recent&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=name_asc&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, token.Token, "scope=all&sort=size_desc&limit=0", 401, "SESSION_REVOKED", "")
+	requestServerUploadTask(t, "http://"+address, token.Token, "500002", 401, "SESSION_REVOKED", "")
 	list(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", token.Token, 401, "SESSION_REVOKED", "")
 	listDirectory(t, directoryNextQuery, token.Token, 401, "SESSION_REVOKED", "")
@@ -1680,6 +1693,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	requestServerRecentEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=recent&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=all&sort=name_asc&limit=0", 401, "SESSION_REVOKED", "")
 	requestServerGlobalEntries(t, "http://"+address, webRefreshed.Data.AccessToken, "scope=all&sort=size_desc&limit=0", 401, "SESSION_REVOKED", "")
+	requestServerUploadTask(t, "http://"+address, webRefreshed.Data.AccessToken, "500002", 401, "SESSION_REVOKED", "")
 	request(t, "/api/v1/me", webLogin.Data.AccessToken, 401)
 	list(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	listDevices(t, "", webLogin.Data.AccessToken, 401, "SESSION_REVOKED", "")
@@ -1789,7 +1803,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("正式认证日志泄漏凭证")
 		}
 	}
-	for _, privateValue := range []string{"private-size-cursor", "size-budget-", "size-tie-", "size-zero", "private-name-cursor", "name-budget-", "name-long-", "private-recent-query", "private-recent-cursor", "最近专用未访问", "private-starred-cursor", "private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
+	for _, privateValue := range []string{"private-upload-query", "private-upload-cookie", "private-upload-diagnostic", "upload-route-", "private-size-cursor", "size-budget-", "size-tie-", "size-zero", "private-name-cursor", "name-budget-", "name-long-", "private-recent-query", "private-recent-cursor", "最近专用未访问", "private-starred-cursor", "private-global-query", "private-global-cursor", "全局%_", "预算%_", "private-directory-query", "private-directory-cursor", "private-detail-query", "private-create-query", "private-rename-query", "private-move-query", "private-star-query", "private-access-query", serverCreateDirectoryKey, serverRenameEntryKey, serverMoveEntryKey, "正式创建 🌱", "正式笔记.PDF", "移动文件.md", "正式移动来源", "收藏文件.md", "正式收藏来源", "访问文件.md", "首次访问.md", "正式访问来源", "学习笔记.md", "发布时设备 🎮"} {
 		if strings.Contains(logs.String(), privateValue) {
 			t.Error("正式目录完成日志泄漏原始查询或游标")
 		}

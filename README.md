@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -581,3 +581,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 UploadTaskPath 与 ParseUploadTaskPath，复用 parsePathID 将路由已解码的 id 转为完整非零 uint64，格式错误返回固定 id 字段提示。合法/非法路径、独立结果与错误对象、认证先行、查询参数及编码边界连续三次通过，OpenAPI 增加 UploadTaskID 参数，规则与复验方法见 [第 249 步学习记录](docs/开发学习记录.md#第-249-步定义上传任务查询路径参数-dto)。
 
 已提供 handler.UploadTask，组合认证上下文、上传路径 DTO、任务服务和成功交付。路径错误定位 id，缺失及跨账号目标使用 UPLOAD_NOT_FOUND 404，授权错误复用已有响应，异常结果与取消使用统一错误交付。专项及真实 JWT/MySQL/TCP 每轮二十八次 GET 连续三次通过，调用与复验方法见 [第 250 步学习记录](docs/开发学习记录.md#第-250-步实现上传任务查询-http-处理函数)。
+
+GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。RegisterUploadTaskRoute 组合既有 RequireAuthorization 与 UploadTask，启动时绑定 Store.FindUserUploadTask 和 UploadTaskService.Get。正式路由、十状态、路径/账号边界、跨设备、重启数据及授权状态联测连续三次通过，使用与复验方法见 [第 251 步学习记录](docs/开发学习记录.md#第-251-步接入正式上传任务查询路由与启动装配)。
