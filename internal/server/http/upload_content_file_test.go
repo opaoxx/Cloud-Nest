@@ -62,6 +62,10 @@ func TestWithUploadContentFileRealHTTP(t *testing.T) {
 			}
 			defer occupiedRelease()
 			directory := t.TempDir()
+			receiver, err := service.NewUploadContentFileService(directory, space)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var logs bytes.Buffer
 			calls := 0
 			router := NewRouter(logging.New(&logs), nil, func(context.Context) bool { return true })
@@ -81,31 +85,24 @@ func TestWithUploadContentFileRealHTTP(t *testing.T) {
 					source = failedJSONReader{}
 				}
 				tracked := &uploadContentTrackedBody{reader: source}
-				release, err := space.Reserve(requestContext.Request.Context(), fixture.declared)
-				if err == nil {
-					err = service.WithUploadContentFile(requestContext.Request.Context(), directory, tracked, fixture.declared, fixture.expected, func(content io.ReadSeeker, digest domain.UploadContentDigest) error {
-						calls++
-						payload, err := io.ReadAll(content)
-						if err != nil || !bytes.Equal(payload, fixture.payload) || digest.SizeBytes != fixture.declared || digest.SHA256 != sha256.Sum256(payload) {
-							t.Error("HTTP 文件回调内容或摘要错误", err)
-						}
-						if fixture.useFailure {
-							return errors.New("private-consumer-failure")
-						}
-						return nil
-					})
-				}
+				err := receiver.WithFile(requestContext.Request.Context(), tracked, fixture.declared, fixture.expected, func(content io.ReadSeeker, digest domain.UploadContentDigest) error {
+					calls++
+					payload, err := io.ReadAll(content)
+					if err != nil || !bytes.Equal(payload, fixture.payload) || digest.SizeBytes != fixture.declared || digest.SHA256 != sha256.Sum256(payload) {
+						t.Error("HTTP 文件回调内容或摘要错误", err)
+					}
+					if fixture.useFailure {
+						return errors.New("private-consumer-failure")
+					}
+					return nil
+				})
 				// 2. 返回前临时文件已经回收，来源仍交由请求所有者管理。
 				entries, readError := os.ReadDir(directory)
 				if readError != nil || len(entries) != 0 || tracked.closes != 0 {
 					t.Error("HTTP 临时文件清理或正文所有权错误", readError)
 				}
-				if errors.Is(err, domain.ErrUploadTempSpaceExhausted) && (release != nil || tracked.reads != 0 || calls != 0) {
+				if errors.Is(err, domain.ErrUploadTempSpaceExhausted) && (tracked.reads != 0 || calls != 0) {
 					t.Error("容量拒绝仍接收了文件")
-				}
-				if release != nil && readError == nil && len(entries) == 0 {
-					release()
-					release()
 				}
 				probe, probeError := space.Reserve(context.Background(), capacity-fixture.occupied)
 				if probeError != nil || probe == nil {
