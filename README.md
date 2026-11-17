@@ -583,3 +583,5 @@ GET /api/v1/entries 已接入 all/starred 的 size_desc 大小降序查询，例
 已提供 handler.UploadTask，组合认证上下文、上传路径 DTO、任务服务和成功交付。路径错误定位 id，缺失及跨账号目标使用 UPLOAD_NOT_FOUND 404，授权错误复用已有响应，异常结果与取消使用统一错误交付。专项及真实 JWT/MySQL/TCP 每轮二十八次 GET 连续三次通过，调用与复验方法见 [第 250 步学习记录](docs/开发学习记录.md#第-250-步实现上传任务查询-http-处理函数)。
 
 GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。RegisterUploadTaskRoute 组合既有 RequireAuthorization 与 UploadTask，启动时绑定 Store.FindUserUploadTask 和 UploadTaskService.Get。正式路由、十状态、路径/账号边界、跨设备、重启数据及授权状态联测连续三次通过，使用与复验方法见 [第 251 步学习记录](docs/开发学习记录.md#第-251-步接入正式上传任务查询路由与启动装配)。
+
+已提供 domain.StoredObjectStatus，以精确字符串常量表达物理对象六种状态，IsValid 对齐正式迁移的状态约束。六个合法值、三十九个非法值及默认 STAGING 对照连续三次通过，状态含义与复验方法见 [第 252 步学习记录](docs/开发学习记录.md#第-252-步定义存储对象状态模型)。
