@@ -28,6 +28,8 @@ type loginTransactionScript struct {
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	objectQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	uploadQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	quotaQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	reserveStorage                                     func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	preferenceQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	rotate                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -72,6 +74,10 @@ type loginTransactionConnection struct {
 }
 
 func (connection *loginTransactionConnection) ExecContext(ctx context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(statement, "UPDATE users SET reserved_storage = ") && connection.script.reserveStorage != nil {
+		connection.script.record("reserve")
+		return connection.script.reserveStorage(ctx, statement, arguments)
+	}
 	if strings.HasPrefix(statement, "INSERT INTO user_entry_preferences (user_id, entry_id, last_opened_at)") && connection.script.recordAccess != nil {
 		connection.script.record("record_access")
 		return connection.script.recordAccess(ctx, statement, arguments)
@@ -157,6 +163,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 	script.rolledBack = make(chan struct{})
 	connector := &loginTransactionConnector{script: script}
 	connector.deviceConnector.accountConnector.query = func(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
+		if strings.Contains(query, "storage_quota AS quota_bytes") && script.quotaQuery != nil {
+			script.record("quota")
+			return script.quotaQuery(ctx, query, arguments)
+		}
 		if strings.Contains(query, "user_entry_preferences") && script.preferenceQuery != nil {
 			script.record("preference")
 			return script.preferenceQuery(ctx, query, arguments)
