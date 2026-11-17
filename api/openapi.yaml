@@ -99,6 +99,7 @@ info:
     CreateUploadRequest 定义单文件上传创建请求 DTO，必填 parent_id/name/size_bytes，可空 sha256 转换为固定摘要，声明原值交给上传服务核对。
     CreateUploadData/CreateUploadResponse 定义上传创建稳定快照，包含公开任务、SINGLE 上传方式、应用内容路径和一致的到期时间。
     CreateUploadSucceeded 定义上传创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
+    CreateUploadRejected/CreateUploadConflict/CreateUploadTooLarge/CreateUploadQuotaExceeded 定义创建参数、幂等冲突/到期、文件声明上限和配额不足响应。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
     IdempotencyKey 定义后续业务写请求的 Idempotency-Key 请求头，单值及字符错误定位 Idempotency-Key。
@@ -2630,6 +2631,125 @@ components:
               message: 文件已发生变化，请刷新后重试
               details:
                 current_revision: '3'
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateUploadRejected:
+      description: |
+        HTTP 400，幂等头、JSON/DTO、父目录类型或深度错误使用 INVALID_ARGUMENT，完整命名不符合规则使用 INVALID_NAME。
+        details.field 定位 Idempotency-Key、parent_id、name、size_bytes 或 sha256，JSON 读取/绑定错误的 details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_NAME
+              message: 目录项名称不符合命名规则
+              details:
+                field: name
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateUploadConflict:
+      description: |
+        HTTP 409，同键不同参数使用 IDEMPOTENCY_CONFLICT，记录保留期到期使用 IDEMPOTENCY_EXPIRED。
+        提示采用固定文本，details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            request_conflict:
+              value:
+                error:
+                  code: IDEMPOTENCY_CONFLICT
+                  message: 幂等键已用于不同请求参数
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            expired_record:
+              value:
+                error:
+                  code: IDEMPOTENCY_EXPIRED
+                  message: 幂等记录已到期，请先核对已有资源状态
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateUploadTooLarge:
+      description: |
+        HTTP 413，JSON 请求正文超过 1 MiB 使用 REQUEST_BODY_TOO_LARGE，details 为 null。
+        声明文件大小超过首期 16 MiB 使用 FILE_TOO_LARGE，details.field 为 size_bytes，max_size_bytes 给出当前允许的字节上限。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            file_too_large:
+              value:
+                error:
+                  code: FILE_TOO_LARGE
+                  message: 文件大小不能超过 16 MiB
+                  details:
+                    field: size_bytes
+                    max_size_bytes: 16777216
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            json_too_large:
+              value:
+                error:
+                  code: REQUEST_BODY_TOO_LARGE
+                  message: JSON 请求正文不能超过 1 MiB
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateUploadQuotaExceeded:
+      description: HTTP 507，剩余逻辑配额不足以预占声明大小，使用 QUOTA_EXCEEDED，details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: QUOTA_EXCEEDED
+              message: 存储空间不足
+              details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateDirectoryRejected:
       description: |

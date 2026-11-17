@@ -619,3 +619,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 IdempotentCreateUploadService，首次请求在同一用户事务中创建预占、对象、任务并保存八天稳定结果；同键同参数重试校验后复用原快照，返回独立 JSON。服务专项与正式 MySQL 单连接、同账号其他设备、跨账号、历史恢复、四项回滚及三类并发连续三次通过，调用与复验方法见 [第 268 步学习记录](docs/开发学习记录.md#第-268-步组合上传创建幂等服务)。
 
 已提供 handler.CreateUploadSuccess，恢复已确认提交的稳定上传快照，关联当前请求 ID 并预先编码，以 HTTP 201、UTF-8 JSON、no-store 和 Pragma no-cache 交付。成功/异常/取消/已发送及真实 POST 专项和正式 MySQL 幂等创建到实际 HTTP 交付连续三次通过，OpenAPI 补充 CreateUploadSucceeded，共 453 处本地引用核对通过。调用与复验方法见 [第 269 步学习记录](docs/开发学习记录.md#第-269-步实现上传创建成功-http-交付)。
+
+已提供 handler.CreateUpload，按认证身份、幂等头、JSON/DTO、幂等服务和成功交付顺序处理上传创建请求，核对返回声明并映射 400/401/403/404/409/413/507/500。FILE_TOO_LARGE 提供 details.field=size_bytes 和 max_size_bytes=16777216。专项与真实 JWT/MySQL/HTTP 每轮三十次 POST 连续三次通过，OpenAPI 增加四类错误响应，461 处本地引用检查通过。调用与复验方法见 [第 270 步学习记录](docs/开发学习记录.md#第-270-步实现上传创建-http-处理函数)。
