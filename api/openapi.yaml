@@ -3805,6 +3805,29 @@ components:
               message: JSON 请求正文不能超过 1 MiB
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadTempSpaceExhausted:
+      description: 共享上传临时区的剩余预占预算不足以接收本次声明大小时，返回 HTTP 507。容量检查在文件创建及正文读取前完成，使用固定提示。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: TEMP_SPACE_EXHAUSTED
+              message: 上传临时空间不足，请稍后重试
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadContentChecksumMismatch:
       description: 完整接收且实际大小符合声明后，客户端提供的预期 SHA256 与实际内容摘要不一致时返回 HTTP 422。省略预期摘要时通过该比较，显式全零摘要仍参与比较。响应只包含固定提示。
       headers:
