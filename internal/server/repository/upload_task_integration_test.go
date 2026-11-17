@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -12,7 +13,9 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestFindUserUploadTaskIntegration(t *testing.T) {
+// uploadTaskDatabase 安装正式任务表和关联夹具，供读取及服务联测共用。
+func uploadTaskDatabase(t *testing.T) (*sql.DB, domain.UploadTask) {
+	t.Helper()
 	// 1. 在独占库安装正式任务表，建立同用户设备、对象及目录引用。
 	pool := userProfileDatabase(t)
 	pool.SetMaxOpenConns(3)
@@ -47,6 +50,13 @@ func TestFindUserUploadTaskIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, statement, arguments...); err != nil {
 		t.Fatal(err)
 	}
+	return pool, want
+}
+
+func TestFindUserUploadTaskIntegration(t *testing.T) {
+	pool, want := uploadTaskDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
