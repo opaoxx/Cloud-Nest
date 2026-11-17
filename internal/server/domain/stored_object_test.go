@@ -117,10 +117,16 @@ func TestStoredObjectUploadPreparationFlow(t *testing.T) {
 			// 2. 用可信身份、服务端位置与统一时间组装暂存对象及任务。
 			actor := domain.Actor{UserID: ^uint64(0), DeviceID: 11, SessionID: 17}
 			createdAt := time.Date(2026, 11, 17, 8, 0, 0, 123456000, time.UTC)
+			objectInput := domain.CreateStagedObjectInput{
+				Provider: "local_minio", Bucket: "cloudnest", ObjectKey: "uploads/test-attempt/object", SizeBytes: prepared.SizeBytes,
+			}
+			if !objectInput.IsValid() {
+				t.Fatal("服务端暂存对象创建参数无效")
+			}
 			object := domain.StoredObject{
 				ID: ^uint64(0), OwnerUserID: actor.UserID,
-				Provider: "local_minio", Bucket: "cloudnest", ObjectKey: "uploads/test-attempt/object",
-				FileSize: prepared.SizeBytes, Status: domain.StoredObjectStatusStaging,
+				Provider: objectInput.Provider, Bucket: objectInput.Bucket, ObjectKey: objectInput.ObjectKey,
+				FileSize: objectInput.SizeBytes, Status: domain.StoredObjectStatusStaging,
 				CreatedAt: createdAt, UpdatedAt: createdAt,
 			}
 			task := domain.UploadTask{
