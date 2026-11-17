@@ -1,4 +1,4 @@
-// Package binding 负责将 HTTP 请求正文转换为请求 DTO，并返回统一的输入错误。
+// Package binding 负责 HTTP 输入校验、正文绑定和统一输入错误。
 package binding
 
 import (
@@ -12,8 +12,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
-	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 )
 
 // MaxJSONBodyBytes 是普通 JSON 接口正文的字节上限，不用于文件上传流。
@@ -27,7 +25,7 @@ func ReadJSON(requestContext *gin.Context, destination any) bool {
 	request := requestContext.Request
 	contentTypes := request.Header.Values("Content-Type")
 	if len(contentTypes) != 1 {
-		return abortJSONRequest(requestContext, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "请求必须使用 application/json，字符集为 UTF-8，且不压缩正文")
+		return abortRequest(requestContext, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "请求必须使用 application/json，字符集为 UTF-8，且不压缩正文")
 	}
 	mediaType, parameters, parseError := mime.ParseMediaType(contentTypes[0])
 	charset, charsetDeclared := parameters["charset"]
@@ -35,7 +33,7 @@ func ReadJSON(requestContext *gin.Context, destination any) bool {
 	encodings := request.Header.Values("Content-Encoding")
 	hasSupportedEncoding := len(encodings) == 0 || (len(encodings) == 1 && strings.EqualFold(strings.TrimSpace(encodings[0]), "identity"))
 	if parseError != nil || mediaType != "application/json" || !hasSupportedCharset || !hasSupportedEncoding {
-		return abortJSONRequest(requestContext, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "请求必须使用 application/json，字符集为 UTF-8，且不压缩正文")
+		return abortRequest(requestContext, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "请求必须使用 application/json，字符集为 UTF-8，且不压缩正文")
 	}
 
 	// 2. 用 MaxBytesReader 限制实际读取量，识别正文超限和读取失败。
@@ -48,18 +46,18 @@ func ReadJSON(requestContext *gin.Context, destination any) bool {
 	if readError != nil {
 		var sizeError *http.MaxBytesError
 		if errors.As(readError, &sizeError) {
-			return abortJSONRequest(requestContext, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE", "JSON 请求正文不能超过 1 MiB")
+			return abortRequest(requestContext, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE", "JSON 请求正文不能超过 1 MiB")
 		}
-		return abortJSONRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "读取请求正文失败")
+		return abortRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "读取请求正文失败")
 	}
 
 	// 3. 将单个 JSON 对象解析到请求结构体，拒绝未知字段和类型不匹配。
 	if !utf8.Valid(body) {
-		return abortJSONRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "请求正文必须使用有效的 UTF-8 编码")
+		return abortRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "请求正文必须使用有效的 UTF-8 编码")
 	}
 	trimmedBody := bytes.Trim(body, " \t\r\n")
 	if len(trimmedBody) == 0 || trimmedBody[0] != '{' {
-		return abortJSONRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "请求正文必须是单个 JSON 对象")
+		return abortRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "请求正文必须是单个 JSON 对象")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
@@ -68,26 +66,13 @@ func ReadJSON(requestContext *gin.Context, destination any) bool {
 		if errors.As(decodeError, &destinationError) {
 			panic("ReadJSON 必须传入非 nil 的请求结构体指针")
 		}
-		return abortJSONRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "JSON 格式、字段或字段类型不正确")
+		return abortRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "JSON 格式、字段或字段类型不正确")
 	}
 
 	// 4. 确认正文没有第二段 JSON；成功后交给调用方继续业务校验。
 	var trailingValue any
 	if decoder.Decode(&trailingValue) != io.EOF {
-		return abortJSONRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "请求正文只能包含一个 JSON 对象")
+		return abortRequest(requestContext, http.StatusBadRequest, "INVALID_ARGUMENT", "请求正文只能包含一个 JSON 对象")
 	}
 	return true
-}
-
-// abortJSONRequest 输出固定的输入错误并停止处理；返回 false 供 ReadJSON 直接返回。
-func abortJSONRequest(requestContext *gin.Context, status int, code, message string) bool {
-	// 1. 沿用公共错误 DTO，关联请求 ID，不包含解析器错误或原始输入。
-	response := dto.ErrorResponse{
-		Error:     dto.ErrorDetail{Code: code, Message: message, Details: nil},
-		RequestID: requestcontext.RequestID(requestContext.Request.Context()),
-	}
-	// 2. 返回不可缓存的错误，并告诉调用方停止使用请求 DTO。
-	requestContext.Header("Cache-Control", "no-store")
-	requestContext.AbortWithStatusJSON(status, response)
-	return false
 }
