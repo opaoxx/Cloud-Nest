@@ -15,6 +15,9 @@ var ErrInvalidUploadTaskData = errors.New("上传任务数据异常")
 // ErrUploadTaskStagedObjectConflict 表示暂存对象已经关联其他上传任务。
 var ErrUploadTaskStagedObjectConflict = errors.New("暂存对象已关联上传任务")
 
+// ErrUploadTaskNotReady 表示任务方式、阶段或期限不满足当前内容接收条件。
+var ErrUploadTaskNotReady = errors.New("上传任务当前不可接收文件内容")
+
 // UploadTask 保存上传任务的内部记录，供后续持久化、发布和恢复流程使用。
 type UploadTask struct {
 	// 1. 保存任务标识、归属及当前暂存对象。
