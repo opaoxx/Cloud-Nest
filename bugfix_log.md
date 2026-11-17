@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-17——临时文件测试误判 Windows 关闭描述符
+
+### 问题现象
+
+第 283 步首次服务专项中，十二组成功场景及 panic 清理场景的关闭检查失败。临时文件已经被删除，已关闭文件调用 Stat 在当前 Windows Go 环境返回 GetFileType 的 The handle is invalid，errors.Is(err, os.ErrClosed) 为 false。修复前记录，接下来用文件读取检查描述符关闭状态，并继续独立检查路径清理。
+
+### 根因与修复方案
+
+测试把关闭后 Stat 的返回值统一假定为 os.ErrClosed。检查本机 Go 源码确认，Windows File.Stat 直接进入句柄检查，当前错误为无效句柄；File.Read 会把关闭状态转换为 os.ErrClosed。已使用非空 Read 检查描述符关闭，并继续用 os.Stat(path) 检查文件已删除。两项复现主测试修正后通过。
+
+### 验证结果
+
+修正后十二组成功场景和 panic 清理用例通过，描述符关闭与路径删除分别核对。本轮六项服务主测试连续三次通过，共 132 个通过事件；新旧十六项服务主测试共 468 个通过事件，十一项 HTTP 主测试共 426 个通过事件，入选无跳过。go test -count=1 ./... 全量通过，Repository 包耗时 118.560 秒。go vet ./...、gofmt 和 git diff --check 通过。 学习记录历史前缀、唯一标题、八个围栏、两段 PowerShell 示例语法、十六项/十一项测试选择器、README/Bug 历史、OpenAPI 结构基线及 484 处本地引用、初始迁移精确摘要检查通过。
+
 ## 2026-11-17——摘要测试的循环括号与响应头断言错误
 
 ### 问题现象
