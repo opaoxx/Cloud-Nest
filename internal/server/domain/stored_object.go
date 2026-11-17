@@ -2,8 +2,15 @@ package domain
 
 import (
 	"crypto/sha256"
+	"errors"
 	"time"
 )
+
+// ErrStoredObjectNotFound 表示在指定用户范围内未找到存储对象。
+var ErrStoredObjectNotFound = errors.New("存储对象不存在")
+
+// ErrInvalidStoredObjectData 表示存储对象的归属、位置或生命周期事实异常。
+var ErrInvalidStoredObjectData = errors.New("存储对象数据异常")
 
 // StoredObject 保存物理对象的内部记录，供上传、发布和回收流程使用。
 type StoredObject struct {
