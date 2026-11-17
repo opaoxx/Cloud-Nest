@@ -1,0 +1,17 @@
+package domain
+
+import (
+	"crypto/sha256"
+	"errors"
+)
+
+// ErrUploadBodySizeMismatch 表示实际文件字节数与任务声明不一致。
+var ErrUploadBodySizeMismatch = errors.New("文件实际大小与声明不一致")
+
+// UploadContentDigest 保存已完整复制并核对大小的文件事实。
+type UploadContentDigest struct {
+	// SizeBytes 是本次实际成功写入的字节数。
+	SizeBytes uint64
+	// SHA256 是本次完整内容的二进制摘要。
+	SHA256 [sha256.Size]byte
+}

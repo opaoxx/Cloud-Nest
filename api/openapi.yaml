@@ -3805,6 +3805,29 @@ components:
               message: JSON 请求正文不能超过 1 MiB
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentActualSizeMismatch:
+      description: 原始文件流按任务声明受限读取，正常到达 EOF 时实际字节偏短，或额外检测到至少一个字节时，返回固定 HTTP 413。大小错误先于后续存储写入和发布，读取/写入故障由对应错误流程处理。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: BODY_SIZE_MISMATCH
+              message: 文件实际大小与声明不一致
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadContentBodySizeMismatch:
       description: 上传内容请求的已知 Content-Length 与当前用户任务的 file_size 不一致时返回 HTTP 413。使用 net/http 解析后的 ContentLength，未知长度继续由实际读取阶段计数校验。错误在正文读取前交付。
       headers:

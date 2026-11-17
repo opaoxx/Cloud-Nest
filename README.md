@@ -641,3 +641,5 @@ GET /api/v1/uploads/{id} 已在启动入口接入正式认证与任务服务。R
 已提供 binding.ValidateUploadContentHeaders，按单个 application/octet-stream 和省略/单个 identity 内容编码校验原始文件请求，允许格式正确的媒体参数。校验先于租约准备及正文读取，不支持的格式沿统一 415 错误交付。新旧 HTTP 专项及真实已知长度/分块传输连续三次通过，规则和复验方法见 [第 279 步学习记录](docs/开发学习记录.md#第-279-步校验上传原始内容请求头)。
 
 已提供 binding.ValidateUploadContentLength，使用 net/http 解析后的 ContentLength 核对任务声明大小。已知长度不一致返回 BODY_SIZE_MISMATCH 413，内部未知长度 -1 继续交给后续读取计数，无效负值返回固定 400。新旧 HTTP 专项及真实已知/分块传输连续三次通过，规则与复验方法见 [第 280 步学习记录](docs/开发学习记录.md#第-280-步校验上传请求长度与任务声明)。
+
+已提供 service.CopyUploadContent，以固定缓冲流式复制声明范围内的文件内容并计算 SHA256，再读取一个额外检测字节确认大小。成功交付 UploadContentDigest，大小不符返回 ErrUploadBodySizeMismatch，I/O 错误和取消保留原因。暂存目标与输入流由调用方管理，失败后的已写前缀由调用方清理。专项、真实文件及 HTTP 已知/分块传输连续三次通过，调用与复验方法见 [第 281 步学习记录](docs/开发学习记录.md#第-281-步受限复制上传文件流并计算摘要)。
