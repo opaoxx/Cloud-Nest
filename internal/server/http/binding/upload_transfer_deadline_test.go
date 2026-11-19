@@ -52,6 +52,8 @@ func TestWithUploadTransferDeadlineShortCircuit(t *testing.T) {
 	failure := errors.New("fixture deadline failure")
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
+	expired, release := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer release()
 	for _, fixture := range []struct {
 		name   string
 		ctx    context.Context
@@ -61,6 +63,7 @@ func TestWithUploadTransferDeadlineShortCircuit(t *testing.T) {
 		{"nil context", nil, httptest.NewRecorder(), nil},
 		{"nil writer", context.Background(), nil, nil},
 		{"canceled", canceled, &uploadDeadlineWriter{}, context.Canceled},
+		{"expired", expired, &uploadDeadlineWriter{}, ErrUploadTransferTimeout},
 		{"unsupported", context.Background(), httptest.NewRecorder(), http.ErrNotSupported},
 		{"setting failed", context.Background(), &uploadDeadlineWriter{failure: failure}, failure},
 	} {
@@ -72,8 +75,8 @@ func TestWithUploadTransferDeadlineShortCircuit(t *testing.T) {
 			if err == nil || (fixture.want != nil && !errors.Is(err, fixture.want)) {
 				t.Fatal("设置读取期限的错误分类异常", err)
 			}
-			if writer, ok := fixture.writer.(*uploadDeadlineWriter); ok && fixture.name == "canceled" && len(writer.deadlines) != 0 {
-				t.Fatal("已取消请求设置了读取期限")
+			if writer, ok := fixture.writer.(*uploadDeadlineWriter); ok && fixture.ctx != nil && fixture.ctx.Err() != nil && len(writer.deadlines) != 0 {
+				t.Fatal("已结束请求设置了读取期限")
 			}
 		})
 	}
@@ -114,10 +117,21 @@ func TestWithUploadTransferDeadlineErrors(t *testing.T) {
 				})
 				if err == nil || (fixture.returned != nil && !errors.Is(err, fixture.returned)) ||
 					(fixture.want != nil && !errors.Is(err, fixture.want)) ||
+					errors.Is(err, ErrUploadTransferTimeout) != (fixture.want == context.DeadlineExceeded) ||
 					(fixture.want == nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled))) {
 					t.Fatal("传输错误或超时原因丢失", err)
 				}
 			})
 		})
+	}
+}
+
+func TestWithUploadTransferDeadlinePreservesDependencyDeadline(t *testing.T) {
+	dependencyError := fmt.Errorf("fixture dependency deadline: %w", context.DeadlineExceeded)
+	err := WithUploadTransferDeadline(t.Context(), &uploadDeadlineWriter{}, func(context.Context) error {
+		return dependencyError
+	})
+	if err != dependencyError || errors.Is(err, ErrUploadTransferTimeout) {
+		t.Fatal("依赖超时被当成上传 HTTP 期限到达", err)
 	}
 }

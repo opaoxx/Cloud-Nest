@@ -101,6 +101,7 @@ info:
     CreateUploadSucceeded 定义上传创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
     UploadContentAcceptedData/UploadContentAcceptedResponse 定义上传内容接收后的 HTTP 202 响应数据。
     UploadContentAccepted 定义该成功响应的请求 ID 与禁止缓存头，供后续内容接收操作引用。
+    UploadContentTimedOut/UploadContentConflict/UploadContentTooLarge/UploadContentStorageUnavailable 定义内容接收失败时可公开的错误。
     CreateUploadRejected/CreateUploadConflict/CreateUploadTooLarge/CreateUploadQuotaExceeded 定义创建参数、幂等冲突/到期、文件声明上限和配额不足响应。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
@@ -3849,6 +3850,130 @@ components:
             error:
               code: REQUEST_BODY_TOO_LARGE
               message: JSON 请求正文不能超过 1 MiB
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentTimedOut:
+      description: HTTP 408，上传 HTTP 传输期限到达。查询任务确认当前进度后再决定是否重试。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UPLOAD_TIMEOUT
+              message: 上传传输超时，请查询任务状态后重试
+              details: null
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentConflict:
+      description: HTTP 409，任务阶段或期限不允许接收、当前接收权不可用、暂存对象已存在或接收名额占满。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            taskNotReady:
+              value:
+                error:
+                  code: TASK_NOT_READY
+                  message: 上传任务当前不可接收文件内容
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            taskBusy:
+              value:
+                error:
+                  code: UPLOAD_BUSY
+                  message: 上传任务正在处理中
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            receiverBusy:
+              value:
+                error:
+                  code: UPLOAD_BUSY
+                  message: 上传接收繁忙，请稍后重试
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentTooLarge:
+      description: HTTP 413，任务声明超过单文件限制，已知正文长度与声明不符，或实际读到的大小与声明不符。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            fileTooLarge:
+              value:
+                error:
+                  code: FILE_TOO_LARGE
+                  message: 文件大小不能超过 16 MiB
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            knownLengthMismatch:
+              value:
+                error:
+                  code: BODY_SIZE_MISMATCH
+                  message: 请求正文长度与上传声明不一致
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            actualLengthMismatch:
+              value:
+                error:
+                  code: BODY_SIZE_MISMATCH
+                  message: 文件实际大小与声明不一致
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadContentStorageUnavailable:
+      description: HTTP 503，对象存储暂时无法完成本次接收。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: STORAGE_UNAVAILABLE
+              message: 存储服务暂时不可用
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadReceiverBusy:

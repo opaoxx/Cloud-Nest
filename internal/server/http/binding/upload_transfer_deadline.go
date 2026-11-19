@@ -11,6 +11,9 @@ import (
 
 const uploadTransferTimeout = 5 * time.Minute
 
+// ErrUploadTransferTimeout 标记 HTTP 上传期限到达，区别于回调内部的依赖超时。
+var ErrUploadTransferTimeout = errors.New("上传传输超时")
+
 // WithUploadTransferDeadline 用同一个期限限制 HTTP 正文读取和传输回调。
 // 在 HTTP 处理函数内、读取正文前调用。回调同步传输，由调用方处理响应。
 func WithUploadTransferDeadline(ctx context.Context, writer http.ResponseWriter, transfer func(context.Context) error) error {
@@ -20,10 +23,10 @@ func WithUploadTransferDeadline(ctx context.Context, writer http.ResponseWriter,
 	}
 	transferContext, cancel := context.WithTimeout(ctx, uploadTransferTimeout)
 	defer cancel()
-	if err := transferContext.Err(); err != nil {
-		return err
-	}
 	deadline, _ := transferContext.Deadline()
+	if err := transferContext.Err(); err != nil {
+		return uploadTransferResultError(deadline, err, nil)
+	}
 
 	// 2. 将同一个期限设置到 HTTP 正文读取上。
 	// 保留读取期限，覆盖 net/http 写响应时可能发生的剩余正文处理。
@@ -32,18 +35,25 @@ func WithUploadTransferDeadline(ctx context.Context, writer http.ResponseWriter,
 		return fmt.Errorf("设置上传正文读取期限失败: %w", err)
 	}
 	if err := transferContext.Err(); err != nil {
-		return err
+		return uploadTransferResultError(deadline, err, nil)
 	}
 
 	// 3. 执行传输，保留原始错误并归并超时原因。
 	transferError := transfer(transferContext)
-	contextError := transferContext.Err()
-	if !time.Now().Before(deadline) || errors.Is(transferError, os.ErrDeadlineExceeded) {
+	return uploadTransferResultError(deadline, transferContext.Err(), transferError)
+}
+
+func uploadTransferResultError(deadline time.Time, contextError, transferError error) error {
+	timedOut := contextError == context.DeadlineExceeded || !time.Now().Before(deadline) || errors.Is(transferError, os.ErrDeadlineExceeded)
+	if timedOut {
 		// 网络读取超时可能先触发请求取消，仍按实际截止时间识别超时。
 		contextError = context.DeadlineExceeded
 	}
 	if contextError != nil && !errors.Is(transferError, contextError) {
-		return errors.Join(transferError, contextError)
+		transferError = errors.Join(transferError, contextError)
+	}
+	if timedOut {
+		return errors.Join(ErrUploadTransferTimeout, transferError)
 	}
 	return transferError
 }

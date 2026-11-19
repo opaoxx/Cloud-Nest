@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/binding"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
@@ -71,14 +74,11 @@ func TestUploadTransferDeadlineRealHTTP(t *testing.T) {
 					})
 				})
 				outcomes <- outcome{err, useCalled, source.reads, deadline}
-				switch {
-				case errors.Is(err, context.DeadlineExceeded):
-					requestContext.Status(http.StatusRequestTimeout)
-				case err != nil:
-					requestContext.Status(http.StatusInternalServerError)
-				default:
-					requestContext.Status(http.StatusNoContent)
+				if err != nil {
+					handler.UploadContentFailure(requestContext, err)
+					return
 				}
+				requestContext.Status(http.StatusNoContent)
 			})
 			server := httptest.NewServer(router)
 			defer server.Close()
@@ -101,9 +101,16 @@ func TestUploadTransferDeadlineRealHTTP(t *testing.T) {
 				if err != nil {
 					t.Fatal("服务器未及时交付响应", err)
 				}
-				_, readError := io.Copy(io.Discard, response.Body)
+				body, readError := io.ReadAll(response.Body)
 				if closeError := response.Body.Close(); readError != nil || closeError != nil {
 					t.Fatal("读取测试响应失败", readError, closeError)
+				}
+				if response.StatusCode == http.StatusRequestTimeout {
+					var result dto.ErrorResponse
+					if err := json.Unmarshal(body, &result); err != nil || result.Error.Code != "UPLOAD_TIMEOUT" ||
+						result.RequestID == "" || result.RequestID != response.Header.Get("X-Request-ID") {
+						t.Fatal("网络超时未交付公开错误及请求 ID", string(body), err)
+					}
 				}
 				return response.StatusCode
 			}
@@ -112,7 +119,8 @@ func TestUploadTransferDeadlineRealHTTP(t *testing.T) {
 			}
 			result := <-outcomes
 			if result.reads < 2 || result.use != fixture.wantUseCall || (fixture.wantStatus == http.StatusNoContent && result.err != nil) ||
-				(fixture.wantStatus == http.StatusRequestTimeout && !errors.Is(result.err, context.DeadlineExceeded)) {
+				(fixture.wantStatus == http.StatusRequestTimeout &&
+					(!errors.Is(result.err, context.DeadlineExceeded) || !errors.Is(result.err, binding.ErrUploadTransferTimeout))) {
 				t.Fatal("传输结果或文件使用时机错误", result.err, result.use)
 			}
 			entries, err := os.ReadDir(directory)
