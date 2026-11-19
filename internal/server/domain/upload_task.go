@@ -18,6 +18,9 @@ var ErrUploadTaskStagedObjectConflict = errors.New("暂存对象已关联上传�
 // ErrUploadTaskNotReady 表示任务方式、阶段或期限不满足当前内容接收条件。
 var ErrUploadTaskNotReady = errors.New("上传任务当前不可接收文件内容")
 
+// ErrUploadTargetUnavailable 表示目标路径当前无法容纳发布的文件。
+var ErrUploadTargetUnavailable = errors.New("目标目录已不可用")
+
 // ErrUploadTaskBusy 表示当前任务仍由有效租约持有者处理。
 var ErrUploadTaskBusy = errors.New("上传任务正在处理中")
 
