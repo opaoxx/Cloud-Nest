@@ -749,3 +749,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `UploadVerificationCandidateProcessor.Process`。它从单条扫描候选领取租约，按已提交的任务查询暂存对象，再运行一次校验。[第 333 步学习记录](docs/开发学习记录.md#第-333-步处理单个上传校验候选)
 
 已提供 `UploadVerificationBatch.RunOnce`。按给定上限扫描一次，逐条校验并汇总发布、重试和候选错误。取消时返回当前汇总。[第 334 步学习记录](docs/开发学习记录.md#第-334-步限量扫描并汇总一轮上传校验)
+
+已提供 `RunUploadVerificationLoop`。首轮立即执行，每轮汇报后等待指定间隔再继续。取消会传给当前轮次，也可中断等待。[第 335 步学习记录](docs/开发学习记录.md#第-335-步为上传校验加入可取消的定时循环)
