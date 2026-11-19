@@ -36,6 +36,7 @@ type loginTransactionScript struct {
 	recordUploadObject                                 func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	beginUploadVerification                            func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	promoteUploadObject                                func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	clearPublishedObjectTimer                          func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	quotaQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	reserveStorage                                     func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	settleUploadQuota                                  func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -103,6 +104,10 @@ func (connection *loginTransactionConnection) ExecContext(ctx context.Context, s
 	if strings.HasPrefix(statement, "UPDATE stored_objects SET status = 'ORPHANED'") && connection.script.orphanStagedObject != nil {
 		connection.script.record("orphan_object")
 		return connection.script.orphanStagedObject(ctx, statement, arguments)
+	}
+	if strings.HasPrefix(statement, "UPDATE stored_objects SET unreferenced_at = NULL, gc_after = NULL") && connection.script.clearPublishedObjectTimer != nil {
+		connection.script.record("clear_object_timer")
+		return connection.script.clearPublishedObjectTimer(ctx, statement, arguments)
 	}
 	if strings.HasPrefix(statement, "UPDATE upload_tasks SET lease_owner = ") && connection.script.claimUploadLease != nil {
 		connection.script.record("claim_upload_lease")
