@@ -20,6 +20,15 @@ var uploadExpirationStatuses = [...]domain.UploadStatus{
 // ListUploadExpirationCandidates 在事务外读取已到期、可尝试处理的任务。
 // 后续写入须在所属用户事务中重新核对当前任务和租约。
 func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit int) ([]domain.UploadExpirationCandidate, error) {
+	return store.listUploadExpirationCandidates(ctx, limit, "")
+}
+
+// ListSingleUploadExpirationCandidates 在限量前筛出到期的单文件任务。
+func (store *Store) ListSingleUploadExpirationCandidates(ctx context.Context, limit int) ([]domain.UploadExpirationCandidate, error) {
+	return store.listUploadExpirationCandidates(ctx, limit, "SINGLE")
+}
+
+func (store *Store) listUploadExpirationCandidates(ctx context.Context, limit int, uploadMode string) ([]domain.UploadExpirationCandidate, error) {
 	// 1. 校验读取入口和批量上限。
 	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > maxUploadExpirationCandidates {
 		return nil, fmt.Errorf("扫描到期上传需要数据入口、上下文和 1～100 条的批量大小")
@@ -35,12 +44,15 @@ func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit in
 
 	// 2. 按 MySQL 时间筛选可处理的到期任务。
 	candidates := make([]domain.UploadExpirationCandidate, 0, limit)
-	queryError := store.database.WithContext(queryContext).Table("upload_tasks").
+	query := store.database.WithContext(queryContext).Table("upload_tasks").
 		Select("id AS task_id", "user_id", "staged_object_id", "lease_version", "status", "expires_at", "upload_mode").
 		Where("status IN ? AND expires_at <= UTC_TIMESTAMP(6)", uploadExpirationStatuses[:]).
 		Where("(lease_until IS NULL OR lease_until <= UTC_TIMESTAMP(6))").
-		Where("(status <> ? OR next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6))", domain.UploadStatusExpiring).
-		Order("expires_at ASC, id ASC").Limit(limit).Find(&candidates).Error
+		Where("(status <> ? OR next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6))", domain.UploadStatusExpiring)
+	if uploadMode != "" {
+		query = query.Where("upload_mode = ?", uploadMode)
+	}
+	queryError := query.Order("expires_at ASC, id ASC").Limit(limit).Find(&candidates).Error
 	if err := queryContext.Err(); err != nil {
 		return nil, err
 	}
@@ -58,6 +70,7 @@ func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit in
 		expiresAt := candidate.ExpiresAt.UTC()
 		if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 || !slices.Contains(uploadExpirationStatuses[:], candidate.Status) ||
 			(candidate.UploadMode != "SINGLE" && candidate.UploadMode != "MULTIPART") ||
+			(uploadMode != "" && candidate.UploadMode != uploadMode) ||
 			expiresAt.Year() < 1000 || expiresAt.Year() > 9999 || expiresAt.Nanosecond()%1000 != 0 ||
 			expiresAt.Before(previousExpiry) || (expiresAt.Equal(previousExpiry) && candidate.TaskID <= previousTaskID) {
 			return nil, domain.ErrInvalidUploadTaskData
