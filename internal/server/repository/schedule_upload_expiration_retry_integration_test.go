@@ -122,6 +122,7 @@ func TestScheduleUploadExpirationRetryRejectsConflictsIntegration(t *testing.T) 
 		wantError       error
 	}{
 		{"active lease", "UPDATE upload_tasks SET lease_owner='other',lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19", domain.ErrUploadTaskBusy},
+		{"before original deadline", "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19", domain.ErrUploadTaskBusy},
 		{"competing cancellation", "UPDATE upload_tasks SET status='CANCELLING' WHERE id=19", domain.ErrUploadTaskNotReady},
 		{"attempt count exhausted", "UPDATE upload_tasks SET attempt_count=4294967295 WHERE id=19", domain.ErrInvalidUploadTaskData},
 		{"invalid readback rolls back", "CREATE TRIGGER fixture_expiry_retry BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.last_error_code='fixture'", domain.ErrInvalidUploadTaskData},
@@ -138,6 +139,7 @@ func TestScheduleUploadExpirationRetryRejectsConflictsIntegration(t *testing.T) 
 				t.Fatal(err)
 			}
 			task.AttemptCount = before.AttemptCount
+			task.ExpiresAt = before.ExpiresAt
 
 			// 2. 核对错误及事务失败后保存的任务。
 			got, err := store.ScheduleUploadExpirationRetry(ctx, task, 10)
