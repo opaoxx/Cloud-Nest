@@ -1,15 +1,26 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -195,6 +206,101 @@ func TestBeginUserUploadCancellationIntegration(t *testing.T) {
 		var writes int
 		if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_cancel_writes WHERE task_id=?", fixture.ID).Scan(&writes); err != nil || writes != 1 {
 			t.Fatal("并发取消没有恰好写入一次", writes, err)
+		}
+	})
+
+	t.Run("http cancellation accepts and replays committed result", func(t *testing.T) {
+		// 1. 用测试路由串联正式 Bearer 授权、取消 Handler 和 MySQL 事务。
+		reset(t)
+		jwtConfig := config.JWTConfig{SigningKey: bytes.Repeat([]byte{9}, 32), Issuer: "cloudnest-test", Audience: "cloudnest-api-test", AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour}
+		signer, err := service.NewAccessTokenSigner(jwtConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := service.NewAccessTokenVerifier(jwtConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		access, err := signer.Issue(domain.LoginSession{ID: otherDevice.SessionID, UserID: otherDevice.UserID, DeviceID: otherDevice.DeviceID, ExpiresAt: time.Now().Add(time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorization := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.POST("/test-uploads/:id/cancel",
+			middleware.RequireAuthorization(authorization.Authorize, handler.AuthorizationFailure), handler.UploadCancellation(store.BeginUserUploadCancellation),
+		)
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 5 * time.Second
+		request := func(taskID, token string, wantStatus int, wantCode string) dto.UploadTaskResponse {
+			t.Helper()
+			message, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/test-uploads/"+taskID+"/cancel", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token != "" {
+				message.Header.Set("Authorization", "Bearer "+token)
+			}
+			response, err := client.Do(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			raw, err := io.ReadAll(response.Body)
+			if err != nil || response.StatusCode != wantStatus || response.Header.Get("Cache-Control") != "no-store" {
+				t.Fatal("实际取消 HTTP 响应与预期不符", response.StatusCode, wantStatus, err, string(raw))
+			}
+			requestID := response.Header.Get("X-Request-ID")
+			var body dto.UploadTaskResponse
+			if wantCode != "" {
+				var failure dto.ErrorResponse
+				if json.Unmarshal(raw, &failure) != nil || failure.Error.Code != wantCode || failure.Error.Details != nil || requestID == "" || failure.RequestID != requestID {
+					t.Fatal("实际取消错误响应不符", string(raw))
+				}
+			} else if json.Unmarshal(raw, &body) != nil || body.Data.ID != taskID || requestID == "" || body.RequestID != requestID {
+				t.Fatal("实际取消成功响应不符", string(raw))
+			}
+			return body
+		}
+
+		// 2. 检查授权先于请求解析、任务归属隔离，以及租约冲突没有推进状态。
+		before := read(t)
+		request("0", "", http.StatusUnauthorized, "AUTH_REQUIRED")
+		for _, missingID := range []string{"20", "999"} {
+			request(missingID, access.Token, http.StatusNotFound, "UPLOAD_NOT_FOUND")
+		}
+		if !reflect.DeepEqual(read(t), before) {
+			t.Fatal("被拒绝的 HTTP 取消改变了任务或额度")
+		}
+		execute(t, "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19")
+		leased := read(t)
+		request("19", access.Token, http.StatusConflict, "UPLOAD_BUSY")
+		if !reflect.DeepEqual(read(t), leased) {
+			t.Fatal("租约冲突后任务记录发生变化")
+		}
+		reset(t)
+		before = read(t)
+
+		// 3. 同账号另一设备首次与重复请求均读到已提交的取消。
+		accepted := request("19", access.Token, http.StatusAccepted, "")
+		after := read(t)
+		replay := request("19", access.Token, http.StatusAccepted, "")
+		if accepted.Data.Status != "CANCELLING" || after.task.Status != domain.UploadStatusCancelling || after.task.DeviceID != originalDevice.DeviceID ||
+			after.task.ReservedBytes != before.task.ReservedBytes || after.quota != before.quota ||
+			!reflect.DeepEqual(accepted.Data, replay.Data) || accepted.RequestID == replay.RequestID || !reflect.DeepEqual(read(t), after) {
+			t.Fatal("跨设备受理、重复响应或持久状态不符", accepted, replay, after)
+		}
+		// 4. 另行准备已发布任务，确认取消请求直接复用已有终态。
+		reset(t)
+		execute(t, `UPDATE upload_tasks SET status='COMPLETED',reserved_bytes=0,lease_owner=NULL,lease_until=NULL,
+			next_attempt_at=NULL,completed_at=UTC_TIMESTAMP(6),
+			published_object_id=29,result_entry_id=31,resolved_name='published.md' WHERE id=19`)
+		completed := read(t)
+		terminal := request("19", access.Token, http.StatusOK, "")
+		if terminal.Data.Status != "COMPLETED" || terminal.Data.ResultEntryID == nil || *terminal.Data.ResultEntryID != "31" || !reflect.DeepEqual(read(t), completed) {
+			t.Fatal("已有发布结果的 HTTP 响应或快照不符", terminal)
 		}
 	})
 
