@@ -63,12 +63,7 @@ func (verification *UploadVerificationService) VerifyAndPublish(ctx context.Cont
 		if errors.Is(verificationError, context.Canceled) {
 			return nil, verificationError
 		}
-		// 从 1 秒逐次翻倍，先判断上限再移位，避免较大的计数溢出。
-		delaySeconds := 30
-		if task.AttemptCount < 5 {
-			delaySeconds = 1 << task.AttemptCount
-		}
-		return verification.scheduleRetry(ctx, task, delaySeconds)
+		return verification.scheduleRetry(ctx, task, uploadRetryDelaySeconds(task.AttemptCount))
 	}
 
 	// 4. 已确认的大小或摘要失配继续交给失败收尾事务。

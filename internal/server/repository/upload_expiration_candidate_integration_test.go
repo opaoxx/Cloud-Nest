@@ -104,7 +104,7 @@ func TestProcessUploadExpirationCandidateIntegration(t *testing.T) {
 				}, func(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
 					completeCalls++
 					return store.CompleteUploadExpiration(ctx, task)
-				})
+				}, store.ScheduleUploadExpirationRetry)
 			result, err := processor.Process(attemptContext, candidate)
 			if !errors.Is(err, scenario.wantError) || beginCalls != scenario.wantBegin || completeCalls != scenario.wantComplete {
 				t.Fatal("候选处理结果或调用顺序错误", result, err, beginCalls, completeCalls)

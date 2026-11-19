@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestMarkUploadExpirationRetryError(t *testing.T) {
@@ -91,12 +92,42 @@ func TestCompleteUploadExpirationMarksLockWaitIntegration(t *testing.T) {
 		t.Fatal("失败的收尾修改了任务或预占", after, reserved, err, reservationError)
 	}
 
-	// 3. 释放行锁后用原任务再次收尾，验证可以正常提交。
+	// 3. 保持行锁，用正式批次安排重试。等待中的任务会被下一次扫描略过。
+	processor := service.NewUploadExpirationCandidateProcessor(
+		store.BeginUploadExpiration, store.CompleteUploadExpiration, store.ScheduleUploadExpirationRetry,
+	)
+	batch := service.NewUploadExpirationBatch(store.ListSingleUploadExpirationCandidates, processor.Process)
+	summary, err := batch.RunOnce(ctx, 1)
+	if err != nil || summary.Scanned != 1 || summary.Expired != 0 || summary.RetriesScheduled != 1 || len(summary.CandidateErrors) != 0 {
+		t.Fatal("批次未将锁等待超时转为已安排的重试", summary, err)
+	}
+	scheduled, err := store.FindUserUploadTask(ctx, task.UserID, task.ID)
+	if err != nil || scheduled == nil || scheduled.Status != domain.UploadStatusExpiring ||
+		scheduled.ReservedBytes != task.ReservedBytes || scheduled.AttemptCount != task.AttemptCount+1 ||
+		scheduled.NextAttemptAt == nil || !scheduled.NextAttemptAt.Equal(scheduled.UpdatedAt.Add(16*time.Second)) ||
+		scheduled.LastErrorCode == nil || *scheduled.LastErrorCode != "DATABASE_UNAVAILABLE" {
+		t.Fatal("临时数据库故障未写回预期的重试安排", scheduled, err)
+	}
+	if waiting, err := batch.RunOnce(ctx, 1); err != nil || waiting.Scanned != 0 {
+		t.Fatal("批次提前处理了等待中的任务", waiting, err)
+	}
+
+	// 4. 释放行锁并让等待结束，从批次入口重新扫描和收尾。
 	if err := holder.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	finished, err := store.CompleteUploadExpiration(ctx, task)
+	if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	summary, err = batch.RunOnce(ctx, 1)
+	if err != nil || summary.Scanned != 1 || summary.Expired != 1 || summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 0 {
+		t.Fatal("到点后批次未正常收尾", summary, err)
+	}
+	finished, err := store.FindUserUploadTask(ctx, task.UserID, task.ID)
 	if err != nil || finished == nil || !hasCompletedUploadExpiration(finished) {
 		t.Fatal("锁释放后无法完成收尾", finished, err)
+	}
+	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved); err != nil || reserved != 512 {
+		t.Fatal("接续收尾未正确返还任务预占", reserved, err)
 	}
 }

@@ -15,9 +15,10 @@ type UploadExpirationCandidateError struct {
 
 // UploadExpirationBatchResult 汇总一轮到期扫描及已经处理的结果。
 type UploadExpirationBatchResult struct {
-	Scanned         int
-	Expired         int
-	CandidateErrors []UploadExpirationCandidateError
+	Scanned          int
+	Expired          int
+	RetriesScheduled int
+	CandidateErrors  []UploadExpirationCandidateError
 }
 
 // UploadExpirationBatch 将单文件扫描接到逐条过期处理入口。
@@ -58,22 +59,29 @@ func (batch *UploadExpirationBatch) RunOnce(ctx context.Context, limit int) (Upl
 	}
 	summary.Scanned = len(candidates)
 
-	// 2. 按顺序处理候选，累计终结数和逐条错误。
+	// 2. 按顺序处理候选，统计已终结、已安排重试和逐条错误。
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
 		task, err := batch.process(ctx, candidate)
-		if err == nil && (task == nil || task.ID != candidate.TaskID || task.UserID != candidate.UserID ||
-			task.StagedObjectID != candidate.StagedObjectID || task.UploadMode != "SINGLE" ||
-			task.Status != domain.UploadStatusExpired || task.ReservedBytes != 0) {
-			err = domain.ErrInvalidUploadTaskData
+		if err == nil {
+			switch {
+			case task == nil || task.ID != candidate.TaskID || task.UserID != candidate.UserID ||
+				task.StagedObjectID != candidate.StagedObjectID || task.UploadMode != "SINGLE":
+				err = domain.ErrInvalidUploadTaskData
+			case task.Status == domain.UploadStatusExpired && task.ReservedBytes == 0:
+				summary.Expired++
+			case task.Status == domain.UploadStatusExpiring && task.CompletedAt == nil &&
+				task.NextAttemptAt != nil && task.NextAttemptAt.After(task.UpdatedAt):
+				summary.RetriesScheduled++
+			default:
+				err = domain.ErrInvalidUploadTaskData
+			}
 		}
 		if err != nil {
 			summary.CandidateErrors = append(summary.CandidateErrors, UploadExpirationCandidateError{TaskID: candidate.TaskID, Err: err})
-			continue
 		}
-		summary.Expired++
 	}
 
 	// 3. 返回本轮汇总及可能的取消原因。

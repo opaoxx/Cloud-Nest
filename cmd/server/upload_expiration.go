@@ -18,8 +18,10 @@ const (
 
 // newServerUploadExpirationBatch 装配单文件过期处理的正式仓储依赖。
 func newServerUploadExpirationBatch(store *repository.Store) *service.UploadExpirationBatch {
-	// 1. 装配单文件到期扫描、阶段推进和收尾。
-	processor := service.NewUploadExpirationCandidateProcessor(store.BeginUploadExpiration, store.CompleteUploadExpiration)
+	// 1. 装配单文件到期扫描、阶段推进、收尾和重试写回。
+	processor := service.NewUploadExpirationCandidateProcessor(
+		store.BeginUploadExpiration, store.CompleteUploadExpiration, store.ScheduleUploadExpirationRetry,
+	)
 	return service.NewUploadExpirationBatch(store.ListSingleUploadExpirationCandidates, processor.Process)
 }
 
@@ -55,7 +57,7 @@ func startServerUploadExpirationWorker(ctx context.Context, runOnce func(context
 				}
 				if summary.Scanned > 0 {
 					logger.Info("上传过期轮次结束", "scanned", summary.Scanned, "expired", summary.Expired,
-						"candidate_errors", len(summary.CandidateErrors))
+						"retries_scheduled", summary.RetriesScheduled, "candidate_errors", len(summary.CandidateErrors))
 				}
 			})
 		if err != nil && workerContext.Err() == nil {

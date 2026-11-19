@@ -33,7 +33,7 @@ func TestServerUploadExpirationWorkerScheduleAndStop(t *testing.T) {
 				t.Error("单文件过期批量上限错误", limit)
 			}
 			if rounds.Add(1) == 1 {
-				return service.UploadExpirationBatchResult{Scanned: 1, Expired: 1}, nil
+				return service.UploadExpirationBatchResult{Scanned: 2, Expired: 1, RetriesScheduled: 1}, nil
 			}
 			close(started)
 			<-ctx.Done()
@@ -79,7 +79,8 @@ func TestServerUploadExpirationWorkerScheduleAndStop(t *testing.T) {
 		logged := logs.String()
 		report := strings.LastIndex(logged, "上传过期轮次结束")
 		exit := strings.Index(logged, "上传过期 worker 已停止")
-		if count := rounds.Load(); count != 2 || report < 0 || exit <= report || !strings.Contains(logged, `"expired":1`) || strings.Contains(logged, "上传过期轮次失败") {
+		if count := rounds.Load(); count != 2 || report < 0 || exit <= report ||
+			!strings.Contains(logged, `"expired":1,"retries_scheduled":1`) || strings.Contains(logged, "上传过期轮次失败") {
 			t.Fatal("过期汇报、关停顺序或取消日志不符", count, logged)
 		}
 		failure := strings.Index(logged, "上传过期任务处理失败")

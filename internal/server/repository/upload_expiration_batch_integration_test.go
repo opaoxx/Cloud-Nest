@@ -66,7 +66,9 @@ func TestUploadExpirationBatchIntegration(t *testing.T) {
 	}
 
 	// 2. 扫描限量前筛选单文件，再逐条调用实际推进和收尾。
-	processor := service.NewUploadExpirationCandidateProcessor(store.BeginUploadExpiration, store.CompleteUploadExpiration)
+	processor := service.NewUploadExpirationCandidateProcessor(
+		store.BeginUploadExpiration, store.CompleteUploadExpiration, store.ScheduleUploadExpirationRetry,
+	)
 	var processed []uint64
 	scanCalls := 0
 	batch := service.NewUploadExpirationBatch(func(ctx context.Context, limit int) ([]domain.UploadExpirationCandidate, error) {
@@ -77,7 +79,8 @@ func TestUploadExpirationBatchIntegration(t *testing.T) {
 		return processor.Process(ctx, candidate)
 	})
 	summary, err := batch.RunOnce(ctx, 2)
-	if err != nil || scanCalls != 1 || summary.Scanned != 2 || summary.Expired != 1 || len(summary.CandidateErrors) != 1 {
+	if err != nil || scanCalls != 1 || summary.Scanned != 2 || summary.Expired != 1 ||
+		summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 1 {
 		t.Fatal("到期批次未返回预期汇总", summary, scanCalls, err)
 	}
 	if !slices.Equal(processed, []uint64{protectedID, expiredID}) || summary.CandidateErrors[0].TaskID != protectedID ||
