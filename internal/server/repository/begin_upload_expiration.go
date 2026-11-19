@@ -19,7 +19,9 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 	}
 	expiry := candidate.ExpiresAt.UTC()
 	if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 ||
-		!slices.Contains(uploadExpirationStatuses[:], candidate.Status) || expiry.Year() < 1000 || expiry.Year() > 9999 || expiry.Nanosecond()%1000 != 0 {
+		!slices.Contains(uploadExpirationStatuses[:], candidate.Status) ||
+		(candidate.UploadMode != "" && candidate.UploadMode != "SINGLE" && candidate.UploadMode != "MULTIPART") ||
+		expiry.Year() < 1000 || expiry.Year() > 9999 || expiry.Nanosecond()%1000 != 0 {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
@@ -37,7 +39,8 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 			return domain.ErrUploadTaskNotReady
 		}
 		if current.Status != candidate.Status || current.StagedObjectID != candidate.StagedObjectID ||
-			current.LeaseVersion != candidate.LeaseVersion || !current.ExpiresAt.Equal(expiry) {
+			current.LeaseVersion != candidate.LeaseVersion || !current.ExpiresAt.Equal(expiry) ||
+			(candidate.UploadMode != "" && current.UploadMode != candidate.UploadMode) {
 			return domain.ErrUploadTaskBusy
 		}
 		if current.ResultEntryID != nil || current.PublishedObjectID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
@@ -69,9 +72,9 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 			"UPDATE upload_tasks SET status = 'EXPIRING', lease_owner = NULL, lease_until = NULL, "+
 				"next_attempt_at = NULL, updated_at = UTC_TIMESTAMP(6) "+
 				"WHERE user_id = ? AND id = ? AND staged_object_id = ? AND lease_version = ? AND status = ? "+
-				"AND expires_at = ? AND expires_at <= UTC_TIMESTAMP(6) "+
+				"AND upload_mode = ? AND expires_at = ? AND expires_at <= UTC_TIMESTAMP(6) "+
 				"AND (lease_until IS NULL OR lease_until <= UTC_TIMESTAMP(6))",
-			current.UserID, current.ID, current.StagedObjectID, current.LeaseVersion, current.Status, current.ExpiresAt)
+			current.UserID, current.ID, current.StagedObjectID, current.LeaseVersion, current.Status, current.UploadMode, current.ExpiresAt)
 		if err := txContext.Err(); err != nil {
 			return err
 		}
@@ -88,7 +91,7 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 		if err != nil {
 			return err
 		}
-		if updated.Status != domain.UploadStatusExpiring || updated.StagedObjectID != current.StagedObjectID ||
+		if updated.Status != domain.UploadStatusExpiring || updated.StagedObjectID != current.StagedObjectID || updated.UploadMode != current.UploadMode ||
 			updated.LeaseOwner != nil || updated.LeaseUntil != nil || updated.LeaseVersion != current.LeaseVersion || updated.NextAttemptAt != nil ||
 			updated.ReservedBytes != current.ReservedBytes || updated.FileSize != current.FileSize || !updated.ExpiresAt.Equal(expiry) ||
 			updated.UpdatedAt.Before(now) || updated.ResultEntryID != nil || updated.PublishedObjectID != nil ||

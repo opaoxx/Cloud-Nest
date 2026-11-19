@@ -13,4 +13,6 @@ type UploadExpirationCandidate struct {
 	// Status 和 ExpiresAt 记录扫描时的阶段和到期时间。
 	Status    UploadStatus
 	ExpiresAt time.Time
+	// UploadMode 区分单文件和分片清理入口。
+	UploadMode string
 }

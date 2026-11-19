@@ -765,3 +765,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `BeginUploadExpiration`，按用户加锁复核到期候选，将符合条件的任务推进到 `EXPIRING`，保留任务预占供随后结算。[第 341 步学习记录](docs/开发学习记录.md#第-341-步将到期上传任务推进到过期处理阶段)
 
 已提供 `CompleteUploadExpiration`，在同一用户事务中写入单文件任务的 `EXPIRED` 终态、释放预占并为暂存对象开始回收计时。[第 342 步学习记录](docs/开发学习记录.md#第-342-步终结过期的单文件上传任务)
+
+已提供 `UploadExpirationCandidateProcessor.Process`，按扫描候选依次推进和收尾单文件任务，中断后可从已提交的 `EXPIRING` 接续。[第 343 步学习记录](docs/开发学习记录.md#第-343-步处理单个到期上传候选)

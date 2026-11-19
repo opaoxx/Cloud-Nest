@@ -36,7 +36,7 @@ func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit in
 	// 2. 按 MySQL 时间筛选可处理的到期任务。
 	candidates := make([]domain.UploadExpirationCandidate, 0, limit)
 	queryError := store.database.WithContext(queryContext).Table("upload_tasks").
-		Select("id AS task_id", "user_id", "staged_object_id", "lease_version", "status", "expires_at").
+		Select("id AS task_id", "user_id", "staged_object_id", "lease_version", "status", "expires_at", "upload_mode").
 		Where("status IN ? AND expires_at <= UTC_TIMESTAMP(6)", uploadExpirationStatuses[:]).
 		Where("(lease_until IS NULL OR lease_until <= UTC_TIMESTAMP(6))").
 		Where("(status <> ? OR next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6))", domain.UploadStatusExpiring).
@@ -57,6 +57,7 @@ func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit in
 	for index, candidate := range candidates {
 		expiresAt := candidate.ExpiresAt.UTC()
 		if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 || !slices.Contains(uploadExpirationStatuses[:], candidate.Status) ||
+			(candidate.UploadMode != "SINGLE" && candidate.UploadMode != "MULTIPART") ||
 			expiresAt.Year() < 1000 || expiresAt.Year() > 9999 || expiresAt.Nanosecond()%1000 != 0 ||
 			expiresAt.Before(previousExpiry) || (expiresAt.Equal(previousExpiry) && candidate.TaskID <= previousTaskID) {
 			return nil, domain.ErrInvalidUploadTaskData

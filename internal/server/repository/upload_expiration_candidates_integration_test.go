@@ -104,11 +104,11 @@ func TestListUploadExpirationCandidatesIntegration(t *testing.T) {
 
 	// 3. 检查精确边界、同到期时间排序、批次截断和范围。
 	want := []domain.UploadExpirationCandidate{
-		{TaskID: 150, UserID: 7, StagedObjectID: 150, LeaseVersion: 5, Status: domain.UploadStatusCompleting, ExpiresAt: earlier},
-		{TaskID: 105, UserID: 8, StagedObjectID: 105, Status: domain.UploadStatusCreating, ExpiresAt: past},
-		{TaskID: 122, UserID: 7, StagedObjectID: 122, LeaseVersion: 2, Status: domain.UploadStatusExpiring, ExpiresAt: past},
-		{TaskID: 100, UserID: 7, StagedObjectID: 100, LeaseVersion: 3, Status: domain.UploadStatusUploading, ExpiresAt: now},
-		{TaskID: math.MaxUint64, UserID: 8, StagedObjectID: math.MaxUint64, LeaseVersion: math.MaxUint64, Status: domain.UploadStatusVerifying, ExpiresAt: now},
+		{TaskID: 150, UserID: 7, StagedObjectID: 150, LeaseVersion: 5, Status: domain.UploadStatusCompleting, ExpiresAt: earlier, UploadMode: "MULTIPART"},
+		{TaskID: 105, UserID: 8, StagedObjectID: 105, Status: domain.UploadStatusCreating, ExpiresAt: past, UploadMode: "SINGLE"},
+		{TaskID: 122, UserID: 7, StagedObjectID: 122, LeaseVersion: 2, Status: domain.UploadStatusExpiring, ExpiresAt: past, UploadMode: "SINGLE"},
+		{TaskID: 100, UserID: 7, StagedObjectID: 100, LeaseVersion: 3, Status: domain.UploadStatusUploading, ExpiresAt: now, UploadMode: "SINGLE"},
+		{TaskID: math.MaxUint64, UserID: 8, StagedObjectID: math.MaxUint64, LeaseVersion: math.MaxUint64, Status: domain.UploadStatusVerifying, ExpiresAt: now, UploadMode: "SINGLE"},
 	}
 	for _, limit := range []int{1, 3, 100, 100} {
 		candidates, err := store.ListUploadExpirationCandidates(ctx, limit)
