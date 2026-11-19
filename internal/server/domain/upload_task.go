@@ -30,6 +30,9 @@ var ErrUploadTaskBusy = errors.New("上传任务正在处理中")
 // ErrUploadExpirationRetryable 表示过期收尾遇到已确认的临时数据库错误。
 var ErrUploadExpirationRetryable = errors.New("上传过期收尾可重试")
 
+// ErrUploadCancellationRetryable 表示取消收尾遇到已确认的临时数据库错误。
+var ErrUploadCancellationRetryable = errors.New("上传取消收尾可重试")
+
 // ErrUploadLeaseVersionExhausted 表示租约版本已达 uint64 上限，无法继续递增。
 var ErrUploadLeaseVersionExhausted = errors.New("上传租约版本已达上限")
 

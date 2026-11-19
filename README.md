@@ -805,3 +805,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 取消 worker 为处理失败的候选记录 `task_id` 和固定 `error_code`，关停引起的上下文错误保留在轮次失败计数中。[第 361 步学习记录](docs/开发学习记录.md#第-361-步记录上传取消任务的错误码)
 
 已提供 `Store.ScheduleUploadCancellationRetry`，可为 `CANCELLING` 单文件任务保存下次尝试时间、尝试次数和固定数据库故障摘要。现有扫描会等到指定时间再选中该任务。[第 362 步学习记录](docs/开发学习记录.md#第-362-步记录上传取消任务的下次重试时间)
+
+`Store.CompleteUploadCancellation` 会为确认的 MySQL 锁等待超时和死锁附加取消重试标记，并保留原始数据库错误。[第 363 步学习记录](docs/开发学习记录.md#第-363-步识别可重试的上传取消收尾错误)

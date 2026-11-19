@@ -14,17 +14,17 @@ import (
 func (store *Store) CompleteUploadExpiration(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
 	// 1. 完成过期收尾，必要时为数据库错误附加过期重试标记。
 	finished, err := store.completeSingleUploadCleanup(ctx, task, domain.UploadStatusExpiring, domain.UploadStatusExpired, "终结过期上传")
-	if err != nil && ctx != nil {
-		return nil, markUploadExpirationRetryError(ctx, err)
-	}
-	return finished, err
+	return finished, markUploadCleanupRetryError(ctx, err, domain.ErrUploadExpirationRetryable)
 }
 
 // CompleteUploadCancellation 终结已受理取消的单文件任务，提交后返回终态。
 // 后台调用方传入已提交的 CANCELLING 任务，重复调用复用同一 CANCELLED 结果。
+// 已确认的临时数据库错误附带 ErrUploadCancellationRetryable 标记。
 func (store *Store) CompleteUploadCancellation(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
 	// 1. 使用同一套单文件收尾事务推进 CANCELLING → CANCELLED。
-	return store.completeSingleUploadCleanup(ctx, task, domain.UploadStatusCancelling, domain.UploadStatusCancelled, "终结取消上传")
+	finished, err := store.completeSingleUploadCleanup(ctx, task, domain.UploadStatusCancelling, domain.UploadStatusCancelled, "终结取消上传")
+	// 2. 识别临时数据库错误并附加取消重试标记。
+	return finished, markUploadCleanupRetryError(ctx, err, domain.ErrUploadCancellationRetryable)
 }
 
 // completeSingleUploadCleanup 在同一用户事务收尾单文件取消或过期。

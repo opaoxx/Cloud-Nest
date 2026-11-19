@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
 const (
@@ -14,10 +13,10 @@ const (
 	mysqlLockDeadlock    = 1213
 )
 
-// markUploadExpirationRetryError 为确认可重试的过期收尾错误附加领域标记。
-func markUploadExpirationRetryError(ctx context.Context, err error) error {
+// markUploadCleanupRetryError 为确认可重试的收尾错误附加对应的领域标记。
+func markUploadCleanupRetryError(ctx context.Context, err, retryMarker error) error {
 	// 1. 确认调用仍有效，保留原来的取消、超时和其他错误。
-	if err == nil || ctx.Err() != nil {
+	if err == nil || ctx == nil || ctx.Err() != nil {
 		return err
 	}
 	// 2. 沿单条包装链找到 MySQL 错误，核对错误码。
@@ -30,7 +29,7 @@ func markUploadExpirationRetryError(ctx context.Context, err error) error {
 		switch databaseError.Number {
 		case mysqlLockWaitTimeout, mysqlLockDeadlock:
 			// 3. 给确认可重试的错误附加标记，同时保留原始原因。
-			return fmt.Errorf("%w: %w", domain.ErrUploadExpirationRetryable, err)
+			return fmt.Errorf("%w: %w", retryMarker, err)
 		}
 	}
 	return err

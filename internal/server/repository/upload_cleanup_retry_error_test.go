@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
-func TestMarkUploadExpirationRetryError(t *testing.T) {
+func TestMarkUploadCleanupRetryError(t *testing.T) {
 	lockWait := &mysql.MySQLError{Number: 1205}
 	deadlock := &mysql.MySQLError{Number: 1213}
 	canceled, cancel := context.WithCancel(t.Context())
@@ -38,6 +39,7 @@ func TestMarkUploadExpirationRetryError(t *testing.T) {
 		{name: "foreign key violation", err: &mysql.MySQLError{Number: 1452}},
 		{name: "bad connection", err: driver.ErrBadConn},
 		{name: "matching text only", err: errors.New("ERROR 1205 Lock wait timeout exceeded")},
+		{name: "typed nil database error", err: (*mysql.MySQLError)(nil)},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 传入收尾可能返回的错误，核对是否附加标记。
@@ -45,13 +47,15 @@ func TestMarkUploadExpirationRetryError(t *testing.T) {
 			if caller == nil {
 				caller = t.Context()
 			}
-			marked := markUploadExpirationRetryError(caller, scenario.err)
-			if errors.Is(marked, domain.ErrUploadExpirationRetryable) != scenario.retryable {
-				t.Fatal("重试标记不符", marked)
-			}
-			// 2. 上层仍可读取原错误，未命中规则的结果原样返回。
-			if !errors.Is(marked, scenario.err) || (!scenario.retryable && marked != scenario.err) {
-				t.Fatal("原错误未保留", marked)
+			for _, marker := range []error{domain.ErrUploadExpirationRetryable, domain.ErrUploadCancellationRetryable} {
+				marked := markUploadCleanupRetryError(caller, scenario.err, marker)
+				if errors.Is(marked, marker) != scenario.retryable {
+					t.Fatal("重试标记不符", marker, marked)
+				}
+				// 2. 上层仍可读取原错误，未命中规则的结果原样返回。
+				if !errors.Is(marked, scenario.err) || (!scenario.retryable && marked != scenario.err) {
+					t.Fatal("原错误未保留", marked)
+				}
 			}
 		})
 	}
@@ -60,23 +64,9 @@ func TestMarkUploadExpirationRetryError(t *testing.T) {
 func TestCompleteUploadExpirationMarksLockWaitIntegration(t *testing.T) {
 	// 1. 用独占库的一条连接占住暂存对象，另一条连接执行实际收尾。
 	pool, store, task := beginUploadExpirationRetryFixture(t)
-	pool.SetMaxOpenConns(2)
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	holder, err := pool.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer holder.Rollback()
-	var lockedID uint64
-	if err := holder.QueryRowContext(ctx, "SELECT id FROM stored_objects WHERE id=? FOR UPDATE", task.StagedObjectID).
-		Scan(&lockedID); err != nil || lockedID != task.StagedObjectID {
-		t.Fatal("夹具未锁住暂存对象", lockedID, err)
-	}
-	// 持锁事务占用一个连接，只在独占库另一条测试连接上缩短等待。
-	if _, err := pool.ExecContext(ctx, "SET SESSION innodb_lock_wait_timeout = 1"); err != nil {
-		t.Fatal(err)
-	}
+	holder := holdUploadCleanupObjectLock(t, ctx, pool, task.StagedObjectID)
 
 	// 2. 验证真实 MySQL 返回 1205，收尾既保留原原因也附加领域标记。
 	result, err := store.CompleteUploadExpiration(ctx, task)
@@ -130,4 +120,77 @@ func TestCompleteUploadExpirationMarksLockWaitIntegration(t *testing.T) {
 	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved); err != nil || reserved != 512 {
 		t.Fatal("接续收尾未正确返还任务预占", reserved, err)
 	}
+}
+
+func TestCompleteUploadCancellationMarksLockWaitIntegration(t *testing.T) {
+	// 1. 在独占库准备已受理取消的单文件任务，并占住对应对象行。
+	pool, fixture := uploadTaskDatabase(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if _, err := pool.ExecContext(ctx, "UPDATE users SET reserved_storage=517 WHERE id=?", fixture.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET status='CANCELLING',upload_mode='SINGLE',storage_upload_id=NULL,
+		part_size=NULL,part_count=NULL,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
+		reserved_bytes=5,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR,lease_owner=NULL,lease_until=NULL,next_attempt_at=NULL
+		WHERE id=?`, fixture.ID); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.FindUserUploadTask(ctx, fixture.UserID, fixture.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := holdUploadCleanupObjectLock(t, ctx, pool, task.StagedObjectID)
+
+	// 2. 确认取消收尾保留真实 MySQL 1205，并附加取消专用标记。
+	result, err := store.CompleteUploadCancellation(ctx, task)
+	var databaseError *mysql.MySQLError
+	if result != nil || !errors.Is(err, domain.ErrUploadCancellationRetryable) || errors.Is(err, domain.ErrUploadExpirationRetryable) ||
+		!errors.As(err, &databaseError) || databaseError.Number != 1205 {
+		t.Fatal("取消收尾未保留锁等待超时和对应标记", result, err)
+	}
+	after, err := store.FindUserUploadTask(ctx, task.UserID, task.ID)
+	var reserved uint64
+	reservationError := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved)
+	if err != nil || !reflect.DeepEqual(after, task) || reservationError != nil || reserved != 517 {
+		t.Fatal("失败的取消收尾修改了任务或预占", after, reserved, err, reservationError)
+	}
+
+	// 3. 释放行锁，再次收尾并核对终态与预占返还。
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := store.CompleteUploadCancellation(ctx, task)
+	if err != nil || finished == nil || !hasCompletedUploadCleanup(finished, domain.UploadStatusCancelled) {
+		t.Fatal("锁释放后无法完成取消收尾", finished, err)
+	}
+	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved); err != nil || reserved != 512 {
+		t.Fatal("取消收尾未正确返还任务预占", reserved, err)
+	}
+}
+
+func holdUploadCleanupObjectLock(t *testing.T, ctx context.Context, pool *sql.DB, objectID uint64) *sql.Tx {
+	t.Helper()
+	// 1. 占用一个连接并锁定对象行，留另一连接给待验证事务。
+	pool.SetMaxOpenConns(2)
+	holder, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Rollback() })
+	var lockedID uint64
+	if err := holder.QueryRowContext(ctx, "SELECT id FROM stored_objects WHERE id=? FOR UPDATE", objectID).
+		Scan(&lockedID); err != nil || lockedID != objectID {
+		t.Fatal("夹具未锁住暂存对象", lockedID, err)
+	}
+
+	// 2. 只在另一条独占测试连接上缩短锁等待时间。
+	if _, err := pool.ExecContext(ctx, "SET SESSION innodb_lock_wait_timeout = 1"); err != nil {
+		t.Fatal(err)
+	}
+	return holder
 }
