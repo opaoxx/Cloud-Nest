@@ -1457,6 +1457,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 1. 在两次启动之间受理取消，并保存取消与过期任务的重试时间。
 	expirationRetry := prepareServerUploadExpirationRetryRecovery(t, ctx, pool)
 	cancellationRecovery := prepareServerUploadCancellationRecovery(t, ctx, pool)
+	cancellationToken, err := signer.Issue(cancellationRecovery.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginSecrets = append(loginSecrets, cancellationToken.Token)
 	restartLogOffset := logs.Len()
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
@@ -1467,6 +1472,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Run("recover ready cancellation and skip pending retry on first round", func(t *testing.T) {
 		cancellationRecovery.verifyFirstRound(t, ctx)
 	})
+	acceptedCancellation := cancellationRecovery.verifyHTTPAcceptance(t, ctx, "http://"+address, cancellationToken.Token, foreignToken.Token)
 	if verificationBeforeRestart != nil {
 		t.Run("recover verifying upload", func(t *testing.T) {
 			verifyServerUploadVerificationRecovery(t, ctx, pool, verificationBeforeRestart, verificationStorageVersion)
@@ -1843,6 +1849,9 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 3. 等待后续轮次完成过期与取消收尾，再停止服务并核对日志。
 	t.Run("recover expiring upload after retry delay", func(t *testing.T) {
 		expirationRetry.verifyRecovered(t, ctx)
+	})
+	t.Run("complete cancellation accepted by official HTTP route", func(t *testing.T) {
+		cancellationRecovery.verifyHTTPRecovery(t, ctx, "http://"+address, cancellationToken.Token, acceptedCancellation)
 	})
 	t.Run("recover cancelling upload after retry delay", func(t *testing.T) {
 		cancellationRecovery.verifyRetryRecovered(t, ctx)

@@ -5,12 +5,16 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"io"
+	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 )
 
@@ -24,11 +28,13 @@ type serverUploadCancellationRecoveryFixture struct {
 	store     *repository.Store
 	ready     *domain.UploadTask
 	scheduled *domain.UploadTask
+	httpTask  *domain.UploadTask
+	session   domain.LoginSession
 }
 
 func prepareServerUploadCancellationRecovery(t *testing.T, ctx context.Context, pool *sql.DB) serverUploadCancellationRecoveryFixture {
 	t.Helper()
-	// 1. 在独占库准备一个账号、一条有效会话和两条仍在上传期限内的任务。
+	// 1. 准备一个账号、一条有效会话和三条仍在上传期限内的任务。
 	tx, err := pool.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -47,12 +53,13 @@ func prepareServerUploadCancellationRecovery(t *testing.T, ctx context.Context, 
 		return uint64(id)
 	}
 	userID := insert(`INSERT INTO users(username,display_name,password_hash,storage_quota,used_storage,reserved_storage)
-		VALUES('cancellation_recovery','重启取消联测','fixture_hash',128,?,?)`, cancellationRecoveryUsedBytes, 2*cancellationRecoveryReservedBytes)
+		VALUES('cancellation_recovery','重启取消联测','fixture_hash',128,?,?)`, cancellationRecoveryUsedBytes, 3*cancellationRecoveryReservedBytes)
 	deviceID := insert(`INSERT INTO user_devices(user_id,installation_id,name,platform)
 		VALUES(?,'06dd6b7a-f9e1-4a80-9ef2-41aae71e722d','取消恢复来源设备','WEB')`, userID)
 	sessionHash := sha256.Sum256([]byte("fixture-cancellation-recovery-refresh"))
+	sessionExpiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	sessionID := insert(`INSERT INTO auth_sessions(user_id,device_id,refresh_token_hash,expires_at)
-		VALUES(?,?,?,UTC_TIMESTAMP(6)+INTERVAL 1 HOUR)`, userID, deviceID, sessionHash[:])
+		VALUES(?,?,?,?)`, userID, deviceID, sessionHash[:], sessionExpiresAt)
 	parentID := insert("INSERT INTO file_entries(user_id,name,name_key,entry_type) VALUES(?,'',X'','DIR')", userID)
 	insertTask := func(label string, attemptCount int) uint64 {
 		t.Helper()
@@ -66,11 +73,12 @@ func prepareServerUploadCancellationRecovery(t *testing.T, ctx context.Context, 
 	}
 	readyID := insertTask("ready", 0)
 	retryID := insertTask("retry", 4)
+	httpTaskID := insertTask("http", 0)
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	// 2. 调用正式事务受理两条取消，给重试任务写入 16 秒等待。
+	// 2. 为重启恢复准备两条已受理任务，第三条由正式 HTTP 请求受理。
 	store, err := repository.NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +93,10 @@ func prepareServerUploadCancellationRecovery(t *testing.T, ctx context.Context, 
 		return pending
 	}
 	ready, retry := accept(readyID), accept(retryID)
+	httpTask, err := store.FindUserUploadTask(ctx, userID, httpTaskID)
+	if err != nil || httpTask.Status != domain.UploadStatusUploading {
+		t.Fatal("未准备好待 HTTP 受理的任务", httpTask, err)
+	}
 	const retryDelaySeconds = 16
 	scheduled, err := store.ScheduleUploadCancellationRetry(ctx, retry, retryDelaySeconds)
 	if err != nil || scheduled == nil || scheduled.NextAttemptAt == nil || scheduled.AttemptCount != retry.AttemptCount+1 ||
@@ -92,7 +104,10 @@ func prepareServerUploadCancellationRecovery(t *testing.T, ctx context.Context, 
 		scheduled.LastErrorCode == nil || *scheduled.LastErrorCode != "DATABASE_UNAVAILABLE" {
 		t.Fatal("重启前未提交预期的取消重试安排", scheduled, err)
 	}
-	return serverUploadCancellationRecoveryFixture{pool: pool, store: store, ready: ready, scheduled: scheduled}
+	return serverUploadCancellationRecoveryFixture{
+		pool: pool, store: store, ready: ready, scheduled: scheduled, httpTask: httpTask,
+		session: domain.LoginSession{ID: sessionID, UserID: userID, DeviceID: deviceID, ExpiresAt: sessionExpiresAt},
+	}
 }
 
 func (fixture serverUploadCancellationRecoveryFixture) verifyFirstRound(t *testing.T, ctx context.Context) {
@@ -108,12 +123,88 @@ func (fixture serverUploadCancellationRecoveryFixture) verifyFirstRound(t *testi
 	if err != nil || object.Status != domain.StoredObjectStatusStaging || object.UnreferencedAt != nil || object.GCAfter != nil {
 		t.Fatal("等待任务的暂存对象提前开始了回收计时", object, err)
 	}
-	fixture.verifyAccount(t, ctx, cancellationRecoveryReservedBytes)
+	fixture.verifyAccount(t, ctx, 2*cancellationRecoveryReservedBytes)
 	var now time.Time
 	if err := fixture.pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&now); err != nil || !now.Before(*scheduled.NextAttemptAt) {
 		t.Fatal("未能在重试时间到达前核对取消首轮结果", now, err)
 	}
 	t.Logf("对照任务结束后，取消重试尚余 %s", scheduled.NextAttemptAt.Sub(now).Round(time.Millisecond))
+}
+
+func (fixture serverUploadCancellationRecoveryFixture) verifyHTTPAcceptance(t *testing.T, ctx context.Context, baseURL, ownerToken, otherToken string) *domain.UploadTask {
+	t.Helper()
+	// 1. 在正式路径核对授权与归属，再受理尚在上传中的任务。
+	taskID := strconv.FormatUint(fixture.httpTask.ID, 10)
+	requestServerUploadCancellation(t, ctx, baseURL, "", taskID, http.StatusUnauthorized, "AUTH_REQUIRED")
+	requestServerUploadCancellation(t, ctx, baseURL, otherToken, taskID, http.StatusNotFound, "UPLOAD_NOT_FOUND")
+	response := requestServerUploadCancellation(t, ctx, baseURL, ownerToken, taskID, http.StatusAccepted, "")
+	accepted, err := fixture.store.FindUserUploadTask(ctx, fixture.httpTask.UserID, fixture.httpTask.ID)
+	if err != nil || accepted.Status != domain.UploadStatusCancelling || accepted.ReservedBytes != fixture.httpTask.ReservedBytes ||
+		accepted.StagedObjectID != fixture.httpTask.StagedObjectID {
+		t.Fatal("HTTP 202 未对应已提交的取消受理", accepted, err)
+	}
+
+	// 2. 查询与重复取消应返回同一个已提交状态，各自使用当前请求 ID。
+	queried := requestServerUploadTask(t, baseURL, ownerToken, taskID, http.StatusOK, "", "")
+	replay := requestServerUploadCancellation(t, ctx, baseURL, ownerToken, taskID, http.StatusAccepted, "")
+	want, err := dto.NewUploadTaskData(accepted)
+	if err != nil || !reflect.DeepEqual(response.Data, *want) || !reflect.DeepEqual(queried.Data, response.Data) ||
+		!reflect.DeepEqual(replay.Data, response.Data) || response.RequestID == queried.RequestID || response.RequestID == replay.RequestID {
+		t.Fatal("查询或重复取消未返回相同受理状态", response, queried, replay, err)
+	}
+	fixture.verifyAccount(t, ctx, 2*cancellationRecoveryReservedBytes)
+	return accepted
+}
+
+func (fixture serverUploadCancellationRecoveryFixture) verifyHTTPRecovery(t *testing.T, ctx context.Context, baseURL, ownerToken string, accepted *domain.UploadTask) {
+	t.Helper()
+	// 1. 等待正式 worker 接手 API 受理的任务，再从同一 POST 路径读取终态。
+	finished := fixture.waitForCancellation(t, ctx, accepted, uploadCancellationInterval+5*time.Second)
+	taskID := strconv.FormatUint(finished.ID, 10)
+	response := requestServerUploadCancellation(t, ctx, baseURL, ownerToken, taskID, http.StatusOK, "")
+	want, err := dto.NewUploadTaskData(finished)
+	if err != nil || !reflect.DeepEqual(response.Data, *want) {
+		t.Fatal("取消完成后未返回实际终态", response, err)
+	}
+}
+
+func requestServerUploadCancellation(t *testing.T, ctx context.Context, baseURL, token, taskID string, status int, code string) dto.UploadTaskResponse {
+	t.Helper()
+	// 1. 通过正式路径发起无正文 POST，携带调用方凭证。
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/uploads/"+taskID+"/cancel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const origin = "http://127.0.0.1:5173"
+	request.Header.Set("Origin", origin)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("正式上传取消请求失败", err)
+	}
+	defer response.Body.Close()
+	encoded, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != status || response.Header.Get("Cache-Control") != "no-store" ||
+		response.Header.Get("Access-Control-Allow-Origin") != origin || response.Header.Get("Content-Type") != "application/json; charset=utf-8" {
+		t.Fatal("正式上传取消状态、正文或头错误", response.StatusCode, status, err, string(encoded))
+	}
+
+	// 2. 对照响应 ID，读取成功任务或期望的固定错误。
+	requestID := response.Header.Get("X-Request-ID")
+	var payload dto.UploadTaskResponse
+	if code != "" {
+		var failure dto.ErrorResponse
+		if json.Unmarshal(encoded, &failure) != nil || failure.Error.Code != code || failure.Error.Details != nil ||
+			requestID == "" || failure.RequestID != requestID {
+			t.Fatal("正式上传取消错误结构不符", string(encoded))
+		}
+	} else if json.Unmarshal(encoded, &payload) != nil || payload.Data.ID != taskID || requestID == "" || payload.RequestID != requestID {
+		t.Fatal("正式上传取消成功响应不符", string(encoded))
+	}
+	return payload
 }
 
 func (fixture serverUploadCancellationRecoveryFixture) verifyRetryRecovered(t *testing.T, ctx context.Context) {
@@ -184,7 +275,8 @@ func (fixture serverUploadCancellationRecoveryFixture) verifyAccount(t *testing.
 
 func verifyServerUploadCancellationRecoveryReport(t *testing.T, restartLogs string) {
 	t.Helper()
-	// 1. 服务退出后检查新实例的日志，核对两次非空取消轮次。
+	// 1. 首轮完成即时任务，后续轮次完成重试任务和刚受理的 HTTP 任务。
+	wantTasks := []int{1, 2}
 	rounds := 0
 	var startedAt time.Time
 	for _, line := range strings.Split(restartLogs, "\n") {
@@ -206,16 +298,20 @@ func verifyServerUploadCancellationRecoveryReport(t *testing.T, restartLogs stri
 			startedAt = event.Time
 			continue
 		}
+		if rounds >= len(wantTasks) {
+			t.Fatal("出现额外的取消轮次", line)
+		}
+		wantProcessed := wantTasks[rounds]
 		rounds++
 		elapsed := event.Time.Sub(startedAt)
 		if startedAt.IsZero() || elapsed < 0 || (rounds == 1 && elapsed >= uploadCancellationInterval) ||
-			(rounds == 2 && elapsed < uploadCancellationInterval) || event.Scanned != 1 || event.Cancelled != 1 ||
+			(rounds == 2 && elapsed < uploadCancellationInterval) || event.Scanned != wantProcessed || event.Cancelled != wantProcessed ||
 			event.RetriesScheduled != 0 || event.CandidateErrors != 0 {
 			t.Fatal("重启后的取消轮次结果或耗时不符", rounds, event, elapsed)
 		}
 		t.Logf("重启后第 %d 次非空取消轮次完成于 worker 启动后 %s", rounds, elapsed.Round(time.Millisecond))
 	}
-	if rounds != 2 {
-		t.Fatal("重启后应分两轮完成即时任务和重试任务", rounds)
+	if rounds != len(wantTasks) {
+		t.Fatal("重启后应分两轮完成三条取消任务", rounds)
 	}
 }
