@@ -693,3 +693,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 正式后端已绑定 `PUT /api/v1/uploads/{id}/content`。启动入口复用共享临时区、MySQL 用户事务和 MinIO，实际写入完成后将任务和对象推进到 `VERIFYING` 并返回 202。真实启动、二进制与零字节读回及拒绝边界验证见 [第 305 步学习记录](docs/开发学习记录.md#第-305-步将上传内容接收接入后端启动)。
 
 已提供 `Store.ListUploadVerificationCandidates`。它按数据库时间只读扫描已就绪的 `VERIFYING` 单文件任务，每批最多 100 条，返回用于后续领取的任务、用户、对象和租约版本。边界及复验见 [第 306 步学习记录](docs/开发学习记录.md#第-306-步查询待校验的上传任务)。
+
+已提供 `Store.ClaimUploadVerificationLease`。校验 worker 可使用候选在所属用户事务中复核任务和暂存对象，领取 60 秒租约并递增版本。真实 MySQL 验证并发唯一领取、过期重领及回滚。调用与复验见 [第 307 步学习记录](docs/开发学习记录.md#第-307-步领取上传校验租约)。
