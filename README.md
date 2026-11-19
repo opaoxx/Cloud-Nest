@@ -717,3 +717,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.BuildPublishedFileEntryInput`，将上传任务、选定名称、`READY` 对象及来源设备整理为发布文件目录项的写入输入。字段来源及复验见 [第 317 步学习记录](docs/开发学习记录.md#第-317-步整理发布文件目录项写入输入)。
 
 已提供 `Store.FindUploadSourceDevice`。发布事务可按上传任务的设备 ID 读取同账号设备，为文件目录项提供真实的设备名称快照。查询与复验见 [第 318 步学习记录](docs/开发学习记录.md#第-318-步读取上传来源设备快照)。
+
+已提供 `models.NewPublishedFileEntry`，映射创建发布文件目录项所需的十三列。GORM 生成 SQL 和正式 MySQL 的字段读回及约束检查见 [第 319 步学习记录](docs/开发学习记录.md#第-319-步定义发布文件目录项写入映射)。
