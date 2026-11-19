@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
+	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
 type serverUploadContentBucket struct {
@@ -83,6 +85,9 @@ func prepareServerUploadContentBucket(t *testing.T, ctx context.Context) *server
 
 func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, target *serverUploadContentBucket, baseURL, token, otherToken string) {
 	t.Helper()
+	if err := target.client.EnableVersioning(ctx, target.name); err != nil {
+		t.Fatal("开启独占桶版本控制失败", err)
+	}
 	store, err := repository.NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +130,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 
 	before := readServerUploadCreationState(t, ctx, pool)
 	binary := []byte{0, 0xff, 0xfe, 1, 0x80}
+	var received []*domain.UploadTask
 	for _, fixture := range []struct {
 		name, key string
 		data      []byte
@@ -184,7 +190,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 			task, object := read()
 			if task.Status != domain.UploadStatusVerifying || task.LeaseOwner != nil || task.LeaseUntil != nil ||
 				task.LeaseVersion != 1 || task.ReservedBytes != uint64(len(fixture.data)) || object.ID != original.ID ||
-				object.Status != domain.StoredObjectStatusVerifying || object.StorageETag == nil || object.VerifiedAt != nil {
+				object.Status != domain.StoredObjectStatusVerifying || object.StorageETag == nil || object.StorageVersionID == nil || object.VerifiedAt != nil {
 				t.Fatal("写入确认、对象身份、两表状态或租约记录错误")
 			}
 			source, err := target.client.GetObject(ctx, target.name, object.ObjectKey, minio.GetObjectOptions{})
@@ -202,6 +208,15 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 			if queried.Data.Status != "VERIFYING" || queried.Data.ResultEntryID != nil {
 				t.Fatal("任务查询结果与实际校验阶段不符")
 			}
+			received = append(received, task)
+			if fixture.name == "binary" {
+				// 3. 为同一键写入不同的最新版本，验证校验会按任务记录读取原版本。
+				const laterContent = "later version"
+				latest, err := target.client.PutObject(ctx, target.name, object.ObjectKey, strings.NewReader(laterContent), int64(len(laterContent)), minio.PutObjectOptions{})
+				if err != nil || latest.VersionID == "" || latest.VersionID == *object.StorageVersionID {
+					t.Fatal("写入独占对象的新版本失败", err)
+				}
+			}
 		})
 	}
 	after := readServerUploadCreationState(t, ctx, pool)
@@ -209,4 +224,63 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 		after.tasks != before.tasks+3 || after.objects != before.objects+3 {
 		t.Fatal("上传接收改变了预占或重复创建了任务和对象")
 	}
+
+	t.Run("verification round", func(t *testing.T) {
+		// 1. 复用启动配置连接独占桶，绑定生产单轮校验入口。
+		settings, err := config.LoadStorageConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		client, err := storage.NewClient(ctx, settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer client.Close()
+		if len(received) != 2 {
+			t.Fatal("未准备好两条待校验记录", len(received))
+		}
+		const userID = 3
+		var usedBefore uint64
+		if err := pool.QueryRowContext(ctx, "SELECT used_storage FROM users WHERE id=?", userID).Scan(&usedBefore); err != nil {
+			t.Fatal(err)
+		}
+		batch := newServerUploadVerificationBatch(store, client)
+		summary, err := batch.RunOnce(ctx, 2, "server-verification-test")
+		if err != nil || summary.Scanned != 2 || summary.Published != 2 || summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 0 {
+			t.Fatal("生产校验入口未发布两条真实上传", summary, err)
+		}
+
+		// 2. 从查询接口和数据库核对已发布结果、实测摘要及配额结算。
+		var publishedBytes uint64
+		for _, original := range received {
+			task, err := store.FindUserUploadTask(ctx, userID, original.ID)
+			if err != nil || task.Status != domain.UploadStatusCompleted || task.ResultEntryID == nil ||
+				task.PublishedObjectID == nil || *task.PublishedObjectID != original.StagedObjectID ||
+				task.LeaseVersion != original.LeaseVersion+1 || task.LeaseOwner != nil || task.ReservedBytes != 0 {
+				t.Fatal("校验任务完成记录不符", task, err)
+			}
+			object, err := store.FindUserStoredObject(ctx, userID, original.StagedObjectID)
+			if err != nil || object.Status != domain.StoredObjectStatusReady || object.VerifiedSHA256 == nil || original.ExpectedSHA256 == nil ||
+				*object.VerifiedSHA256 != *original.ExpectedSHA256 {
+				t.Fatal("真实读回摘要未按上传声明写入", object, err)
+			}
+			queried := requestServerUploadTask(t, baseURL, token, strconv.FormatUint(task.ID, 10), 200, "", "")
+			if queried.Data.Status != "COMPLETED" || queried.Data.ResultEntryID == nil || *queried.Data.ResultEntryID != strconv.FormatUint(*task.ResultEntryID, 10) {
+				t.Fatal("正式查询未返回完成状态和目录项", queried.Data)
+			}
+			publishedBytes += original.ReservedBytes
+		}
+		var usedAfter uint64
+		if err := pool.QueryRowContext(ctx, "SELECT used_storage FROM users WHERE id=?", userID).Scan(&usedAfter); err != nil {
+			t.Fatal(err)
+		}
+		settled := readServerUploadCreationState(t, ctx, pool)
+		if usedAfter != usedBefore+publishedBytes || settled.reserved != after.reserved-publishedBytes || settled.taskReserved != settled.reserved ||
+			settled.tasks != after.tasks || settled.objects != after.objects {
+			t.Fatal("从预占转为已用的配额不符", usedBefore, usedAfter, settled)
+		}
+		if repeated, err := batch.RunOnce(ctx, 2, "server-verification-test"); err != nil || repeated.Scanned != 0 || len(repeated.CandidateErrors) != 0 {
+			t.Fatal("完成任务仍被再次扫描", repeated, err)
+		}
+	})
 }
