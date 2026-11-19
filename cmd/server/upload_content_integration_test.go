@@ -78,15 +78,15 @@ func prepareServerUploadContentBucket(t *testing.T, ctx context.Context) *server
 			t.Error("独占桶清理复核失败")
 		}
 	})
+	if err := client.EnableVersioning(ctx, bucket); err != nil {
+		t.Fatal("开启独占桶版本控制失败", err)
+	}
 	t.Setenv("CLOUDNEST_S3_BUCKET", bucket)
 	return &serverUploadContentBucket{client: client, name: bucket}
 }
 
 func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, target *serverUploadContentBucket, baseURL, token, otherToken string) {
 	t.Helper()
-	if err := target.client.EnableVersioning(ctx, target.name); err != nil {
-		t.Fatal("开启独占桶版本控制失败", err)
-	}
 	store, err := repository.NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -218,31 +218,11 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 		}
 		waitContext, stopWaiting := context.WithTimeout(ctx, 12*time.Second)
 		defer stopWaiting()
-		poll := time.NewTicker(50 * time.Millisecond)
-		defer poll.Stop()
 
 		// 2. 从查询接口和数据库核对已发布结果、实测摘要及配额结算。
 		var publishedBytes uint64
 		for _, original := range received {
-			var task *domain.UploadTask
-			for {
-				current, err := store.FindUserUploadTask(waitContext, userID, original.ID)
-				if err != nil {
-					t.Fatal("等待后台发布时读取任务失败", original.ID, err)
-				}
-				if current.Status == domain.UploadStatusCompleted {
-					task = current
-					break
-				}
-				if current.Status != domain.UploadStatusVerifying {
-					t.Fatal("后台处理进入了意外的任务状态", current)
-				}
-				select {
-				case <-waitContext.Done():
-					t.Fatal("后台校验未在等待期限内发布", current, waitContext.Err())
-				case <-poll.C:
-				}
-			}
+			task := awaitServerUploadPublication(t, waitContext, store, userID, original.ID)
 			if task.ResultEntryID == nil ||
 				task.PublishedObjectID == nil || *task.PublishedObjectID != original.StagedObjectID ||
 				task.LeaseVersion != original.LeaseVersion+2 || task.LeaseOwner != nil || task.ReservedBytes != 0 {
@@ -269,4 +249,30 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 			t.Fatal("从预占转为已用的配额不符", usedBefore, usedAfter, settled)
 		}
 	})
+}
+
+// awaitServerUploadPublication 轮询已交给生产 worker 的任务，完成后交还数据库事实。
+func awaitServerUploadPublication(t *testing.T, ctx context.Context, store *repository.Store, userID, taskID uint64) *domain.UploadTask {
+	t.Helper()
+	// 1. 定期读取实际状态，完成或进入意外状态时结束等待。
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		current, err := store.FindUserUploadTask(ctx, userID, taskID)
+		if err != nil {
+			t.Fatal("等待后台发布时读取任务失败", taskID, err)
+		}
+		if current.Status == domain.UploadStatusCompleted {
+			return current
+		}
+		if current.Status != domain.UploadStatusVerifying {
+			t.Fatal("后台处理进入了意外的任务状态", current)
+		}
+		// 2. 到时观察下一次状态，等待期限由调用方控制。
+		select {
+		case <-ctx.Done():
+			t.Fatal("后台校验未在等待期限内发布", current, ctx.Err())
+		case <-poll.C:
+		}
+	}
 }

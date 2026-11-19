@@ -1440,9 +1440,20 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopFirst()
+	var verificationBeforeRestart *domain.UploadTask
+	var verificationStorageVersion string
+	if uploadStorage != nil {
+		verificationBeforeRestart, verificationStorageVersion = prepareServerUploadVerificationRecovery(t, ctx, pool, uploadStorage)
+	}
+	restartLogOffset := logs.Len()
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	if verificationBeforeRestart != nil {
+		t.Run("recover verifying upload", func(t *testing.T) {
+			verifyServerUploadVerificationRecovery(t, ctx, pool, verificationBeforeRestart, verificationStorageVersion)
+		})
+	}
 	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
 	if uploadStorage != nil {
 		t.Run("upload content", func(t *testing.T) {
@@ -1813,6 +1824,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	revokeDevice(t, deviceTarget.Data.Device.ID, nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", foreignToken.Token, 200, "", "")
 	stopSecond()
+	if verificationBeforeRestart != nil {
+		t.Run("recover on first verification round", func(t *testing.T) {
+			verifyServerUploadVerificationRecoveryFirstRound(t, logs.String()[restartLogOffset:])
+		})
+	}
 	uploadEntries, err = os.ReadDir(uploadDirectory)
 	uploadContent, uploadReadError := os.ReadFile(uploadNeighbor)
 	if err != nil || len(uploadEntries) != 1 || uploadReadError != nil || string(uploadContent) != "keep" {

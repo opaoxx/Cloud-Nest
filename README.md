@@ -755,3 +755,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 `cmd/server` 已提供 `newServerUploadVerificationBatch`，将正式 MySQL 仓储与 MinIO 按版本读回接到单轮校验入口。[第 336 步学习记录](docs/开发学习记录.md#第-336-步装配生产单轮上传校验入口)
 
 后端启动后自动执行上传校验。单个 worker 启动时立即扫描，每轮最多 10 条，轮结束后等待 5 秒。退出时先等待 worker 停止，再释放 MinIO 和 MySQL 连接。[第 337 步学习记录](docs/开发学习记录.md#第-337-步将上传校验接入服务启动与退出)
+
+真实重启联测覆盖已持久化的 `VERIFYING` 任务。在旧租约到期后，新实例首轮可领取任务，按保存的 MinIO 版本读回并发布。[第 338 步学习记录](docs/开发学习记录.md#第-338-步验证重启后恢复待校验上传)
