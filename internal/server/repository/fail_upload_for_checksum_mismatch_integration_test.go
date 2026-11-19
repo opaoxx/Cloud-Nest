@@ -14,12 +14,12 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
-type checksumMismatchFixtureStream struct {
+type verificationFailureFixtureStream struct {
 	io.Reader
 	closeError error
 }
 
-func (stream checksumMismatchFixtureStream) Close() error { return stream.closeError }
+func (stream verificationFailureFixtureStream) Close() error { return stream.closeError }
 
 func TestFailUploadForChecksumMismatchIntegration(t *testing.T) {
 	closeFailure := errors.New("fixture close failure")
@@ -91,7 +91,7 @@ func TestFailUploadForChecksumMismatchIntegration(t *testing.T) {
 
 			// 2. 复用正式读回校验方法，模拟读完后证据或当前数据库状态变化。
 			digest, verificationError := service.VerifyUploadObject(ctx, task, staged, func(context.Context, *domain.StoredObject) (io.ReadCloser, error) {
-				return checksumMismatchFixtureStream{Reader: bytes.NewReader(content), closeError: scenario.closeError}, nil
+				return verificationFailureFixtureStream{Reader: bytes.NewReader(content), closeError: scenario.closeError}, nil
 			})
 			if digest != nil || !errors.Is(verificationError, domain.ErrUploadChecksumMismatch) {
 				t.Fatal("读回校验未获得预期摘要失配", digest, verificationError)

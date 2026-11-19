@@ -26,7 +26,7 @@ func (store *Store) FailUploadForChecksumMismatch(ctx context.Context, task *dom
 	}
 
 	// 2. 进入写回复核事务，确认租约和对象仍匹配。
-	return store.withUploadVerificationResultTransaction(ctx, task, staged, mismatch.Actual, true,
+	return store.withUploadVerificationResultTransaction(ctx, task, staged, mismatch.Actual.SizeBytes, &mismatch.Actual.SHA256, true,
 		func(txContext context.Context, txStore *Store, current *domain.UploadTask, _ *domain.StoredObject) error {
 			// 3. 复用失败收尾，原子写入任务、配额和回收计时。
 			return txStore.failVerifyingUpload(txContext, current, domain.UploadChecksumMismatchCode, domain.ErrUploadChecksumMismatch.Error())

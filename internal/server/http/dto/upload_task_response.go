@@ -118,8 +118,8 @@ func uploadTaskErrorSummary(code *string) *UploadTaskErrorSummary {
 	switch publicCode {
 	case domain.UploadTargetUnavailableCode:
 		message = domain.ErrUploadTargetUnavailable.Error()
-	case "BODY_SIZE_MISMATCH":
-		message = "文件实际大小与声明不一致"
+	case domain.UploadBodySizeMismatchCode:
+		message = domain.ErrUploadBodySizeMismatch.Error()
 	case "FILE_TOO_LARGE":
 		message = "文件大小超过当前上传限制"
 	case domain.UploadChecksumMismatchCode:

@@ -8,6 +8,24 @@ import (
 // ErrUploadBodySizeMismatch 表示实际文件字节数与任务声明不一致。
 var ErrUploadBodySizeMismatch = errors.New("文件实际大小与声明不一致")
 
+// UploadBodySizeMismatchCode 标记读回的文件大小与声明不符。
+const UploadBodySizeMismatchCode = "BODY_SIZE_MISMATCH"
+
+// UploadVerificationSizeMismatch 绑定本次读回的大小证据与校验尝试。
+type UploadVerificationSizeMismatch struct {
+	TaskID, UserID, StagedObjectID, LeaseVersion uint64
+	// DeclaredSizeBytes 保存本次校验使用的声明长度。
+	DeclaredSizeBytes uint64
+	// ObservedSizeBytes 是提前读到 EOF 的长度，或超长时读到的声明长度加一。
+	ObservedSizeBytes uint64
+}
+
+// Error 返回固定的大小不匹配提示。
+func (*UploadVerificationSizeMismatch) Error() string { return ErrUploadBodySizeMismatch.Error() }
+
+// Unwrap 支持已有大小不匹配的错误判断。
+func (*UploadVerificationSizeMismatch) Unwrap() error { return ErrUploadBodySizeMismatch }
+
 // ErrUploadChecksumMismatch 表示完整文件摘要与客户端声明不一致。
 var ErrUploadChecksumMismatch = errors.New("文件校验失败，请重新上传")
 

@@ -180,5 +180,13 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 		if result != nil || !errors.Is(err, domain.ErrUploadChecksumMismatch) {
 			t.Fatal("历史版本摘要不匹配未拒绝", result, err)
 		}
+		for _, declared := range []uint64{uint64(len(oldBytes) - 1), uint64(len(oldBytes) + 1)} {
+			task.FileSize, record.FileSize = declared, declared
+			result, err := service.VerifyUploadObject(ctx, task, &record, client.OpenUploadVerificationObject)
+			mismatch, ok := err.(*domain.UploadVerificationSizeMismatch)
+			if result != nil || !ok || mismatch.DeclaredSizeBytes != declared || mismatch.ObservedSizeBytes != uint64(len(oldBytes)) {
+				t.Fatal("历史版本读回未返回大小证据", result, err)
+			}
+		}
 	})
 }

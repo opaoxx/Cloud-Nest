@@ -737,3 +737,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 上传发布发现目标目录不可用时，现可在当前校验租约内将任务标为 `FAILED`、释放预占并开始暂存对象回收计时。任务查询交付 `TARGET_UNAVAILABLE`。[第 327 步学习记录](docs/开发学习记录.md#第-327-步终结发布目标不可用的上传任务)
 
 已提供 `Store.FailUploadForChecksumMismatch`。完整读回确认 SHA-256 与声明不符时，可在当前校验租约内释放预占、记录 `FAILED/CHECKSUM_MISMATCH` 并启动暂存对象回收计时。[第 328 步学习记录](docs/开发学习记录.md#第-328-步终结摘要校验失败的上传任务)
+
+已提供 `Store.FailUploadForBodySizeMismatch`。读回确认内容过短或超长后，可在当前校验租约内释放预占、记录 `FAILED/BODY_SIZE_MISMATCH` 并启动暂存对象回收计时。[第 329 步学习记录](docs/开发学习记录.md#第-329-步终结读回大小不符的上传任务)

@@ -157,6 +157,79 @@ func TestVerifyUploadObjectLifecycle(t *testing.T) {
 	}
 }
 
+func TestVerifyUploadObjectSizeMismatchEvidence(t *testing.T) {
+	readFailure := domain.ErrUploadStorageUnavailable
+	closeFailure := errors.New("fixture close failure")
+	for _, scenario := range []struct {
+		name          string
+		data          string
+		declaredSize  uint64
+		observedSize  uint64
+		cleanMismatch bool
+		readError     error
+		extraOnError  bool
+		closeError    error
+		cancelOnClose bool
+		wantSizeError bool
+	}{
+		{name: "early EOF", data: "ab", declaredSize: 4, observedSize: 2, cleanMismatch: true, wantSizeError: true},
+		{name: "empty object", declaredSize: 4, cleanMismatch: true, wantSizeError: true},
+		{name: "bounded excess", data: "abcdefgh", declaredSize: 4, observedSize: 5, cleanMismatch: true, wantSizeError: true},
+		{name: "extra byte for empty declaration", data: "ab", observedSize: 1, cleanMismatch: true, wantSizeError: true},
+		{name: "extra byte arrives with read fault", data: "abcd", declaredSize: 4, readError: readFailure, extraOnError: true, wantSizeError: true},
+		{name: "truncated transport", data: "ab", declaredSize: 4, readError: readFailure},
+		{name: "reader returns bare size error", declaredSize: 4, readError: domain.ErrUploadBodySizeMismatch, wantSizeError: true},
+		{name: "size mismatch and close failure", data: "ab", declaredSize: 4, closeError: closeFailure, wantSizeError: true},
+		{name: "size mismatch and cancellation", data: "ab", declaredSize: 4, cancelOnClose: true, wantSizeError: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			task, object := uploadObjectVerificationFixture(scenario.declaredSize)
+			payload := bytes.NewReader([]byte(scenario.data))
+			reader := uploadCopyReadFunc(func(buffer []byte) (int, error) {
+				if payload.Len() != 0 || scenario.readError == nil {
+					return payload.Read(buffer)
+				}
+				if scenario.extraOnError {
+					buffer[0] = 'x'
+					return 1, scenario.readError
+				}
+				return 0, scenario.readError
+			})
+			source := &uploadCopySource{reader: reader}
+			stream := uploadObjectVerificationStream{uploadCopySource: source, closeStream: func() error {
+				if scenario.cancelOnClose {
+					cancel()
+				}
+				return scenario.closeError
+			}}
+			actual, err := VerifyUploadObject(ctx, task, object, func(context.Context, *domain.StoredObject) (io.ReadCloser, error) {
+				return stream, nil
+			})
+			if actual != nil || err == nil || source.closes != 1 ||
+				errors.Is(err, domain.ErrUploadBodySizeMismatch) != scenario.wantSizeError {
+				t.Fatal("大小校验或关闭结果错误", actual, err)
+			}
+			if scenario.readError != nil && !errors.Is(err, scenario.readError) ||
+				scenario.closeError != nil && !errors.Is(err, scenario.closeError) ||
+				scenario.cancelOnClose && !errors.Is(err, context.Canceled) {
+				t.Fatal("未保留读取、关闭或取消的原因", err)
+			}
+			mismatch, clean := err.(*domain.UploadVerificationSizeMismatch)
+			if clean != scenario.cleanMismatch {
+				t.Fatal("大小证据的类型错误", err)
+			}
+			if clean && (mismatch.TaskID != task.ID || mismatch.UserID != task.UserID ||
+				mismatch.StagedObjectID != object.ID || mismatch.LeaseVersion != task.LeaseVersion ||
+				mismatch.DeclaredSizeBytes != scenario.declaredSize || mismatch.ObservedSizeBytes != scenario.observedSize ||
+				payload.Len() != len(scenario.data)-int(scenario.observedSize)) {
+				t.Fatal("大小证据与校验尝试或受限读取不符", mismatch)
+			}
+		})
+	}
+}
+
 func TestVerifyUploadObjectRejectsInvalidRecords(t *testing.T) {
 	for _, name := range []string{"missing task", "wrong task phase", "missing lease", "oversize", "missing object", "wrong object", "foreign owner", "wrong object state", "wrong object size", "canceled"} {
 		t.Run(name, func(t *testing.T) {

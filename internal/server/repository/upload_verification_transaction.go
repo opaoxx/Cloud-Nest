@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -19,7 +20,7 @@ func (store *Store) WithUploadVerificationTransaction(
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 ) error {
 	// 1. 用摘要相符的结果进入共同的写回复核流程。
-	return store.withUploadVerificationResultTransaction(ctx, verifiedTask, verifiedObject, digest, false, action)
+	return store.withUploadVerificationResultTransaction(ctx, verifiedTask, verifiedObject, digest.SizeBytes, &digest.SHA256, false, action)
 }
 
 // withUploadVerificationResultTransaction 复用对象身份、声明和租约的锁内检查。
@@ -27,11 +28,12 @@ func (store *Store) withUploadVerificationResultTransaction(
 	ctx context.Context,
 	verifiedTask *domain.UploadTask,
 	verifiedObject *domain.StoredObject,
-	digest domain.UploadContentDigest,
+	observedSize uint64,
+	checksum *[sha256.Size]byte,
 	expectChecksumMismatch bool,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 ) error {
-	// 1. 检查校验快照和实际摘要，开启用户事务。
+	// 1. 检查校验快照和读回结果，开启用户事务。
 	if store == nil || store.database == nil || ctx == nil || action == nil {
 		return fmt.Errorf("复核上传校验结果需要数据入口、上下文和事务回调")
 	}
@@ -53,16 +55,24 @@ func (store *Store) withUploadVerificationResultTransaction(
 		verifiedObject.Status != domain.StoredObjectStatusVerifying || verifiedObject.FileSize != verifiedTask.FileSize {
 		return domain.ErrInvalidStoredObjectData
 	}
-	if digest.SizeBytes != verifiedTask.FileSize {
-		return domain.ErrUploadBodySizeMismatch
-	}
+	declaredSize := verifiedTask.FileSize
 	expected := copyUploadTaskValue(verifiedTask.ExpectedSHA256)
-	checksumMismatch := expected != nil && digest.SHA256 != *expected
-	if expectChecksumMismatch && !checksumMismatch {
-		return domain.ErrInvalidUploadTaskData
-	}
-	if !expectChecksumMismatch && checksumMismatch {
-		return domain.ErrUploadChecksumMismatch
+	if checksum == nil {
+		// 大小不符时只需要确认提前 EOF，或者已读到声明范围外的一个字节。
+		if observedSize == declaredSize || observedSize > declaredSize+1 {
+			return domain.ErrInvalidUploadTaskData
+		}
+	} else {
+		if observedSize != declaredSize {
+			return domain.ErrUploadBodySizeMismatch
+		}
+		checksumMismatch := expected != nil && *checksum != *expected
+		if expectChecksumMismatch && !checksumMismatch {
+			return domain.ErrInvalidUploadTaskData
+		}
+		if !expectChecksumMismatch && checksumMismatch {
+			return domain.ErrUploadChecksumMismatch
+		}
 	}
 	userID, taskID, objectID := verifiedTask.UserID, verifiedTask.ID, verifiedTask.StagedObjectID
 	leaseOwner, leaseVersion := *verifiedTask.LeaseOwner, verifiedTask.LeaseVersion
@@ -85,7 +95,7 @@ func (store *Store) withUploadVerificationResultTransaction(
 			*task.LeaseOwner != leaseOwner || task.LeaseUntil == nil {
 			return domain.ErrUploadTaskBusy
 		}
-		if task.FileSize != digest.SizeBytes || task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil ||
+		if task.FileSize != declaredSize || task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil ||
 			task.ResolvedName != nil || task.ResultEntryID != nil || task.CompletedAt != nil ||
 			(expected == nil) != (task.ExpectedSHA256 == nil) || (expected != nil && *expected != *task.ExpectedSHA256) {
 			return domain.ErrInvalidUploadTaskData

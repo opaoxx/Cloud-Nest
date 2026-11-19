@@ -42,9 +42,7 @@ func VerifyUploadObject(
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 	declaredSize, expected := task.FileSize, copyOptionalValue(task.ExpectedSHA256)
-	mismatch := domain.UploadVerificationChecksumMismatch{
-		TaskID: task.ID, UserID: task.UserID, StagedObjectID: task.StagedObjectID, LeaseVersion: task.LeaseVersion,
-	}
+	taskID, userID, objectID, leaseVersion := task.ID, task.UserID, task.StagedObjectID, task.LeaseVersion
 
 	// 2. 打开对象流，安排退出时关闭。
 	stream, openError := open(ctx, object)
@@ -71,14 +69,43 @@ func VerifyUploadObject(
 		return nil, domain.ErrUploadStorageUnavailable
 	}
 
-	// 3. 按声明读取，核对摘要后返回校验结果。
-	actual, err := ReadUploadVerificationDigest(ctx, stream, declaredSize)
+	// 3. 按声明读取并记录实际观察量，再核对摘要。
+	reader := &uploadVerificationReader{Reader: stream}
+	actual, err := ReadUploadVerificationDigest(ctx, reader, declaredSize)
+	if err == domain.ErrUploadBodySizeMismatch {
+		if reader.readError != nil {
+			return nil, errors.Join(err, reader.readError)
+		}
+		return nil, &domain.UploadVerificationSizeMismatch{
+			TaskID: taskID, UserID: userID, StagedObjectID: objectID, LeaseVersion: leaseVersion,
+			DeclaredSizeBytes: declaredSize, ObservedSizeBytes: reader.observedSize,
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	if err := ValidateUploadContentChecksum(actual.SHA256, expected); err != nil {
-		mismatch.ExpectedSHA256, mismatch.Actual = *expected, *actual
-		return nil, &mismatch
+		return nil, &domain.UploadVerificationChecksumMismatch{
+			TaskID: taskID, UserID: userID, StagedObjectID: objectID, LeaseVersion: leaseVersion,
+			ExpectedSHA256: *expected, Actual: *actual,
+		}
 	}
 	return actual, nil
+}
+
+// uploadVerificationReader 记录受限读取实际经过的字节和底层读取错误。
+type uploadVerificationReader struct {
+	io.Reader
+	observedSize uint64
+	readError    error
+}
+
+func (reader *uploadVerificationReader) Read(buffer []byte) (int, error) {
+	// 1. 保留额外一字节探测中与数据同时返回的读取故障。
+	count, err := reader.Reader.Read(buffer)
+	reader.observedSize += uint64(count)
+	if err != nil && err != io.EOF {
+		reader.readError = err
+	}
+	return count, err
 }
