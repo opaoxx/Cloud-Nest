@@ -753,3 +753,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `RunUploadVerificationLoop`。首轮立即执行，每轮汇报后等待指定间隔再继续。取消会传给当前轮次，也可中断等待。[第 335 步学习记录](docs/开发学习记录.md#第-335-步为上传校验加入可取消的定时循环)
 
 `cmd/server` 已提供 `newServerUploadVerificationBatch`，将正式 MySQL 仓储与 MinIO 按版本读回接到单轮校验入口。[第 336 步学习记录](docs/开发学习记录.md#第-336-步装配生产单轮上传校验入口)
+
+后端启动后自动执行上传校验。单个 worker 启动时立即扫描，每轮最多 10 条，轮结束后等待 5 秒。退出时先等待 worker 停止，再释放 MinIO 和 MySQL 连接。[第 337 步学习记录](docs/开发学习记录.md#第-337-步将上传校验接入服务启动与退出)

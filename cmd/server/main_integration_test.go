@@ -1822,6 +1822,17 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if len(startupSegments) != 3 || strings.Count(logs.String(), "上传临时目录检查通过") != 2 || !strings.Contains(startupSegments[0], "上传临时目录检查通过") || !strings.Contains(startupSegments[1], "上传临时目录检查通过") {
 		t.Fatal("两轮临时目录检查未先于 HTTP 启动")
 	}
+	workerStops := strings.Split(logs.String(), "上传校验 worker 已停止")
+	if len(workerStops) != 3 || strings.Count(logs.String(), "上传校验 worker 已启动") != 2 {
+		t.Fatal("每次真实启动应对应一个校验 worker 的启动和停止")
+	}
+	for _, afterWorkerStop := range workerStops[1:] {
+		storageClosed := strings.Index(afterWorkerStop, "MinIO 空闲连接已释放")
+		databaseClosed := strings.Index(afterWorkerStop, "MySQL 连接池已关闭")
+		if storageClosed < 0 || databaseClosed <= storageClosed {
+			t.Fatal("校验 worker 退出前已清理依赖，或连接关闭顺序错误")
+		}
+	}
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("生产启动流程重写了已有密钥")

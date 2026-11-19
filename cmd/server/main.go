@@ -489,7 +489,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 29. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 29. 启动上传校验，退出时先停止并等待 worker，再清理存储和数据库连接。
+	uploadVerificationBatch := newServerUploadVerificationBatch(store, storageClient)
+	stopUploadVerification := startServerUploadVerificationWorker(ctx, uploadVerificationBatch.RunOnce, logger)
+	defer stopUploadVerification()
+
+	// 30. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
