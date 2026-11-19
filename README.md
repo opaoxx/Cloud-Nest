@@ -731,3 +731,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.MarkDeduplicatedUploadObjectOrphaned`。任务完成并复用其他对象时，发布事务可为失去有效引用的暂存副本开启七天回收宽限期。行为与复验见 [第 324 步学习记录](docs/开发学习记录.md#第-324-步标记去重后剩余的暂存副本)。
 
 已提供 `service.ValidateUploadPublicationTarget`，在当前发布事务中复核目标目录和全部祖先，并检查新增文件的深度。真实 MySQL 联测和复验见 [第 325 步学习记录](docs/开发学习记录.md#第-325-步复核上传发布的目标目录)。
+
+已提供 `service.UploadPublicationService.Publish`。它在同一个写回复核事务中组合单文件发布步骤，提交后返回完成任务。真实 MySQL 验证了新对象、复用对象、零字节发布及整体回滚。[第 326 步学习记录](docs/开发学习记录.md#第-326-步组合单文件上传发布事务)
