@@ -171,6 +171,7 @@ func TestBeginUserUploadCancellationIntegration(t *testing.T) {
 		reset(t)
 		execute(t, "CREATE TABLE fixture_cancel_writes(task_id BIGINT UNSIGNED NOT NULL)")
 		execute(t, "CREATE TRIGGER fixture_count_cancels AFTER UPDATE ON upload_tasks FOR EACH ROW INSERT INTO fixture_cancel_writes(task_id) VALUES(NEW.id)")
+		defer execute(t, "DROP TRIGGER fixture_count_cancels")
 		type outcome struct {
 			task *domain.UploadTask
 			err  error
@@ -193,6 +194,23 @@ func TestBeginUserUploadCancellationIntegration(t *testing.T) {
 		var writes int
 		if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_cancel_writes WHERE task_id=?", fixture.ID).Scan(&writes); err != nil || writes != 1 {
 			t.Fatal("并发取消没有恰好写入一次", writes, err)
+		}
+	})
+
+	t.Run("committed acceptance flows to cleanup", func(t *testing.T) {
+		// 1. 使用实际用户事务受理，再把已提交任务交给独立的内部收尾事务。
+		reset(t)
+		before := read(t)
+		accepted, err := store.BeginUserUploadCancellation(ctx, originalDevice, fixture.ID)
+		if err != nil || accepted == nil || accepted.Status != domain.UploadStatusCancelling {
+			t.Fatal("没有取得已提交的取消受理结果", accepted, err)
+		}
+		finished, err := store.CompleteUploadCancellation(ctx, accepted)
+		after := read(t)
+		if err != nil || !reflect.DeepEqual(finished, after.task) ||
+			!hasCompletedUploadCleanup(after.task, domain.UploadStatusCancelled) || after.object.Status != domain.StoredObjectStatusOrphaned ||
+			after.quota[1] != before.quota[1] || after.quota[2] != before.quota[2]-accepted.ReservedBytes {
+			t.Fatal("受理和收尾事务未完成取消及预占返还", after, err)
 		}
 	})
 }

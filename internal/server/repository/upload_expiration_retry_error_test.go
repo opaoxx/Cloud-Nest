@@ -124,7 +124,7 @@ func TestCompleteUploadExpirationMarksLockWaitIntegration(t *testing.T) {
 		t.Fatal("到点后批次未正常收尾", summary, err)
 	}
 	finished, err := store.FindUserUploadTask(ctx, task.UserID, task.ID)
-	if err != nil || finished == nil || !hasCompletedUploadExpiration(finished) {
+	if err != nil || finished == nil || !hasCompletedUploadCleanup(finished, domain.UploadStatusExpired) {
 		t.Fatal("锁释放后无法完成收尾", finished, err)
 	}
 	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved); err != nil || reserved != 512 {

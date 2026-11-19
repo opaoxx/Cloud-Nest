@@ -12,17 +12,36 @@ import (
 )
 
 func TestCompleteUploadExpirationIntegration(t *testing.T) {
-	for _, scenario := range []struct {
-		name       string
-		size       uint64
-		reserved   uint64
-		verifying  bool
-		disabled   bool
-		multipart  bool
-		concurrent bool
-		changeSQL  string
-		wantError  error
-	}{
+	verifyCompleteUploadCleanup(t, domain.UploadStatusExpired, (*Store).CompleteUploadExpiration)
+}
+
+func TestCompleteUploadCancellationIntegration(t *testing.T) {
+	verifyCompleteUploadCleanup(t, domain.UploadStatusCancelled, (*Store).CompleteUploadCancellation)
+}
+
+func verifyCompleteUploadCleanup(
+	t *testing.T,
+	terminalStatus domain.UploadStatus,
+	complete func(*Store, context.Context, *domain.UploadTask) (*domain.UploadTask, error),
+) {
+	t.Helper()
+	competingStatus := domain.UploadStatusCancelling
+	if terminalStatus == domain.UploadStatusCancelled {
+		competingStatus = domain.UploadStatusExpiring
+	}
+	type cleanupScenario struct {
+		name         string
+		size         uint64
+		reserved     uint64
+		verifying    bool
+		disabled     bool
+		multipart    bool
+		concurrent   bool
+		pastDeadline bool
+		changeSQL    string
+		wantError    error
+	}
+	scenarios := []cleanupScenario{
 		{name: "release only recorded partial reservation", size: 12, reserved: 5},
 		{name: "orphan a verifying object and replay", size: 12, reserved: 12, verifying: true},
 		{name: "zero-byte task updates task and object"},
@@ -35,8 +54,8 @@ func TestCompleteUploadExpirationIntegration(t *testing.T) {
 			changeSQL: "UPDATE upload_tasks SET lease_owner='cleanup',lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19", wantError: domain.ErrUploadTaskBusy},
 		{name: "reject a pending cleanup retry", size: 12, reserved: 5,
 			changeSQL: "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19", wantError: domain.ErrUploadTaskBusy},
-		{name: "reject competing cancellation", size: 12, reserved: 5,
-			changeSQL: "UPDATE upload_tasks SET status='CANCELLING' WHERE id=19", wantError: domain.ErrUploadTaskNotReady},
+		{name: "reject competing cleanup", size: 12, reserved: 5,
+			changeSQL: "UPDATE upload_tasks SET status='" + string(competingStatus) + "' WHERE id=19", wantError: domain.ErrUploadTaskNotReady},
 		{name: "reject insufficient account reservation", size: 12, reserved: 5,
 			changeSQL: "UPDATE users SET reserved_storage=4 WHERE id=7", wantError: domain.ErrInvalidAccountData},
 		{name: "reject a ready object", size: 12, reserved: 5,
@@ -44,10 +63,14 @@ func TestCompleteUploadExpirationIntegration(t *testing.T) {
 		{name: "rollback when object still has a file reference", size: 12, reserved: 5,
 			changeSQL: "UPDATE file_entries SET object_id=23 WHERE id=31", wantError: domain.ErrStoredObjectInUse},
 		{name: "rollback on invalid terminal readback", size: 12, reserved: 5,
-			changeSQL: "CREATE TRIGGER fixture_expired BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.last_error_code='fixture'", wantError: domain.ErrInvalidUploadTaskData},
-	} {
+			changeSQL: "CREATE TRIGGER fixture_cleanup BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.last_error_code='fixture'", wantError: domain.ErrInvalidUploadTaskData},
+	}
+	if terminalStatus == domain.UploadStatusCancelled {
+		scenarios = append(scenarios, cleanupScenario{name: "continue accepted cancellation past upload deadline", size: 12, reserved: 5, pastDeadline: true})
+	}
+	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			// 1. 使用正式扫描和阶段推进准备收尾输入。
+			// 1. 准备各自阶段的收尾输入，过期仍使用正式扫描和阶段推进。
 			pool, fixture := uploadTaskDatabase(t)
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
@@ -76,19 +99,35 @@ func TestCompleteUploadExpirationIntegration(t *testing.T) {
 			if scenario.multipart {
 				status, mode, uploadID, partSize, partCount = domain.UploadStatusCompleting, "MULTIPART", *fixture.StorageUploadID, *fixture.PartSize, *fixture.PartCount
 			}
+			expiryMinutes := -1
+			finishesBeforeDeadline := terminalStatus == domain.UploadStatusCancelled && !scenario.pastDeadline
+			if terminalStatus == domain.UploadStatusCancelled {
+				status = domain.UploadStatusCancelling
+				if finishesBeforeDeadline {
+					expiryMinutes = 60
+				}
+			}
 			execute("UPDATE stored_objects SET status=?,file_size=? WHERE id=?", objectStatus, scenario.size, fixture.StagedObjectID)
 			execute(`UPDATE upload_tasks SET status=?,upload_mode=?,storage_upload_id=?,part_size=?,part_count=?,
 				published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,file_size=?,reserved_bytes=?,
-				lease_owner=NULL,lease_until=NULL,lease_version=?,expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 MINUTE,
+				lease_owner=NULL,lease_until=NULL,lease_version=?,next_attempt_at=NULL,expires_at=TIMESTAMPADD(MINUTE,?,UTC_TIMESTAMP(6)),
 				last_error_code='STORAGE_UNAVAILABLE',last_error_message='old diagnostic' WHERE id=?`,
-				status, mode, uploadID, partSize, partCount, scenario.size, scenario.reserved, leaseVersion, fixture.ID)
-			candidates, err := store.ListUploadExpirationCandidates(ctx, 1)
-			if err != nil || len(candidates) != 1 {
-				t.Fatal("未取得待收尾的任务", candidates, err)
-			}
-			expiring, err := store.BeginUploadExpiration(ctx, candidates[0])
-			if err != nil {
-				t.Fatal(err)
+				status, mode, uploadID, partSize, partCount, scenario.size, scenario.reserved, leaseVersion, expiryMinutes, fixture.ID)
+			var pending *domain.UploadTask
+			if terminalStatus == domain.UploadStatusExpired {
+				candidates, err := store.ListUploadExpirationCandidates(ctx, 1)
+				if err != nil || len(candidates) != 1 {
+					t.Fatal("未取得待过期的任务", candidates, err)
+				}
+				pending, err = store.BeginUploadExpiration(ctx, candidates[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				pending, err = store.FindUserUploadTask(ctx, fixture.UserID, fixture.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			if scenario.changeSQL != "" {
 				execute(scenario.changeSQL)
@@ -128,20 +167,20 @@ func TestCompleteUploadExpirationIntegration(t *testing.T) {
 				for range 2 {
 					go func() {
 						<-start
-						finished, err := store.CompleteUploadExpiration(ctx, expiring)
+						finished, err := complete(store, ctx, pending)
 						outcomes <- outcome{task: finished, err: err}
 					}()
 				}
 				close(start)
 				first, second := <-outcomes, <-outcomes
 				if first.err != nil || second.err != nil || !reflect.DeepEqual(first.task, second.task) {
-					t.Fatal("并发收尾没有复用一个过期结果", first, second)
+					t.Fatal("并发收尾没有复用同一终态结果", first, second)
 				}
 				result = first.task
 			} else {
-				result, err = store.CompleteUploadExpiration(ctx, expiring)
+				result, err = complete(store, ctx, pending)
 				if !errors.Is(err, scenario.wantError) {
-					t.Fatal("过期收尾错误不符", result, err)
+					t.Fatal("上传收尾错误不符", result, err)
 				}
 			}
 			afterTask, afterObject, afterAccount := read()
@@ -153,14 +192,15 @@ func TestCompleteUploadExpirationIntegration(t *testing.T) {
 			}
 
 			// 3. 核对完整任务、预占返还和暂存对象回收计时。
-			if result == nil || !reflect.DeepEqual(result, afterTask) || afterTask.CompletedAt == nil || afterTask.CompletedAt.Before(expiring.ExpiresAt) {
-				t.Fatal("结果不是已提交的过期任务", result, afterTask)
+			if result == nil || !reflect.DeepEqual(result, afterTask) || afterTask.CompletedAt == nil ||
+				afterTask.CompletedAt.Before(pending.ExpiresAt) != finishesBeforeDeadline {
+				t.Fatal("提交结果或收尾时间不符", result, afterTask)
 			}
-			beforeTask.Status, beforeTask.ReservedBytes = domain.UploadStatusExpired, 0
+			beforeTask.Status, beforeTask.ReservedBytes = terminalStatus, 0
 			beforeTask.CompletedAt, beforeTask.UpdatedAt = afterTask.CompletedAt, *afterTask.CompletedAt
 			beforeTask.LastErrorCode, beforeTask.LastErrorMessage = nil, nil
 			if !reflect.DeepEqual(beforeTask, afterTask) {
-				t.Fatal("过期任务的终态或历史字段不符", beforeTask, afterTask)
+				t.Fatal("任务的终态或历史字段不符", beforeTask, afterTask)
 			}
 			if afterObject.UnreferencedAt == nil || afterObject.GCAfter == nil ||
 				!afterObject.GCAfter.Equal(afterObject.UnreferencedAt.Add(7*24*time.Hour)) || afterObject.UnreferencedAt.Before(*afterTask.CompletedAt) {
@@ -179,7 +219,7 @@ func TestCompleteUploadExpirationIntegration(t *testing.T) {
 			if afterAccount != wantAccount {
 				t.Fatal("账户没有只释放该任务的预占", afterAccount, wantAccount)
 			}
-			replayed, err := store.CompleteUploadExpiration(ctx, expiring)
+			replayed, err := complete(store, ctx, pending)
 			replayedTask, replayedObject, replayedAccount := read()
 			if err != nil || !reflect.DeepEqual(replayed, afterTask) || !reflect.DeepEqual(replayedTask, afterTask) ||
 				!reflect.DeepEqual(replayedObject, afterObject) || replayedAccount != afterAccount {

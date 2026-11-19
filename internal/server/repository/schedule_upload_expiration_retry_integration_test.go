@@ -111,7 +111,7 @@ func TestScheduleUploadExpirationRetryIntegration(t *testing.T) {
 	}
 	setClock(*again.NextAttemptAt)
 	finished, err := store.CompleteUploadExpiration(ctx, again)
-	if err != nil || finished == nil || !hasCompletedUploadExpiration(finished) || finished.AttemptCount != again.AttemptCount {
+	if err != nil || finished == nil || !hasCompletedUploadCleanup(finished, domain.UploadStatusExpired) || finished.AttemptCount != again.AttemptCount {
 		t.Fatal("收尾未能在到点后提交，并清理重试时间和诊断", finished, err)
 	}
 }
