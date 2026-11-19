@@ -33,35 +33,13 @@ func (store *Store) ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64
 		return err
 	}
 
-	// 2. 当前读锁定用户配额，处理缺失及数据库故障。
-	var account models.UserProfile
-	queryError := store.database.WithContext(updateContext).Table("users").
-		Select("id", "status", "storage_quota AS quota_bytes", "used_storage AS used_bytes", "reserved_storage AS reserved_bytes").
-		Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", actor.UserID).Take(&account).Error
-	if err := updateContext.Err(); err != nil {
+	// 2. 当前读锁定用户配额并检查既有账目。
+	account, err := store.lockUserUploadQuota(updateContext, actor.UserID)
+	if err != nil {
 		return err
 	}
-	if errors.Is(queryError, gorm.ErrRecordNotFound) {
-		return domain.ErrAccountNotFound
-	}
-	if queryError != nil {
-		return fmt.Errorf("读取上传配额失败: %w", queryError)
-	}
 
-	// 3. 校验配额事实，用减法判断剩余空间。
-	if account.ID != actor.UserID {
-		return domain.ErrInvalidAccountData
-	}
-	switch account.Status {
-	case "ACTIVE":
-	case "DISABLED":
-		return domain.ErrAccountDisabled
-	default:
-		return domain.ErrInvalidAccountData
-	}
-	if account.UsedBytes > account.QuotaBytes || account.ReservedBytes > account.QuotaBytes-account.UsedBytes {
-		return domain.ErrInvalidAccountData
-	}
+	// 3. 用减法判断剩余空间。
 	availableBytes := account.QuotaBytes - account.UsedBytes - account.ReservedBytes
 	if sizeBytes > availableBytes {
 		return domain.ErrQuotaExceeded
@@ -88,4 +66,38 @@ func (store *Store) ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64
 		return domain.ErrInvalidAccountData
 	}
 	return nil
+}
+
+// lockUserUploadQuota 供用户事务复用，读取并核对活动账号的当前配额。
+func (store *Store) lockUserUploadQuota(ctx context.Context, userID uint64) (*models.UserProfile, error) {
+	// 1. 当前读锁定用户配额，处理缺失及数据库故障。
+	var account models.UserProfile
+	queryError := store.database.WithContext(ctx).Table("users").
+		Select("id", "status", "storage_quota AS quota_bytes", "used_storage AS used_bytes", "reserved_storage AS reserved_bytes").
+		Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", userID).Take(&account).Error
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if errors.Is(queryError, gorm.ErrRecordNotFound) {
+		return nil, domain.ErrAccountNotFound
+	}
+	if queryError != nil {
+		return nil, fmt.Errorf("读取上传配额失败: %w", queryError)
+	}
+
+	// 2. 核对账号和账目约束，用减法避免无符号加法溢出。
+	if account.ID != userID {
+		return nil, domain.ErrInvalidAccountData
+	}
+	switch account.Status {
+	case "ACTIVE":
+	case "DISABLED":
+		return nil, domain.ErrAccountDisabled
+	default:
+		return nil, domain.ErrInvalidAccountData
+	}
+	if account.UsedBytes > account.QuotaBytes || account.ReservedBytes > account.QuotaBytes-account.UsedBytes {
+		return nil, domain.ErrInvalidAccountData
+	}
+	return &account, nil
 }

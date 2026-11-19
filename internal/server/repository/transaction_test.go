@@ -38,6 +38,7 @@ type loginTransactionScript struct {
 	promoteUploadObject                                func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	quotaQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	reserveStorage                                     func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	settleUploadQuota                                  func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	idempotencyQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	preferenceQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	rotate                                             func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -113,6 +114,10 @@ func (connection *loginTransactionConnection) ExecContext(ctx context.Context, s
 	if strings.HasPrefix(statement, "UPDATE users SET reserved_storage = ") && connection.script.reserveStorage != nil {
 		connection.script.record("reserve")
 		return connection.script.reserveStorage(ctx, statement, arguments)
+	}
+	if strings.HasPrefix(statement, "UPDATE users AS quota_user JOIN upload_tasks AS upload_task ") && connection.script.settleUploadQuota != nil {
+		connection.script.record("settle_quota")
+		return connection.script.settleUploadQuota(ctx, statement, arguments)
 	}
 	if strings.HasPrefix(statement, "INSERT INTO user_entry_preferences (user_id, entry_id, last_opened_at)") && connection.script.recordAccess != nil {
 		connection.script.record("record_access")

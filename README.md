@@ -721,3 +721,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `models.NewPublishedFileEntry`，映射创建发布文件目录项所需的十三列。GORM 生成 SQL 和正式 MySQL 的字段读回及约束检查见 [第 319 步学习记录](docs/开发学习记录.md#第-319-步定义发布文件目录项写入映射)。
 
 已提供 `Store.CreatePublishedFileEntry`。上传发布事务可复核任务租约和引用，写入 `FILE/ACTIVE` 目录项，再按活动名称键读回。真实 MySQL 与回滚验证见 [第 320 步学习记录](docs/开发学习记录.md#第-320-步在发布事务中创建文件目录项)。
+
+已提供 `Store.SettlePublishedUploadQuota`，在发布事务内将本任务预占等额转入用户已用配额，并同步清零任务预占。回滚、零字节及边界验证见 [第 321 步学习记录](docs/开发学习记录.md#第-321-步结算上传预占配额)。
