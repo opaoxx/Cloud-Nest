@@ -73,7 +73,7 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 				digest = domain.UploadContentDigest{SHA256: sha256.Sum256(nil)}
 			}
 			execute(t, "UPDATE users SET used_storage=?,reserved_storage=? WHERE id=7", domain.MaxSingleUploadSizeBytes, digest.SizeBytes)
-			execute(t, "UPDATE stored_objects SET status='VERIFYING',file_size=?,verified_sha256=NULL,verified_at=NULL WHERE id=23", digest.SizeBytes)
+			execute(t, "UPDATE stored_objects SET status='VERIFYING',file_size=?,verified_sha256=NULL,verified_at=NULL,unreferenced_at=NULL,gc_after=NULL WHERE id=23", digest.SizeBytes)
 			execute(t, `UPDATE upload_tasks SET status='VERIFYING',upload_mode='SINGLE',storage_upload_id=NULL,part_size=NULL,part_count=NULL,
 				published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
 				file_size=?,reserved_bytes=?,expected_sha256=?,lease_owner='verify-worker',lease_version=3,
@@ -145,6 +145,17 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 				}
 				if scenario.wantError == rollbackFixture {
 					return rollbackFixture
+				}
+				orphaned, err := txStore.MarkDeduplicatedUploadObjectOrphaned(txContext, result.ID)
+				if err != nil {
+					return err
+				}
+				if selected.ID != current.StagedObjectID {
+					if orphaned == nil || orphaned.ID != current.StagedObjectID || orphaned.Status != domain.StoredObjectStatusOrphaned {
+						t.Fatal("复用对象后的副本未标记为孤立", orphaned)
+					}
+				} else if orphaned != nil {
+					t.Fatal("本次发布对象不应成为孤立副本", orphaned)
 				}
 				if retried, err := txStore.CompletePublishedUpload(txContext, current, objectID, entry); retried != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 					t.Fatal("完成任务再次被改写", retried, err)

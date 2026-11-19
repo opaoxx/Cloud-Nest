@@ -727,3 +727,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.CompletePublishedUpload`。文件创建并结算配额后，发布事务可按当前校验租约写入完成状态、实际名称、发布对象和结果目录项。真实 MySQL 回读及回滚见 [第 322 步学习记录](docs/开发学习记录.md#第-322-步写入上传任务的完成结果)。
 
 已提供 `Store.ClearPublishedObjectGCTimer`。发布对象获得活动文件引用后，可在同一用户事务中清空它原有的无引用计时。联测与复验见 [第 323 步学习记录](docs/开发学习记录.md#第-323-步清除已发布对象的无引用计时)。
+
+已提供 `Store.MarkDeduplicatedUploadObjectOrphaned`。任务完成并复用其他对象时，发布事务可为失去有效引用的暂存副本开启七天回收宽限期。行为与复验见 [第 324 步学习记录](docs/开发学习记录.md#第-324-步标记去重后剩余的暂存副本)。

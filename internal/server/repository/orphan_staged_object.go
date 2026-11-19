@@ -46,18 +46,25 @@ func (store *Store) MarkUserStagedObjectOrphaned(ctx context.Context, objectID u
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 
-	// 3. 当前读检查文件与未终结上传任务的有效引用。
+	// 3. 复用有效引用检查和孤立计时写入。
+	return lockedStore.markUnreferencedUploadObjectOrphaned(writeContext, object)
+}
+
+// markUnreferencedUploadObjectOrphaned 处理已锁定且阶段已复核的上传对象。
+func (lockedStore *Store) markUnreferencedUploadObjectOrphaned(ctx context.Context, object *domain.StoredObject) (*domain.StoredObject, error) {
+	userID, objectID := object.OwnerUserID, object.ID
+	// 1. 当前读检查文件与未终结上传任务的有效引用。
 	for _, scope := range []struct {
 		table, condition string
 		arguments        []any
 	}{
-		{"file_entries", "user_id = ? AND object_id = ? AND status <> 'PURGED'", []any{actor.UserID, objectID}},
-		{"upload_tasks", "user_id = ? AND status NOT IN ('COMPLETED','CANCELLED','EXPIRED','FAILED') AND (staged_object_id = ? OR published_object_id = ?)", []any{actor.UserID, objectID, objectID}},
+		{"file_entries", "user_id = ? AND object_id = ? AND status <> 'PURGED'", []any{userID, objectID}},
+		{"upload_tasks", "user_id = ? AND status NOT IN ('COMPLETED','CANCELLED','EXPIRED','FAILED') AND (staged_object_id = ? OR published_object_id = ?)", []any{userID, objectID, objectID}},
 	} {
 		var reference struct{ ID uint64 }
-		queryError := store.database.WithContext(writeContext).Table(scope.table).Select("id").
-			Clauses(clause.Locking{Strength: "UPDATE"}).Where(scope.condition, scope.arguments...).Take(&reference).Error
-		if err := writeContext.Err(); err != nil {
+		queryError := lockedStore.database.WithContext(ctx).Table(scope.table).Select("id").
+			Where(scope.condition, scope.arguments...).Take(&reference).Error
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if queryError == nil {
@@ -68,22 +75,22 @@ func (store *Store) MarkUserStagedObjectOrphaned(ctx context.Context, objectID u
 		}
 	}
 
-	// 4. 复用已有孤立记录，或条件写入孤立状态及七天宽限期。
+	// 2. 复用已有孤立记录，或条件写入孤立状态及七天宽限期。
 	if object.UnreferencedAt != nil {
 		if object.GCAfter.Before(object.UnreferencedAt.Add(7 * 24 * time.Hour)) {
 			return nil, domain.ErrInvalidStoredObjectData
 		}
-		if err := writeContext.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		return object, nil
 	}
-	result := store.database.WithContext(writeContext).Exec(
+	result := lockedStore.database.WithContext(ctx).Exec(
 		"UPDATE stored_objects SET status = 'ORPHANED', unreferenced_at = UTC_TIMESTAMP(6), "+
 			"gc_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 7 DAY), updated_at = UTC_TIMESTAMP(6) "+
 			"WHERE owner_user_id = ? AND id = ? AND status = ? AND unreferenced_at IS NULL AND gc_after IS NULL",
-		actor.UserID, objectID, string(object.Status))
-	if err := writeContext.Err(); err != nil {
+		userID, objectID, string(object.Status))
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if result.Error != nil {
@@ -93,8 +100,8 @@ func (store *Store) MarkUserStagedObjectOrphaned(ctx context.Context, objectID u
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 
-	// 5. 当前读复核写入结果，交由外层事务确认。
-	orphaned, err := lockedStore.FindUserStoredObject(writeContext, actor.UserID, objectID)
+	// 3. 当前读复核写入结果，交由外层事务确认。
+	orphaned, err := lockedStore.FindUserStoredObject(ctx, userID, objectID)
 	if errors.Is(err, domain.ErrStoredObjectNotFound) {
 		return nil, domain.ErrInvalidStoredObjectData
 	}
@@ -106,7 +113,7 @@ func (store *Store) MarkUserStagedObjectOrphaned(ctx context.Context, objectID u
 		orphaned.Provider != object.Provider || orphaned.Bucket != object.Bucket || orphaned.ObjectKey != object.ObjectKey || orphaned.FileSize != object.FileSize {
 		return nil, domain.ErrInvalidStoredObjectData
 	}
-	if err := writeContext.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return orphaned, nil
