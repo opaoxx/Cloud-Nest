@@ -3,7 +3,7 @@ info:
   title: CloudNest API
   version: 0.1.0
   description: |
-    当前契约包含系统检查、受保护的上传创建与任务查询、目录列表及详情、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
+    当前契约包含系统检查、受保护的上传创建、内容接收与任务查询、目录列表及详情、当前用户资料、会话列表及撤销接口、设备列表、改名与撤销、登录、刷新及退出操作。
     无 Origin 请求沿用原流程；有 Origin 时必须是单个与 CLOUDNEST_ALLOWED_ORIGINS 完全一致的值。
     允许来源的普通响应（包括 404/500/503）附带明确的 Access-Control-Allow-Origin、
     Access-Control-Allow-Credentials: true、Access-Control-Expose-Headers: X-Request-ID, Retry-After。
@@ -219,6 +219,77 @@ paths:
           $ref: '#/components/responses/UploadTaskNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/uploads/{id}/content:
+    put:
+      tags: [Uploads]
+      operationId: uploadContent
+      summary: 接收当前用户的单文件上传内容
+      description: |
+        Bearer 授权通过后解析任务 ID，检查头部格式，并按当前用户读取已有上传任务。
+        正文使用 application/octet-stream，Content-Encoding 可省略或为单个 identity。
+        允许零字节文件。已知 Content-Length 须与任务声明相同，分块请求继续校验实际字节数。
+        单文件上限为 16 MiB。接收前复查任务和执行租约，传输阶段总时限为 5 分钟。
+        写入对象并提交校验状态后返回 202，客户端按 task_id 查询进度。超时后宜先查询现有任务状态。
+        HTTP/1.x 提前返回且正文未读完时，响应后关闭本次连接。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UploadTaskID'
+      requestBody:
+        required: true
+        description: 文件原始字节，不使用 JSON 或 multipart。零字节任务发送空正文并提供上述媒体类型。
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '202':
+          $ref: '#/components/responses/UploadContentAccepted'
+        '400':
+          description: 路径 ID 或正文长度元数据无效，返回 INVALID_ARGUMENT。路径错误的 details.field 为 id。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/UploadTaskNotFound'
+        '408':
+          $ref: '#/components/responses/UploadContentTimedOut'
+        '409':
+          $ref: '#/components/responses/UploadContentConflict'
+        '413':
+          $ref: '#/components/responses/UploadContentTooLarge'
+        '415':
+          $ref: '#/components/responses/UploadContentUnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UploadContentChecksumMismatch'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/UploadContentStorageUnavailable'
+        '507':
+          $ref: '#/components/responses/UploadTempSpaceExhausted'
   /api/v1/directories:
     post:
       tags: [Entries]

@@ -19,7 +19,12 @@ func NewRouter(logger *slog.Logger, allowedOrigins []string, checkReadiness func
 	router.RedirectTrailingSlash = false
 
 	// 2. 先分配 ID，再记录处理结果；Recovery 在内层处理异常且不转储原始请求。
-	router.Use(middleware.RequestID(), middleware.RequestLog(logger), middleware.Recovery(handler.InternalError), middleware.CORS(allowedOrigins, handler.CORSForbidden))
+	router.Use(
+		middleware.RequestID(), middleware.RequestLog(logger), middleware.Recovery(handler.InternalError),
+		// 上传正文收尾覆盖来源拒绝及其后的认证和接收响应。
+		finishUploadContentBody,
+		middleware.CORS(allowedOrigins, handler.CORSForbidden),
+	)
 
 	// 3. 注册系统探测接口，就绪检查绑定调用方提供的检查能力。
 	router.GET("/ping", handler.Ping)
