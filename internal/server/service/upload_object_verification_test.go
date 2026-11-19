@@ -49,6 +49,8 @@ func TestVerifyUploadObjectLifecycle(t *testing.T) {
 		{"no checksum", nil, 1, true},
 		{"snapshot before opening", nil, 1, true},
 		{"checksum mismatch", []error{domain.ErrUploadChecksumMismatch}, 1, true},
+		{"checksum mismatch and close failure", []error{domain.ErrUploadChecksumMismatch, closeError}, 1, true},
+		{"checksum mismatch and cancellation", []error{domain.ErrUploadChecksumMismatch, context.Canceled}, 1, true},
 		{"short object", []error{domain.ErrUploadBodySizeMismatch}, 1, true},
 		{"open failed", []error{openError}, 0, false},
 		{"empty open result", []error{domain.ErrUploadStorageUnavailable}, 0, false},
@@ -68,7 +70,7 @@ func TestVerifyUploadObjectLifecycle(t *testing.T) {
 			switch fixture.name {
 			case "no checksum":
 				task.ExpectedSHA256 = nil
-			case "checksum mismatch":
+			case "checksum mismatch", "checksum mismatch and close failure", "checksum mismatch and cancellation":
 				task.ExpectedSHA256 = new([sha256.Size]byte{})
 			case "short object":
 				reader = bytes.NewReader(binary[:2])
@@ -80,9 +82,9 @@ func TestVerifyUploadObjectLifecycle(t *testing.T) {
 			source := &uploadCopySource{reader: reader}
 			stream := uploadObjectVerificationStream{uploadCopySource: source, closeStream: func() error {
 				switch fixture.name {
-				case "open failed with stream", "read and close fail", "close failed after verification":
+				case "open failed with stream", "read and close fail", "close failed after verification", "checksum mismatch and close failure":
 					return closeError
-				case "cancel during close":
+				case "cancel during close", "checksum mismatch and cancellation":
 					cancel()
 				}
 				return nil
@@ -140,6 +142,16 @@ func TestVerifyUploadObjectLifecycle(t *testing.T) {
 				if !errors.Is(err, expected) {
 					t.Fatal("未保留校验或关闭的失败原因", expected, err)
 				}
+			}
+			mismatch, cleanMismatch := err.(*domain.UploadVerificationChecksumMismatch)
+			if cleanMismatch != (fixture.name == "checksum mismatch") {
+				t.Fatal("关闭失败或取消与纯摘要失配的处理不符", err)
+			}
+			if cleanMismatch && (mismatch.TaskID != task.ID || mismatch.UserID != task.UserID ||
+				mismatch.StagedObjectID != object.ID || mismatch.LeaseVersion != task.LeaseVersion ||
+				mismatch.ExpectedSHA256 != *task.ExpectedSHA256 || mismatch.Actual.SizeBytes != task.FileSize ||
+				mismatch.Actual.SHA256 != checksum) {
+				t.Fatal("摘要失配未绑定当前校验尝试")
 			}
 		})
 	}

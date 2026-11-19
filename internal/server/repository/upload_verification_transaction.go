@@ -18,6 +18,19 @@ func (store *Store) WithUploadVerificationTransaction(
 	digest domain.UploadContentDigest,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 ) error {
+	// 1. 用摘要相符的结果进入共同的写回复核流程。
+	return store.withUploadVerificationResultTransaction(ctx, verifiedTask, verifiedObject, digest, false, action)
+}
+
+// withUploadVerificationResultTransaction 复用对象身份、声明和租约的锁内检查。
+func (store *Store) withUploadVerificationResultTransaction(
+	ctx context.Context,
+	verifiedTask *domain.UploadTask,
+	verifiedObject *domain.StoredObject,
+	digest domain.UploadContentDigest,
+	expectChecksumMismatch bool,
+	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
+) error {
 	// 1. 检查校验快照和实际摘要，开启用户事务。
 	if store == nil || store.database == nil || ctx == nil || action == nil {
 		return fmt.Errorf("复核上传校验结果需要数据入口、上下文和事务回调")
@@ -44,7 +57,11 @@ func (store *Store) WithUploadVerificationTransaction(
 		return domain.ErrUploadBodySizeMismatch
 	}
 	expected := copyUploadTaskValue(verifiedTask.ExpectedSHA256)
-	if expected != nil && digest.SHA256 != *expected {
+	checksumMismatch := expected != nil && digest.SHA256 != *expected
+	if expectChecksumMismatch && !checksumMismatch {
+		return domain.ErrInvalidUploadTaskData
+	}
+	if !expectChecksumMismatch && checksumMismatch {
 		return domain.ErrUploadChecksumMismatch
 	}
 	userID, taskID, objectID := verifiedTask.UserID, verifiedTask.ID, verifiedTask.StagedObjectID

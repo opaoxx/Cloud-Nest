@@ -42,6 +42,9 @@ func VerifyUploadObject(
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 	declaredSize, expected := task.FileSize, copyOptionalValue(task.ExpectedSHA256)
+	mismatch := domain.UploadVerificationChecksumMismatch{
+		TaskID: task.ID, UserID: task.UserID, StagedObjectID: task.StagedObjectID, LeaseVersion: task.LeaseVersion,
+	}
 
 	// 2. 打开对象流，安排退出时关闭。
 	stream, openError := open(ctx, object)
@@ -74,7 +77,8 @@ func VerifyUploadObject(
 		return nil, err
 	}
 	if err := ValidateUploadContentChecksum(actual.SHA256, expected); err != nil {
-		return nil, err
+		mismatch.ExpectedSHA256, mismatch.Actual = *expected, *actual
+		return nil, &mismatch
 	}
 	return actual, nil
 }

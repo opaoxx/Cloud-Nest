@@ -122,8 +122,8 @@ func uploadTaskErrorSummary(code *string) *UploadTaskErrorSummary {
 		message = "文件实际大小与声明不一致"
 	case "FILE_TOO_LARGE":
 		message = "文件大小超过当前上传限制"
-	case "CHECKSUM_MISMATCH":
-		message = "文件校验失败，请重新上传"
+	case domain.UploadChecksumMismatchCode:
+		message = domain.ErrUploadChecksumMismatch.Error()
 	case "QUOTA_EXCEEDED":
 		message = "存储空间不足"
 	case "TEMP_SPACE_EXHAUSTED":

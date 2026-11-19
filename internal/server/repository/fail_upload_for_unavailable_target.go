@@ -12,12 +12,18 @@ import (
 // FailUploadForUnavailableTarget 终结已确认目标不可用的校验任务，并释放预占。
 // 调用方在同一写回复核事务中完成目标检查，并向外传播收尾错误。
 func (store *Store) FailUploadForUnavailableTarget(ctx context.Context, task *domain.UploadTask) error {
+	// 1. 使用目标不可用的固定原因进入共同的失败收尾。
+	return store.failVerifyingUpload(ctx, task, domain.UploadTargetUnavailableCode, domain.ErrUploadTargetUnavailable.Error())
+}
+
+// failVerifyingUpload 写入已由调用方确认的校验任务失败结果。
+func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.UploadTask, errorCode, errorMessage string) error {
 	// 1. 核对当前任务、校验租约、预占和暂存对象。
 	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
-		return fmt.Errorf("终结目标不可用的上传需要上下文和已锁定用户的事务")
+		return fmt.Errorf("终结校验失败的上传需要上下文和已锁定用户的事务")
 	}
 	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
-		return fmt.Errorf("终结目标不可用的上传必须使用事务 Store")
+		return fmt.Errorf("终结校验失败的上传必须使用事务 Store")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -49,7 +55,6 @@ func (store *Store) FailUploadForUnavailableTarget(ctx context.Context, task *do
 	}
 
 	// 2. 等额释放预占，条件写入失败状态和原因。
-	errorMessage := domain.ErrUploadTargetUnavailable.Error()
 	result := store.database.WithContext(ctx).Exec(
 		"UPDATE users AS quota_user JOIN upload_tasks AS upload_task ON upload_task.user_id = quota_user.id "+
 			"SET quota_user.reserved_storage = ?, "+
@@ -67,14 +72,14 @@ func (store *Store) FailUploadForUnavailableTarget(ctx context.Context, task *do
 			"AND upload_task.file_size = ? AND upload_task.reserved_bytes = upload_task.file_size "+
 			"AND upload_task.published_object_id IS NULL AND upload_task.result_entry_id IS NULL "+
 			"AND upload_task.resolved_name IS NULL AND upload_task.completed_at IS NULL",
-		account.ReservedBytes-current.ReservedBytes, current.ReservedBytes, domain.UploadTargetUnavailableCode, errorMessage,
+		account.ReservedBytes-current.ReservedBytes, current.ReservedBytes, errorCode, errorMessage,
 		userID, account.QuotaBytes, account.UsedBytes, account.ReservedBytes,
 		current.ID, current.StagedObjectID, current.TargetParentID, *current.LeaseOwner, current.LeaseVersion, current.FileSize)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if result.Error != nil {
-		return fmt.Errorf("终结目标不可用的上传失败: %w", result.Error)
+		return fmt.Errorf("写入上传任务失败结果: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return domain.ErrUploadTaskBusy
@@ -98,7 +103,7 @@ func (store *Store) FailUploadForUnavailableTarget(ctx context.Context, task *do
 		failed.PublishedObjectID != nil || failed.ResultEntryID != nil || failed.ResolvedName != nil ||
 		failed.CompletedAt == nil || !failed.CompletedAt.Equal(failed.UpdatedAt) ||
 		!failed.CompletedAt.Before(current.ExpiresAt) || !failed.CompletedAt.Before(*current.LeaseUntil) ||
-		failed.LastErrorCode == nil || *failed.LastErrorCode != domain.UploadTargetUnavailableCode ||
+		failed.LastErrorCode == nil || *failed.LastErrorCode != errorCode ||
 		failed.LastErrorMessage == nil || *failed.LastErrorMessage != errorMessage {
 		return domain.ErrInvalidUploadTaskData
 	}

@@ -735,3 +735,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.UploadPublicationService.Publish`。它在同一个写回复核事务中组合单文件发布步骤，提交后返回完成任务。真实 MySQL 验证了新对象、复用对象、零字节发布及整体回滚。[第 326 步学习记录](docs/开发学习记录.md#第-326-步组合单文件上传发布事务)
 
 上传发布发现目标目录不可用时，现可在当前校验租约内将任务标为 `FAILED`、释放预占并开始暂存对象回收计时。任务查询交付 `TARGET_UNAVAILABLE`。[第 327 步学习记录](docs/开发学习记录.md#第-327-步终结发布目标不可用的上传任务)
+
+已提供 `Store.FailUploadForChecksumMismatch`。完整读回确认 SHA-256 与声明不符时，可在当前校验租约内释放预占、记录 `FAILED/CHECKSUM_MISMATCH` 并启动暂存对象回收计时。[第 328 步学习记录](docs/开发学习记录.md#第-328-步终结摘要校验失败的上传任务)
