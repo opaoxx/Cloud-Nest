@@ -38,7 +38,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Skip("设置 CLOUDNEST_SERVER_TEST=1 后使用独占库、临时用户配置目录和现有 MinIO 验证真实启动")
 	}
 	// 1. 创建独占数据库，使用固定正式迁移建立启动检查及用户夹具。
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 	databaseConfig, err := config.LoadDatabaseConfig()
 	if err != nil {
@@ -1454,16 +1454,20 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if uploadStorage != nil {
 		verificationBeforeRestart, verificationStorageVersion = prepareServerUploadVerificationRecovery(t, ctx, pool, uploadStorage)
 	}
+	// 1. 在两次启动之间保存 EXPIRING 任务的重试时间。
+	expirationRetry := prepareServerUploadExpirationRetryRecovery(t, ctx, pool)
 	restartLogOffset := logs.Len()
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
+	// 2. 用已到期的对照任务确认首轮已扫描，再核对等待中的任务。
+	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
+	expirationRetry.verifyStillWaiting(t, ctx)
 	if verificationBeforeRestart != nil {
 		t.Run("recover verifying upload", func(t *testing.T) {
 			verifyServerUploadVerificationRecovery(t, ctx, pool, verificationBeforeRestart, verificationStorageVersion)
 		})
 	}
-	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
 	if uploadStorage != nil {
 		t.Run("upload content", func(t *testing.T) {
 			verifyServerUploadContent(t, ctx, pool, uploadStorage, "http://"+address, foreignToken.Token, webRefreshed.Data.AccessToken)
@@ -1832,6 +1836,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	renameDevice(t, nativeLogin.Data.Device.ID, nativeFinal.Data.AccessToken, "退出后名称", 401, "SESSION_REVOKED", "")
 	revokeDevice(t, deviceTarget.Data.Device.ID, nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", foreignToken.Token, 200, "", "")
+	// 3. 等待新实例再次扫描，检查终态、配额和对象回收计时。
+	t.Run("recover expiring upload after retry delay", func(t *testing.T) {
+		expirationRetry.verifyRecovered(t, ctx)
+	})
 	stopSecond()
 	if verificationBeforeRestart != nil {
 		t.Run("recover on first verification round", func(t *testing.T) {
@@ -1860,9 +1868,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(logs.String()[restartLogOffset:], "上传过期轮次结束") {
-		t.Fatal("重启后的过期 worker 未汇报本轮结果")
-	}
+	verifyServerUploadExpirationRecoveryRounds(t, logs.String()[restartLogOffset:])
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("生产启动流程重写了已有密钥")
