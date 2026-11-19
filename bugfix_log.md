@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-20——过期 worker 调度测试的计数发生竞态
+
+### 问题现象
+
+- 第 346 步真实启动联测通过，临时 Linux 容器中的 `-race` 在 `TestServerUploadExpirationWorkerScheduleAndStop` 报告测试读取轮次数与 worker 更新轮次数发生竞态。
+
+### 根因与修复方案
+
+- 测试用虚拟时钟控制轮次触发时点，两个 goroutine 对普通整数的读写缺少同步。将测试计数器改为 `atomic.Int32`，递增与读取使用原子操作。
+
+### 验证结果
+
+- 修正后，调度与退出用例在临时 Linux 容器中连续三次通过 `-race`，`go test ./...` 与 `go vet ./...` 通过。
+
 ## 2026-11-20——启动校验联测误算剩余预占
 
 ### 问题现象

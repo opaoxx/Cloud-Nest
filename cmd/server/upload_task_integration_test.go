@@ -79,6 +79,11 @@ func verifyServerUploadTasks(t *testing.T, ctx context.Context, pool *sql.DB, ba
 	t.Helper()
 	// 1. 十种阶段使用独立暂存对象，完成任务保留已有逻辑文件的审计引用。
 	stamp := time.Date(2026, 11, 17, 8, 0, 0, 123456000, time.UTC)
+	// 用活跃租约保留这些查询夹具，过期处理由独立的上传创建用例验证。
+	var fixtureLeaseUntil time.Time
+	if err := pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)+INTERVAL 1 HOUR").Scan(&fixtureLeaseUntil); err != nil {
+		t.Fatal(err)
+	}
 	var uploading, completed dto.UploadTaskResponse
 	for index, status := range []domain.UploadStatus{
 		domain.UploadStatusCreating, domain.UploadStatusUploading, domain.UploadStatusCompleting,
@@ -89,14 +94,22 @@ func verifyServerUploadTasks(t *testing.T, ctx context.Context, pool *sql.DB, ba
 		size := uint64(0)
 		var publishedID, resultID any
 		var resolvedName, completedAt any
+		var leaseOwner, leaseUntil any
+		var leaseVersion uint64
+		if !status.IsTerminal() {
+			leaseOwner, leaseUntil, leaseVersion = "upload-query-fixture", fixtureLeaseUntil, 1
+		}
 		if status == domain.UploadStatusCompleted {
 			size, publishedID, resultID, resolvedName, completedAt = 2048, uint64(41), uint64(23), "upload-route-final.bin", stamp
 		}
 		if _, err := pool.ExecContext(ctx, "INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(?,1,'MINIO','fixture-bucket',?,?)", taskID, "upload-route-object-"+strconv.FormatUint(taskID, 10), size); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.ExecContext(ctx, "INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,published_object_id,target_parent_id,requested_name,resolved_name,upload_mode,file_size,status,result_entry_id,reserved_bytes,expires_at,last_error_code,last_error_message,created_at,updated_at,completed_at) VALUES(?,1,13,?,?,11,?,?,'SINGLE',?,?,?,0,?,'STORAGE_RETRY','private-upload-diagnostic',?,?,?)",
-			taskID, taskID, publishedID, "upload-route-"+strconv.FormatUint(taskID, 10)+".bin", resolvedName, size, string(status), resultID, stamp.Add(-24*time.Hour), stamp, stamp, completedAt); err != nil {
+		if _, err := pool.ExecContext(ctx, `INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,published_object_id,target_parent_id,requested_name,resolved_name,
+			upload_mode,file_size,status,result_entry_id,reserved_bytes,expires_at,last_error_code,last_error_message,created_at,updated_at,completed_at,
+			lease_owner,lease_until,lease_version) VALUES(?,1,13,?,?,11,?,?,'SINGLE',?,?,?,0,?,'STORAGE_RETRY','private-upload-diagnostic',?,?,?,?,?,?)`,
+			taskID, taskID, publishedID, "upload-route-"+strconv.FormatUint(taskID, 10)+".bin", resolvedName, size, string(status), resultID,
+			stamp.Add(-24*time.Hour), stamp, stamp, completedAt, leaseOwner, leaseUntil, leaseVersion); err != nil {
 			t.Fatal(err)
 		}
 		response := requestServerUploadTask(t, baseURL, token, strconv.FormatUint(taskID, 10), 200, "", "")
@@ -132,7 +145,7 @@ func verifyServerUploadTasks(t *testing.T, ctx context.Context, pool *sql.DB, ba
 	if _, err := pool.ExecContext(ctx, "INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(500011,3,'MINIO','fixture-bucket','upload-route-foreign',0)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.ExecContext(ctx, "INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,file_size,status,reserved_bytes,expires_at) VALUES(500011,3,23,500011,33,'upload-route-foreign.bin','SINGLE',0,'UPLOADING',0,?)", stamp); err != nil {
+	if _, err := pool.ExecContext(ctx, "INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,file_size,status,reserved_bytes,expires_at) VALUES(500011,3,23,500011,33,'upload-route-foreign.bin','SINGLE',0,'UPLOADING',0,?)", fixtureLeaseUntil); err != nil {
 		t.Fatal(err)
 	}
 	requestServerUploadTask(t, baseURL, token, "500011", 404, "UPLOAD_NOT_FOUND", "")

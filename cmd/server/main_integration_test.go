@@ -1440,6 +1440,15 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopFirst()
+	// 允许新实例处理创建用例留在数据库中的过期任务。
+	leaseExpired, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6)
+		WHERE id=? AND user_id=3 AND status='VERIFYING' AND lease_owner='create-upload-fixture'`, createdUploadBeforeRestart.Data.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := leaseExpired.RowsAffected(); err != nil || rows != 1 {
+		t.Fatal("重启前未留下可处理的到期任务", rows, err)
+	}
 	var verificationBeforeRestart *domain.UploadTask
 	var verificationStorageVersion string
 	if uploadStorage != nil {
@@ -1838,16 +1847,21 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if len(startupSegments) != 3 || strings.Count(logs.String(), "上传临时目录检查通过") != 2 || !strings.Contains(startupSegments[0], "上传临时目录检查通过") || !strings.Contains(startupSegments[1], "上传临时目录检查通过") {
 		t.Fatal("两轮临时目录检查未先于 HTTP 启动")
 	}
-	workerStops := strings.Split(logs.String(), "上传校验 worker 已停止")
-	if len(workerStops) != 3 || strings.Count(logs.String(), "上传校验 worker 已启动") != 2 {
-		t.Fatal("每次真实启动应对应一个校验 worker 的启动和停止")
-	}
-	for _, afterWorkerStop := range workerStops[1:] {
-		storageClosed := strings.Index(afterWorkerStop, "MinIO 空闲连接已释放")
-		databaseClosed := strings.Index(afterWorkerStop, "MySQL 连接池已关闭")
-		if storageClosed < 0 || databaseClosed <= storageClosed {
-			t.Fatal("校验 worker 退出前已清理依赖，或连接关闭顺序错误")
+	for _, worker := range []string{"上传校验", "上传过期"} {
+		workerStops := strings.Split(logs.String(), worker+" worker 已停止")
+		if len(workerStops) != 3 || strings.Count(logs.String(), worker+" worker 已启动") != 2 {
+			t.Fatal("每次真实启动应对应一个 worker 的启动和停止", worker)
 		}
+		for _, afterWorkerStop := range workerStops[1:] {
+			storageClosed := strings.Index(afterWorkerStop, "MinIO 空闲连接已释放")
+			databaseClosed := strings.Index(afterWorkerStop, "MySQL 连接池已关闭")
+			if storageClosed < 0 || databaseClosed <= storageClosed {
+				t.Fatal("worker 退出前已清理依赖，或连接关闭顺序错误", worker)
+			}
+		}
+	}
+	if !strings.Contains(logs.String()[restartLogOffset:], "上传过期轮次结束") {
+		t.Fatal("重启后的过期 worker 未汇报本轮结果")
 	}
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {

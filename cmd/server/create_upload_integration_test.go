@@ -16,6 +16,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/repository"
 )
 
 const serverCreateUploadBody = `{"parent_id":"33","name":"正式上传 🌱.bin","size_bytes":40}`
@@ -172,7 +173,9 @@ func verifyServerUploadCreation(t *testing.T, ctx context.Context, pool *sql.DB,
 		t.Fatal("正式创建与查询的公开任务事实不一致")
 	}
 	requestServerUploadTask(t, baseURL, otherUserToken, first.Data.Task.ID, 404, "UPLOAD_NOT_FOUND", "")
-	if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET status='VERIFYING',expires_at=? WHERE user_id=3 AND id=?", serverCreateUploadExpiredAt, first.Data.Task.ID); err != nil {
+	if _, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET status='VERIFYING',expires_at=?,
+		lease_owner='create-upload-fixture',lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR,lease_version=1 WHERE user_id=3 AND id=?`,
+		serverCreateUploadExpiredAt, first.Data.Task.ID); err != nil {
 		t.Fatal(err)
 	}
 	currentTask := requestServerUploadTask(t, baseURL, token, first.Data.Task.ID, 200, "", "")
@@ -182,15 +185,61 @@ func verifyServerUploadCreation(t *testing.T, ctx context.Context, pool *sql.DB,
 	return first, current
 }
 
-// verifyServerUploadCreationAfterRestart 对照重启前快照及配额，验证原键继续复用。
+// verifyServerUploadCreationAfterRestart 核对自动过期、配额返还和原创建结果重放。
 func verifyServerUploadCreationAfterRestart(t *testing.T, ctx context.Context, pool *sql.DB, baseURL, token string, before dto.CreateUploadResponse, state serverUploadCreationState) {
 	t.Helper()
+	// 1. 等待新实例的过期 worker 处理停机时已可领取的任务。
+	const userID = 3
+	taskID, err := strconv.ParseUint(before.Data.Task.ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := repository.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitContext, stopWaiting := context.WithTimeout(ctx, 12*time.Second)
+	defer stopWaiting()
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
+	var expired *domain.UploadTask
+	for {
+		current, err := store.FindUserUploadTask(waitContext, userID, taskID)
+		if err != nil {
+			t.Fatal("等待过期处理时读取任务失败", err)
+		}
+		if current.Status == domain.UploadStatusExpired {
+			expired = current
+			break
+		}
+		if current.Status != domain.UploadStatusVerifying && current.Status != domain.UploadStatusExpiring {
+			t.Fatal("过期处理进入意外的任务阶段", current.Status)
+		}
+		select {
+		case <-waitContext.Done():
+			t.Fatal("重启后的过期 worker 未在期限内结束任务", waitContext.Err())
+		case <-poll.C:
+		}
+	}
+	if expired.CompletedAt == nil || expired.ReservedBytes != 0 || expired.LeaseOwner != nil || expired.ResultEntryID != nil {
+		t.Fatal("已过期任务未完成终态收尾", expired)
+	}
+	staged, err := store.FindUserStoredObject(ctx, userID, expired.StagedObjectID)
+	if err != nil || staged.Status != domain.StoredObjectStatusOrphaned || staged.UnreferencedAt == nil || staged.GCAfter == nil ||
+		!staged.GCAfter.Equal(staged.UnreferencedAt.Add(7*24*time.Hour)) {
+		t.Fatal("自动过期处理未开始暂存回收计时", staged, err)
+	}
+	state.reserved -= before.Data.Task.SizeBytes
+	state.taskReserved -= before.Data.Task.SizeBytes
+
+	// 2. 对照已完成的任务现状与仍可重放的原始创建响应。
 	replayed := requestServerCreateUpload(t, baseURL, token, serverCreateUploadKey, serverCreateUploadBody, 201, "", "")
 	if !reflect.DeepEqual(before.Data, replayed.Data) || replayed.RequestID == before.RequestID || readServerUploadCreationState(t, ctx, pool) != state {
 		t.Fatal("真实重启后未复用原始上传创建结果")
 	}
 	current := requestServerUploadTask(t, baseURL, token, before.Data.Task.ID, 200, "", "")
-	if current.Data.Status != "VERIFYING" || !current.Data.ExpiresAt.Equal(serverCreateUploadExpiredAt) {
+	if current.Data.Status != "EXPIRED" || !current.Data.ExpiresAt.Equal(serverCreateUploadExpiredAt) ||
+		current.Data.CompletedAt == nil || current.Data.ResultEntryID != nil {
 		t.Fatal("重启后当前任务事实不准确")
 	}
 	requestServerCreateUpload(t, baseURL, token, serverCreateUploadKey, `{"parent_id":"33","name":"changed-after-restart.bin","size_bytes":40}`, 409, "IDEMPOTENCY_CONFLICT", "")
