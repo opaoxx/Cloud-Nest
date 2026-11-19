@@ -677,3 +677,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 `UploadContentReceiveService.Receive` 已在准备事务提交后启动每 20 秒一次的续租。正文和存储写入共用可取消上下文，续租失败时返回原始原因。存储确认后先等待续租停止，再推进校验。调用及复验见 [第 297 步学习记录](docs/开发学习记录.md#第-297-步将定时续租接入上传接收)。
 
 已提供 `binding.WithUploadTransferDeadline`，让 HTTP 正文读取与传输回调共用最长 5 分钟的截止时间，沿用更短的父期限。真实 HTTP 已验证正文未发完时退出、临时文件清理和成功后的连接复用。规则及复验见 [第 298 步学习记录](docs/开发学习记录.md#第-298-步限制上传-http-传输时间)。
+
+已定义上传内容已接收的 `UploadContentAcceptedData` 和响应外层。接收服务的 `VERIFYING` 结果转换为字符串任务 ID 与当前状态，供后续 HTTP 202 成功交付使用。字段与复验见 [第 299 步学习记录](docs/开发学习记录.md#第-299-步定义上传内容已接收响应)。
