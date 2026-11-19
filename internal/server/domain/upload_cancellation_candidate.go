@@ -1,5 +1,8 @@
 package domain
 
+// MaxUploadCancellationCandidates 是每轮可处理的取消候选上限。
+const MaxUploadCancellationCandidates = 100
+
 // UploadCancellationCandidate 保存取消收尾前扫描到的任务定位。
 type UploadCancellationCandidate struct {
 	// TaskID 和 UserID 用于按所属用户重新读取任务。

@@ -9,14 +9,12 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxUploadCancellationCandidates = 100
-
 // ListSingleUploadCancellationCandidates 读取可接续收尾的单文件取消候选。
 // 扫描在事务外执行，后续收尾必须重新核对任务与对象。
 func (store *Store) ListSingleUploadCancellationCandidates(ctx context.Context, limit int) ([]domain.UploadCancellationCandidate, error) {
 	// 1. 校验事务外入口、上下文和批量上限。
-	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > maxUploadCancellationCandidates {
-		return nil, fmt.Errorf("扫描待取消收尾上传需要数据入口、上下文和 1～100 条的批量大小")
+	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > domain.MaxUploadCancellationCandidates {
+		return nil, fmt.Errorf("扫描待取消收尾上传需要数据入口、上下文和 1～%d 条的批量大小", domain.MaxUploadCancellationCandidates)
 	}
 	if _, inTransaction := store.database.Statement.ConnPool.(gorm.TxCommitter); inTransaction {
 		return nil, fmt.Errorf("跨用户扫描待取消收尾上传须使用事务外的数据入口")
