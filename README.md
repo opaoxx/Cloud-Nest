@@ -695,3 +695,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.ListUploadVerificationCandidates`。它按数据库时间只读扫描已就绪的 `VERIFYING` 单文件任务，每批最多 100 条，返回用于后续领取的任务、用户、对象和租约版本。边界及复验见 [第 306 步学习记录](docs/开发学习记录.md#第-306-步查询待校验的上传任务)。
 
 已提供 `Store.ClaimUploadVerificationLease`。校验 worker 可使用候选在所属用户事务中复核任务和暂存对象，领取 60 秒租约并递增版本。真实 MySQL 验证并发唯一领取、过期重领及回滚。调用与复验见 [第 307 步学习记录](docs/开发学习记录.md#第-307-步领取上传校验租约)。
+
+已提供 `Client.OpenUploadVerificationObject`，可从 MinIO 打开待校验对象的原始内容流，按保存的版本定位并核对已知 ETag。真实版本桶已验证旧版本、`null` 版本、默认最新版本和缺失边界。调用与复验见 [第 308 步学习记录](docs/开发学习记录.md#第-308-步打开待校验的-minio-对象流)。
