@@ -747,3 +747,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 `VerifyAndPublish` 读回遇到临时存储故障时会调用重试写回。提交后返回带下次尝试时间的 `VERIFYING` 任务，等待时间由已记录的重试次数决定，最多 30 秒。[第 332 步学习记录](docs/开发学习记录.md#第-332-步为临时存储故障安排上传校验重试)
 
 已提供 `UploadVerificationCandidateProcessor.Process`。它从单条扫描候选领取租约，按已提交的任务查询暂存对象，再运行一次校验。[第 333 步学习记录](docs/开发学习记录.md#第-333-步处理单个上传校验候选)
+
+已提供 `UploadVerificationBatch.RunOnce`。按给定上限扫描一次，逐条校验并汇总发布、重试和候选错误。取消时返回当前汇总。[第 334 步学习记录](docs/开发学习记录.md#第-334-步限量扫描并汇总一轮上传校验)
