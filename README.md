@@ -745,3 +745,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.ScheduleUploadVerificationRetry`，按当前校验租约记录临时存储故障和下次尝试时间，释放租约并继续保留任务预占。扫描和领取均受下次尝试时间及任务期限约束。[第 331 步学习记录](docs/开发学习记录.md#第-331-步记录上传校验的下次重试时间)
 
 `VerifyAndPublish` 读回遇到临时存储故障时会调用重试写回。提交后返回带下次尝试时间的 `VERIFYING` 任务，等待时间由已记录的重试次数决定，最多 30 秒。[第 332 步学习记录](docs/开发学习记录.md#第-332-步为临时存储故障安排上传校验重试)
+
+已提供 `UploadVerificationCandidateProcessor.Process`。它从单条扫描候选领取租约，按已提交的任务查询暂存对象，再运行一次校验。[第 333 步学习记录](docs/开发学习记录.md#第-333-步处理单个上传校验候选)
