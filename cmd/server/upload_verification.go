@@ -104,29 +104,6 @@ func uploadVerificationErrorCode(err error) string {
 		}
 	}
 
-	// 2. 识别可包裹的常见原因，其余使用内部错误码。
-	switch {
-	case errors.Is(err, context.Canceled):
-		return "CANCELED"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "DEADLINE_EXCEEDED"
-	case errors.Is(err, domain.ErrUploadTaskBusy):
-		return "UPLOAD_BUSY"
-	case errors.Is(err, domain.ErrUploadTaskNotReady), errors.Is(err, domain.ErrUploadLeaseVersionExhausted):
-		return "TASK_NOT_READY"
-	case errors.Is(err, domain.ErrUploadTaskNotFound):
-		return "UPLOAD_NOT_FOUND"
-	case errors.Is(err, domain.ErrUploadObjectMissing):
-		return "UPLOAD_OBJECT_MISSING"
-	case errors.Is(err, domain.ErrStoredObjectNotFound):
-		return "STORED_OBJECT_NOT_FOUND"
-	case errors.Is(err, domain.ErrUploadTargetUnavailable):
-		return domain.UploadTargetUnavailableCode
-	case errors.Is(err, domain.ErrUploadFileTooLarge):
-		return "FILE_TOO_LARGE"
-	case errors.Is(err, domain.ErrUploadStorageUnavailable):
-		return "STORAGE_UNAVAILABLE"
-	default:
-		return "INTERNAL_ERROR"
-	}
+	// 2. 其余原因交给上传 worker 共用的错误码映射。
+	return uploadWorkerErrorCode(err)
 }
