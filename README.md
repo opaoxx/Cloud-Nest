@@ -741,3 +741,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.FailUploadForBodySizeMismatch`。读回确认内容过短或超长后，可在当前校验租约内释放预占、记录 `FAILED/BODY_SIZE_MISMATCH` 并启动暂存对象回收计时。[第 329 步学习记录](docs/开发学习记录.md#第-329-步终结读回大小不符的上传任务)
 
 已提供 `service.UploadVerificationService.VerifyAndPublish`。一次已领取的单文件校验会按读回结果调用发布或相应的失败事务，读取及关闭故障保留原任务供后续处理。[第 330 步学习记录](docs/开发学习记录.md#第-330-步组合一次后台单文件校验)
+
+已提供 `Store.ScheduleUploadVerificationRetry`，按当前校验租约记录临时存储故障和下次尝试时间，释放租约并继续保留任务预占。扫描和领取均受下次尝试时间及任务期限约束。[第 331 步学习记录](docs/开发学习记录.md#第-331-步记录上传校验的下次重试时间)
