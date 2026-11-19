@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -70,6 +71,10 @@ func TestProcessUploadCancellationCandidate(t *testing.T) {
 					}
 					return &result, nil
 				},
+				func(context.Context, *domain.UploadTask, int) (*domain.UploadTask, error) {
+					t.Fatal("无取消重试标记时仍安排了重试")
+					return nil, nil
+				},
 			)
 
 			// 2. 核对成功交付已提交任务，或在预期位置返回原错误。
@@ -95,6 +100,10 @@ func TestProcessUploadCancellationCandidateRejectsBeforeLookup(t *testing.T) {
 			t.Fatal("无效或已取消的处理仍调用了收尾")
 			return nil, nil
 		},
+		func(context.Context, *domain.UploadTask, int) (*domain.UploadTask, error) {
+			t.Fatal("无效或已取消的处理仍安排了重试")
+			return nil, nil
+		},
 	)
 	for _, candidate := range []domain.UploadCancellationCandidate{
 		{UserID: 7, StagedObjectID: 23}, {TaskID: 19, StagedObjectID: 23}, {TaskID: 19, UserID: 7},
@@ -108,5 +117,72 @@ func TestProcessUploadCancellationCandidateRejectsBeforeLookup(t *testing.T) {
 	candidate := domain.UploadCancellationCandidate{TaskID: 19, UserID: 7, StagedObjectID: 23}
 	if task, err := processor.Process(ctx, candidate); task != nil || !errors.Is(err, context.Canceled) {
 		t.Fatal("已取消的调用未结束", task, err)
+	}
+}
+
+func TestProcessUploadCancellationCandidateRetry(t *testing.T) {
+	candidate := domain.UploadCancellationCandidate{TaskID: 19, UserID: 7, StagedObjectID: 23, LeaseVersion: 3}
+	temporary := fmt.Errorf("收尾事务: %w", domain.ErrUploadCancellationRetryable)
+	scheduleFailure := errors.New("fixture schedule retry failed")
+	for _, scenario := range []struct {
+		name          string
+		attemptCount  uint32
+		stop          bool
+		terminal      bool
+		completeError error
+		scheduleError error
+		wantDelay     int
+		wantError     error
+	}{
+		{name: "first retry", completeError: temporary, wantDelay: 1},
+		{name: "existing attempts", attemptCount: 4, completeError: temporary, wantDelay: 16},
+		{name: "delay cap", attemptCount: math.MaxUint32 - 1, completeError: temporary, wantDelay: 30},
+		{name: "writeback fails", completeError: temporary, scheduleError: scheduleFailure, wantDelay: 1, wantError: scheduleFailure},
+		{name: "worker stopping", stop: true, completeError: temporary, wantError: temporary},
+		{name: "terminal replay failed", terminal: true, completeError: temporary, wantError: temporary},
+		{name: "different marker", completeError: domain.ErrUploadExpirationRetryable, wantError: domain.ErrUploadExpirationRetryable},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			// 1. 让收尾返回指定错误，用当前任务保留重试次数。
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			task := &domain.UploadTask{ID: candidate.TaskID, UserID: candidate.UserID, StagedObjectID: candidate.StagedObjectID,
+				LeaseVersion: candidate.LeaseVersion, UploadMode: "SINGLE", Status: domain.UploadStatusCancelling, AttemptCount: scenario.attemptCount}
+			if scenario.terminal {
+				task.Status = domain.UploadStatusCancelled
+			}
+			scheduled := *task
+			scheduled.AttemptCount++
+			scheduleCalls := 0
+			processor := NewUploadCancellationCandidateProcessor(
+				func(context.Context, uint64, uint64) (*domain.UploadTask, error) { return task, nil },
+				func(context.Context, *domain.UploadTask) (*domain.UploadTask, error) {
+					if scenario.stop {
+						cancel()
+					}
+					return nil, scenario.completeError
+				},
+				func(writeContext context.Context, current *domain.UploadTask, delaySeconds int) (*domain.UploadTask, error) {
+					scheduleCalls++
+					if writeContext != ctx || current != task || delaySeconds != scenario.wantDelay || delaySeconds == 0 {
+						t.Fatal("重试未使用当前任务、原上下文及预期等待时间", current, delaySeconds)
+					}
+					if scenario.scheduleError != nil {
+						return nil, scenario.scheduleError
+					}
+					return &scheduled, nil
+				},
+			)
+
+			// 2. 确认只有符合条件的失败会尝试写回，并交付其结果。
+			result, err := processor.Process(ctx, candidate)
+			wantCalls := 0
+			if scenario.wantDelay > 0 {
+				wantCalls = 1
+			}
+			if scheduleCalls != wantCalls || err != scenario.wantError || (err == nil && result != &scheduled) || (err != nil && result != nil) {
+				t.Fatal("重试交付结果或写回次数不符", result, err, scheduleCalls)
+			}
+		})
 	}
 }

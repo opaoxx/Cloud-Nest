@@ -40,7 +40,7 @@ func TestUploadCancellationBatchScanBoundaries(t *testing.T) {
 				return nil, nil
 			})
 			summary, err := batch.RunOnce(t.Context(), scenario.limit)
-			if scanCalls != scenario.wantScans || summary.Scanned != 0 || summary.Cancelled != 0 || len(summary.CandidateErrors) != 0 {
+			if scanCalls != scenario.wantScans || summary.Scanned != 0 || summary.Cancelled != 0 || summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 0 {
 				t.Fatal("扫描阶段的计数不符", summary, scanCalls, err)
 			}
 			if scenario.wantFailure {
@@ -49,6 +49,53 @@ func TestUploadCancellationBatchScanBoundaries(t *testing.T) {
 				}
 			} else if !errors.Is(err, scenario.wantError) {
 				t.Fatal("扫描阶段的错误不符", err)
+			}
+		})
+	}
+}
+
+func TestUploadCancellationBatchChecksScheduledRetries(t *testing.T) {
+	candidate := domain.UploadCancellationCandidate{TaskID: 19, UserID: 7, StagedObjectID: 23, LeaseVersion: 3}
+	for _, scenario := range []struct {
+		name   string
+		change func(*domain.UploadTask)
+	}{
+		{name: "committed retry"},
+		{name: "missing retry time", change: func(task *domain.UploadTask) { task.NextAttemptAt = nil }},
+		{name: "retry time not after write", change: func(task *domain.UploadTask) { task.NextAttemptAt = &task.UpdatedAt }},
+		{name: "no recorded attempt", change: func(task *domain.UploadTask) { task.AttemptCount = 0 }},
+		{name: "completion already recorded", change: func(task *domain.UploadTask) { task.CompletedAt = &task.UpdatedAt }},
+		{name: "different lease version", change: func(task *domain.UploadTask) { task.LeaseVersion++ }},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			// 1. 让同一候选返回取消中的任务，模拟已提交或不完整的重试安排。
+			scheduled := cancelledCandidateResult(candidate)
+			scheduled.Status, scheduled.CompletedAt = domain.UploadStatusCancelling, nil
+			scheduled.AttemptCount, scheduled.ReservedBytes = 1, 5
+			scheduled.UpdatedAt = time.Unix(1, 0).UTC()
+			nextAttempt := scheduled.UpdatedAt.Add(time.Second)
+			scheduled.NextAttemptAt = &nextAttempt
+			if scenario.change != nil {
+				scenario.change(scheduled)
+			}
+			batch := NewUploadCancellationBatch(func(context.Context, int) ([]domain.UploadCancellationCandidate, error) {
+				return []domain.UploadCancellationCandidate{candidate}, nil
+			}, func(context.Context, domain.UploadCancellationCandidate) (*domain.UploadTask, error) {
+				return scheduled, nil
+			})
+
+			// 2. 重试成功只计入已安排重试，异常结果计入当前候选错误。
+			summary, err := batch.RunOnce(t.Context(), 1)
+			if err != nil || summary.Scanned != 1 || summary.Cancelled != 0 {
+				t.Fatal("重试结果被误计为取消终态", summary, err)
+			}
+			if scenario.change == nil {
+				if summary.RetriesScheduled != 1 || len(summary.CandidateErrors) != 0 {
+					t.Fatal("已提交的重试未正确汇总", summary)
+				}
+			} else if summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 1 ||
+				summary.CandidateErrors[0].TaskID != candidate.TaskID || !errors.Is(summary.CandidateErrors[0].Err, domain.ErrInvalidUploadTaskData) {
+				t.Fatal("无效重试结果未计为候选错误", summary)
 			}
 		})
 	}

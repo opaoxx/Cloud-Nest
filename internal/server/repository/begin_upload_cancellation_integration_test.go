@@ -210,7 +210,9 @@ func TestBeginUserUploadCancellationIntegration(t *testing.T) {
 		if err != nil || len(candidates) != 1 || candidates[0].TaskID != accepted.ID {
 			t.Fatal("未扫描到已受理的取消任务", candidates, err)
 		}
-		processor := service.NewUploadCancellationCandidateProcessor(store.FindUserUploadTask, store.CompleteUploadCancellation)
+		processor := service.NewUploadCancellationCandidateProcessor(
+			store.FindUserUploadTask, store.CompleteUploadCancellation, store.ScheduleUploadCancellationRetry,
+		)
 
 		// 2. 扫描后若重试时间被推迟，后续事务应按最新条件拒绝收尾。
 		execute(t, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=?", accepted.ID)

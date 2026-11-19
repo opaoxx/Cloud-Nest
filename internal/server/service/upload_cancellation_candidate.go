@@ -7,26 +7,28 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// UploadCancellationCandidateProcessor 将候选定位转换为一次取消收尾。
+// UploadCancellationCandidateProcessor 串联候选读取、取消收尾和重试安排。
 type UploadCancellationCandidateProcessor struct {
-	findTask func(context.Context, uint64, uint64) (*domain.UploadTask, error)
-	complete func(context.Context, *domain.UploadTask) (*domain.UploadTask, error)
+	findTask      func(context.Context, uint64, uint64) (*domain.UploadTask, error)
+	complete      func(context.Context, *domain.UploadTask) (*domain.UploadTask, error)
+	scheduleRetry func(context.Context, *domain.UploadTask, int) (*domain.UploadTask, error)
 }
 
-// NewUploadCancellationCandidateProcessor 绑定归属读取与收尾事务。
+// NewUploadCancellationCandidateProcessor 绑定归属读取、收尾和重试写回事务。
 func NewUploadCancellationCandidateProcessor(
 	findTask func(context.Context, uint64, uint64) (*domain.UploadTask, error),
 	complete func(context.Context, *domain.UploadTask) (*domain.UploadTask, error),
+	scheduleRetry func(context.Context, *domain.UploadTask, int) (*domain.UploadTask, error),
 ) *UploadCancellationCandidateProcessor {
 	// 1. 核对读取和写入依赖已装配。
-	if findTask == nil || complete == nil {
-		panic("处理取消上传候选需要任务读取及取消收尾方法")
+	if findTask == nil || complete == nil || scheduleRetry == nil {
+		panic("处理取消上传候选需要任务读取、取消收尾和重试写回方法")
 	}
-	return &UploadCancellationCandidateProcessor{findTask: findTask, complete: complete}
+	return &UploadCancellationCandidateProcessor{findTask: findTask, complete: complete, scheduleRetry: scheduleRetry}
 }
 
 // Process 处理一条已扫描的单文件取消候选。
-// 返回收尾提交的任务，或复用另一次调用已提交的 CANCELLED 记录。
+// 返回已确认取消或已安排重试的任务。
 func (processor *UploadCancellationCandidateProcessor) Process(ctx context.Context, candidate domain.UploadCancellationCandidate) (*domain.UploadTask, error) {
 	// 1. 检查候选和调用状态，按所属用户重新读取任务。
 	if ctx == nil {
@@ -58,5 +60,12 @@ func (processor *UploadCancellationCandidateProcessor) Process(ctx context.Conte
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return processor.complete(ctx, task)
+	finished, completeError := processor.complete(ctx, task)
+
+	// 4. 确认可重试的收尾错误，按尝试次数安排下次处理。
+	if !errors.Is(completeError, domain.ErrUploadCancellationRetryable) || ctx.Err() != nil || task.Status != domain.UploadStatusCancelling {
+		return finished, completeError
+	}
+	delaySeconds := uploadRetryDelaySeconds(task.AttemptCount)
+	return processor.scheduleRetry(ctx, task, delaySeconds)
 }

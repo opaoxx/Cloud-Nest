@@ -15,8 +15,10 @@ const uploadCancellationInterval = 30 * time.Second
 
 // newServerUploadCancellationBatch 用服务持有的 MySQL 仓储装配单文件取消收尾。
 func newServerUploadCancellationBatch(store *repository.Store) *service.UploadCancellationBatch {
-	// 1. 绑定 MySQL 候选扫描、任务读取和取消收尾事务。
-	processor := service.NewUploadCancellationCandidateProcessor(store.FindUserUploadTask, store.CompleteUploadCancellation)
+	// 1. 绑定 MySQL 候选扫描、任务读取、取消收尾和重试写回。
+	processor := service.NewUploadCancellationCandidateProcessor(
+		store.FindUserUploadTask, store.CompleteUploadCancellation, store.ScheduleUploadCancellationRetry,
+	)
 	return service.NewUploadCancellationBatch(store.ListSingleUploadCancellationCandidates, processor.Process)
 }
 
@@ -52,7 +54,8 @@ func startServerUploadCancellationWorker(ctx context.Context, runOnce func(conte
 				}
 				if summary.Scanned > 0 {
 					logger.Info("上传取消轮次结束", "scanned", summary.Scanned,
-						"cancelled", summary.Cancelled, "candidate_errors", len(summary.CandidateErrors))
+						"cancelled", summary.Cancelled, "retries_scheduled", summary.RetriesScheduled,
+						"candidate_errors", len(summary.CandidateErrors))
 				}
 			})
 		if err != nil && workerContext.Err() == nil {

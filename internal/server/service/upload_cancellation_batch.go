@@ -13,11 +13,12 @@ type UploadCancellationCandidateError struct {
 	Err    error
 }
 
-// UploadCancellationBatchResult 汇总扫描数、已确认的取消终态和逐条错误。
+// UploadCancellationBatchResult 汇总扫描数、取消终态、重试安排和逐条错误。
 type UploadCancellationBatchResult struct {
-	Scanned         int
-	Cancelled       int
-	CandidateErrors []UploadCancellationCandidateError
+	Scanned          int
+	Cancelled        int
+	RetriesScheduled int
+	CandidateErrors  []UploadCancellationCandidateError
 }
 
 // UploadCancellationBatch 将限量扫描接到顺序执行的单条取消收尾。
@@ -58,23 +59,29 @@ func (batch *UploadCancellationBatch) RunOnce(ctx context.Context, limit int) (U
 	}
 	summary.Scanned = len(candidates)
 
-	// 2. 按扫描顺序调用单条处理，确认终态或记录错误。
+	// 2. 按扫描顺序处理候选，分别统计终态、已安排重试和错误。
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
 		task, err := batch.process(ctx, candidate)
-		if err == nil && (task == nil || task.ID != candidate.TaskID || task.UserID != candidate.UserID ||
-			task.StagedObjectID != candidate.StagedObjectID || task.LeaseVersion != candidate.LeaseVersion ||
-			task.UploadMode != "SINGLE" || task.Status != domain.UploadStatusCancelled ||
-			task.ReservedBytes != 0 || task.CompletedAt == nil) {
-			err = domain.ErrInvalidUploadTaskData
+		if err == nil {
+			switch {
+			case task == nil || task.ID != candidate.TaskID || task.UserID != candidate.UserID ||
+				task.StagedObjectID != candidate.StagedObjectID || task.LeaseVersion != candidate.LeaseVersion || task.UploadMode != "SINGLE":
+				err = domain.ErrInvalidUploadTaskData
+			case task.Status == domain.UploadStatusCancelled && task.ReservedBytes == 0 && task.CompletedAt != nil:
+				summary.Cancelled++
+			case task.Status == domain.UploadStatusCancelling && task.CompletedAt == nil && task.AttemptCount > 0 &&
+				task.NextAttemptAt != nil && task.NextAttemptAt.After(task.UpdatedAt):
+				summary.RetriesScheduled++
+			default:
+				err = domain.ErrInvalidUploadTaskData
+			}
 		}
 		if err != nil {
 			summary.CandidateErrors = append(summary.CandidateErrors, UploadCancellationCandidateError{TaskID: candidate.TaskID, Err: err})
-			continue
 		}
-		summary.Cancelled++
 	}
 
 	// 3. 返回本轮汇总及可能的停止原因。

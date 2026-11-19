@@ -57,7 +57,9 @@ func TestUploadCancellationBatchIntegration(t *testing.T) {
 	multipartBefore, deferredBefore, protectedBefore := readTask(multipartID), readTask(deferredID), readTask(protectedID)
 
 	// 2. 通过循环执行真实扫描和单条处理，首轮结果交付后结束。
-	processor := service.NewUploadCancellationCandidateProcessor(store.FindUserUploadTask, store.CompleteUploadCancellation)
+	processor := service.NewUploadCancellationCandidateProcessor(
+		store.FindUserUploadTask, store.CompleteUploadCancellation, store.ScheduleUploadCancellationRetry,
+	)
 	scanCalls := 0
 	var processed []uint64
 	batch := service.NewUploadCancellationBatch(func(ctx context.Context, limit int) ([]domain.UploadCancellationCandidate, error) {

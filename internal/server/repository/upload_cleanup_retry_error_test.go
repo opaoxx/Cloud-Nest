@@ -132,7 +132,8 @@ func TestCompleteUploadCancellationMarksLockWaitIntegration(t *testing.T) {
 	}
 	if _, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET status='CANCELLING',upload_mode='SINGLE',storage_upload_id=NULL,
 		part_size=NULL,part_count=NULL,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
-		reserved_bytes=5,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR,lease_owner=NULL,lease_until=NULL,next_attempt_at=NULL
+		reserved_bytes=5,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR,lease_owner=NULL,lease_until=NULL,
+		attempt_count=4,next_attempt_at=NULL,last_error_code=NULL,last_error_message=NULL
 		WHERE id=?`, fixture.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -160,12 +161,42 @@ func TestCompleteUploadCancellationMarksLockWaitIntegration(t *testing.T) {
 		t.Fatal("失败的取消收尾修改了任务或预占", after, reserved, err, reservationError)
 	}
 
-	// 3. 释放行锁，再次收尾并核对终态与预占返还。
+	// 3. 保持行锁，让真实取消批次安排重试并跳过尚未到点的任务。
+	processor := service.NewUploadCancellationCandidateProcessor(
+		store.FindUserUploadTask, store.CompleteUploadCancellation, store.ScheduleUploadCancellationRetry,
+	)
+	batch := service.NewUploadCancellationBatch(store.ListSingleUploadCancellationCandidates, processor.Process)
+	summary, err := batch.RunOnce(ctx, 1)
+	if err != nil || summary.Scanned != 1 || summary.Cancelled != 0 || summary.RetriesScheduled != 1 || len(summary.CandidateErrors) != 0 {
+		t.Fatal("取消批次未将锁等待超时转为重试安排", summary, err)
+	}
+	scheduled, err := store.FindUserUploadTask(ctx, task.UserID, task.ID)
+	if err != nil || scheduled == nil || scheduled.Status != domain.UploadStatusCancelling || scheduled.ReservedBytes != task.ReservedBytes ||
+		scheduled.AttemptCount != task.AttemptCount+1 || scheduled.NextAttemptAt == nil ||
+		!scheduled.NextAttemptAt.Equal(scheduled.UpdatedAt.Add(16*time.Second)) ||
+		scheduled.LastErrorCode == nil || *scheduled.LastErrorCode != "DATABASE_UNAVAILABLE" {
+		t.Fatal("未保存预期的取消重试安排", scheduled, err)
+	}
+	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved); err != nil || reserved != 517 {
+		t.Fatal("写回重试时变更了账户预占", reserved, err)
+	}
+	if waiting, err := batch.RunOnce(ctx, 1); err != nil || waiting.Scanned != 0 {
+		t.Fatal("取消批次提前选中了任务", waiting, err)
+	}
+
+	// 4. 释放行锁，让等待到点并通过下一轮完成取消。
 	if err := holder.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	finished, err := store.CompleteUploadCancellation(ctx, task)
-	if err != nil || finished == nil || !hasCompletedUploadCleanup(finished, domain.UploadStatusCancelled) {
+	if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	summary, err = batch.RunOnce(ctx, 1)
+	if err != nil || summary.Scanned != 1 || summary.Cancelled != 1 || summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 0 {
+		t.Fatal("到点后批次未完成取消收尾", summary, err)
+	}
+	finished, err := store.FindUserUploadTask(ctx, task.UserID, task.ID)
+	if err != nil || finished == nil || !hasCompletedUploadCleanup(finished, domain.UploadStatusCancelled) || finished.AttemptCount != scheduled.AttemptCount {
 		t.Fatal("锁释放后无法完成取消收尾", finished, err)
 	}
 	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=?", task.UserID).Scan(&reserved); err != nil || reserved != 512 {

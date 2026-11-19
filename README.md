@@ -807,3 +807,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.ScheduleUploadCancellationRetry`，可为 `CANCELLING` 单文件任务保存下次尝试时间、尝试次数和固定数据库故障摘要。现有扫描会等到指定时间再选中该任务。[第 362 步学习记录](docs/开发学习记录.md#第-362-步记录上传取消任务的下次重试时间)
 
 `Store.CompleteUploadCancellation` 会为确认的 MySQL 锁等待超时和死锁附加取消重试标记，并保留原始数据库错误。[第 363 步学习记录](docs/开发学习记录.md#第-363-步识别可重试的上传取消收尾错误)
+
+取消 worker 遇到已标记的临时数据库故障时，会按尝试次数保存下次处理时间。轮次日志通过 `retries_scheduled` 记录已提交的重试安排。[第 364 步学习记录](docs/开发学习记录.md#第-364-步为临时数据库故障安排上传取消重试)

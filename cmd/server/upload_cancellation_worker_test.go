@@ -75,7 +75,7 @@ func TestServerUploadCancellationWorkerReportsFailureAndWaitsForStop(t *testing.
 		report := strings.Index(logged, "上传取消轮次结束")
 		exit := strings.Index(logged, "上传取消 worker 已停止")
 		if strings.Count(logged, "上传取消轮次失败") != 1 || strings.Contains(logged, privateError) ||
-			failure < 0 || report <= failure || exit <= report || !strings.Contains(logged, `"scanned":3,"cancelled":1,"candidate_errors":2`) {
+			failure < 0 || report <= failure || exit <= report || !strings.Contains(logged, `"scanned":3,"cancelled":1,"retries_scheduled":0,"candidate_errors":2`) {
 			t.Fatal("取消 worker 的故障或关停汇报不符", logged)
 		}
 		if strings.Count(logged, "上传取消任务处理失败") != 1 ||
@@ -94,7 +94,7 @@ func TestServerUploadCancellationWorkerLogsCandidateFailures(t *testing.T) {
 		const candidateWarning = "上传取消任务处理失败"
 		stop := startServerUploadCancellationWorker(t.Context(), func(context.Context, int) (service.UploadCancellationBatchResult, error) {
 			return service.UploadCancellationBatchResult{
-				Scanned: 5, Cancelled: 1,
+				Scanned: 6, Cancelled: 1, RetriesScheduled: 1,
 				CandidateErrors: []service.UploadCancellationCandidateError{
 					{TaskID: 17, Err: fmt.Errorf("%s: %w", privateDetail, domain.ErrStoredObjectInUse)},
 					{TaskID: 18, Err: domain.ErrUploadTaskNotReady},
@@ -131,7 +131,7 @@ func TestServerUploadCancellationWorkerLogsCandidateFailures(t *testing.T) {
 			{Level: "WARN", TaskID: math.MaxUint64, Code: "INTERNAL_ERROR"},
 		}
 		if !slices.Equal(warnings, want) || strings.Contains(logged, privateDetail) ||
-			strings.Contains(logged, `"error":`) || !strings.Contains(logged, `"candidate_errors":4`) {
+			strings.Contains(logged, `"error":`) || !strings.Contains(logged, `"scanned":6,"cancelled":1,"retries_scheduled":1,"candidate_errors":4`) {
 			t.Fatal("逐条警告或轮次汇报不符", warnings, logged)
 		}
 	})
