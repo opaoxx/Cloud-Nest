@@ -679,3 +679,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `binding.WithUploadTransferDeadline`，让 HTTP 正文读取与传输回调共用最长 5 分钟的截止时间，沿用更短的父期限。真实 HTTP 已验证正文未发完时退出、临时文件清理和成功后的连接复用。规则及复验见 [第 298 步学习记录](docs/开发学习记录.md#第-298-步限制上传-http-传输时间)。
 
 已定义上传内容已接收的 `UploadContentAcceptedData` 和响应外层。接收服务的 `VERIFYING` 结果转换为字符串任务 ID 与当前状态，供后续 HTTP 202 成功交付使用。字段与复验见 [第 299 步学习记录](docs/开发学习记录.md#第-299-步定义上传内容已接收响应)。
+
+已提供 `handler.UploadContentSuccess`，将提交到 `VERIFYING` 的任务交付为 HTTP 202，关联当前请求 ID，设置 UTF-8 JSON 和禁止缓存头。成功及失败边界通过测试入口验证。规则与复验见 [第 300 步学习记录](docs/开发学习记录.md#第-300-步交付上传内容接收成功响应)。

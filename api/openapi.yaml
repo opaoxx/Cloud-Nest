@@ -100,6 +100,7 @@ info:
     CreateUploadData/CreateUploadResponse 定义上传创建稳定快照，包含公开任务、SINGLE 上传方式、应用内容路径和一致的到期时间。
     CreateUploadSucceeded 定义上传创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
     UploadContentAcceptedData/UploadContentAcceptedResponse 定义上传内容接收后的 HTTP 202 响应数据。
+    UploadContentAccepted 定义该成功响应的请求 ID 与禁止缓存头，供后续内容接收操作引用。
     CreateUploadRejected/CreateUploadConflict/CreateUploadTooLarge/CreateUploadQuotaExceeded 定义创建参数、幂等冲突/到期、文件声明上限和配额不足响应。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
     请求解析按 parent_id、name、color_key 定位字段错误，完整名称规则由后续创建服务校验。
@@ -3355,6 +3356,25 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/CreateUploadResponse'
+    UploadContentAccepted:
+      description: |
+        上传内容接收成功 HTTP 202，任务已进入 VERIFYING。
+        客户端使用 task_id 查询进度，响应关联当前请求 ID，采用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UploadContentAcceptedResponse'
     CreateDirectorySucceeded:
       description: |
         创建文件夹成功 HTTP 201，使用 data.entry 创建快照与当前请求 ID。
