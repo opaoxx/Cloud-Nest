@@ -1454,7 +1454,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if uploadStorage != nil {
 		verificationBeforeRestart, verificationStorageVersion = prepareServerUploadVerificationRecovery(t, ctx, pool, uploadStorage)
 	}
-	// 1. 在两次启动之间保存 EXPIRING 任务的重试时间。
+	// 1. 在两次启动之间受理取消，再保存 EXPIRING 任务的重试时间。
+	cancellationPending := prepareServerUploadCancellationRecovery(t, ctx, pool)
 	expirationRetry := prepareServerUploadExpirationRetryRecovery(t, ctx, pool)
 	restartLogOffset := logs.Len()
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
@@ -1463,6 +1464,9 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 2. 用已到期的对照任务确认首轮已扫描，再核对等待中的任务。
 	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
 	expirationRetry.verifyStillWaiting(t, ctx)
+	t.Run("recover cancelling upload on first round", func(t *testing.T) {
+		verifyServerUploadCancellationRecovery(t, ctx, pool, cancellationPending)
+	})
 	if verificationBeforeRestart != nil {
 		t.Run("recover verifying upload", func(t *testing.T) {
 			verifyServerUploadVerificationRecovery(t, ctx, pool, verificationBeforeRestart, verificationStorageVersion)
@@ -1855,7 +1859,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if len(startupSegments) != 3 || strings.Count(logs.String(), "上传临时目录检查通过") != 2 || !strings.Contains(startupSegments[0], "上传临时目录检查通过") || !strings.Contains(startupSegments[1], "上传临时目录检查通过") {
 		t.Fatal("两轮临时目录检查未先于 HTTP 启动")
 	}
-	for _, worker := range []string{"上传校验", "上传过期"} {
+	for _, worker := range []string{"上传校验", "上传过期", "上传取消"} {
 		workerStops := strings.Split(logs.String(), worker+" worker 已停止")
 		if len(workerStops) != 3 || strings.Count(logs.String(), worker+" worker 已启动") != 2 {
 			t.Fatal("每次真实启动应对应一个 worker 的启动和停止", worker)
@@ -1869,6 +1873,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		}
 	}
 	verifyServerUploadExpirationRecoveryRounds(t, logs.String()[restartLogOffset:])
+	verifyServerUploadCancellationRecoveryReport(t, logs.String()[restartLogOffset:])
 	after, err := os.Stat(secretPath)
 	if err != nil || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("生产启动流程重写了已有密钥")

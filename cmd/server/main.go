@@ -499,7 +499,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	stopUploadExpiration := startServerUploadExpirationWorker(ctx, uploadExpirationBatch.RunOnce, logger)
 	defer stopUploadExpiration()
 
-	// 31. 启动 HTTP 并处理退出通知。
+	// 31. 启动单文件取消收尾，退出时等待取消 worker 停止。
+	uploadCancellationBatch := newServerUploadCancellationBatch(store)
+	stopUploadCancellation := startServerUploadCancellationWorker(ctx, uploadCancellationBatch.RunOnce, logger)
+	defer stopUploadCancellation()
+
+	// 32. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
