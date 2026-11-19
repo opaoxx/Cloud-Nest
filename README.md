@@ -713,3 +713,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.BuildUploadConflictName`。它按 Demo 的编号格式生成单个上传重名候选，保留末级扩展名，并在 120 个 UTF-16 代码单元的限制内截短基名。用例和复验见 [第 315 步学习记录](docs/开发学习记录.md#第-315-步生成上传重名候选)。
 
 已提供 `service.ResolveUploadPublicationName`。发布流程可传入当前用户事务的活动同名查询，依次检查原名和编号候选并返回第一个空闲的展示名。MySQL 联测和复验见 [第 316 步学习记录](docs/开发学习记录.md#第-316-步选择可用的上传发布名称)。
+
+已提供 `service.BuildPublishedFileEntryInput`，将上传任务、选定名称、`READY` 对象及来源设备整理为发布文件目录项的写入输入。字段来源及复验见 [第 317 步学习记录](docs/开发学习记录.md#第-317-步整理发布文件目录项写入输入)。
