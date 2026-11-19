@@ -787,3 +787,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 单文件上传取消的计划契约已写入 OpenAPI。取消处理中返回 HTTP 202，任务已到终态时返回 HTTP 200 和当前任务结果。[OpenAPI](api/openapi.yaml) · [第 352 步学习记录](docs/开发学习记录.md#第-352-步定义单文件上传取消接口契约)
 
 已提供 `domain.ShouldBeginUploadCancellation`，按当前阶段、任务期限和租约判断能否进入 `CANCELLING`，或可直接复用当前状态。[第 353 步学习记录](docs/开发学习记录.md#第-353-步判断单文件上传任务的取消资格)
+
+已提供 `Store.BeginUserUploadCancellation`。在已认证用户事务中按归属锁定单文件任务，满足期限和租约条件时写入 `CANCELLING`，并在提交后返回状态。[第 354 步学习记录](docs/开发学习记录.md#第-354-步在用户事务中受理单文件上传取消)
