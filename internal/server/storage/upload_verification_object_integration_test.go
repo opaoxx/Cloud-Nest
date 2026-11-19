@@ -3,6 +3,7 @@ package storage_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
@@ -126,5 +128,35 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 	object.StorageVersionID = &missing
 	if stream, err := client.OpenUploadVerificationObject(ctx, &object); stream != nil || !errors.Is(err, domain.ErrUploadObjectMissing) {
 		t.Fatal("未知版本未按缺失交付", stream, err)
+	}
+
+	// 3. 将同一历史版本交给实际校验摘要方法，核对精确大小与两侧边界。
+	object.StorageVersionID, object.StorageETag = &old.VersionID, &old.ETag
+	for _, fixture := range []struct {
+		name     string
+		declared uint64
+		wantErr  error
+	}{
+		{"digest matches", uint64(len(oldBytes)), nil},
+		{"digest rejects short object", uint64(len(oldBytes) + 1), domain.ErrUploadBodySizeMismatch},
+		{"digest rejects long object", uint64(len(oldBytes) - 1), domain.ErrUploadBodySizeMismatch},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			stream, err := client.OpenUploadVerificationObject(ctx, &object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, readError := service.ReadUploadVerificationDigest(ctx, stream, fixture.declared)
+			closeError := stream.Close()
+			if !errors.Is(readError, fixture.wantErr) || closeError != nil {
+				t.Fatal("历史版本大小校验或关闭失败", readError, closeError)
+			}
+			if fixture.wantErr == nil && (digest == nil || digest.SizeBytes != fixture.declared || digest.SHA256 != sha256.Sum256(oldBytes)) {
+				t.Fatal("历史版本大小或摘要错误", digest)
+			}
+			if fixture.wantErr != nil && digest != nil {
+				t.Fatal("大小不符却返回了摘要", digest)
+			}
+		})
 	}
 }
