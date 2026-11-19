@@ -9,24 +9,37 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestUploadPublicationServiceIntegration(t *testing.T) {
 	outerFailure := errors.New("fixture abort after publication callback")
 	for _, scenario := range []struct {
-		name          string
-		reuse         bool
-		zeroBytes     bool
-		blockedTarget bool
-		shortReserve  bool
-		protectedCopy bool
-		wantError     error
+		name               string
+		reuse              bool
+		zeroBytes          bool
+		blockedTarget      bool
+		shortReserve       bool
+		protectedCopy      bool
+		verificationChange string
+		wantError          error
 	}{
 		{name: "publish newly verified object"},
 		{name: "reuse object and numbered name", reuse: true},
 		{name: "publish zero bytes", zeroBytes: true},
 		{name: "ancestor in trash", blockedTarget: true, wantError: domain.ErrUploadTargetUnavailable},
+		{name: "zero-byte target unavailable", blockedTarget: true, zeroBytes: true, wantError: domain.ErrUploadTargetUnavailable},
+		{name: "target unavailable with insufficient reservation", blockedTarget: true, shortReserve: true, wantError: domain.ErrInvalidAccountData},
+		{name: "target unavailable with stale lease", blockedTarget: true,
+			verificationChange: "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "target unavailable with elapsed lease", blockedTarget: true,
+			verificationChange: "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "target changed before finalization", blockedTarget: true,
+			verificationChange: "UPDATE upload_tasks SET target_parent_id=13 WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "target unavailable and orphaning fails", blockedTarget: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
+		{name: "target failure finalization rolls back", blockedTarget: true, wantError: outerFailure},
+		{name: "corrupt target chain preserves upload", verificationChange: "UPDATE file_entries SET parent_id=16 WHERE id=15", wantError: domain.ErrInvalidFileEntryData},
 		{name: "quota mismatch after file creation", shortReserve: true, wantError: domain.ErrInvalidAccountData},
 		{name: "orphaning fails after task completion", reuse: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
 		{name: "outer rollback after cleanup", reuse: true, wantError: outerFailure},
@@ -62,11 +75,21 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			if scenario.zeroBytes {
 				digest = domain.UploadContentDigest{SHA256: sha256.Sum256(nil)}
 			}
-			reserved := digest.SizeBytes
+			reserved, used := digest.SizeBytes, uint64(0)
+			if scenario.blockedTarget {
+				used = 1024
+				if !scenario.shortReserve {
+					reserved += 512
+				}
+			}
 			if scenario.shortReserve {
 				reserved--
 			}
-			execute("UPDATE users SET reserved_storage=? WHERE id=7", reserved)
+			execute("UPDATE users SET used_storage=?,reserved_storage=?,updated_at='2026-11-17 08:00:00.123456' WHERE id=7", used, reserved)
+			var quotaUpdatedAt time.Time
+			if err := pool.QueryRowContext(ctx, "SELECT updated_at FROM users WHERE id=7").Scan(&quotaUpdatedAt); err != nil {
+				t.Fatal(err)
+			}
 			execute("UPDATE stored_objects SET status='VERIFYING',file_size=? WHERE id=23", digest.SizeBytes)
 			execute(`UPDATE upload_tasks SET target_parent_id=16,status='VERIFYING',upload_mode='SINGLE',
 				storage_upload_id=NULL,part_size=NULL,part_count=NULL,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,
@@ -110,6 +133,12 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			publisher := service.NewUploadPublicationService(func(ctx context.Context, task *domain.UploadTask, object *domain.StoredObject, measured domain.UploadContentDigest,
 				action func(context.Context, service.UploadPublicationTransaction, *domain.UploadTask, *domain.StoredObject) error) error {
 				return store.WithUploadVerificationTransaction(ctx, task, object, measured, func(txContext context.Context, txStore *Store, current *domain.UploadTask, staged *domain.StoredObject) error {
+					if scenario.verificationChange != "" {
+						result := txStore.database.WithContext(txContext).Exec(scenario.verificationChange)
+						if result.Error != nil || result.RowsAffected != 1 {
+							t.Fatal("写回复核后的变化夹具错误", result.Error)
+						}
+					}
 					if err := action(txContext, txStore, current, staged); err != nil {
 						return err
 					}
@@ -131,12 +160,40 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			}
 			entry, entryError := store.FindUserActiveFileEntryByName(ctx, 7, 16, nameKey)
 			var savedUsed, savedReserved uint64
-			if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&savedUsed, &savedReserved); err != nil {
+			var savedQuotaUpdatedAt time.Time
+			if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage,updated_at FROM users WHERE id=7").
+				Scan(&savedUsed, &savedReserved, &savedQuotaUpdatedAt); err != nil {
 				t.Fatal(err)
+			}
+			if scenario.wantError == domain.ErrUploadTargetUnavailable {
+				if result != nil || entry != nil || !errors.Is(entryError, domain.ErrFileEntryNotFound) ||
+					savedUsed != used || savedReserved != reserved-digest.SizeBytes ||
+					savedQuotaUpdatedAt.Equal(quotaUpdatedAt) != scenario.zeroBytes ||
+					savedTask.Status != domain.UploadStatusFailed || savedTask.ReservedBytes != 0 ||
+					savedTask.LeaseOwner != nil || savedTask.LeaseUntil != nil || savedTask.LeaseVersion != task.LeaseVersion ||
+					savedTask.NextAttemptAt != nil || savedTask.PublishedObjectID != nil || savedTask.ResultEntryID != nil ||
+					savedTask.CompletedAt == nil || !savedTask.CompletedAt.Equal(savedTask.UpdatedAt) ||
+					savedTask.LastErrorMessage == nil || *savedTask.LastErrorMessage != domain.ErrUploadTargetUnavailable.Error() {
+					t.Fatal("目标不可用的失败状态或配额错误", result, savedTask, savedUsed, savedReserved)
+				}
+				failedView, err := dto.NewUploadTaskData(savedTask)
+				if err != nil || failedView == nil || failedView.LastError == nil || failedView.LastError.Code != domain.UploadTargetUnavailableCode {
+					t.Fatal("任务查询未交付目标不可用原因", failedView, err)
+				}
+				orphaned := readObject(staged.ID)
+				if orphaned.Status != domain.StoredObjectStatusOrphaned || orphaned.UnreferencedAt == nil || orphaned.GCAfter == nil ||
+					!orphaned.GCAfter.Equal(orphaned.UnreferencedAt.Add(7*24*time.Hour)) || !reflect.DeepEqual(readObject(reusable.ID), reusable) {
+					t.Fatal("失败收尾未正确处理暂存对象", orphaned)
+				}
+				if retried, err := publisher.Publish(ctx, task, staged, digest); retried != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+					t.Fatal("重复收尾不应再次释放预占", retried, err)
+				}
+				return
 			}
 			if scenario.wantError != nil {
 				if result != nil || !reflect.DeepEqual(savedTask, task) || entry != nil || !errors.Is(entryError, domain.ErrFileEntryNotFound) ||
-					savedUsed != 0 || savedReserved != reserved || !reflect.DeepEqual(readObject(23), staged) || !reflect.DeepEqual(readObject(29), reusable) {
+					savedUsed != used || savedReserved != reserved || !savedQuotaUpdatedAt.Equal(quotaUpdatedAt) ||
+					!reflect.DeepEqual(readObject(23), staged) || !reflect.DeepEqual(readObject(29), reusable) {
 					t.Fatal("失败发布留下了持久化变更", result, savedTask, entry, entryError)
 				}
 				return

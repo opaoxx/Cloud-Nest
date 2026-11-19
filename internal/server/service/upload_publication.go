@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -10,6 +11,7 @@ import (
 // UploadPublicationTransaction 汇集同一个发布事务中的读取与写入。
 type UploadPublicationTransaction interface {
 	FileEntryPathReader
+	FailUploadForUnavailableTarget(ctx context.Context, task *domain.UploadTask) error
 	FindUserActiveFileEntryByName(ctx context.Context, userID, parentID uint64, nameKey []byte) (*domain.FileEntry, error)
 	SelectUploadPublicationObject(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest) (*domain.StoredObject, error)
 	FindUploadSourceDevice(ctx context.Context, task *domain.UploadTask) (*domain.UserDevice, error)
@@ -41,6 +43,7 @@ func NewUploadPublicationService(
 
 // Publish 使用事务外已读回校验的任务、暂存对象和实测摘要发布文件。
 // 对象、文件、配额、完成结果及计时由外层事务一起确认。
+// 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
 func (publication *UploadPublicationService) Publish(
 	ctx context.Context,
 	verifiedTask *domain.UploadTask,
@@ -60,6 +63,7 @@ func (publication *UploadPublicationService) Publish(
 	taskID, userID := verifiedTask.ID, verifiedTask.UserID
 
 	var prepared *domain.UploadTask
+	var targetUnavailable bool
 	err := publication.withTransaction(ctx, verifiedTask, verifiedObject, digest, func(txContext context.Context, txn UploadPublicationTransaction, task *domain.UploadTask, staged *domain.StoredObject) error {
 		if txContext == nil || txn == nil {
 			return fmt.Errorf("上传发布回调需要事务上下文和写入能力")
@@ -70,7 +74,15 @@ func (publication *UploadPublicationService) Publish(
 
 		// 2. 复核目标目录，选定对象、文件名和来源设备。
 		if _, err := ValidateUploadPublicationTarget(txContext, task, txn); err != nil {
-			return err
+			if !errors.Is(err, domain.ErrUploadTargetUnavailable) {
+				return err
+			}
+			if err := txn.FailUploadForUnavailableTarget(txContext, task); err != nil {
+				return err
+			}
+			// 回调成功才能提交失败状态。待外层提交后再向调用方交付业务错误。
+			targetUnavailable = true
+			return nil
 		}
 		selected, err := txn.SelectUploadPublicationObject(txContext, task, staged, digest)
 		if err != nil {
@@ -126,6 +138,9 @@ func (publication *UploadPublicationService) Publish(
 	// 5. 等待事务提交后返回完成任务。
 	if err != nil {
 		return nil, err
+	}
+	if targetUnavailable {
+		return nil, domain.ErrUploadTargetUnavailable
 	}
 	if prepared == nil {
 		return nil, domain.ErrInvalidUploadTaskData

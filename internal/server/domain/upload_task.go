@@ -21,6 +21,9 @@ var ErrUploadTaskNotReady = errors.New("上传任务当前不可接收文件内�
 // ErrUploadTargetUnavailable 表示目标路径当前无法容纳发布的文件。
 var ErrUploadTargetUnavailable = errors.New("目标目录已不可用")
 
+// UploadTargetUnavailableCode 标记目标目录失效导致的任务失败。
+const UploadTargetUnavailableCode = "TARGET_UNAVAILABLE"
+
 // ErrUploadTaskBusy 表示当前任务仍由有效租约持有者处理。
 var ErrUploadTaskBusy = errors.New("上传任务正在处理中")
 

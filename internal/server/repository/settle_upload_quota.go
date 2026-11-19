@@ -24,32 +24,14 @@ func (store *Store) SettlePublishedUploadQuota(ctx context.Context, task *domain
 		return err
 	}
 	userID := store.loginUserID
-	if task == nil || task.ID == 0 || task.UserID != userID || task.StagedObjectID == 0 ||
-		task.LeaseVersion == 0 || task.LeaseOwner == nil || *task.LeaseOwner == "" || task.LeaseUntil == nil {
-		return domain.ErrInvalidUploadTaskData
-	}
 	lockedStore := *store
 	lockedStore.database = store.database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"})
-	current, err := lockedStore.FindUserUploadTask(ctx, userID, task.ID)
+	current, err := lockedStore.findVerifyingUploadWithFullReservation(ctx, task)
 	if err != nil {
 		return err
 	}
-	if current.Status != domain.UploadStatusVerifying || current.UploadMode != "SINGLE" {
-		return domain.ErrUploadTaskNotReady
-	}
-	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
-		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil {
-		return domain.ErrUploadTaskBusy
-	}
 
 	// 2. 读取用户配额，检查任务预占和可结算金额。
-	if current.FileSize != task.FileSize || current.ReservedBytes != current.FileSize ||
-		current.PublishedObjectID != nil || current.ResultEntryID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
-		return domain.ErrInvalidUploadTaskData
-	}
-	if current.FileSize > domain.MaxSingleUploadSizeBytes {
-		return domain.ErrUploadFileTooLarge
-	}
 	account, err := store.lockUserUploadQuota(ctx, userID)
 	if err != nil {
 		return err
@@ -114,4 +96,35 @@ func (store *Store) SettlePublishedUploadQuota(ctx context.Context, task *domain
 		return domain.ErrInvalidUploadTaskData
 	}
 	return nil
+}
+
+// findVerifyingUploadWithFullReservation 复核待发布任务及其完整预占，调用方提供加锁读取的 Store。
+func (lockedStore *Store) findVerifyingUploadWithFullReservation(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
+	// 1. 校验事务账号和传入的租约标识。
+	userID := lockedStore.loginUserID
+	if task == nil || task.ID == 0 || task.UserID != userID || task.StagedObjectID == 0 ||
+		task.LeaseVersion == 0 || task.LeaseOwner == nil || *task.LeaseOwner == "" || task.LeaseUntil == nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+
+	// 2. 加锁读回当前任务，核对阶段、租约和预占。
+	current, err := lockedStore.FindUserUploadTask(ctx, userID, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current.Status != domain.UploadStatusVerifying || current.UploadMode != "SINGLE" {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
+		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil {
+		return nil, domain.ErrUploadTaskBusy
+	}
+	if current.FileSize != task.FileSize || current.ReservedBytes != current.FileSize ||
+		current.PublishedObjectID != nil || current.ResultEntryID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if current.FileSize > domain.MaxSingleUploadSizeBytes {
+		return nil, domain.ErrUploadFileTooLarge
+	}
+	return current, nil
 }
