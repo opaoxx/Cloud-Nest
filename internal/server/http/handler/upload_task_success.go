@@ -13,11 +13,20 @@ import (
 // UploadTaskSuccess 交付上传任务服务成功返回的内部记录。
 // 调用方完成认证、目标解析和服务调用，请求 ID 由公共中间件提供。
 func UploadTaskSuccess(requestContext *gin.Context, result *domain.UploadTask) {
-	// 1. 检查响应状态和请求取消。
+	// 1. 检查响应状态，再交付公开任务查询结果。
 	if requestContext.Writer.Written() {
 		requestContext.Abort()
 		return
 	}
+
+	// 2. 复用任务 JSON 的编码和写出步骤。
+	writeUploadTaskSuccess(requestContext, result, http.StatusOK)
+}
+
+// writeUploadTaskSuccess 为查询和取消响应写出同一套公开任务字段。
+// 调用方已经检查响应状态并选好成功状态码。
+func writeUploadTaskSuccess(requestContext *gin.Context, result *domain.UploadTask, responseStatus int) {
+	// 1. 设置禁止缓存并检查请求取消。
 	requestContext.Header("Cache-Control", "no-store")
 	requestContext.Header("Pragma", "no-cache")
 	ctx := requestContext.Request.Context()
@@ -47,5 +56,5 @@ func UploadTaskSuccess(requestContext *gin.Context, result *domain.UploadTask) {
 	requestContext.Writer.Header().Del("Content-Encoding")
 	requestContext.Header("Content-Type", "application/json; charset=utf-8")
 	requestContext.Abort()
-	requestContext.Data(http.StatusOK, "application/json; charset=utf-8", responseBytes)
+	requestContext.Data(responseStatus, "application/json; charset=utf-8", responseBytes)
 }
