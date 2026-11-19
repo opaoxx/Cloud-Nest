@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestWithUploadVerificationTransactionIntegration(t *testing.T) {
@@ -108,6 +109,49 @@ func TestWithUploadVerificationTransactionIntegration(t *testing.T) {
 		after, staged := read(t)
 		if !errors.Is(err, domain.ErrUploadTaskBusy) || !reflect.DeepEqual(after, newLease) || !reflect.DeepEqual(staged, object) {
 			t.Fatal("旧结果未拒绝或改变了新租约", err)
+		}
+	})
+	t.Run("read upload source device", func(t *testing.T) {
+		task, staged, digest := reset(t)
+		rollbackFixture := errors.New("rollback fixture device update and object selection")
+		err := store.WithUploadVerificationTransaction(ctx, task, staged, digest, func(txContext context.Context, txStore *Store, currentTask *domain.UploadTask, currentObject *domain.StoredObject) error {
+			source, err := txStore.FindUploadSourceDevice(txContext, currentTask)
+			if err != nil || source == nil || source.ID != task.DeviceID || source.UserID != task.UserID || source.Name != "fixture" || source.RevokedAt != nil {
+				t.Fatal("未读到任务的来源设备", source, err)
+			}
+			// 其他账号的设备与不存在的设备都按当前账号范围返回缺失。
+			for _, deviceID := range []uint64{12, 404} {
+				otherTask := *currentTask
+				otherTask.DeviceID = deviceID
+				device, err := txStore.FindUploadSourceDevice(txContext, &otherTask)
+				if device != nil || !errors.Is(err, domain.ErrDeviceNotFound) {
+					t.Fatal("未按用户隔离来源设备", device, err)
+				}
+			}
+
+			// 在隔离库模拟设备已改名和撤销，复查后的名称用于写入输入。
+			const renamed = " 新设备名 🌱 "
+			result := txStore.database.WithContext(txContext).Exec(
+				"UPDATE user_devices SET name=?, revoked_at=UTC_TIMESTAMP(6) WHERE user_id=? AND id=?", renamed, task.UserID, task.DeviceID)
+			if result.Error != nil || result.RowsAffected != 1 {
+				t.Fatal("设置设备联测夹具失败", result.Error)
+			}
+			updated, err := txStore.FindUploadSourceDevice(txContext, currentTask)
+			if err != nil || updated == nil || updated.Name != renamed || updated.RevokedAt == nil || source.Name != "fixture" || source.RevokedAt != nil {
+				t.Fatal("设备名称快照或撤销记录错误", updated, err)
+			}
+			selected, err := txStore.SelectUploadPublicationObject(txContext, currentTask, currentObject, digest)
+			if err != nil {
+				return err
+			}
+			input, err := service.BuildPublishedFileEntryInput(currentTask, selected, currentTask.RequestedName, updated)
+			if err != nil || input == nil || input.SourceDeviceName != renamed || input.SourceDeviceID != task.DeviceID {
+				t.Fatal("来源设备未正确传给发布写入输入", input, err)
+			}
+			return rollbackFixture
+		})
+		if !errors.Is(err, rollbackFixture) {
+			t.Fatal("读取来源设备联测失败", err)
 		}
 	})
 	t.Run("select publication object", func(t *testing.T) {
