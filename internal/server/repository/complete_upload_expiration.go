@@ -10,6 +10,7 @@ import (
 
 // CompleteUploadExpiration 终结已进入过期清理的单文件任务，提交后返回终态。
 // 同一次过期处理的重复调用复用已提交的 EXPIRED 结果。
+// 已确认的临时数据库错误附带 ErrUploadExpirationRetryable 标记。
 func (store *Store) CompleteUploadExpiration(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
 	// 1. 锁定所属用户和任务，复核本次过期处理。
 	if store == nil || store.database == nil || ctx == nil {
@@ -123,7 +124,8 @@ func (store *Store) CompleteUploadExpiration(ctx context.Context, task *domain.U
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		// 4. 事务结束后识别可重试的数据库错误。
+		return nil, markUploadExpirationRetryError(ctx, err)
 	}
 	return expired, nil
 }

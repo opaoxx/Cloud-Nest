@@ -777,3 +777,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 单文件上传过期处理失败时，worker 按候选记录 `task_id` 和固定 `error_code`。正常关停导致的取消保留在轮次计数中。[第 347 步学习记录](docs/开发学习记录.md#第-347-步记录上传过期任务的错误码)
 
 已提供 `Store.ScheduleUploadExpirationRetry`，可为单文件 `EXPIRING` 任务保存下次尝试时间、恢复次数和固定数据库故障摘要。现有过期扫描会等到该时间再选中任务。[第 348 步学习记录](docs/开发学习记录.md#第-348-步记录上传过期任务的下次重试时间)
+
+`Store.CompleteUploadExpiration` 会为确认的 MySQL 锁等待超时或死锁附加过期重试标记，同时保留原始错误。[第 349 步学习记录](docs/开发学习记录.md#第-349-步识别可重试的上传过期收尾错误)
