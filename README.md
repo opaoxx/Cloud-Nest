@@ -711,3 +711,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.SelectUploadPublicationObject`。写回复核回调可统一选择后续目录项要引用的 `READY` 对象，优先复用同账号已有对象，未命中时推进暂存对象。流程、去重冲突处理与复验见 [第 314 步学习记录](docs/开发学习记录.md#第-314-步选择上传发布对象)。
 
 已提供 `service.BuildUploadConflictName`。它按 Demo 的编号格式生成单个上传重名候选，保留末级扩展名，并在 120 个 UTF-16 代码单元的限制内截短基名。用例和复验见 [第 315 步学习记录](docs/开发学习记录.md#第-315-步生成上传重名候选)。
+
+已提供 `service.ResolveUploadPublicationName`。发布流程可传入当前用户事务的活动同名查询，依次检查原名和编号候选并返回第一个空闲的展示名。MySQL 联测和复验见 [第 316 步学习记录](docs/开发学习记录.md#第-316-步选择可用的上传发布名称)。
