@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -35,8 +36,19 @@ func startServerUploadCancellationWorker(ctx context.Context, runOnce func(conte
 				return runOnce(roundContext, domain.MaxUploadCancellationCandidates)
 			},
 			func(summary service.UploadCancellationBatchResult, roundError error) {
-				if roundError != nil && workerContext.Err() == nil {
+				stopError := workerContext.Err()
+				if roundError != nil && stopError == nil {
 					logger.Warn("上传取消轮次失败")
+				}
+				// 1. 遍历失败任务，跳过随服务关停产生的上下文错误。
+				for _, failure := range summary.CandidateErrors {
+					if stopError != nil && errors.Is(failure.Err, stopError) {
+						continue
+					}
+					// 2. 把收尾错误映射为固定码，未知原因归为 INTERNAL_ERROR。
+					code := uploadCleanupErrorCode(failure.Err)
+					// 3. 记录任务 ID 和错误码，再汇报本轮的完整失败数。
+					logger.Warn("上传取消任务处理失败", "task_id", failure.TaskID, "error_code", code)
 				}
 				if summary.Scanned > 0 {
 					logger.Info("上传取消轮次结束", "scanned", summary.Scanned,

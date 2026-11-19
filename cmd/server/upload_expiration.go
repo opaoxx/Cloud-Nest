@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
@@ -51,7 +50,7 @@ func startServerUploadExpirationWorker(ctx context.Context, runOnce func(context
 						continue
 					}
 					// 2. 把错误转换为固定码，未知原因归为 INTERNAL_ERROR。
-					code := uploadExpirationErrorCode(failure.Err)
+					code := uploadCleanupErrorCode(failure.Err)
 					// 3. 写入任务 ID 和错误码，再汇报整轮计数。
 					logger.Warn("上传过期任务处理失败", "task_id", failure.TaskID, "error_code", code)
 				}
@@ -70,15 +69,4 @@ func startServerUploadExpirationWorker(ctx context.Context, runOnce func(context
 		cancel()
 		<-done
 	}
-}
-
-// uploadExpirationErrorCode 为后台过期日志返回固定错误码。
-func uploadExpirationErrorCode(err error) string {
-	// 1. 识别仍被引用而无法进入回收流程的暂存对象。
-	if errors.Is(err, domain.ErrStoredObjectInUse) {
-		return "STORED_OBJECT_IN_USE"
-	}
-
-	// 2. 其余原因交给上传 worker 共用的错误码映射。
-	return uploadWorkerErrorCode(err)
 }
