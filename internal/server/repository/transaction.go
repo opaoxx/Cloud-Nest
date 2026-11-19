@@ -29,6 +29,16 @@ func (store *Store) withActiveUserTransaction(
 	ctx context.Context,
 	userID uint64,
 	action func(context.Context, *Store) error,
+) error {
+	return store.withLockedUserTransaction(ctx, userID, false, action)
+}
+
+// withLockedUserTransaction 统一按用户加锁，内部清理可处理已禁用账号的遗留任务。
+func (store *Store) withLockedUserTransaction(
+	ctx context.Context,
+	userID uint64,
+	allowDisabled bool,
+	action func(context.Context, *Store) error,
 ) (err error) {
 	// 1. 检查参数，开启有期限的事务并登记回滚。
 	if ctx == nil || userID == 0 || action == nil {
@@ -73,7 +83,9 @@ func (store *Store) withActiveUserTransaction(
 	switch account.Status {
 	case "ACTIVE":
 	case "DISABLED":
-		return domain.ErrAccountDisabled
+		if !allowDisabled {
+			return domain.ErrAccountDisabled
+		}
 	default:
 		return domain.ErrInvalidAccountData
 	}

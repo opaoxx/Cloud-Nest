@@ -12,6 +12,11 @@ import (
 
 const maxUploadExpirationCandidates = 100
 
+var uploadExpirationStatuses = [...]domain.UploadStatus{
+	domain.UploadStatusCreating, domain.UploadStatusUploading, domain.UploadStatusCompleting,
+	domain.UploadStatusVerifying, domain.UploadStatusExpiring,
+}
+
 // ListUploadExpirationCandidates 在事务外读取已到期、可尝试处理的任务。
 // 后续写入须在所属用户事务中重新核对当前任务和租约。
 func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit int) ([]domain.UploadExpirationCandidate, error) {
@@ -29,14 +34,10 @@ func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit in
 	}
 
 	// 2. 按 MySQL 时间筛选可处理的到期任务。
-	statuses := []domain.UploadStatus{
-		domain.UploadStatusCreating, domain.UploadStatusUploading, domain.UploadStatusCompleting,
-		domain.UploadStatusVerifying, domain.UploadStatusExpiring,
-	}
 	candidates := make([]domain.UploadExpirationCandidate, 0, limit)
 	queryError := store.database.WithContext(queryContext).Table("upload_tasks").
 		Select("id AS task_id", "user_id", "staged_object_id", "lease_version", "status", "expires_at").
-		Where("status IN ? AND expires_at <= UTC_TIMESTAMP(6)", statuses).
+		Where("status IN ? AND expires_at <= UTC_TIMESTAMP(6)", uploadExpirationStatuses[:]).
 		Where("(lease_until IS NULL OR lease_until <= UTC_TIMESTAMP(6))").
 		Where("(status <> ? OR next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6))", domain.UploadStatusExpiring).
 		Order("expires_at ASC, id ASC").Limit(limit).Find(&candidates).Error
@@ -55,7 +56,7 @@ func (store *Store) ListUploadExpirationCandidates(ctx context.Context, limit in
 	var previousTaskID uint64
 	for index, candidate := range candidates {
 		expiresAt := candidate.ExpiresAt.UTC()
-		if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 || !slices.Contains(statuses, candidate.Status) ||
+		if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 || !slices.Contains(uploadExpirationStatuses[:], candidate.Status) ||
 			expiresAt.Year() < 1000 || expiresAt.Year() > 9999 || expiresAt.Nanosecond()%1000 != 0 ||
 			expiresAt.Before(previousExpiry) || (expiresAt.Equal(previousExpiry) && candidate.TaskID <= previousTaskID) {
 			return nil, domain.ErrInvalidUploadTaskData

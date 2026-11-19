@@ -761,3 +761,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 后台上传校验的逐条错误日志包含 `task_id` 和固定的 `error_code`，可以按任务检索。[第 339 步学习记录](docs/开发学习记录.md#第-339-步记录上传校验任务的错误码)
 
 已提供 `ListUploadExpirationCandidates`，按 MySQL 时间读取到期且可尝试处理的上传任务，供过期事务复核。[第 340 步学习记录](docs/开发学习记录.md#第-340-步扫描已到期的上传任务候选)
+
+已提供 `BeginUploadExpiration`，按用户加锁复核到期候选，将符合条件的任务推进到 `EXPIRING`，保留任务预占供随后结算。[第 341 步学习记录](docs/开发学习记录.md#第-341-步将到期上传任务推进到过期处理阶段)
