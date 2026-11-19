@@ -701,3 +701,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.ReadUploadVerificationDigest`，从待校验对象流一次计算实际大小和 SHA-256，复用声明长度限制及额外一字节探测。真实 MinIO 历史版本验证计数与摘要，细节见 [第 309 步学习记录](docs/开发学习记录.md#第-309-步计算待校验对象的大小和摘要)。
 
 已提供 `service.VerifyUploadObject`，将校验租约快照检查、打开 MinIO 对象、重新计算并比较摘要、关闭对象流组成一次调用。真实版本桶和失败清理验证见 [第 310 步学习记录](docs/开发学习记录.md#第-310-步组合待校验对象的读回校验)。
+
+已提供 `Store.WithUploadVerificationTransaction`。对象读回校验后，按当前用户、任务、对象位置和租约在短事务中复核，再交给后续写回。真实 MySQL 行锁、旧租约拒绝及回滚见 [第 311 步学习记录](docs/开发学习记录.md#第-311-步复核上传校验结果的写回资格)。
