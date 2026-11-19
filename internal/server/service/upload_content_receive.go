@@ -2,14 +2,17 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// UploadContentVerificationTransaction 提供接收完成后的事务内状态推进。
-type UploadContentVerificationTransaction interface {
+// UploadContentReceiveTransaction 提供接收期间续租以及完成后的状态推进。
+type UploadContentReceiveTransaction interface {
+	// RenewUserUploadContentLease 延长本次接收持有的租约。
+	RenewUserUploadContentLease(context.Context, uint64, uint64, uint64, string) (*domain.UploadTask, error)
 	// BeginUserUploadVerification 保存确认信息，按当前租约推进任务和对象。
 	BeginUserUploadVerification(context.Context, uint64, uint64, uint64, string, domain.UploadObjectResult) (*domain.UploadTask, error)
 }
@@ -24,7 +27,7 @@ type UploadContentReceiveService struct {
 	putObject        func(context.Context, string, io.ReadSeeker, uint64) (*domain.UploadObjectResult, error)
 	provider, bucket string
 	// withTransaction 仅在用户事务提交成功后返回 nil。
-	withTransaction func(context.Context, domain.Actor, func(context.Context, UploadContentVerificationTransaction) error) error
+	withTransaction func(context.Context, domain.Actor, func(context.Context, UploadContentReceiveTransaction) error) error
 }
 
 // NewUploadContentReceiveService 组装接收依赖，provider 和 bucket 须来自写入客户端使用的配置。
@@ -33,7 +36,7 @@ func NewUploadContentReceiveService(
 	provider, bucket string,
 	prepare func(context.Context, domain.Actor, uint64) (*domain.UploadContentPreparation, error),
 	putObject func(context.Context, string, io.ReadSeeker, uint64) (*domain.UploadObjectResult, error),
-	withTransaction func(context.Context, domain.Actor, func(context.Context, UploadContentVerificationTransaction) error) error,
+	withTransaction func(context.Context, domain.Actor, func(context.Context, UploadContentReceiveTransaction) error) error,
 ) *UploadContentReceiveService {
 	// 1. 核对依赖和写入客户端对应的位置。
 	if files == nil || prepare == nil || putObject == nil || withTransaction == nil ||
@@ -50,7 +53,7 @@ func NewUploadContentReceiveService(
 // Receive 使用已按用户读取的任务声明，接收正文并返回已提交的校验阶段任务。
 // 正文由调用方持有。写入后若事务或临时文件清理失败，调用方可通过任务查询确认进度。
 func (receiver *UploadContentReceiveService) Receive(ctx context.Context, actor domain.Actor, declaration *domain.UploadTask, source io.Reader) (*domain.UploadTask, error) {
-	// 1. 核对认证身份和任务声明，进入临时文件接收流程。
+	// 1. 校验任务声明，建立本次接收的可取消上下文。
 	if ctx == nil || source == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
 		return nil, fmt.Errorf("接收上传内容需要上下文、完整认证身份和正文")
 	}
@@ -61,12 +64,20 @@ func (receiver *UploadContentReceiveService) Receive(ctx context.Context, actor 
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	declared := copyUploadTask(declaration)
+	receiveContext, cancelReceive := context.WithCancelCause(ctx)
+	var stopRenewal func() error
+	defer func() {
+		cancelReceive(nil)
+		if stopRenewal != nil {
+			_ = stopRenewal()
+		}
+	}()
 	var objectID, leaseVersion uint64
 	var objectKey, leaseOwner string
 	var verifying *domain.UploadTask
 
-	err := receiver.files.WithPreparedFile(ctx, source, declared.FileSize, declared.ExpectedSHA256, func(prepareContext context.Context) error {
-		// 2. 领取租约，复核声明和暂存对象位置。
+	err := receiver.files.WithPreparedFile(receiveContext, source, declared.FileSize, declared.ExpectedSHA256, func(prepareContext context.Context) error {
+		// 2. 领取租约，核对对象后启动定时续租。
 		prepared, err := receiver.prepare(prepareContext, actor, declared.ID)
 		if err != nil {
 			return err
@@ -90,22 +101,28 @@ func (receiver *UploadContentReceiveService) Receive(ctx context.Context, actor 
 		}
 		objectID, objectKey = object.ID, object.ObjectKey
 		leaseVersion, leaseOwner = task.LeaseVersion, *task.LeaseOwner
+		stopRenewal = startUploadContentLeaseRenewal(receiveContext, cancelReceive, func(renewContext context.Context) error {
+			return receiver.withTransaction(renewContext, actor, func(txContext context.Context, txn UploadContentReceiveTransaction) error {
+				_, err := txn.RenewUserUploadContentLease(txContext, declared.ID, objectID, leaseVersion, leaseOwner)
+				return err
+			})
+		})
 		return nil
 	}, func(file io.ReadSeeker, digest domain.UploadContentDigest) error {
-		// 3. 将校验后的临时文件写入当前对象。
-		confirmation, err := receiver.putObject(ctx, objectKey, file, digest.SizeBytes)
+		// 3. 将校验后的临时文件写入当前对象，等待续租停止。
+		confirmation, err := receiver.putObject(receiveContext, objectKey, file, digest.SizeBytes)
 		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if confirmation == nil || confirmation.SizeBytes != digest.SizeBytes {
 			return domain.ErrUploadStorageUnavailable
 		}
+		if err := stopRenewal(); err != nil {
+			return err
+		}
 
 		// 4. 在用户事务中按本次租约推进 VERIFYING。
-		return receiver.withTransaction(ctx, actor, func(txContext context.Context, txn UploadContentVerificationTransaction) error {
+		return receiver.withTransaction(receiveContext, actor, func(txContext context.Context, txn UploadContentReceiveTransaction) error {
 			task, err := txn.BeginUserUploadVerification(txContext, declared.ID, objectID, leaseVersion, leaseOwner, *confirmation)
 			if err != nil {
 				return err
@@ -120,8 +137,12 @@ func (receiver *UploadContentReceiveService) Receive(ctx context.Context, actor 
 		})
 	})
 
-	// 5. 确认提交与临时文件处理结果，返回任务。
+	// 5. 返回提交结果或错误，退出时统一清理续租循环。
 	if err != nil {
+		cancelReceive(err)
+		if cause := context.Cause(receiveContext); cause != nil && !errors.Is(err, cause) {
+			err = errors.Join(err, cause)
+		}
 		return nil, err
 	}
 	if verifying == nil {

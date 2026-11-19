@@ -87,7 +87,7 @@ func TestUploadContentReceiveServiceIntegration(t *testing.T) {
 	}
 	rollback := errors.New("fixture rollback after advance")
 	failTransaction := true
-	receiver := service.NewUploadContentReceiveService(files, "local_minio", "fixture-bucket", preparer.Prepare, putObject, func(ctx context.Context, current domain.Actor, action func(context.Context, service.UploadContentVerificationTransaction) error) error {
+	receiver := service.NewUploadContentReceiveService(files, "local_minio", "fixture-bucket", preparer.Prepare, putObject, func(ctx context.Context, current domain.Actor, action func(context.Context, service.UploadContentReceiveTransaction) error) error {
 		return store.WithUserTransaction(ctx, current, func(txContext context.Context, txStore *Store) error {
 			if err := action(txContext, txStore); err != nil {
 				return err

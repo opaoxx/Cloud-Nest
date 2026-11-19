@@ -14,10 +14,17 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-type uploadVerificationFunc func(context.Context, uint64, uint64, uint64, string, domain.UploadObjectResult) (*domain.UploadTask, error)
+type uploadReceiveTransactionStub struct {
+	advance func(context.Context, uint64, uint64, uint64, string, domain.UploadObjectResult) (*domain.UploadTask, error)
+	renew   func(context.Context, uint64, uint64, uint64, string) (*domain.UploadTask, error)
+}
 
-func (advance uploadVerificationFunc) BeginUserUploadVerification(ctx context.Context, taskID, objectID, version uint64, owner string, confirmation domain.UploadObjectResult) (*domain.UploadTask, error) {
-	return advance(ctx, taskID, objectID, version, owner, confirmation)
+func (stub uploadReceiveTransactionStub) BeginUserUploadVerification(ctx context.Context, taskID, objectID, version uint64, owner string, confirmation domain.UploadObjectResult) (*domain.UploadTask, error) {
+	return stub.advance(ctx, taskID, objectID, version, owner, confirmation)
+}
+
+func (stub uploadReceiveTransactionStub) RenewUserUploadContentLease(ctx context.Context, taskID, objectID, version uint64, owner string) (*domain.UploadTask, error) {
+	return stub.renew(ctx, taskID, objectID, version, owner)
 }
 
 func TestUploadContentReceiveService(t *testing.T) {
@@ -105,9 +112,11 @@ func TestUploadContentReceiveService(t *testing.T) {
 				return body.Read(buffer)
 			})
 			etag := "fixture-etag"
+			var receiveContext context.Context
 			prepare := func(prepareContext context.Context, current domain.Actor, taskID uint64) (*domain.UploadContentPreparation, error) {
 				events = append(events, "prepare")
-				if prepareContext != ctx || current != actor || taskID != declaration.ID || space.activeReceivers != 1 || space.reservedBytes != 3 {
+				receiveContext = prepareContext
+				if prepareContext == ctx || prepareContext.Err() != nil || current != actor || taskID != declaration.ID || space.activeReceivers != 1 || space.reservedBytes != 3 {
 					t.Fatal("准备未收到当前身份、任务或资源预占")
 				}
 				if fixture.name == "preparation busy" {
@@ -118,7 +127,7 @@ func TestUploadContentReceiveService(t *testing.T) {
 			putObject := func(putContext context.Context, key string, file io.ReadSeeker, size uint64) (*domain.UploadObjectResult, error) {
 				events = append(events, "put")
 				data, err := io.ReadAll(file)
-				if err != nil || putContext != ctx || key != "new-attempt" || string(data) != "abc" || size != 3 {
+				if err != nil || putContext != receiveContext || key != "new-attempt" || string(data) != "abc" || size != 3 {
 					t.Fatal("写入未使用本次暂存位置和已校验文件", err)
 				}
 				switch fixture.name {
@@ -131,13 +140,13 @@ func TestUploadContentReceiveService(t *testing.T) {
 				}
 				return &domain.UploadObjectResult{SizeBytes: size, StorageETag: &etag}, nil
 			}
-			withTransaction := func(transactionContext context.Context, current domain.Actor, action func(context.Context, UploadContentVerificationTransaction) error) error {
-				if transactionContext != ctx || current != actor {
+			withTransaction := func(transactionContext context.Context, current domain.Actor, action func(context.Context, UploadContentReceiveTransaction) error) error {
+				if transactionContext != receiveContext || current != actor {
 					t.Fatal("推进未使用请求上下文和身份")
 				}
-				txContext, stop := context.WithCancel(ctx)
+				txContext, stop := context.WithCancel(transactionContext)
 				defer stop()
-				err := action(txContext, uploadVerificationFunc(func(callContext context.Context, taskID, objectID, version uint64, leaseOwner string, confirmation domain.UploadObjectResult) (*domain.UploadTask, error) {
+				advance := func(callContext context.Context, taskID, objectID, version uint64, leaseOwner string, confirmation domain.UploadObjectResult) (*domain.UploadTask, error) {
 					events = append(events, "advance")
 					if callContext != txContext || taskID != 19 || objectID != 25 || version != 2 || leaseOwner != owner || confirmation.SizeBytes != 3 || confirmation.StorageETag == nil || *confirmation.StorageETag != etag {
 						t.Fatal("推进未使用当前租约或对象确认")
@@ -151,7 +160,8 @@ func TestUploadContentReceiveService(t *testing.T) {
 						advanced.Status = domain.UploadStatusVerifying
 					}
 					return advanced, nil
-				}))
+				}
+				err := action(txContext, uploadReceiveTransactionStub{advance: advance})
 				if err != nil {
 					return err
 				}
