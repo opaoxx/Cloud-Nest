@@ -20,16 +20,19 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 	readFailure := errors.New("fixture read failure")
 	closeFailure := errors.New("fixture close failure")
 	for _, scenario := range []struct {
-		name        string
-		content     string
-		openError   error
-		readError   error
-		closeError  error
-		cancelRead  bool
-		staleLease  bool
-		trashTarget bool
-		wantError   error
-		wantCode    string
+		name            string
+		content         string
+		openError       error
+		readError       error
+		closeError      error
+		cancelRead      bool
+		expiredDeadline bool
+		staleLease      bool
+		trashTarget     bool
+		attemptCount    uint32
+		wantError       error
+		wantCode        string
+		wantRetryDelay  time.Duration
 	}{
 		{name: "publish matching bytes", content: declaredContent},
 		{name: "end checksum mismatch", content: "ABCD", wantError: domain.ErrUploadChecksumMismatch, wantCode: domain.UploadChecksumMismatchCode},
@@ -43,6 +46,17 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 		{name: "preserve bare size error", openError: domain.ErrUploadBodySizeMismatch, wantError: domain.ErrUploadBodySizeMismatch},
 		{name: "preserve cancellation", content: declaredContent, cancelRead: true, wantError: context.Canceled},
 		{name: "return stale lease instead of confirmed mismatch", content: "ab", staleLease: true, wantError: domain.ErrUploadTaskBusy},
+		{name: "retry temporary open failure", openError: domain.ErrUploadStorageUnavailable, wantRetryDelay: time.Second},
+		{name: "retry temporary read failure with backoff", readError: domain.ErrUploadStorageUnavailable, attemptCount: 2, wantRetryDelay: 4 * time.Second},
+		{name: "retry storage timeout with active caller", openError: context.DeadlineExceeded, attemptCount: 4, wantRetryDelay: 16 * time.Second},
+		{name: "retry close failure after full read", content: declaredContent, closeError: domain.ErrUploadStorageUnavailable, attemptCount: 1, wantRetryDelay: 2 * time.Second},
+		{name: "retry size mismatch with temporary close failure and cap delay", content: "ab", closeError: domain.ErrUploadStorageUnavailable,
+			attemptCount: 63, wantRetryDelay: 30 * time.Second},
+		{name: "preserve caller cancellation with temporary open failure", cancelRead: true, openError: domain.ErrUploadStorageUnavailable, wantError: context.Canceled},
+		{name: "preserve storage cancellation with active caller", openError: errors.Join(domain.ErrUploadStorageUnavailable, context.Canceled), wantError: context.Canceled},
+		{name: "preserve expired caller deadline", expiredDeadline: true, wantError: context.DeadlineExceeded},
+		{name: "preserve missing object", openError: domain.ErrUploadObjectMissing, wantError: domain.ErrUploadObjectMissing},
+		{name: "return stale lease instead of retry result", openError: domain.ErrUploadStorageUnavailable, staleLease: true, wantError: domain.ErrUploadTaskBusy},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 在独占库准备任务、暂存对象和本次尝试持有的租约。
@@ -70,8 +84,8 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 			execute(`UPDATE upload_tasks SET status='VERIFYING',upload_mode='SINGLE',target_parent_id=?,storage_upload_id=NULL,
 				part_size=NULL,part_count=NULL,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
 				file_size=?,reserved_bytes=?,expected_sha256=?,lease_owner='verify-worker',lease_version=3,
-				lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY,updated_at=UTC_TIMESTAMP(6)
-				WHERE id=?`, targetID, size, size, expected[:], taskID)
+				lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY,updated_at=UTC_TIMESTAMP(6),
+				attempt_count=? WHERE id=?`, targetID, size, size, expected[:], scenario.attemptCount, taskID)
 			readFacts := func() (*domain.UploadTask, *domain.StoredObject) {
 				t.Helper()
 				task, err := store.FindUserUploadTask(ctx, userID, taskID)
@@ -93,7 +107,7 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 			}
 			beforeTask, beforeObject := readFacts()
 
-			// 2. 将受控对象流接给正式读回，将三种写回接给真实 MySQL。
+			// 2. 将受控对象流接给正式读回，将发布、失败及重试写回接给真实 MySQL。
 			publisher := service.NewUploadPublicationService(func(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest,
 				publish func(context.Context, service.UploadPublicationTransaction, *domain.UploadTask, *domain.StoredObject) error) error {
 				return store.WithUploadVerificationTransaction(ctx, task, staged, digest, func(txContext context.Context, txStore *Store, current *domain.UploadTask, object *domain.StoredObject) error {
@@ -102,6 +116,13 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 			})
 			readContext, cancelRead := context.WithCancel(ctx)
 			defer cancelRead()
+			wantOpenCalls := 1
+			if scenario.expiredDeadline {
+				deadlineContext, cancelDeadline := context.WithDeadline(readContext, time.Now().Add(-time.Second))
+				defer cancelDeadline()
+				readContext = deadlineContext
+				wantOpenCalls = 0
+			}
 			openCalls := 0
 			verification := service.NewUploadVerificationService(func(_ context.Context, object *domain.StoredObject) (io.ReadCloser, error) {
 				openCalls++
@@ -119,12 +140,19 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 					reader = iotest.ErrReader(scenario.readError)
 				}
 				return verificationFailureFixtureStream{Reader: reader, closeError: scenario.closeError}, nil
-			}, publisher.Publish, store.FailUploadForChecksumMismatch, store.FailUploadForBodySizeMismatch)
+			}, publisher.Publish, store.FailUploadForChecksumMismatch, store.FailUploadForBodySizeMismatch, store.ScheduleUploadVerificationRetry)
 			result, err := verification.VerifyAndPublish(readContext, task, staged)
-			if openCalls != 1 || !errors.Is(err, scenario.wantError) ||
-				(scenario.closeError != nil && !errors.Is(err, scenario.closeError)) ||
-				(scenario.staleLease && errors.Is(err, domain.ErrUploadBodySizeMismatch)) {
+			if openCalls != wantOpenCalls || !errors.Is(err, scenario.wantError) {
 				t.Fatal("单次校验返回错误", openCalls, result, err)
+			}
+			if scenario.wantRetryDelay == 0 && scenario.closeError != nil && !errors.Is(err, scenario.closeError) {
+				t.Fatal("校验错误丢失关闭原因", err)
+			}
+			if scenario.cancelRead && scenario.openError != nil && !errors.Is(err, scenario.openError) {
+				t.Fatal("取消时丢失存储错误", err)
+			}
+			if scenario.staleLease && (errors.Is(err, domain.ErrUploadBodySizeMismatch) || errors.Is(err, domain.ErrUploadStorageUnavailable)) {
+				t.Fatal("写回失败时返回了已处理的校验原因", err)
 			}
 
 			// 3. 从事务外复核任务、对象、文件和配额的最终记录。
@@ -137,6 +165,17 @@ func TestUploadVerificationServiceIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch {
+			case scenario.wantRetryDelay > 0:
+				nextAttempt := savedTask.UpdatedAt.Add(scenario.wantRetryDelay)
+				retryCode, retryMessage := "STORAGE_UNAVAILABLE", domain.ErrUploadStorageUnavailable.Error()
+				beforeTask.LeaseOwner, beforeTask.LeaseUntil = nil, nil
+				beforeTask.UpdatedAt, beforeTask.NextAttemptAt = savedTask.UpdatedAt, &nextAttempt
+				beforeTask.AttemptCount++
+				beforeTask.LastErrorCode, beforeTask.LastErrorMessage = &retryCode, &retryMessage
+				if result == nil || !reflect.DeepEqual(result, savedTask) || !reflect.DeepEqual(savedTask, beforeTask) ||
+					!reflect.DeepEqual(savedObject, beforeObject) || files != 0 || used != initialUsed || reserved != otherReserved+size {
+					t.Fatal("临时存储故障未正确安排重试", result, savedTask, files, used, reserved)
+				}
 			case scenario.wantError == nil:
 				if result == nil || !reflect.DeepEqual(result, savedTask) || savedTask.Status != domain.UploadStatusCompleted ||
 					savedTask.PublishedObjectID == nil || *savedTask.PublishedObjectID != objectID || savedTask.ResultEntryID == nil ||
