@@ -793,3 +793,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.CompleteUploadCancellation`。单文件取消收尾在同一事务写入 `CANCELLED`、按任务实际预占返还空间，并为无引用暂存对象开始回收计时。[第 355 步学习记录](docs/开发学习记录.md#第-355-步终结已受理取消的单文件上传任务)
 
 已提供 `Store.ListSingleUploadCancellationCandidates`，按 MySQL 时间和批量上限读取可接续的 `CANCELLING` 单文件任务。[第 356 步学习记录](docs/开发学习记录.md#第-356-步扫描待收尾的单文件上传取消任务)
+
+已提供 `UploadCancellationCandidateProcessor.Process`。它按扫描候选重新读取并核对任务，再调用取消收尾事务。[第 357 步学习记录](docs/开发学习记录.md#第-357-步处理单条上传取消候选)

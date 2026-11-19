@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
@@ -198,19 +199,39 @@ func TestBeginUserUploadCancellationIntegration(t *testing.T) {
 	})
 
 	t.Run("committed acceptance flows to cleanup", func(t *testing.T) {
-		// 1. 使用实际用户事务受理，再把已提交任务交给独立的内部收尾事务。
+		// 1. 使用实际用户事务受理，再扫描取出它的候选。
 		reset(t)
 		before := read(t)
 		accepted, err := store.BeginUserUploadCancellation(ctx, originalDevice, fixture.ID)
 		if err != nil || accepted == nil || accepted.Status != domain.UploadStatusCancelling {
 			t.Fatal("没有取得已提交的取消受理结果", accepted, err)
 		}
-		finished, err := store.CompleteUploadCancellation(ctx, accepted)
+		candidates, err := store.ListSingleUploadCancellationCandidates(ctx, 1)
+		if err != nil || len(candidates) != 1 || candidates[0].TaskID != accepted.ID {
+			t.Fatal("未扫描到已受理的取消任务", candidates, err)
+		}
+		processor := service.NewUploadCancellationCandidateProcessor(store.FindUserUploadTask, store.CompleteUploadCancellation)
+
+		// 2. 扫描后若重试时间被推迟，后续事务应按最新条件拒绝收尾。
+		execute(t, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=?", accepted.ID)
+		delayed := read(t)
+		if task, err := processor.Process(ctx, candidates[0]); task != nil || !errors.Is(err, domain.ErrUploadTaskBusy) ||
+			!reflect.DeepEqual(read(t), delayed) {
+			t.Fatal("旧候选绕过了收尾事务的重试时间", task, err)
+		}
+
+		// 3. 模拟到点后再次接续，并验证旧候选可读到同一终态。
+		execute(t, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", accepted.ID)
+		finished, err := processor.Process(ctx, candidates[0])
 		after := read(t)
 		if err != nil || !reflect.DeepEqual(finished, after.task) ||
 			!hasCompletedUploadCleanup(after.task, domain.UploadStatusCancelled) || after.object.Status != domain.StoredObjectStatusOrphaned ||
 			after.quota[1] != before.quota[1] || after.quota[2] != before.quota[2]-accepted.ReservedBytes {
 			t.Fatal("受理和收尾事务未完成取消及预占返还", after, err)
+		}
+		replayed, err := processor.Process(ctx, candidates[0])
+		if err != nil || !reflect.DeepEqual(replayed, finished) || !reflect.DeepEqual(read(t), after) {
+			t.Fatal("旧候选未复用终态或重复结算了预占", replayed, err)
 		}
 	})
 }

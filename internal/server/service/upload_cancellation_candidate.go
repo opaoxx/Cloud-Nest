@@ -1,0 +1,62 @@
+package service
+
+import (
+	"context"
+	"errors"
+
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
+)
+
+// UploadCancellationCandidateProcessor 将候选定位转换为一次取消收尾。
+type UploadCancellationCandidateProcessor struct {
+	findTask func(context.Context, uint64, uint64) (*domain.UploadTask, error)
+	complete func(context.Context, *domain.UploadTask) (*domain.UploadTask, error)
+}
+
+// NewUploadCancellationCandidateProcessor 绑定归属读取与收尾事务。
+func NewUploadCancellationCandidateProcessor(
+	findTask func(context.Context, uint64, uint64) (*domain.UploadTask, error),
+	complete func(context.Context, *domain.UploadTask) (*domain.UploadTask, error),
+) *UploadCancellationCandidateProcessor {
+	// 1. 核对读取和写入依赖已装配。
+	if findTask == nil || complete == nil {
+		panic("处理取消上传候选需要任务读取及取消收尾方法")
+	}
+	return &UploadCancellationCandidateProcessor{findTask: findTask, complete: complete}
+}
+
+// Process 处理一条已扫描的单文件取消候选。
+// 返回收尾提交的任务，或复用另一次调用已提交的 CANCELLED 记录。
+func (processor *UploadCancellationCandidateProcessor) Process(ctx context.Context, candidate domain.UploadCancellationCandidate) (*domain.UploadTask, error) {
+	// 1. 检查候选和调用状态，按所属用户重新读取任务。
+	if ctx == nil {
+		return nil, errors.New("处理取消上传候选需要上下文")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	task, err := processor.findTask(ctx, candidate.UserID, candidate.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 核对身份、阶段、暂存对象和租约版本。
+	if task == nil || task.ID != candidate.TaskID || task.UserID != candidate.UserID {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if task.UploadMode != "SINGLE" || (task.Status != domain.UploadStatusCancelling && task.Status != domain.UploadStatusCancelled) {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	if task.StagedObjectID != candidate.StagedObjectID || task.LeaseVersion != candidate.LeaseVersion {
+		return nil, domain.ErrUploadTaskBusy
+	}
+
+	// 3. 调用取消收尾事务，由数据库再次检查写入条件。
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return processor.complete(ctx, task)
+}
