@@ -159,4 +159,26 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 			}
 		})
 	}
+
+	// 4. 用历史版本完成打开、摘要比对与关闭的完整校验调用。
+	t.Run("verify old object", func(t *testing.T) {
+		record := object
+		record.FileSize = uint64(len(oldBytes))
+		now := time.Now().UTC()
+		expected := sha256.Sum256(oldBytes)
+		task := &domain.UploadTask{
+			ID: 19, UserID: record.OwnerUserID, StagedObjectID: record.ID, UploadMode: "SINGLE", Status: domain.UploadStatusVerifying,
+			FileSize: record.FileSize, ExpectedSHA256: &expected,
+			LeaseVersion: 1, LeaseOwner: new("fixture-worker"), UpdatedAt: now, LeaseUntil: new(now.Add(time.Minute)),
+		}
+		result, err := service.VerifyUploadObject(ctx, task, &record, client.OpenUploadVerificationObject)
+		if err != nil || result == nil || result.SizeBytes != record.FileSize || result.SHA256 != expected {
+			t.Fatal("历史版本校验结果错误", result, err)
+		}
+		task.ExpectedSHA256 = new(sha256.Sum256([]byte("another object")))
+		result, err = service.VerifyUploadObject(ctx, task, &record, client.OpenUploadVerificationObject)
+		if result != nil || !errors.Is(err, domain.ErrUploadChecksumMismatch) {
+			t.Fatal("历史版本摘要不匹配未拒绝", result, err)
+		}
+	})
 }

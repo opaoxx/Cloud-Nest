@@ -699,3 +699,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Client.OpenUploadVerificationObject`，可从 MinIO 打开待校验对象的原始内容流，按保存的版本定位并核对已知 ETag。真实版本桶已验证旧版本、`null` 版本、默认最新版本和缺失边界。调用与复验见 [第 308 步学习记录](docs/开发学习记录.md#第-308-步打开待校验的-minio-对象流)。
 
 已提供 `service.ReadUploadVerificationDigest`，从待校验对象流一次计算实际大小和 SHA-256，复用声明长度限制及额外一字节探测。真实 MinIO 历史版本验证计数与摘要，细节见 [第 309 步学习记录](docs/开发学习记录.md#第-309-步计算待校验对象的大小和摘要)。
+
+已提供 `service.VerifyUploadObject`，将校验租约快照检查、打开 MinIO 对象、重新计算并比较摘要、关闭对象流组成一次调用。真实版本桶和失败清理验证见 [第 310 步学习记录](docs/开发学习记录.md#第-310-步组合待校验对象的读回校验)。
