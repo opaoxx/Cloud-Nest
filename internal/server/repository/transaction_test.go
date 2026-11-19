@@ -30,6 +30,7 @@ type loginTransactionScript struct {
 	uploadQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	leaseClockQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	claimUploadLease                                   func(context.Context, string, []driver.NamedValue) (driver.Result, error)
+	renewUploadLease                                   func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	orphanStagedObject                                 func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	replaceUploadObject                                func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	recordUploadObject                                 func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -99,6 +100,10 @@ func (connection *loginTransactionConnection) ExecContext(ctx context.Context, s
 	if strings.HasPrefix(statement, "UPDATE upload_tasks SET lease_owner = ") && connection.script.claimUploadLease != nil {
 		connection.script.record("claim_upload_lease")
 		return connection.script.claimUploadLease(ctx, statement, arguments)
+	}
+	if strings.HasPrefix(statement, "UPDATE upload_tasks SET lease_until = ") && connection.script.renewUploadLease != nil {
+		connection.script.record("renew_upload_lease")
+		return connection.script.renewUploadLease(ctx, statement, arguments)
 	}
 	if strings.HasPrefix(statement, "UPDATE users SET reserved_storage = ") && connection.script.reserveStorage != nil {
 		connection.script.record("reserve")
