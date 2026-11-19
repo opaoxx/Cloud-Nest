@@ -1454,18 +1454,18 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if uploadStorage != nil {
 		verificationBeforeRestart, verificationStorageVersion = prepareServerUploadVerificationRecovery(t, ctx, pool, uploadStorage)
 	}
-	// 1. 在两次启动之间受理取消，再保存 EXPIRING 任务的重试时间。
-	cancellationPending := prepareServerUploadCancellationRecovery(t, ctx, pool)
+	// 1. 在两次启动之间受理取消，并保存取消与过期任务的重试时间。
 	expirationRetry := prepareServerUploadExpirationRetryRecovery(t, ctx, pool)
+	cancellationRecovery := prepareServerUploadCancellationRecovery(t, ctx, pool)
 	restartLogOffset := logs.Len()
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "true")
 	expectedSecureCookie = true
 	stopSecond := start()
-	// 2. 用已到期的对照任务确认首轮已扫描，再核对等待中的任务。
+	// 2. 通过对照任务核对过期和取消 worker 的首轮处理及重试等待。
 	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
 	expirationRetry.verifyStillWaiting(t, ctx)
-	t.Run("recover cancelling upload on first round", func(t *testing.T) {
-		verifyServerUploadCancellationRecovery(t, ctx, pool, cancellationPending)
+	t.Run("recover ready cancellation and skip pending retry on first round", func(t *testing.T) {
+		cancellationRecovery.verifyFirstRound(t, ctx)
 	})
 	if verificationBeforeRestart != nil {
 		t.Run("recover verifying upload", func(t *testing.T) {
@@ -1840,9 +1840,12 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	renameDevice(t, nativeLogin.Data.Device.ID, nativeFinal.Data.AccessToken, "退出后名称", 401, "SESSION_REVOKED", "")
 	revokeDevice(t, deviceTarget.Data.Device.ID, nativeFinal.Data.AccessToken, 401, "SESSION_REVOKED", "")
 	list(t, "", foreignToken.Token, 200, "", "")
-	// 3. 等待新实例再次扫描，检查终态、配额和对象回收计时。
+	// 3. 等待后续轮次完成过期与取消收尾，再停止服务并核对日志。
 	t.Run("recover expiring upload after retry delay", func(t *testing.T) {
 		expirationRetry.verifyRecovered(t, ctx)
+	})
+	t.Run("recover cancelling upload after retry delay", func(t *testing.T) {
+		cancellationRecovery.verifyRetryRecovered(t, ctx)
 	})
 	stopSecond()
 	if verificationBeforeRestart != nil {
