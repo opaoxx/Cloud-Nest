@@ -36,6 +36,22 @@ func NewUploadContentFileService(directory string, space *UploadTempSpace) (*Upl
 // WithFile 在容量预算内接收文件，向 use 交付定位到开头的完整内容。
 // 清理失败时保留预算及回收记录，panic 保持原有传播方式。
 func (service *UploadContentFileService) WithFile(ctx context.Context, source io.Reader, declaredSize uint64, expected *[sha256.Size]byte, use func(io.ReadSeeker, domain.UploadContentDigest) error) error {
+	return service.withFile(ctx, source, declaredSize, expected, nil, use)
+}
+
+// WithPreparedFile 在资源预占后执行 prepare，再接收文件并交给 use。
+// prepare 失败或请求取消时停止接收。两个回调均在当前调用内同步执行。
+func (service *UploadContentFileService) WithPreparedFile(ctx context.Context, source io.Reader, declaredSize uint64, expected *[sha256.Size]byte, prepare func(context.Context) error, use func(io.ReadSeeker, domain.UploadContentDigest) error) error {
+	// 1. 要求调用方提供正文读取前的准备步骤。
+	if prepare == nil {
+		return fmt.Errorf("接收上传临时文件需要准备方法")
+	}
+
+	// 2. 进入共享资源管理流程，按顺序完成准备、接收及清理。
+	return service.withFile(ctx, source, declaredSize, expected, prepare, use)
+}
+
+func (service *UploadContentFileService) withFile(ctx context.Context, source io.Reader, declaredSize uint64, expected *[sha256.Size]byte, prepare func(context.Context) error, use func(io.ReadSeeker, domain.UploadContentDigest) error) error {
 	// 1. 校验接收参数和服务依赖。
 	if service == nil || service.directory == "" || service.space == nil || service.pending == nil {
 		return fmt.Errorf("接收上传临时文件需要已初始化的文件服务")
@@ -57,8 +73,8 @@ func (service *UploadContentFileService) WithFile(ctx context.Context, source io
 		return err
 	}
 
-	// 4. 复用临时文件接收，清理成功时释放预算。
-	return withUploadContentFile(ctx, service.directory, source, declaredSize, expected, use, func(file *os.File, cleaned bool) {
+	// 4. 在资源预占内完成准备和接收，文件清理成功时释放容量。
+	return withUploadContentFile(ctx, service.directory, source, declaredSize, expected, prepare, use, func(file *os.File, cleaned bool) {
 		if cleaned {
 			release()
 			return
