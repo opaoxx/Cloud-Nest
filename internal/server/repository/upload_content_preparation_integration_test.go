@@ -229,7 +229,8 @@ func TestUploadContentPreparationServiceIntegration(t *testing.T) {
 		{"disabled", "UPDATE users SET status='DISABLED' WHERE id=7", "UPDATE users SET status='ACTIVE' WHERE id=7", domain.ErrAccountDisabled},
 		{"revoked device", "UPDATE user_devices SET revoked_at=UTC_TIMESTAMP(6) WHERE id=11", "UPDATE user_devices SET revoked_at=NULL WHERE id=11", domain.ErrDeviceRevoked},
 		{"revoked session", "UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(6) WHERE id=17", "UPDATE auth_sessions SET revoked_at=NULL WHERE id=17", domain.ErrSessionRevoked},
-		{"expired session", "UPDATE auth_sessions SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=17", "UPDATE auth_sessions SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=17", domain.ErrSessionExpired},
+		// 会话校验使用应用时钟，固定过去时间避免依赖容器与主机的瞬时钟差。
+		{"expired session", "UPDATE auth_sessions SET expires_at='2000-01-01 00:00:00' WHERE id=17", "UPDATE auth_sessions SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=17", domain.ErrSessionExpired},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			reset(t, 0)
