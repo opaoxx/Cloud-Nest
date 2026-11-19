@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -58,8 +59,19 @@ func startServerUploadVerificationWorker(ctx context.Context, runOnce func(conte
 				return runOnce(roundContext, uploadVerificationBatchLimit, leaseOwner)
 			},
 			func(summary service.UploadVerificationBatchResult, roundError error) {
-				if roundError != nil && workerContext.Err() == nil {
+				stopError := workerContext.Err()
+				if roundError != nil && stopError == nil {
 					logger.Warn("上传校验轮次失败")
+				}
+				// 1. 遍历本轮逐条错误，识别服务停止造成的取消。
+				for _, failure := range summary.CandidateErrors {
+					if stopError != nil && errors.Is(failure.Err, stopError) {
+						continue
+					}
+					// 2. 根据错误类型和可识别的原因选取固定错误码。
+					code := uploadVerificationErrorCode(failure.Err)
+					// 3. 只将任务 ID 和错误码写入结构化日志。
+					logger.Warn("上传校验任务处理失败", "task_id", failure.TaskID, "error_code", code)
 				}
 				if summary.Scanned > 0 {
 					logger.Info("上传校验轮次结束", "scanned", summary.Scanned, "published", summary.Published,
@@ -75,5 +87,46 @@ func startServerUploadVerificationWorker(ctx context.Context, runOnce func(conte
 	return func() {
 		cancel()
 		<-done
+	}
+}
+
+// uploadVerificationErrorCode 为后台校验日志返回固定错误码。
+func uploadVerificationErrorCode(err error) string {
+	// 1. 识别校验服务交回的原始、已确认的失配证据。
+	switch mismatch := err.(type) {
+	case *domain.UploadVerificationSizeMismatch:
+		if mismatch != nil {
+			return domain.UploadBodySizeMismatchCode
+		}
+	case *domain.UploadVerificationChecksumMismatch:
+		if mismatch != nil {
+			return domain.UploadChecksumMismatchCode
+		}
+	}
+
+	// 2. 识别可包裹的常见原因，其余使用内部错误码。
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "CANCELED"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "DEADLINE_EXCEEDED"
+	case errors.Is(err, domain.ErrUploadTaskBusy):
+		return "UPLOAD_BUSY"
+	case errors.Is(err, domain.ErrUploadTaskNotReady), errors.Is(err, domain.ErrUploadLeaseVersionExhausted):
+		return "TASK_NOT_READY"
+	case errors.Is(err, domain.ErrUploadTaskNotFound):
+		return "UPLOAD_NOT_FOUND"
+	case errors.Is(err, domain.ErrUploadObjectMissing):
+		return "UPLOAD_OBJECT_MISSING"
+	case errors.Is(err, domain.ErrStoredObjectNotFound):
+		return "STORED_OBJECT_NOT_FOUND"
+	case errors.Is(err, domain.ErrUploadTargetUnavailable):
+		return domain.UploadTargetUnavailableCode
+	case errors.Is(err, domain.ErrUploadFileTooLarge):
+		return "FILE_TOO_LARGE"
+	case errors.Is(err, domain.ErrUploadStorageUnavailable):
+		return "STORAGE_UNAVAILABLE"
+	default:
+		return "INTERNAL_ERROR"
 	}
 }
