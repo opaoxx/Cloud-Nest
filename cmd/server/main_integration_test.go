@@ -164,6 +164,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_COOKIE_SECURE", "false")
 	uploadDirectory := filepath.Join(t.TempDir(), "上传 临时目录")
 	t.Setenv("CLOUDNEST_TEMP_DIR", uploadDirectory)
+	var uploadStorage *serverUploadContentBucket
+	if os.Getenv("CLOUDNEST_UPLOAD_STORAGE_TEST") == "1" {
+		uploadStorage = prepareServerUploadContentBucket(t, ctx)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1440,6 +1444,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	expectedSecureCookie = true
 	stopSecond := start()
 	verifyServerUploadCreationAfterRestart(t, ctx, pool, "http://"+address, foreignToken.Token, createdUploadBeforeRestart, uploadCreationBeforeRestart)
+	if uploadStorage != nil {
+		t.Run("upload content", func(t *testing.T) {
+			verifyServerUploadContent(t, ctx, pool, uploadStorage, "http://"+address, foreignToken.Token, webRefreshed.Data.AccessToken)
+		})
+	}
 	// 两类任务数据跨真实服务重启保持一致，各次请求使用当前请求 ID。
 	for _, fixture := range []dto.UploadTaskResponse{uploadBeforeRestart, completedUploadBeforeRestart} {
 		after := requestServerUploadTask(t, "http://"+address, webRefreshed.Data.AccessToken, fixture.Data.ID, 200, "", "")

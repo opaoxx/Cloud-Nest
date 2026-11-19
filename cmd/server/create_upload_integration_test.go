@@ -21,6 +21,8 @@ import (
 const serverCreateUploadBody = `{"parent_id":"33","name":"正式上传 🌱.bin","size_bytes":40}`
 const serverCreateUploadKey = "server-upload-create-007"
 
+var serverCreateUploadExpiredAt = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // requestServerCreateUpload 经真实 run 入口调用正式上传创建接口。
 func requestServerCreateUpload(t *testing.T, baseURL, token, key, body string, status int, code, field string) dto.CreateUploadResponse {
 	t.Helper()
@@ -170,11 +172,11 @@ func verifyServerUploadCreation(t *testing.T, ctx context.Context, pool *sql.DB,
 		t.Fatal("正式创建与查询的公开任务事实不一致")
 	}
 	requestServerUploadTask(t, baseURL, otherUserToken, first.Data.Task.ID, 404, "UPLOAD_NOT_FOUND", "")
-	if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET status='VERIFYING',expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE user_id=3 AND id=?", first.Data.Task.ID); err != nil {
+	if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET status='VERIFYING',expires_at=? WHERE user_id=3 AND id=?", serverCreateUploadExpiredAt, first.Data.Task.ID); err != nil {
 		t.Fatal(err)
 	}
 	currentTask := requestServerUploadTask(t, baseURL, token, first.Data.Task.ID, 200, "", "")
-	if currentTask.Data.Status != "VERIFYING" || !currentTask.Data.ExpiresAt.Before(time.Now()) {
+	if currentTask.Data.Status != "VERIFYING" || !currentTask.Data.ExpiresAt.Equal(serverCreateUploadExpiredAt) {
 		t.Fatal("当前任务状态与期限变更未生效")
 	}
 	return first, current
@@ -188,7 +190,7 @@ func verifyServerUploadCreationAfterRestart(t *testing.T, ctx context.Context, p
 		t.Fatal("真实重启后未复用原始上传创建结果")
 	}
 	current := requestServerUploadTask(t, baseURL, token, before.Data.Task.ID, 200, "", "")
-	if current.Data.Status != "VERIFYING" || !current.Data.ExpiresAt.Before(time.Now()) {
+	if current.Data.Status != "VERIFYING" || !current.Data.ExpiresAt.Equal(serverCreateUploadExpiredAt) {
 		t.Fatal("重启后当前任务事实不准确")
 	}
 	requestServerCreateUpload(t, baseURL, token, serverCreateUploadKey, `{"parent_id":"33","name":"changed-after-restart.bin","size_bytes":40}`, 409, "IDEMPOTENCY_CONFLICT", "")

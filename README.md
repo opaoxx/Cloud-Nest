@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -689,3 +689,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供上传正文收尾中间件。HTTP/1.x 返回响应时若正文仍未读完，会结束剩余读取并关闭本次连接，完整上传保留常规连接复用。真实网络验证与调用顺序见 [第 303 步学习记录](docs/开发学习记录.md#第-303-步收尾未读完的上传正文)。
 
 已提供正式 `PUT /api/v1/uploads/{id}/content` 的路由注册方法与 OpenAPI 操作。正文收尾先于来源拒绝和认证，测试服务器已验证二进制请求、授权、未读正文收尾和创建/查询共存。启动入口装配随下一步接入。验证见 [第 304 步学习记录](docs/开发学习记录.md#第-304-步注册上传内容接收路由)。
+
+正式后端已绑定 `PUT /api/v1/uploads/{id}/content`。启动入口复用共享临时区、MySQL 用户事务和 MinIO，实际写入完成后将任务和对象推进到 `VERIFYING` 并返回 202。真实启动、二进制与零字节读回及拒绝边界验证见 [第 305 步学习记录](docs/开发学习记录.md#第-305-步将上传内容接收接入后端启动)。

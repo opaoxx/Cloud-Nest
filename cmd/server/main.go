@@ -436,13 +436,39 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 26. 注册业务接口，在列表路径绑定目录、全局、最近、名称及大小分页。
+	// 26. 用已检查的目录创建共享上传临时区。
+	uploadSpace := service.NewUploadTempSpace()
+	uploadFiles, err := service.NewUploadContentFileService(uploadTempConfig.Directory, uploadSpace)
+	if err != nil {
+		logger.Error("装配上传临时文件服务失败", "stage", "upload_temp", "error", err)
+		return err
+	}
+
+	// 27. 绑定用户事务、租约准备和 MinIO 写入。
+	prepareUploadContent := service.NewUploadContentPreparationService(storageConfig.Provider, storageConfig.Bucket,
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.UploadContentPreparationTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+	)
+	receiveUploadContent := service.NewUploadContentReceiveService(uploadFiles, storageConfig.Provider, storageConfig.Bucket,
+		prepareUploadContent.Prepare, storageClient.PutUploadContent,
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.UploadContentReceiveTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+	)
+
+	// 28. 注册业务接口，将接收服务挂到正式 PUT 路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)
 	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize, createUploadService.Create)
+	serverhttp.RegisterUploadContentRoute(router, authorizationService.Authorize, uploadTaskService.Get, receiveUploadContent.Receive)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)
@@ -463,7 +489,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 27. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
+	// 29. 启动 HTTP 并处理退出通知，返回后依次清理存储和数据库连接。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
