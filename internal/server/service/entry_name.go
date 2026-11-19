@@ -9,6 +9,9 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
+// maxEntryNameUTF16Units 是普通目录项展示名的 UTF-16 长度上限。
+const maxEntryNameUTF16Units = 120
+
 // reservedEntryDeviceName 匹配大小写不敏感的 Windows 设备基本名。
 var reservedEntryDeviceName = regexp.MustCompile(`(?i)^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$`)
 
@@ -36,7 +39,7 @@ func ValidateEntryName(rawName string) (string, error) {
 		if character > 0xFFFF {
 			utf16Length++
 		}
-		if utf16Length > 120 {
+		if utf16Length > maxEntryNameUTF16Units {
 			return "", domain.ErrInvalidEntryName
 		}
 	}
