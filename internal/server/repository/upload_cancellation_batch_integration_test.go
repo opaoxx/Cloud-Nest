@@ -56,7 +56,7 @@ func TestUploadCancellationBatchIntegration(t *testing.T) {
 	}
 	multipartBefore, deferredBefore, protectedBefore := readTask(multipartID), readTask(deferredID), readTask(protectedID)
 
-	// 2. 通过正式扫描和单条处理执行一轮，首条错误交给汇总。
+	// 2. 通过循环执行真实扫描和单条处理，首轮结果交付后结束。
 	processor := service.NewUploadCancellationCandidateProcessor(store.FindUserUploadTask, store.CompleteUploadCancellation)
 	scanCalls := 0
 	var processed []uint64
@@ -67,9 +67,21 @@ func TestUploadCancellationBatchIntegration(t *testing.T) {
 		processed = append(processed, candidate.TaskID)
 		return processor.Process(ctx, candidate)
 	})
-	summary, err := batch.RunOnce(ctx, 2)
-	if err != nil || scanCalls != 1 || summary.Scanned != 2 || summary.Cancelled != 1 || len(summary.CandidateErrors) != 1 {
-		t.Fatal("一轮取消收尾的扫描或结果总数不符", summary, scanCalls, err)
+	loopContext, stopLoop := context.WithCancel(ctx)
+	defer stopLoop()
+	var summary service.UploadCancellationBatchResult
+	var roundError error
+	reports := 0
+	err = service.RunUploadCancellationLoop(loopContext, 30*time.Second, func(roundContext context.Context) (service.UploadCancellationBatchResult, error) {
+		return batch.RunOnce(roundContext, 2)
+	}, func(result service.UploadCancellationBatchResult, resultError error) {
+		summary, roundError = result, resultError
+		reports++
+		stopLoop()
+	})
+	if !errors.Is(err, context.Canceled) || roundError != nil || reports != 1 || scanCalls != 1 ||
+		summary.Scanned != 2 || summary.Cancelled != 1 || len(summary.CandidateErrors) != 1 {
+		t.Fatal("一轮取消收尾的扫描、汇报或结果总数不符", summary, scanCalls, reports, roundError, err)
 	}
 	if !slices.Equal(processed, []uint64{protectedID, cancelledID}) || summary.CandidateErrors[0].TaskID != protectedID ||
 		!errors.Is(summary.CandidateErrors[0].Err, domain.ErrStoredObjectInUse) {
