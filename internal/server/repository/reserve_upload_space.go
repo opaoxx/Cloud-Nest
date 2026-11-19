@@ -70,6 +70,11 @@ func (store *Store) ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64
 
 // lockUserUploadQuota 供用户事务复用，读取并核对活动账号的当前配额。
 func (store *Store) lockUserUploadQuota(ctx context.Context, userID uint64) (*models.UserProfile, error) {
+	return store.lockUploadQuota(ctx, userID, false)
+}
+
+// lockUploadQuota 核对锁内配额，内部清理可读取禁用账号的账目。
+func (store *Store) lockUploadQuota(ctx context.Context, userID uint64, allowDisabled bool) (*models.UserProfile, error) {
 	// 1. 当前读锁定用户配额，处理缺失及数据库故障。
 	var account models.UserProfile
 	queryError := store.database.WithContext(ctx).Table("users").
@@ -92,7 +97,9 @@ func (store *Store) lockUserUploadQuota(ctx context.Context, userID uint64) (*mo
 	switch account.Status {
 	case "ACTIVE":
 	case "DISABLED":
-		return nil, domain.ErrAccountDisabled
+		if !allowDisabled {
+			return nil, domain.ErrAccountDisabled
+		}
 	default:
 		return nil, domain.ErrInvalidAccountData
 	}

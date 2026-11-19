@@ -763,3 +763,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `ListUploadExpirationCandidates`，按 MySQL 时间读取到期且可尝试处理的上传任务，供过期事务复核。[第 340 步学习记录](docs/开发学习记录.md#第-340-步扫描已到期的上传任务候选)
 
 已提供 `BeginUploadExpiration`，按用户加锁复核到期候选，将符合条件的任务推进到 `EXPIRING`，保留任务预占供随后结算。[第 341 步学习记录](docs/开发学习记录.md#第-341-步将到期上传任务推进到过期处理阶段)
+
+已提供 `CompleteUploadExpiration`，在同一用户事务中写入单文件任务的 `EXPIRED` 终态、释放预占并为暂存对象开始回收计时。[第 342 步学习记录](docs/开发学习记录.md#第-342-步终结过期的单文件上传任务)
