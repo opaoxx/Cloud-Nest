@@ -57,6 +57,27 @@ func (taskService *UploadTaskService) Get(ctx context.Context, actor domain.Acto
 	return result, nil
 }
 
+// ConfirmCompletion 为可信 Actor 读取并确认单文件任务的完成状态。
+func (taskService *UploadTaskService) ConfirmCompletion(ctx context.Context, actor domain.Actor, taskID uint64) (*domain.UploadTask, error) {
+	// 1. 按认证用户和任务 ID 读取独立快照。
+	task, err := taskService.Get(ctx, actor, taskID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 按当前任务阶段核对完成条件和发布结果。
+	_, completionError := domain.ResolveSingleUploadCompletionStatus(task)
+
+	// 3. 复查请求取消状态，返回已校验的快照或原错误。
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if completionError != nil {
+		return nil, completionError
+	}
+	return task, nil
+}
+
 // copyUploadTask 复制非空任务及全部可空字段，供查询和接收准备共同使用。
 func copyUploadTask(task *domain.UploadTask) *domain.UploadTask {
 	// 1. 按值复制记录，再独立持有摘要与可空标量。

@@ -821,3 +821,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 单文件上传完成的计划契约已写入 OpenAPI。`POST /api/v1/uploads/{id}/complete` 在校验中返回 202，已经发布时返回 200 和已有目录项 ID，其余阶段返回 409。[第 369 步学习记录](docs/开发学习记录.md#第-369-步定义单文件上传完成接口契约)
 
 已提供 `domain.ResolveSingleUploadCompletionStatus`，按持久任务快照判定 `VERIFYING`、`COMPLETED`、任务未就绪或数据异常。[第 370 步学习记录](docs/开发学习记录.md#第-370-步判断单文件上传的完成状态)
+
+已提供 `UploadTaskService.ConfirmCompletion`，按当前用户和任务 ID 读取最新快照，通过完成状态判断后交付独立的任务结果。[第 371 步学习记录](docs/开发学习记录.md#第-371-步组合单文件上传完成确认服务)
