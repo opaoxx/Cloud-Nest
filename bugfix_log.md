@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 2026-11-19——发布文件写入联测的同名夹具未归一化
+
+### 问题现象
+
+- 第 320 步的 `TestCreatePublishedFileEntryIntegration/duplicate_entry_name` 预期收到活动名称冲突，实际插入成功并返回 nil 错误，导致仓储回归失败。
+
+### 根因与修复方案
+
+- 共用测试夹具将展示名 `发布笔记.MD` 的原文字节写入 `name_key`。本轮正式输入经过统一规则生成 `发布笔记.md`，两个键在二进制唯一索引中不同。本轮联测在隔离库用 `BuildEntryNameKey` 生成已有记录的名称键。
+
+### 验证结果
+
+- 修正后实际 MySQL 插入触发 1062 并映射为 `ErrEntryNameConflict`，目录项数量未增加。11 组 MySQL 场景、2 组插入时间用例、相关仓储回归和 `go vet ./...` 均通过。
+
 ## 2026-11-19——读取 MinIO 的 null 版本时返回对象数据异常
 
 ### 问题现象
