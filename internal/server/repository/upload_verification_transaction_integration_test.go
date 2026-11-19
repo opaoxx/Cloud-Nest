@@ -110,4 +110,65 @@ func TestWithUploadVerificationTransactionIntegration(t *testing.T) {
 			t.Fatal("旧结果未拒绝或改变了新租约", err)
 		}
 	})
+	t.Run("select publication object", func(t *testing.T) {
+		rollbackFailure := errors.New("fixture aborts after object selection")
+		for _, scenario := range []struct {
+			name     string
+			reuse    bool
+			rollback bool
+		}{
+			{name: "existing ready object", reuse: true},
+			{name: "new ready object rolled back", rollback: true},
+			{name: "new ready object committed"},
+		} {
+			t.Run(scenario.name, func(t *testing.T) {
+				task, staged, digest := reset(t)
+				wantID := staged.ID
+				if scenario.reuse {
+					// 对象 29 是同账号已有的 READY 夹具，使用它的摘要触发复用。
+					wantID = 29
+					originalHash := *task.ExpectedSHA256
+					t.Cleanup(func() {
+						if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET expected_sha256=? WHERE id=19", originalHash[:]); err != nil {
+							t.Error(err)
+						}
+					})
+					execute(t, "UPDATE upload_tasks SET expected_sha256=UNHEX(REPEAT('00',32)) WHERE id=19")
+					task, staged = read(t)
+					digest.SHA256 = *task.ExpectedSHA256
+				}
+				var selected *domain.StoredObject
+				err := store.WithUploadVerificationTransaction(ctx, task, staged, digest, func(txContext context.Context, txStore *Store, currentTask *domain.UploadTask, currentObject *domain.StoredObject) error {
+					object, err := txStore.SelectUploadPublicationObject(txContext, currentTask, currentObject, digest)
+					if err != nil {
+						return err
+					}
+					if object == nil || object.ID != wantID || object.Status != domain.StoredObjectStatusReady ||
+						object.VerifiedSHA256 == nil || *object.VerifiedSHA256 != digest.SHA256 {
+						t.Fatal("选择的 READY 对象错误", object)
+					}
+					selected = object
+					if scenario.rollback {
+						return rollbackFailure
+					}
+					return nil
+				})
+				var expectedError error
+				if scenario.rollback {
+					expectedError = rollbackFailure
+				}
+				if !errors.Is(err, expectedError) || selected == nil {
+					t.Fatal("发布对象选择事务失败", err)
+				}
+				savedTask, savedStaged := read(t)
+				wantStaged := selected
+				if scenario.reuse || scenario.rollback {
+					wantStaged = staged
+				}
+				if !reflect.DeepEqual(savedStaged, wantStaged) || !reflect.DeepEqual(savedTask, task) {
+					t.Fatal("对象选择提交或回滚后的持久记录错误")
+				}
+			})
+		}
+	})
 }

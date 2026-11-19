@@ -707,3 +707,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.FindReusableUploadObject`。上传发布流程可在用户事务内按实测 SHA-256 与大小查找同账号的 `READY` 对象，命中时锁定候选行。查询边界和复验见 [第 312 步学习记录](docs/开发学习记录.md#第-312-步查询同用户可复用的上传对象)。
 
 已提供 `Store.PromoteVerifiedUploadObject`。复用查询未命中后，可在写回复核事务中按当前任务和校验租约，将暂存对象推进到 `READY` 并保存实测 SHA-256。真实 MySQL 条件更新和回滚验证见 [第 313 步学习记录](docs/开发学习记录.md#第-313-步按校验租约推进暂存对象到-ready)。
+
+已提供 `Store.SelectUploadPublicationObject`。写回复核回调可统一选择后续目录项要引用的 `READY` 对象，优先复用同账号已有对象，未命中时推进暂存对象。流程、去重冲突处理与复验见 [第 314 步学习记录](docs/开发学习记录.md#第-314-步选择上传发布对象)。

@@ -14,41 +14,60 @@ import (
 // task 和 staged 来自写回复核回调，调用方先查询复用对象，写入结果由外层事务确认。
 func (store *Store) PromoteVerifiedUploadObject(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest) (*domain.StoredObject, error) {
 	// 1. 核对事务、校验快照和实测摘要。
-	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
-		return nil, fmt.Errorf("推进已校验对象需要上下文和已锁定用户的事务")
-	}
-	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
-		return nil, fmt.Errorf("推进已校验对象必须使用事务 Store")
-	}
-	if err := ctx.Err(); err != nil {
+	if err := store.validateUploadPublicationInput(ctx, task, staged, digest); err != nil {
 		return nil, err
 	}
+
+	// 2. 条件写入 READY，并读回外层事务中的对象。
+	return store.promoteVerifiedUploadObject(ctx, task, staged, digest)
+}
+
+// validateUploadPublicationInput 为复用和推进使用同一套事务与校验快照约束。
+func (store *Store) validateUploadPublicationInput(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest) error {
+	// 1. 确保调用处于已锁定用户的事务，且上下文仍有效。
+	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
+		return fmt.Errorf("选择或推进发布对象需要上下文和已锁定用户的事务")
+	}
+	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
+		return fmt.Errorf("选择或推进发布对象必须使用事务 Store")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// 2. 核对任务的当前校验阶段、租约事实及实测内容声明。
 	if task == nil || task.ID == 0 || task.UserID != store.loginUserID || task.StagedObjectID == 0 ||
 		task.LeaseVersion == 0 || task.LeaseOwner == nil || *task.LeaseOwner == "" || task.LeaseUntil == nil ||
 		task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil || task.ResultEntryID != nil ||
 		task.ResolvedName != nil || task.CompletedAt != nil {
-		return nil, domain.ErrInvalidUploadTaskData
+		return domain.ErrInvalidUploadTaskData
 	}
 	if task.Status != domain.UploadStatusVerifying || task.UploadMode != "SINGLE" {
-		return nil, domain.ErrUploadTaskNotReady
+		return domain.ErrUploadTaskNotReady
 	}
 	if task.FileSize > domain.MaxSingleUploadSizeBytes {
-		return nil, domain.ErrUploadFileTooLarge
+		return domain.ErrUploadFileTooLarge
 	}
 	if digest.SizeBytes != task.FileSize {
-		return nil, domain.ErrUploadBodySizeMismatch
+		return domain.ErrUploadBodySizeMismatch
 	}
 	if task.ExpectedSHA256 != nil && *task.ExpectedSHA256 != digest.SHA256 {
-		return nil, domain.ErrUploadChecksumMismatch
+		return domain.ErrUploadChecksumMismatch
 	}
+
+	// 3. 核对当前暂存对象的归属、大小和状态。
 	if staged == nil || staged.ID != task.StagedObjectID || staged.OwnerUserID != task.UserID ||
 		staged.Status != domain.StoredObjectStatusVerifying || staged.FileSize != task.FileSize ||
 		staged.VerifiedSHA256 != nil || staged.DedupHash != nil || staged.VerifiedAt != nil ||
 		staged.UnreferencedAt != nil || staged.GCAfter != nil {
-		return nil, domain.ErrInvalidStoredObjectData
+		return domain.ErrInvalidStoredObjectData
 	}
+	return nil
+}
 
-	// 2. 按当前对象、租约和数据库时间写入 READY。
+// promoteVerifiedUploadObject 写入通过快照检查的暂存对象，SQL 再校验当前持久化事实。
+func (store *Store) promoteVerifiedUploadObject(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest) (*domain.StoredObject, error) {
+	// 1. 按当前对象、租约和数据库时间写入 READY。
 	result := store.database.WithContext(ctx).Exec(
 		"UPDATE stored_objects AS stored_object JOIN upload_tasks AS upload_task "+
 			"ON upload_task.user_id = stored_object.owner_user_id AND upload_task.staged_object_id = stored_object.id "+
@@ -87,7 +106,7 @@ func (store *Store) PromoteVerifiedUploadObject(ctx context.Context, task *domai
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 
-	// 3. 读回复核状态、摘要和存储位置，交由外层事务确认。
+	// 2. 读回复核状态、摘要和存储位置，交由外层事务确认。
 	ready, err := store.FindUserStoredObject(ctx, task.UserID, staged.ID)
 	if errors.Is(err, domain.ErrStoredObjectNotFound) {
 		return nil, domain.ErrInvalidStoredObjectData
