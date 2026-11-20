@@ -46,9 +46,7 @@ func (store *Store) ListPurgeRootCandidates(ctx context.Context, limit int) ([]d
 		candidate := &candidates[index]
 		candidate.PurgeStartedAt = candidate.PurgeStartedAt.UTC()
 		startedAt := candidate.PurgeStartedAt
-		if candidate.EntryID == 0 || candidate.UserID == 0 || candidate.ParentID == 0 ||
-			candidate.ParentID == candidate.EntryID || candidate.Revision == 0 ||
-			startedAt.Year() < 1000 || startedAt.Year() > 9999 || startedAt.Nanosecond()%1000 != 0 {
+		if !candidate.IsValid() {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		if index > 0 {
