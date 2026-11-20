@@ -31,7 +31,7 @@ const webEmptyRootFixtureUsername = "fixture_web_empty_root"
 
 func TestServerWebLoginIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_WEB_LOGIN_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录、刷新、目录浏览与创建")
+		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录及目录操作")
 	}
 	t.Setenv("ACCESS_TOKEN_TTL", "8s")
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
@@ -328,6 +328,62 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("跨账号拒绝后目标目录应保持为空")
 	}
 	t.Log("Web 创建目录联测通过：同键两次 201 同一条目，当前目录重读，重名 409、非法名称 400、跨账号 404 和过期 401")
+
+	// 13. 使用目录列表中的 ID 和版本重命名，核对结果和手动同键重试。
+	target := firstPageItems[0]
+	rename := func(accessToken, revision, name, key string) *http.Request {
+		t.Helper()
+		body, err := json.Marshal(dto.RenameEntryRequest{ExpectedRevision: revision, Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPatch, baseURL+"/api/v1/entries/"+target.ID, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", key)
+		request.Header.Set("Origin", baseURL)
+		return request
+	}
+	const renameKey = "311921fb-1239-4ed6-97e8-60b4aa4bc401"
+	const renamedFile = "隔离重命名.md"
+	var renamed, renameReplay dto.RenameEntryResponse
+	read(rename(renewed.Data.AccessToken, target.Revision, renamedFile, renameKey), http.StatusOK, &renamed)
+	read(rename(renewed.Data.AccessToken, target.Revision, renamedFile, renameKey), http.StatusOK, &renameReplay)
+	entry := renamed.Data.Entry
+	if entry.ID != target.ID || entry.Name != renamedFile || entry.Revision != "2" ||
+		renameReplay.Data.Entry.ID != entry.ID || renameReplay.Data.Entry.Revision != entry.Revision ||
+		renameReplay.RequestID == renamed.RequestID {
+		t.Fatal("重命名成功或同键重试的条目版本不符")
+	}
+
+	// 14. 过期版本、重名和跨账号分别走正式拒绝，目录仍读到已保存的名称。
+	var staleRename dto.ErrorResponse
+	read(rename(renewed.Data.AccessToken, target.Revision, "过期的草稿.md", "web-rename-stale"), http.StatusConflict, &staleRename)
+	if staleRename.Error.Code != "REVISION_CONFLICT" || staleRename.Error.Details["current_revision"] != entry.Revision {
+		t.Fatal("重命名版本冲突响应不符", staleRename.Error)
+	}
+	var duplicateName dto.ErrorResponse
+	read(rename(renewed.Data.AccessToken, entry.Revision, rootFolder.Name, "web-rename-duplicate"), http.StatusConflict, &duplicateName)
+	if duplicateName.Error.Code != "NAME_CONFLICT" {
+		t.Fatal("重命名的同名冲突响应不符", duplicateName.Error)
+	}
+	var foreignRename dto.ErrorResponse
+	read(rename(emptyUser.Data.AccessToken, entry.Revision, "越权草稿.md", "web-rename-foreign"), http.StatusNotFound, &foreignRename)
+	if foreignRename.Error.Code != "ENTRY_NOT_FOUND" {
+		t.Fatal("其他账号的重命名响应不符", foreignRename.Error)
+	}
+	var afterRename dto.DirectoryPageResponse
+	read(getDirectory(renewed.Data.AccessToken, parentID, nil), http.StatusOK, &afterRename)
+	if len(afterRename.Data.Items) != len(firstPageItems) ||
+		!slices.ContainsFunc(afterRename.Data.Items, func(item dto.DirectoryEntrySummary) bool {
+			return item.ID == target.ID && item.Name == renamedFile && item.Revision == entry.Revision
+		}) {
+		t.Fatal("重读目录未找到已更新的文件名称与版本")
+	}
+	t.Log("Web 重命名联测通过：同一 ID 更新到版本 2，原键重试结果一致，重名及过期版本返回 409，跨账号返回 404")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

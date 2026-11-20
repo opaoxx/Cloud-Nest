@@ -5,6 +5,7 @@ export interface DirectoryEntry {
   name: string
   type: 'DIR' | 'FILE'
   sizeBytes: number
+  revision: string
 }
 
 export interface DirectoryBreadcrumb {
@@ -27,6 +28,35 @@ export interface DirectoryCreation {
 }
 
 export type DirectoryCreator = (creation: DirectoryCreation) => Promise<void>
+
+interface EntryRename {
+  entryId: string
+  expectedRevision: string
+  name: string
+  idempotencyKey: string
+}
+
+export type EntryRenamer = (rename: EntryRename) => Promise<void>
+
+export async function renameEntry(accessToken: string, rename: EntryRename): Promise<void> {
+  // 1. 用条目 ID、原版本和幂等键提交一次重命名。
+  const data = await requestData(`/api/v1/entries/${encodeURIComponent(rename.entryId)}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': rename.idempotencyKey,
+    },
+    body: JSON.stringify({ expected_revision: rename.expectedRevision, name: rename.name }),
+    redirect: 'error',
+  })
+
+  // 2. 核对成功响应对应原条目。
+  if (!isRecord(data.entry) || data.entry.id !== rename.entryId ||
+      data.entry.status !== 'ACTIVE' || typeof data.entry.revision !== 'string') {
+    throw new ApiError(200, '服务返回的重命名结果格式有误。')
+  }
+}
 
 export async function createDirectory(accessToken: string, creation: DirectoryCreation): Promise<void> {
   // 1. 按正式契约提交父目录、原始名称和本次幂等键。
@@ -95,10 +125,11 @@ async function listDirectoryPage(
   const items = data.items.map((item: unknown): DirectoryEntry => {
     if (!isRecord(item) || typeof item.id !== 'string' || item.parent_id !== parentId ||
         typeof item.name !== 'string' || (item.entry_type !== 'DIR' && item.entry_type !== 'FILE') ||
-        item.status !== 'ACTIVE' || !isByteCount(item.size_bytes)) {
+        item.status !== 'ACTIVE' || !isByteCount(item.size_bytes) ||
+        typeof item.revision !== 'string' || !/^[1-9][0-9]{0,19}$/.test(item.revision)) {
       throw new ApiError(200, '服务返回的目录条目格式有误。')
     }
-    return { id: item.id, name: item.name, type: item.entry_type, sizeBytes: item.size_bytes }
+    return { id: item.id, name: item.name, type: item.entry_type, sizeBytes: item.size_bytes, revision: item.revision }
   })
   // 3. 解析后端返回的根到当前目录路径，保留每一级的 ID 和名称。
   if (!Array.isArray(data.breadcrumbs) || data.breadcrumbs.length === 0) {

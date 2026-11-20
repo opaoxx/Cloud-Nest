@@ -81,8 +81,10 @@
   text-align: left;
   overflow-wrap: anywhere;
 }
-.directory-items th:first-child { width: 58%; }
+.directory-items th:first-child { width: 46%; }
+.directory-items th:last-child { width: 22%; }
+.directory-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .directory-items + button { margin-top: 12px; }
 .create-directory-trigger { margin-bottom: 10px; }
-.create-directory-form { display: grid; gap: 8px; }
-.create-directory-form .auth-error { margin: 0; }
+.entry-name-form { display: grid; gap: 8px; }
+.entry-name-form .auth-error { margin: 0; }

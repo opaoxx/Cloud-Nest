@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Button } from 'antd'
-import type { DirectoryBreadcrumb, DirectoryCreator, DirectoryEntry, DirectoryPageReader } from './api/drive'
+import type { DirectoryBreadcrumb, DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryRenamer } from './api/drive'
 import { apiErrorMessage } from './api/http'
 import { formatSize } from './demo'
-import CreateDirectoryForm from './CreateDirectoryForm'
+import EntryNameDialog from './EntryNameDialog'
 
 type DirectoryListing = {
   items: DirectoryEntry[]
@@ -18,12 +18,16 @@ type DirectoryRequest = {
   cursor: string | null
 }
 
-export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory }: {
+type NameAction = { kind: 'create' } | { kind: 'rename'; entry: DirectoryEntry }
+
+export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
   createDirectory: DirectoryCreator
+  renameEntry: EntryRenamer
 }) {
   const [request, setRequest] = useState<DirectoryRequest>({ directoryId: rootEntryId, cursor: null })
+  const [nameAction, setNameAction] = useState<NameAction | null>(null)
   const [listing, setListing] = useState<DirectoryListing>({
     items: [], breadcrumbs: [], nextCursor: null, status: 'loading', errorMessage: '',
   })
@@ -72,6 +76,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
   // 1. 切换目录时从首页加载，清除上一目录的条目和分页游标。
   function openDirectory(directoryId: string) {
     if (directoryId === request.directoryId) return
+    setNameAction(null)
     setListing(previous => ({
       ...previous, items: [], nextCursor: null, status: 'loading', errorMessage: '',
     }))
@@ -82,6 +87,16 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
   const isRoot = request.directoryId === rootEntryId
   const directoryLabel = isRoot ? '根目录' : '文件夹'
   const currentDirectory = listing.breadcrumbs.at(-1)
+
+  // 1. 打开名称表单时记住待修改条目及其版本。
+  const renameTarget = nameAction?.kind === 'rename' ? nameAction.entry : null
+  const canModify = currentDirectory?.id === request.directoryId && listing.status === 'ready'
+
+  // 2. 确认成功后从当前目录的首页重新读取。
+  function refreshAfterNaming() {
+    setNameAction(null)
+    requestPage(null)
+  }
 
   return (
     <section className="directory-browser" aria-labelledby="directory-browser-title">
@@ -107,13 +122,23 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
         </nav>
       )}
       {currentDirectory?.id === request.directoryId && (
-        <CreateDirectoryForm key={currentDirectory.id} parentId={currentDirectory.id}
-          parentName={currentDirectory.name || '根目录'} disabled={listing.status !== 'ready'}
-          createDirectory={createDirectory} onCreated={() => requestPage(null)} />
+        <Button className="create-directory-trigger" disabled={!canModify}
+          onClick={() => setNameAction({ kind: 'create' })}>新建文件夹</Button>
+      )}
+      {nameAction && currentDirectory?.id === request.directoryId && (
+        <EntryNameDialog title={renameTarget ? '重命名' : '新建文件夹'}
+          inputLabel={renameTarget ? '新名称' : '文件夹名称'}
+          confirmLabel={renameTarget ? '保存名称' : '创建文件夹'}
+          hint={renameTarget ? `原名称为「${renameTarget.name}」。` : `将在「${currentDirectory.name || '根目录'}」中创建。`}
+          initialName={renameTarget?.name ?? ''}
+          submitName={(name, idempotencyKey) => renameTarget ? renameEntry({
+            entryId: renameTarget.id, expectedRevision: renameTarget.revision, name, idempotencyKey,
+          }) : createDirectory({ parentId: currentDirectory.id, name, idempotencyKey })}
+          onClose={() => setNameAction(null)} onSaved={refreshAfterNaming} />
       )}
       {listing.items.length > 0 && (
         <table className="directory-items" aria-label={`${directoryLabel}条目`}>
-          <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">大小</th></tr></thead>
+          <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">大小</th><th scope="col">操作</th></tr></thead>
           <tbody>
             {listing.items.map(item => (
               <tr key={item.id}>
@@ -124,6 +149,8 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
                 ) : item.name}</td>
                 <td>{item.type === 'DIR' ? '文件夹' : '文件'}</td>
                 <td>{item.type === 'DIR' ? '—' : formatSize(item.sizeBytes)}</td>
+                <td><button type="button" className="directory-link" aria-label={`重命名 ${item.name}`}
+                  disabled={!canModify} onClick={() => setNameAction({ kind: 'rename', entry: item })}>重命名</button></td>
               </tr>
             ))}
           </tbody>
