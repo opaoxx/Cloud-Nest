@@ -189,4 +189,61 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("confirm download metadata", func(t *testing.T) {
+		// 1. 对同一个键检查未指定版本、历史版本与显式 null，大小取实际写入字节数。
+		target := domain.EntryDownloadTarget{EntryID: 13, UserID: 7, ObjectID: 23, Provider: settings.Provider, Bucket: bucket, ObjectKey: key}
+		for _, fixture := range []struct {
+			name    string
+			version *string
+			size    uint64
+			want    error
+		}{
+			{"original null version", new("null"), uint64(len("before versioning")), nil},
+			{"old explicit version", &old.VersionID, uint64(len(oldBytes)), nil},
+			{"zero byte current version", nil, 0, nil},
+			{"wrong size", &old.VersionID, 0, domain.ErrDownloadTargetUnavailable},
+			{"unknown version", &missing, uint64(len(oldBytes)), domain.ErrDownloadTargetUnavailable},
+		} {
+			t.Run(fixture.name, func(t *testing.T) {
+				target.StorageVersionID, target.SizeBytes = fixture.version, fixture.size
+				if err := client.CheckDownloadObject(ctx, &target); !errors.Is(err, fixture.want) {
+					t.Fatal("真实 MinIO 下载元数据检查结果不符", err)
+				}
+			})
+		}
+		target.StorageVersionID, target.ObjectKey = nil, key+"-absent"
+		if err := client.CheckDownloadObject(ctx, &target); !errors.Is(err, domain.ErrDownloadTargetUnavailable) {
+			t.Fatal("真实缺失对象未返回内容不可用", err)
+		}
+
+		// 2. 在独占桶写入删除标记，旧版本仍可明确读取。
+		if err := verifier.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{}); err != nil {
+			t.Fatal("创建联测删除标记失败", minio.ToErrorResponse(err).Code)
+		}
+		target.ObjectKey, target.SizeBytes = key, 0
+		if err := client.CheckDownloadObject(ctx, &target); !errors.Is(err, domain.ErrDownloadTargetUnavailable) {
+			t.Fatal("当前删除标记未返回内容不可用", err)
+		}
+		var markerVersion string
+		for item := range verifier.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: key, WithVersions: true}) {
+			if item.Err != nil {
+				t.Fatal("读取联测删除标记失败", minio.ToErrorResponse(item.Err).Code)
+			}
+			if item.Key == key && item.IsDeleteMarker && item.IsLatest {
+				markerVersion = item.VersionID
+			}
+		}
+		if markerVersion == "" {
+			t.Fatal("独占桶中未找到删除标记")
+		}
+		target.StorageVersionID = &markerVersion
+		if err := client.CheckDownloadObject(ctx, &target); !errors.Is(err, domain.ErrDownloadTargetUnavailable) {
+			t.Fatal("指定删除标记未返回内容不可用", err)
+		}
+		target.StorageVersionID, target.SizeBytes = &old.VersionID, uint64(len(oldBytes))
+		if err := client.CheckDownloadObject(ctx, &target); err != nil {
+			t.Fatal("删除标记不应遮蔽明确指定的历史版本", err)
+		}
+	})
 }

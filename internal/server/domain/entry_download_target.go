@@ -8,6 +8,9 @@ import (
 // ErrDownloadTargetUnavailable 表示当前文件内容缺失或不可用。
 var ErrDownloadTargetUnavailable = errors.New("文件内容当前不可用")
 
+// ErrDownloadStorageUnavailable 表示存储服务未能交付可用的对象元数据。
+var ErrDownloadStorageUnavailable = errors.New("存储服务暂时不可用")
+
 // EntryDownloadTarget 保存同一快照中校验过的目录项和就绪对象事实。
 type EntryDownloadTarget struct {
 	// EntryID 是可见文件的目录项 ID。

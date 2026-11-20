@@ -2,12 +2,8 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net"
-	"strings"
-	"unicode"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -28,20 +24,10 @@ func (client *Client) OpenUploadVerificationObject(ctx context.Context, object *
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 	location := domain.CreateStagedObjectInput{Provider: object.Provider, Bucket: object.Bucket, ObjectKey: object.ObjectKey}
-	if !location.IsValid() || strings.TrimSpace(object.ObjectKey) == "" || strings.ContainsFunc(object.ObjectKey, unicode.IsControl) {
-		return nil, domain.ErrInvalidStoredObjectData
+	options, err := objectReadOptions(location, object.StorageVersionID)
+	if err != nil {
+		return nil, err
 	}
-	options := minio.GetObjectOptions{}
-	if object.StorageVersionID != nil {
-		version := *object.StorageVersionID
-		if len(version) == 0 || len(version) > 255 || strings.ContainsFunc(version, func(character rune) bool {
-			return character < 32 || character > 126
-		}) {
-			return nil, domain.ErrInvalidStoredObjectData
-		}
-		options.VersionID = version
-	}
-	options.Set("Accept-Encoding", "identity")
 
 	// 2. 发起 GET，检查返回的对象身份。
 	// Core.GetObject 立即执行 GET，成功后直接交付 HTTP 正文流。
@@ -57,13 +43,11 @@ func (client *Client) OpenUploadVerificationObject(ctx context.Context, object *
 		case "NoSuchKey", "NoSuchVersion":
 			return nil, domain.ErrUploadObjectMissing
 		default:
-			return nil, uploadVerificationIOError(err)
+			return nil, storageObjectReadError(err, domain.ErrUploadStorageUnavailable)
 		}
 	}
 	// 版本功能开启前的 null 版本可以省略版本响应头，请求仍明确携带 versionId=null。
-	versionMatches := options.VersionID == "" || info.VersionID == options.VersionID ||
-		(options.VersionID == "null" && info.VersionID == "")
-	if headers.Get("Content-Range") != "" || !versionMatches ||
+	if headers.Get("Content-Range") != "" || !matchesObjectReadVersion(options.VersionID, info.VersionID) ||
 		(object.StorageETag != nil && info.ETag != *object.StorageETag) {
 		_ = body.Close()
 		return nil, domain.ErrInvalidStoredObjectData
@@ -87,26 +71,14 @@ func (body *uploadVerificationObjectBody) Read(buffer []byte) (int, error) {
 		return count, contextError
 	}
 	if err != nil && err != io.EOF {
-		return count, uploadVerificationIOError(err)
+		return count, storageObjectReadError(err, domain.ErrUploadStorageUnavailable)
 	}
 	return count, err
 }
 
 func (body *uploadVerificationObjectBody) Close() error {
 	if err := body.ReadCloser.Close(); err != nil {
-		return uploadVerificationIOError(err)
+		return storageObjectReadError(err, domain.ErrUploadStorageUnavailable)
 	}
 	return nil
-}
-
-// uploadVerificationIOError 保留取消和超时分类，避免传出存储内部诊断。
-func uploadVerificationIOError(err error) error {
-	if errors.Is(err, context.Canceled) {
-		return context.Canceled
-	}
-	var networkError net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
-		return context.DeadlineExceeded
-	}
-	return domain.ErrUploadStorageUnavailable
 }
