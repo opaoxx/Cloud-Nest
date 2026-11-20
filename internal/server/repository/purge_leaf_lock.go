@@ -68,8 +68,7 @@ func (store *Store) LockPurgeLeaf(ctx context.Context, candidate domain.PurgeLea
 	if hasPendingChild {
 		return nil, domain.ErrPurgeLeafCandidateStale
 	}
-	if (current.EntryType == "FILE" && (current.ObjectID == nil || *current.ObjectID == 0)) ||
-		(current.EntryType == "DIR" && current.ObjectID != nil) {
+	if !current.IsValid() {
 		return nil, domain.ErrInvalidFileEntryData
 	}
 	return &current, nil

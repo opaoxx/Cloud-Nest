@@ -41,3 +41,17 @@ type LockedPurgeLeaf struct {
 	// ObjectID 是文件的当前内容引用，目录为 nil。
 	ObjectID *uint64
 }
+
+// IsValid 检查锁定叶子的所属用户与对象引用。
+func (leaf LockedPurgeLeaf) IsValid() bool {
+	// 1. 确认目录项事实与所属用户完整。
+	if leaf.UserID == 0 || !leaf.PurgeLeafCandidate.IsValid() {
+		return false
+	}
+
+	// 2. 文件须有内容引用，目录则允许空引用。
+	if leaf.EntryType == "FILE" {
+		return leaf.ObjectID != nil && *leaf.ObjectID != 0
+	}
+	return leaf.ObjectID == nil
+}
