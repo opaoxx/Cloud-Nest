@@ -88,3 +88,13 @@
 .create-directory-trigger { margin-bottom: 10px; }
 .entry-name-form { display: grid; gap: 8px; }
 .entry-name-form .auth-error { margin: 0; }
+.directory-actions { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.move-entry-form { overflow-wrap: anywhere; }
+.move-entry-folders {
+  display: grid;
+  gap: 6px;
+  max-height: min(40vh, 260px);
+  overflow: auto;
+  padding: 8px;
+  list-style: none;
+}

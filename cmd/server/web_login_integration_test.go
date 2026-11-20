@@ -384,6 +384,63 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("重读目录未找到已更新的文件名称与版本")
 	}
 	t.Log("Web 重命名联测通过：同一 ID 更新到版本 2，原键重试结果一致，重名及过期版本返回 409，跨账号返回 404")
+
+	// 15. 同名目标拒绝移动，随后用原版本移到另一层目录。
+	move := func(targetParentID, revision, key string) *http.Request {
+		t.Helper()
+		body, err := json.Marshal(dto.MoveEntryRequest{TargetParentID: targetParentID, ExpectedRevision: revision})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/entries/"+entry.ID+"/move", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+renewed.Data.AccessToken)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", key)
+		request.Header.Set("Origin", baseURL)
+		return request
+	}
+	var collision dto.CreateDirectoryResponse
+	read(createFolder(renewed.Data.AccessToken, rootFolder.ID, renamedFile, "web-move-collision-fixture"), http.StatusCreated, &collision)
+	var moveConflict dto.ErrorResponse
+	read(move(rootFolder.ID, entry.Revision, "web-move-name-conflict"), http.StatusConflict, &moveConflict)
+	if moveConflict.Error.Code != "NAME_CONFLICT" {
+		t.Fatal("移动的同名冲突响应不符", moveConflict.Error)
+	}
+
+	const moveKey = "986be2cc-dbb9-467e-922d-1867660e689f"
+	var moved, moveReplay dto.MoveEntryResponse
+	read(move(nestedFolder.ID, entry.Revision, moveKey), http.StatusOK, &moved)
+	read(move(nestedFolder.ID, entry.Revision, moveKey), http.StatusOK, &moveReplay)
+	movedEntry := moved.Data.Entry
+	if movedEntry.ID != entry.ID || movedEntry.ParentID == nil || *movedEntry.ParentID != nestedFolder.ID ||
+		movedEntry.Name != entry.Name || movedEntry.Revision != "3" ||
+		moveReplay.Data.Entry.ID != entry.ID || moveReplay.Data.Entry.Revision != movedEntry.Revision {
+		t.Fatal("移动成功或同键重试未返回预期条目")
+	}
+
+	// 16. 确认旧版本和他人目标仍被拒绝，重读两端核对唯一位置。
+	var staleMove dto.ErrorResponse
+	read(move(parentID, entry.Revision, "web-move-stale"), http.StatusConflict, &staleMove)
+	if staleMove.Error.Code != "REVISION_CONFLICT" || staleMove.Error.Details["current_revision"] != movedEntry.Revision {
+		t.Fatal("移动版本冲突响应不符", staleMove.Error)
+	}
+	var foreignMove dto.ErrorResponse
+	read(move(emptyProfile.Data.RootEntryID, movedEntry.Revision, "web-move-foreign"), http.StatusNotFound, &foreignMove)
+	if foreignMove.Error.Code != "ENTRY_NOT_FOUND" {
+		t.Fatal("移动到其他账号目录的响应不符", foreignMove.Error)
+	}
+	var sourceAfterMove, targetAfterMove dto.DirectoryPageResponse
+	read(getDirectory(renewed.Data.AccessToken, parentID, nil), http.StatusOK, &sourceAfterMove)
+	read(getDirectory(renewed.Data.AccessToken, nestedFolder.ID, nil), http.StatusOK, &targetAfterMove)
+	if slices.ContainsFunc(sourceAfterMove.Data.Items, func(item dto.DirectoryEntrySummary) bool { return item.ID == entry.ID }) ||
+		len(targetAfterMove.Data.Items) != 1 || targetAfterMove.Data.Items[0].ID != entry.ID ||
+		targetAfterMove.Data.Items[0].Revision != movedEntry.Revision {
+		t.Fatal("移动后重读源与目标目录的结果不符")
+	}
+	t.Log("Web 单项移动联测通过：同名和过期版本返回 409，跨账号返回 404，移动后仅目标有原 ID 与新版本")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

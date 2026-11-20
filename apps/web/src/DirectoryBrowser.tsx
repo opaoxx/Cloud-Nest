@@ -1,86 +1,28 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from 'antd'
-import type { DirectoryBreadcrumb, DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryRenamer } from './api/drive'
-import { apiErrorMessage } from './api/http'
+import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer } from './api/drive'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
+import MoveEntryDialog from './MoveEntryDialog'
+import { useDirectoryListing } from './useDirectoryListing'
 
-type DirectoryListing = {
-  items: DirectoryEntry[]
-  breadcrumbs: DirectoryBreadcrumb[]
-  nextCursor: string | null
-  status: 'loading' | 'ready' | 'error'
-  errorMessage: string
-}
+type EntryAction = { kind: 'create' } | { kind: 'rename' | 'move'; entry: DirectoryEntry }
 
-type DirectoryRequest = {
-  directoryId: string
-  cursor: string | null
-}
-
-type NameAction = { kind: 'create' } | { kind: 'rename'; entry: DirectoryEntry }
-
-export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry }: {
+export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry, moveEntry }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
   createDirectory: DirectoryCreator
   renameEntry: EntryRenamer
+  moveEntry: EntryMover
 }) {
-  const [request, setRequest] = useState<DirectoryRequest>({ directoryId: rootEntryId, cursor: null })
-  const [nameAction, setNameAction] = useState<NameAction | null>(null)
-  const [listing, setListing] = useState<DirectoryListing>({
-    items: [], breadcrumbs: [], nextCursor: null, status: 'loading', errorMessage: '',
-  })
-
-  useEffect(() => {
-    const controller = new AbortController()
-
-    async function loadPage() {
-      try {
-        // 1. 读取目标目录的一页子项和服务端确认的路径。
-        const page = await readDirectoryPage(request.directoryId, request.cursor, controller.signal)
-        if (controller.signal.aborted) return
-
-        // 2. 首页从空列表开始，后续页按字符串 ID 合并已有记录。
-        setListing(previous => {
-          const itemsById = new Map<string, DirectoryEntry>()
-          if (request.cursor !== null) {
-            for (const item of previous.items) itemsById.set(item.id, item)
-          }
-          for (const item of page.items) itemsById.set(item.id, item)
-          return {
-            items: [...itemsById.values()],
-            breadcrumbs: page.breadcrumbs,
-            nextCursor: page.nextCursor,
-            status: 'ready',
-            errorMessage: '',
-          }
-        })
-      } catch (error) {
-        // 3. 读取失败时保留已展示条目，允许重试当前页。
-        if (!controller.signal.aborted) {
-          setListing(previous => ({ ...previous, status: 'error', errorMessage: apiErrorMessage(error) }))
-        }
-      }
-    }
-
-    void loadPage()
-    return () => controller.abort()
-  }, [readDirectoryPage, request])
-
-  function requestPage(cursor: string | null) {
-    setListing(previous => ({ ...previous, status: 'loading', errorMessage: '' }))
-    setRequest({ directoryId: request.directoryId, cursor })
-  }
+  const { request, listing, requestPage, openDirectory } = useDirectoryListing(rootEntryId, readDirectoryPage)
+  const [entryAction, setEntryAction] = useState<EntryAction | null>(null)
 
   // 1. 切换目录时从首页加载，清除上一目录的条目和分页游标。
-  function openDirectory(directoryId: string) {
+  function navigateToDirectory(directoryId: string) {
     if (directoryId === request.directoryId) return
-    setNameAction(null)
-    setListing(previous => ({
-      ...previous, items: [], nextCursor: null, status: 'loading', errorMessage: '',
-    }))
-    setRequest({ directoryId, cursor: null })
+    setEntryAction(null)
+    openDirectory(directoryId)
   }
 
   // 2. 使用服务端确认的目录路径生成当前位置和上级入口。
@@ -89,12 +31,12 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
   const currentDirectory = listing.breadcrumbs.at(-1)
 
   // 1. 打开名称表单时记住待修改条目及其版本。
-  const renameTarget = nameAction?.kind === 'rename' ? nameAction.entry : null
+  const renameTarget = entryAction?.kind === 'rename' ? entryAction.entry : null
   const canModify = currentDirectory?.id === request.directoryId && listing.status === 'ready'
 
   // 2. 确认成功后从当前目录的首页重新读取。
-  function refreshAfterNaming() {
-    setNameAction(null)
+  function refreshAfterChange() {
+    setEntryAction(null)
     requestPage(null)
   }
 
@@ -111,7 +53,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
                 <li key={crumb.id}>
                   {index > 0 && <span aria-hidden="true">/</span>}
                   {isCurrent ? <span aria-current="location">{label}</span> : (
-                    <button type="button" className="directory-link" onClick={() => openDirectory(crumb.id)}>
+                    <button type="button" className="directory-link" onClick={() => navigateToDirectory(crumb.id)}>
                       {label}
                     </button>
                   )}
@@ -123,9 +65,9 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
       )}
       {currentDirectory?.id === request.directoryId && (
         <Button className="create-directory-trigger" disabled={!canModify}
-          onClick={() => setNameAction({ kind: 'create' })}>新建文件夹</Button>
+          onClick={() => setEntryAction({ kind: 'create' })}>新建文件夹</Button>
       )}
-      {nameAction && currentDirectory?.id === request.directoryId && (
+      {entryAction && entryAction.kind !== 'move' && currentDirectory?.id === request.directoryId && (
         <EntryNameDialog title={renameTarget ? '重命名' : '新建文件夹'}
           inputLabel={renameTarget ? '新名称' : '文件夹名称'}
           confirmLabel={renameTarget ? '保存名称' : '创建文件夹'}
@@ -134,7 +76,12 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
           submitName={(name, idempotencyKey) => renameTarget ? renameEntry({
             entryId: renameTarget.id, expectedRevision: renameTarget.revision, name, idempotencyKey,
           }) : createDirectory({ parentId: currentDirectory.id, name, idempotencyKey })}
-          onClose={() => setNameAction(null)} onSaved={refreshAfterNaming} />
+          onClose={() => setEntryAction(null)} onSaved={refreshAfterChange} />
+      )}
+      {entryAction?.kind === 'move' && (
+        <MoveEntryDialog entry={entryAction.entry} rootEntryId={rootEntryId}
+          readDirectoryPage={readDirectoryPage} moveEntry={moveEntry}
+          onClose={() => setEntryAction(null)} onSaved={refreshAfterChange} />
       )}
       {listing.items.length > 0 && (
         <table className="directory-items" aria-label={`${directoryLabel}条目`}>
@@ -143,14 +90,20 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
             {listing.items.map(item => (
               <tr key={item.id}>
                 <td>{item.type === 'DIR' ? (
-                  <button type="button" className="directory-link" onClick={() => openDirectory(item.id)}>
+                  <button type="button" className="directory-link" onClick={() => navigateToDirectory(item.id)}>
                     {item.name}
                   </button>
                 ) : item.name}</td>
                 <td>{item.type === 'DIR' ? '文件夹' : '文件'}</td>
                 <td>{item.type === 'DIR' ? '—' : formatSize(item.sizeBytes)}</td>
-                <td><button type="button" className="directory-link" aria-label={`重命名 ${item.name}`}
-                  disabled={!canModify} onClick={() => setNameAction({ kind: 'rename', entry: item })}>重命名</button></td>
+                <td>
+                  <div className="directory-actions">
+                    <button type="button" className="directory-link" aria-label={`重命名 ${item.name}`}
+                      disabled={!canModify} onClick={() => setEntryAction({ kind: 'rename', entry: item })}>重命名</button>
+                    <button type="button" className="directory-link" aria-label={`移动 ${item.name}`}
+                      disabled={!canModify} onClick={() => setEntryAction({ kind: 'move', entry: item })}>移动</button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>

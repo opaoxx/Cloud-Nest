@@ -38,6 +38,36 @@ interface EntryRename {
 
 export type EntryRenamer = (rename: EntryRename) => Promise<void>
 
+interface EntryMove {
+  entryId: string
+  targetParentId: string
+  expectedRevision: string
+  idempotencyKey: string
+}
+
+export type EntryMover = (move: EntryMove) => Promise<void>
+
+export async function moveEntry(accessToken: string, move: EntryMove): Promise<void> {
+  // 1. 使用现有移动接口提交目标父目录及预期版本。
+  const data = await requestData(`/api/v1/entries/${encodeURIComponent(move.entryId)}/move`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': move.idempotencyKey,
+    },
+    body: JSON.stringify({ target_parent_id: move.targetParentId, expected_revision: move.expectedRevision }),
+    redirect: 'error',
+  })
+
+  // 2. 核对响应的条目及目标父目录。
+  if (!isRecord(data.entry) || data.entry.id !== move.entryId ||
+      data.entry.parent_id !== move.targetParentId || data.entry.status !== 'ACTIVE' ||
+      typeof data.entry.revision !== 'string') {
+    throw new ApiError(200, '服务返回的移动结果格式有误。')
+  }
+}
+
 export async function renameEntry(accessToken: string, rename: EntryRename): Promise<void> {
   // 1. 用条目 ID、原版本和幂等键提交一次重命名。
   const data = await requestData(`/api/v1/entries/${encodeURIComponent(rename.entryId)}`, {
