@@ -25,6 +25,8 @@ pnpm --dir apps/web dev
 
 本 Demo 独立运行，不需要启动后端或容器。具体能力与演示边界见 [Web Demo 说明](apps/web/README.md)。
 
+本地也可用 `VITE_CLOUDNEST_DATA_MODE=api` 进入真实登录模式，通过同源代理登录并读取本人资料。[Web 登录配置与复验](apps/web/README.md#真实登录模式)
+
 ## 开发环境
 
 在项目根目录打开 PowerShell：

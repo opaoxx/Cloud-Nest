@@ -1,6 +1,6 @@
 # CloudNest Web 页面 Demo
 
-用于从用户角度体验云盘界面的本地交互原型，采用 React、TypeScript、Vite、Ant Design 和 Lucide 图标。当前版本重点验证文件浏览、整理和传输流程是否顺手，尚未连接后端、数据库或对象存储。
+采用 React、TypeScript、Vite、Ant Design 和 Lucide 图标。默认进入本地 Demo，可体验文件浏览、整理和传输交互。另有一个可选的 API 模式，用于真实登录和查看本人资料。
 
 ## 启动
 
@@ -18,6 +18,18 @@ pnpm --dir apps/web dev
 ~~~powershell
 pnpm --dir apps/web build
 ~~~
+
+## 真实登录模式
+
+设置 API 模式后，Vite 将同源 `/api` 转发到 `CLOUDNEST_WEB_API_TARGET`，其默认地址为 `http://127.0.0.1:18081`。本地后端的 `CLOUDNEST_ALLOWED_ORIGINS` 需要包含实际的 Vite 来源。
+
+~~~powershell
+$env:VITE_CLOUDNEST_DATA_MODE = 'api'
+$env:CLOUDNEST_WEB_API_TARGET = 'http://127.0.0.1:18081'
+pnpm --dir apps/web dev
+~~~
+
+使用本地测试账号登录后，页面会调用 `GET /api/v1/me` 取得显示名称、用户名和配额。Access Token 保存在内存中，浏览器自行管理后端交付的 HttpOnly 刷新 Cookie。当前重新加载页面会回到登录页。[隔离验收与复验命令](../../docs/开发学习记录.md#第-508-步接通-web-登录与本人资料)
 
 ## 可以体验的操作
 

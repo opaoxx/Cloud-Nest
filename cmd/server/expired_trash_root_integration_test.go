@@ -47,28 +47,7 @@ func TestServerExpiredTrashRootIntegration(t *testing.T) {
 		VALUES(1200,1,11,'fixture-retained',CAST('fixture-retained' AS BINARY),'DIR','TRASHED',UTC_TIMESTAMP(6)-INTERVAL 29 DAY,3)`)
 
 	// 2. 启动隔离服务，存储桩只接受桶检查，永久清理使用测试空实现。
-	const bucketName = "fixture-expiry-startup"
-	storageStub := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/"+bucketName+"/" || request.URL.Path == "/"+bucketName {
-			switch {
-			case request.Method == http.MethodHead && request.URL.RawQuery == "":
-				response.WriteHeader(http.StatusOK)
-				return
-			case request.Method == http.MethodGet && request.URL.Query().Has("location"):
-				response.Header().Set("Content-Type", "application/xml")
-				_, _ = io.WriteString(response, "<LocationConstraint>us-east-1</LocationConstraint>")
-				return
-			}
-		}
-		t.Error("隔离存储桩收到桶检查以外的请求", request.Method, request.URL.Path)
-		http.Error(response, "unexpected request", http.StatusBadRequest)
-	}))
-	t.Cleanup(storageStub.Close)
-	t.Setenv("CLOUDNEST_S3_ENDPOINT", storageStub.URL)
-	t.Setenv("CLOUDNEST_S3_PUBLIC_ENDPOINT", storageStub.URL)
-	t.Setenv("CLOUDNEST_S3_BUCKET", bucketName)
-	t.Setenv("CLOUDNEST_S3_ACCESS_KEY", "fixture-key")
-	t.Setenv("CLOUDNEST_S3_SECRET_KEY", "fixture-secret")
+	prepareServerReadOnlyStorageStub(t, "fixture-expiry-startup")
 	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
 	t.Setenv("CLOUDNEST_TEMP_DIR", t.TempDir())
 	t.Setenv("CLOUDNEST_JWT_SECRET", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("e"), 32)))
@@ -169,4 +148,30 @@ func TestServerExpiredTrashRootIntegration(t *testing.T) {
 		t.Fatal("启动参数、隔离范围或首轮汇报不符", logText)
 	}
 	t.Log("首轮标记 100 项，超限和保留期内各 1 项未标记。放行汇报后先停 worker，再关闭数据库池")
+}
+
+// prepareServerReadOnlyStorageStub 只为隔离进程提供本地桶检查接口。
+func prepareServerReadOnlyStorageStub(t *testing.T, bucketName string) {
+	t.Helper()
+	storageStub := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/"+bucketName+"/" || request.URL.Path == "/"+bucketName {
+			switch {
+			case request.Method == http.MethodHead && request.URL.RawQuery == "":
+				response.WriteHeader(http.StatusOK)
+				return
+			case request.Method == http.MethodGet && request.URL.Query().Has("location"):
+				response.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(response, "<LocationConstraint>us-east-1</LocationConstraint>")
+				return
+			}
+		}
+		t.Error("隔离存储桩收到桶检查以外的请求", request.Method, request.URL.Path)
+		http.Error(response, "unexpected request", http.StatusBadRequest)
+	}))
+	t.Cleanup(storageStub.Close)
+	t.Setenv("CLOUDNEST_S3_ENDPOINT", storageStub.URL)
+	t.Setenv("CLOUDNEST_S3_PUBLIC_ENDPOINT", storageStub.URL)
+	t.Setenv("CLOUDNEST_S3_BUCKET", bucketName)
+	t.Setenv("CLOUDNEST_S3_ACCESS_KEY", "fixture-key")
+	t.Setenv("CLOUDNEST_S3_SECRET_KEY", "fixture-secret")
 }

@@ -1,0 +1,94 @@
+import { useState } from 'react'
+import type { FormEvent } from 'react'
+import { Button, Input } from 'antd'
+import { AuthApiError, getCurrentUser, login } from './api/auth'
+import type { CurrentUserProfile } from './api/auth'
+import { formatSize } from './demo'
+import './auth.css'
+
+type WebSession = {
+  accessToken: string
+  profile: CurrentUserProfile
+}
+
+function messageFor(error: unknown): string {
+  return error instanceof AuthApiError ? error.message : '暂时无法连接到服务，请重试。'
+}
+
+export default function AuthPage() {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [session, setSession] = useState<WebSession | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+
+  async function submitLogin(event: FormEvent<HTMLFormElement>) {
+    // 1. 取出本次凭据，清空输入框并开始登录。
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setErrorMessage('')
+    const submittedPassword = password
+    setPassword('')
+    try {
+      // 2. 登录后带 Access Token 读取本人资料，再展示已认证页面。
+      const accessToken = await login(username, submittedPassword)
+      const profile = await getCurrentUser(accessToken)
+      setSession({ accessToken, profile })
+    } catch (error) {
+      // 3. 登录或资料读取失败时，交付可重试的错误提示。
+      setErrorMessage(messageFor(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function readProfileAgain() {
+    // 1. 用当前内存会话重新读取资料。
+    if (!session || busy) return
+    setBusy(true)
+    setErrorMessage('')
+    try {
+      const profile = await getCurrentUser(session.accessToken)
+      setSession({ accessToken: session.accessToken, profile })
+    } catch (error) {
+      // 2. 401 表明需要重新登录，其他失败保留已显示资料。
+      if (error instanceof AuthApiError && error.status === 401) setSession(null)
+      setErrorMessage(messageFor(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card" aria-labelledby="auth-title">
+        <div className="auth-brand"><img src="/favicon.svg" alt="" />CloudNest</div>
+        <h1 id="auth-title">{session ? '本人资料' : '登录'}</h1>
+        {errorMessage && <p className="auth-error" role="alert">{errorMessage}</p>}
+        {session ? (
+          <>
+            <dl className="auth-profile">
+              <div><dt>显示名称</dt><dd>{session.profile.user.display_name}</dd></div>
+              <div><dt>用户名</dt><dd>{session.profile.user.username}</dd></div>
+              <div><dt>总配额</dt><dd>{formatSize(session.profile.quota_bytes)}</dd></div>
+              <div><dt>已用空间</dt><dd>{formatSize(session.profile.used_bytes)}</dd></div>
+              <div><dt>预占空间</dt><dd>{formatSize(session.profile.reserved_bytes)}</dd></div>
+            </dl>
+            <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
+          </>
+        ) : (
+          <form className="auth-form" onSubmit={submitLogin}>
+            <label htmlFor="auth-username">用户名</label>
+            <Input id="auth-username" name="username" autoComplete="username" required value={username}
+              onChange={event => setUsername(event.target.value)} disabled={busy} />
+            <label htmlFor="auth-password">密码</label>
+            <Input.Password id="auth-password" name="password" autoComplete="current-password" required value={password}
+              onChange={event => setPassword(event.target.value)} disabled={busy} />
+            <Button type="primary" htmlType="submit" loading={busy} disabled={busy}>登录</Button>
+          </form>
+        )}
+      </section>
+    </main>
+  )
+}

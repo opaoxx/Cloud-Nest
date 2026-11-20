@@ -3,6 +3,7 @@ import { App as AntApp, ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import 'antd/dist/reset.css'
 import App from './App'
+import AuthPage from './AuthPage'
 import './styles.css'
 
 createRoot(document.getElementById('root')!).render(
@@ -14,6 +15,6 @@ createRoot(document.getElementById('root')!).render(
       fontFamily: 'Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif',
     } }}
   >
-    <AntApp><App /></AntApp>
+    <AntApp>{import.meta.env.VITE_CLOUDNEST_DATA_MODE === 'api' ? <AuthPage /> : <App />}</AntApp>
   </ConfigProvider>,
 )
