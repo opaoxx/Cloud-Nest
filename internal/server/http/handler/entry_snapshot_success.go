@@ -7,7 +7,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 )
 
-// writeEntrySnapshotSuccess 负责回收和恢复快照的 HTTP 写入，正文由调用方编码。
+// writeEntrySnapshotSuccess 写出回收、恢复和预检的快照响应，正文由调用方编码。
 func writeEntrySnapshotSuccess(requestContext *gin.Context, prepareResponse func(string) ([]byte, error)) {
 	// 1. 检查响应是否可写以及请求是否取消，设置禁止缓存头。
 	if requestContext.Writer.Written() || requestContext.IsAborted() {

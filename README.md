@@ -967,3 +967,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.PurgePreviewService`，在同一只读快照中生成清理范围与目标版本，快照成功结束后签发凭证。[第 442 步学习记录](docs/开发学习记录.md#第-442-步组合永久清理预检核心服务)
 
 已提供 `dto.NewPurgePreviewData`，将内部结果转换为含完整十进制标识、逻辑字节和 UTC 截止时间的公开数据。[第 443 步学习记录](docs/开发学习记录.md#第-443-步转换永久清理预检成功响应数据)
+
+已提供 `handler.PurgePreviewSuccess`，将预检结果写为带当次请求 ID 和禁止缓存响应头的 HTTP 200。[第 444 步学习记录](docs/开发学习记录.md#第-444-步交付永久清理预检成功响应)
