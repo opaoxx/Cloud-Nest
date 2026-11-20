@@ -13,6 +13,12 @@ import (
 	"gorm.io/gorm"
 )
 
+var storedObjectReadColumns = [...]string{
+	"id", "owner_user_id", "provider", "bucket", "object_key", "storage_version_id",
+	"file_size", "verified_sha256", "status", "dedup_hash", "storage_etag", "verified_at",
+	"unreferenced_at", "gc_after", "last_error_code", "created_at", "updated_at",
+}
+
 // FindUserStoredObject 按可信用户归属读取物理对象，保留全部合法生命周期状态。
 // 缺失返回 ErrStoredObjectNotFound，异常记录返回 ErrInvalidStoredObjectData。
 // 返回值独立持有可空字段，具体操作的授权和写入由上层用户事务复核。
@@ -46,9 +52,7 @@ func readStoredObject(ctx context.Context, query *gorm.DB, userID uint64) (*doma
 	// 2. 在调用方指定的范围内读取十七列。
 	var record models.StoredObject
 	queryError := query.WithContext(queryContext).
-		Select("id", "owner_user_id", "provider", "bucket", "object_key", "storage_version_id",
-			"file_size", "verified_sha256", "status", "dedup_hash", "storage_etag", "verified_at",
-			"unreferenced_at", "gc_after", "last_error_code", "created_at", "updated_at").
+		Select(storedObjectReadColumns[:]).
 		Take(&record).Error
 
 	// 3. 处理取消、未找到及数据库故障。
@@ -62,9 +66,25 @@ func readStoredObject(ctx context.Context, query *gorm.DB, userID uint64) (*doma
 		return nil, fmt.Errorf("查询存储对象失败: %w", queryError)
 	}
 
-	// 4. 核对归属、存储位置、状态、摘要及回收约束。
+	// 4. 核对归属，转换当前对象记录。
+	if record.OwnerUserID != userID {
+		return nil, domain.ErrInvalidStoredObjectData
+	}
+	object, err := mapStoredObjectRecord(record)
+	if err != nil {
+		return nil, err
+	}
+	if err := queryContext.Err(); err != nil {
+		return nil, fmt.Errorf("查询存储对象已取消: %w", err)
+	}
+	return object, nil
+}
+
+// mapStoredObjectRecord 统一转换单条读取与批量扫描的对象记录。
+func mapStoredObjectRecord(record models.StoredObject) (*domain.StoredObject, error) {
+	// 1. 核对标识、存储位置、状态、摘要及回收约束。
 	status := domain.StoredObjectStatus(record.Status)
-	if record.ID == 0 || record.OwnerUserID != userID || !status.IsValid() ||
+	if record.ID == 0 || record.OwnerUserID == 0 || !status.IsValid() ||
 		record.Provider == "" || record.Bucket == "" || record.ObjectKey == "" {
 		return nil, domain.ErrInvalidStoredObjectData
 	}
@@ -94,7 +114,7 @@ func readStoredObject(ctx context.Context, query *gorm.DB, userID uint64) (*doma
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 
-	// 5. 检查时间并复制摘要及可空字段。
+	// 2. 检查时间并复制摘要及可空字段。
 	for _, stamp := range []*time.Time{record.VerifiedAt, record.UnreferencedAt, record.GCAfter, &record.CreatedAt, &record.UpdatedAt} {
 		if stamp != nil && (stamp.UTC().Year() < 1000 || stamp.UTC().Year() > 9999 || stamp.Nanosecond()%1000 != 0) {
 			return nil, domain.ErrInvalidStoredObjectData
@@ -134,9 +154,5 @@ func readStoredObject(ctx context.Context, query *gorm.DB, userID uint64) (*doma
 		}
 	}
 
-	// 6. 复查取消，返回独立领域记录。
-	if err := queryContext.Err(); err != nil {
-		return nil, fmt.Errorf("查询存储对象已取消: %w", err)
-	}
 	return result, nil
 }

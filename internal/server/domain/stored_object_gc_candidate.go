@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// MaxStoredObjectGCCandidates 限定一次到期对象扫描返回的数量。
+// MaxStoredObjectGCCandidates 限定一次对象回收扫描返回的数量。
 const MaxStoredObjectGCCandidates = 100
 
 // ErrStoredObjectGCCandidateStale 表示当前对象状态或计时已不符合扫描候选。

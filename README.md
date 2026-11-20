@@ -1055,3 +1055,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.WithStoredObjectGCTransaction`，在用户锁和对象锁下复核到期候选，再将当前对象交给事务回调。[第 486 步学习记录](docs/开发学习记录.md#第-486-步锁定并复核待回收对象)
 
 已提供 `Store.ClaimStoredObjectGC`，复核到期候选后条件写入 `DELETING`，提交后交付对象记录。[第 487 步学习记录](docs/开发学习记录.md#第-487-步将到期对象标记为删除中)
+
+已提供 `Store.ListDeletingStoredObjects`，从 MySQL 限量恢复已提交的删除记录和存储位置。[第 488 步学习记录](docs/开发学习记录.md#第-488-步扫描删除中的对象以恢复回收)
