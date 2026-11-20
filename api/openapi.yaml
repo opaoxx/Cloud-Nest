@@ -2277,6 +2277,7 @@ components:
       description: |
         expected_revision 取自已读取的目录项，使用非零 uint64 十进制字符串，服务端校验至 18446744073709551615。
         purpose 使用准确小写值，两个字段均不得为空。目录项 ID 来自路径，身份来自认证上下文。
+        JSON 成功解码后按 expected_revision、purpose 的顺序校验，缺失、null 或非法值定位相应字段。
       example:
         expected_revision: '3'
         purpose: download
