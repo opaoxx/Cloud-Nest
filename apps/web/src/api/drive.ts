@@ -36,6 +36,32 @@ interface TrashPage {
 
 export type TrashPageReader = (cursor: string | null, signal: AbortSignal) => Promise<TrashPage>
 
+export interface PurgePreviewScope {
+  fileCount: number
+  directoryCount: number
+  logicalBytes: string
+}
+
+export type PurgePreviewReader = (entryId: string, signal: AbortSignal) => Promise<PurgePreviewScope>
+
+export async function readPurgePreview(accessToken: string, entryId: string, signal: AbortSignal): Promise<PurgePreviewScope> {
+  // 1. 使用现有 GET 读取范围。
+  const data = await requestData(`/api/v1/trash/${encodeURIComponent(entryId)}/purge-preview`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal,
+  })
+
+  // 2. 只交付展示字段，逻辑字节按字符串保留精度。
+  const { file_count: fileCount, directory_count: directoryCount, logical_bytes: logicalBytes } = data
+  if (data.entry_id !== entryId || !isByteCount(fileCount) || !isByteCount(directoryCount) ||
+      fileCount + directoryCount < 1 || fileCount + directoryCount > 10000 ||
+      typeof logicalBytes !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(logicalBytes)) {
+    throw new ApiError(200, '服务返回的清理预检范围有误。')
+  }
+  return { fileCount, directoryCount, logicalBytes }
+}
+
 interface EntryRestore {
   entryId: string
   expectedRevision: string

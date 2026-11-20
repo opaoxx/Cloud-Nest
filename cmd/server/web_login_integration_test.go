@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -652,8 +653,12 @@ func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {
 			t.Fatal(err)
 		}
 	}
+	return startServerWebFixture(t, ctx, databaseName, run)
+}
 
-	// 2. 给真实后端和 Vite 分配本机端口，Origin 白名单指向该 Vite 实例。
+func startServerWebFixture(t *testing.T, ctx context.Context, databaseName string, runServer func(context.Context, *slog.Logger) error) string {
+	t.Helper()
+	// 1. 给真实后端和 Vite 分配本机端口，Origin 白名单指向该 Vite 实例。
 	apiAddress, webAddress := reserveWebLoginAddress(t), reserveWebLoginAddress(t)
 	baseURL := "http://" + webAddress
 	t.Setenv("CLOUDNEST_HTTP_ADDR", apiAddress)
@@ -666,7 +671,7 @@ func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {
 	t.Setenv("CLOUDNEST_WEB_API_TARGET", "http://"+apiAddress)
 	apiContext, stopAPI := context.WithCancel(ctx)
 	apiDone := make(chan error, 1)
-	go func() { apiDone <- run(apiContext, logging.New(io.Discard)) }()
+	go func() { apiDone <- runServer(apiContext, logging.New(io.Discard)) }()
 	t.Cleanup(func() {
 		stopAPI()
 		select {
@@ -703,7 +708,7 @@ func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {
 		}
 	})
 
-	// 3. 等待 Vite 页面可访问，再交给联测。
+	// 2. 等待 Vite 页面可访问，再交给联测。
 	ticker := time.NewTicker(30 * time.Millisecond)
 	defer ticker.Stop()
 	client := &http.Client{Timeout: time.Second}

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Button } from 'antd'
-import type { DirectoryBreadcrumb, DirectoryPageReader, EntryRestorer, RestoredEntryLocation, TrashEntrySummary, TrashPageReader } from './api/drive'
+import type { DirectoryBreadcrumb, DirectoryPageReader, EntryRestorer, PurgePreviewReader, RestoredEntryLocation, TrashEntrySummary, TrashPageReader } from './api/drive'
 import { apiErrorMessage } from './api/http'
 import { formatDate } from './demo'
 import EntryConfirmationDialog from './EntryConfirmationDialog'
+import PurgePreviewDialog from './PurgePreviewDialog'
 
 type TrashListing = {
   items: TrashEntrySummary[]
@@ -16,10 +17,11 @@ function formatDirectoryPath(path: DirectoryBreadcrumb[]) {
   return path.map(directory => directory.name || '根目录').join(' / ')
 }
 
-export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectoryPage, restoreEntry }: {
+export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectoryPage, readPreview, restoreEntry }: {
   rootEntryId: string
   readTrashPage: TrashPageReader
   readDirectoryPage: DirectoryPageReader
+  readPreview: PurgePreviewReader
   restoreEntry: EntryRestorer
 }) {
   const [request, setRequest] = useState<{ cursor: string | null }>({ cursor: null })
@@ -27,6 +29,7 @@ export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectory
     items: [], nextCursor: null, status: 'loading', errorMessage: '',
   })
   const [restoreTarget, setRestoreTarget] = useState<TrashEntrySummary | null>(null)
+  const [previewTarget, setPreviewTarget] = useState<TrashEntrySummary | null>(null)
   const [restored, setRestored] = useState<RestoredEntryLocation | null>(null)
   const [restoredPath, setRestoredPath] = useState<DirectoryBreadcrumb[] | null>(null)
 
@@ -100,6 +103,10 @@ export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectory
           confirmText="恢复条目" onClose={() => setRestoreTarget(null)}
           onConfirm={idempotencyKey => confirmRestore(restoreTarget, idempotencyKey)} />
       )}
+      {previewTarget && (
+        <PurgePreviewDialog target={previewTarget} originalLocation={formatDirectoryPath(previewTarget.originalPath)}
+          readPreview={readPreview} onClose={() => setPreviewTarget(null)} />
+      )}
       {listing.items.length > 0 && (
         <table className="directory-items trash-items" aria-label="已回收条目">
           <thead><tr><th scope="col">名称</th><th scope="col">原位置</th><th scope="col">回收时间</th><th scope="col">操作</th></tr></thead>
@@ -109,8 +116,14 @@ export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectory
                 <td>{entry.name}</td>
                 <td>{formatDirectoryPath(entry.originalPath)}</td>
                 <td><time dateTime={entry.deletedAt}>{formatDate(Date.parse(entry.deletedAt))}</time></td>
-                <td><button type="button" className="directory-link" aria-label={`恢复 ${entry.name}`}
-                  disabled={listing.status !== 'ready'} onClick={() => setRestoreTarget(entry)}>恢复</button></td>
+                <td>
+                  <div className="directory-actions">
+                    <button type="button" className="directory-link" aria-label={`恢复 ${entry.name}`}
+                      disabled={listing.status !== 'ready'} onClick={() => setRestoreTarget(entry)}>恢复</button>
+                    <button type="button" className="directory-link" aria-label={`清理预检 ${entry.name}`}
+                      disabled={listing.status !== 'ready'} onClick={() => setPreviewTarget(entry)}>清理预检</button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>

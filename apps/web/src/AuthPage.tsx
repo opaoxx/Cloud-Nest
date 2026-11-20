@@ -3,8 +3,8 @@ import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
-import { createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, renameEntry, restoreEntry, trashEntry } from './api/drive'
-import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, TrashPageReader } from './api/drive'
+import { createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, renameEntry, restoreEntry, trashEntry } from './api/drive'
+import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgePreviewReader, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
 import TrashBrowser from './TrashBrowser'
@@ -65,6 +65,13 @@ export default function AuthPage() {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
     return listTrashPage(session.accessToken, cursor, signal)
+  }, [])
+
+  const readPreview = useCallback<PurgePreviewReader>(async (entryId, signal) => {
+    // 使用当前会话读取清理范围，预检窗口处理读取失败。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return readPurgePreview(session.accessToken, entryId, signal)
   }, [])
 
   const submitDirectoryCreation: DirectoryCreator = async creation => {
@@ -206,7 +213,7 @@ export default function AuthPage() {
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
             {view === 'trash' && <TrashBrowser rootEntryId={profile.root_entry_id} readTrashPage={readTrashPage}
-              readDirectoryPage={readDirectoryPage} restoreEntry={submitEntryRestore} />}
+              readDirectoryPage={readDirectoryPage} readPreview={readPreview} restoreEntry={submitEntryRestore} />}
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>
