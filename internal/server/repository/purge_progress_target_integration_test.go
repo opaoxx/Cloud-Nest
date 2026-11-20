@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestFindUserPurgeProgressTargetIntegration(t *testing.T) {
@@ -69,7 +70,37 @@ func TestFindUserPurgeProgressTargetIntegration(t *testing.T) {
 		t.Fatal("应保留调用方取消错误", err)
 	}
 
-	// 3. 让另一个连接提交清理完成，验证旧快照和新读取各自的状态。
+	// 3. 让服务使用同一快照中的真实记录，判断不同目录项的查询资格。
+	t.Run("progress target eligibility", func(t *testing.T) {
+		err := store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *Store) error {
+			for _, scenario := range []struct {
+				entryID uint64
+				status  string
+				want    error
+			}{
+				{11, "", domain.ErrFileEntryNotFound},
+				{12, "", domain.ErrFileEntryNotFound},
+				{14, "", domain.ErrFileEntryNotFound},
+				{17, "PURGING", nil},
+				{18, "PURGED", nil},
+				{21, "", domain.ErrFileEntryNotFound},
+				{22, "", domain.ErrFileEntryNotFound},
+				{99, "", domain.ErrFileEntryNotFound},
+			} {
+				target, err := service.ReadPurgeProgressTarget(snapshotContext, actor, scenario.entryID, snapshotStore)
+				if !errors.Is(err, scenario.want) || (target == nil) != (scenario.want != nil) ||
+					(target != nil && target.Status != scenario.status) {
+					return fmt.Errorf("目标 %d 返回 %+v、错误 %v，预期状态 %q、错误 %v", scenario.entryID, target, err, scenario.status, scenario.want)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// 4. 让另一个连接提交清理完成，验证旧快照和新读取各自的状态。
 	t.Run("completion visible after snapshot", func(t *testing.T) {
 		err := store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *Store) error {
 			before, err := snapshotStore.FindUserPurgeProgressTarget(snapshotContext, actor.UserID, 17)
@@ -104,7 +135,7 @@ func TestFindUserPurgeProgressTargetIntegration(t *testing.T) {
 		}
 	})
 
-	// 4. 关闭测试连接，确认数据库故障仍与目标缺失区分。
+	// 5. 关闭测试连接，确认数据库故障仍与目标缺失区分。
 	if err := pool.Close(); err != nil {
 		t.Fatal(err)
 	}
