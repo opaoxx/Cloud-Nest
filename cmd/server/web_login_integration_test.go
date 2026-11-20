@@ -443,13 +443,13 @@ func TestServerWebLoginIntegration(t *testing.T) {
 	t.Log("Web 单项移动联测通过：同名和过期版本返回 409，跨账号返回 404，移动后仅目标有原 ID 与新版本")
 
 	// 17. 提交过期版本和其他账号的回收请求，确认文件仍在原位置。
-	trash := func(accessToken, revision, key string) *http.Request {
+	trash := func(accessToken, entryID, revision, key string) *http.Request {
 		t.Helper()
 		body, err := json.Marshal(dto.TrashEntryRequest{ExpectedRevision: &revision})
 		if err != nil {
 			t.Fatal(err)
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/entries/"+movedEntry.ID+"/trash", bytes.NewReader(body))
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/entries/"+entryID+"/trash", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -460,11 +460,11 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		return request
 	}
 	var staleTrash, foreignTrash dto.ErrorResponse
-	read(trash(renewed.Data.AccessToken, entry.Revision, "web-trash-stale"), http.StatusConflict, &staleTrash)
+	read(trash(renewed.Data.AccessToken, movedEntry.ID, entry.Revision, "web-trash-stale"), http.StatusConflict, &staleTrash)
 	if staleTrash.Error.Code != "REVISION_CONFLICT" || staleTrash.Error.Details["current_revision"] != movedEntry.Revision {
 		t.Fatal("回收版本冲突响应不符", staleTrash.Error)
 	}
-	read(trash(emptyUser.Data.AccessToken, movedEntry.Revision, "web-trash-foreign"), http.StatusNotFound, &foreignTrash)
+	read(trash(emptyUser.Data.AccessToken, movedEntry.ID, movedEntry.Revision, "web-trash-foreign"), http.StatusNotFound, &foreignTrash)
 	if foreignTrash.Error.Code != "ENTRY_NOT_FOUND" {
 		t.Fatal("回收其他账号条目的响应不符", foreignTrash.Error)
 	}
@@ -477,8 +477,8 @@ func TestServerWebLoginIntegration(t *testing.T) {
 	// 18. 用当前版本回收，核对原目录、回收站和已用空间。
 	const trashKey = "77097013-ddbb-44f3-a82e-9b68aa63239a"
 	var trashed, trashReplay dto.TrashEntryResponse
-	read(trash(renewed.Data.AccessToken, movedEntry.Revision, trashKey), http.StatusOK, &trashed)
-	read(trash(renewed.Data.AccessToken, movedEntry.Revision, trashKey), http.StatusOK, &trashReplay)
+	read(trash(renewed.Data.AccessToken, movedEntry.ID, movedEntry.Revision, trashKey), http.StatusOK, &trashed)
+	read(trash(renewed.Data.AccessToken, movedEntry.ID, movedEntry.Revision, trashKey), http.StatusOK, &trashReplay)
 	trashSnapshot := trashed.Data.Entry
 	if trashSnapshot.ID != movedEntry.ID || trashSnapshot.ParentID != nestedFolder.ID ||
 		trashSnapshot.Status != "TRASHED" || trashSnapshot.Revision != "4" || trashSnapshot.DeletedAt.IsZero() ||
@@ -531,6 +531,80 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("回收站游标绑定或认证拒绝响应不符")
 	}
 	t.Log("Web 回收站列表联测通过：含原位置的 50 项首页、2 项续页、独立账号空列表，跨账号游标及匿名请求被拒")
+
+	// 21. 拒绝过期版本和其他账号；用当前版本恢复文件至原父目录。
+	restore := func(accessToken, entryID, revision, key string) *http.Request {
+		t.Helper()
+		body, err := json.Marshal(dto.RestoreEntryRequest{ExpectedRevision: &revision})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/trash/"+entryID+"/restore", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", key)
+		request.Header.Set("Origin", baseURL)
+		return request
+	}
+	var staleRestore, foreignRestore dto.ErrorResponse
+	read(restore(renewed.Data.AccessToken, trashSnapshot.ID, movedEntry.Revision, "web-restore-stale"), http.StatusConflict, &staleRestore)
+	read(restore(emptyUser.Data.AccessToken, trashSnapshot.ID, trashSnapshot.Revision, "web-restore-foreign"), http.StatusNotFound, &foreignRestore)
+	if staleRestore.Error.Code != "REVISION_CONFLICT" || staleRestore.Error.Details["current_revision"] != trashSnapshot.Revision ||
+		foreignRestore.Error.Code != "ENTRY_NOT_FOUND" {
+		t.Fatal("恢复时的认证或版本边界不符")
+	}
+	const restoreKey = "623dbeda-412a-4f3a-9e1a-fbe6e4d4c875"
+	var restored, restoreReplay dto.RestoreEntryResponse
+	read(restore(renewed.Data.AccessToken, trashSnapshot.ID, trashSnapshot.Revision, restoreKey), http.StatusOK, &restored)
+	read(restore(renewed.Data.AccessToken, trashSnapshot.ID, trashSnapshot.Revision, restoreKey), http.StatusOK, &restoreReplay)
+	restoredFile := restored.Data.Entry
+	if restoredFile.ID != trashSnapshot.ID || restoredFile.ParentID != nestedFolder.ID ||
+		restoredFile.Name != trashSnapshot.Name || restoredFile.Status != "ACTIVE" || restoredFile.Revision != "5" ||
+		restoreReplay.Data != restored.Data || restoreReplay.RequestID == restored.RequestID {
+		t.Fatal("原位恢复或同键重试的结果不符")
+	}
+	var originalAfterRestore dto.DirectoryPageResponse
+	read(getDirectory(renewed.Data.AccessToken, nestedFolder.ID, nil), http.StatusOK, &originalAfterRestore)
+	if !slices.ContainsFunc(originalAfterRestore.Data.Items, func(item dto.DirectoryEntrySummary) bool {
+		return item.ID == restoredFile.ID && item.Name == restoredFile.Name && item.Revision == restoredFile.Revision
+	}) {
+		t.Fatal("原目录中没有已恢复文件")
+	}
+
+	// 22. 原父目录在列表读取后被回收，并在根目录准备同名项。
+	fallbackIndex := slices.IndexFunc(trashPage.Data.Items, func(item dto.TrashListItem) bool { return item.ID == "250" })
+	if fallbackIndex < 0 {
+		t.Fatal("回收站未提供用于回退验证的原版本")
+	}
+	fallback := trashPage.Data.Items[fallbackIndex]
+	var rootCollision dto.CreateDirectoryResponse
+	var trashedParent dto.TrashEntryResponse
+	read(createFolder(renewed.Data.AccessToken, parentID, fallback.Name, "web-restore-root-collision"), http.StatusCreated, &rootCollision)
+	read(trash(renewed.Data.AccessToken, rootFolder.ID, rootFolder.Revision, "web-restore-hide-parent"), http.StatusOK, &trashedParent)
+	var restoredAtRoot dto.RestoreEntryResponse
+	read(restore(renewed.Data.AccessToken, fallback.ID, fallback.Revision, "web-restore-fallback"), http.StatusOK, &restoredAtRoot)
+	fallbackResult := restoredAtRoot.Data.Entry
+	if fallbackResult.ID != fallback.ID || fallbackResult.ParentID != parentID ||
+		fallbackResult.Name != fallback.Name+" (1)" || fallbackResult.Status != "ACTIVE" {
+		t.Fatal("恢复至根目录时的实际位置或编号名称不符")
+	}
+	var rootAfterRestore dto.DirectoryPageResponse
+	var trashAfterRestore dto.TrashPageResponse
+	read(getDirectory(renewed.Data.AccessToken, parentID, nil), http.StatusOK, &rootAfterRestore)
+	read(get("/api/v1/trash", renewed.Data.AccessToken), http.StatusOK, &trashAfterRestore)
+	if !slices.ContainsFunc(rootAfterRestore.Data.Items, func(item dto.DirectoryEntrySummary) bool {
+		return item.ID == fallbackResult.ID && item.Name == fallbackResult.Name
+	}) || !slices.ContainsFunc(rootAfterRestore.Data.Items, func(item dto.DirectoryEntrySummary) bool {
+		return item.ID == rootCollision.Data.Entry.ID && item.Name == fallback.Name
+	}) || slices.ContainsFunc(trashAfterRestore.Data.Items, func(item dto.TrashListItem) bool {
+		return item.ID == restoredFile.ID || item.ID == fallbackResult.ID
+	}) {
+		t.Fatal("恢复后目录与回收站读取结果不一致")
+	}
+	t.Log("Web 单项恢复联测通过：原位恢复、根目录回退与编号、同键结果、过期版本 409 和跨账号 404")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

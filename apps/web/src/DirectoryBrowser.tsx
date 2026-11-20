@@ -4,7 +4,7 @@ import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover,
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
-import TrashEntryDialog from './TrashEntryDialog'
+import EntryConfirmationDialog from './EntryConfirmationDialog'
 import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
@@ -34,6 +34,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
 
   // 1. 打开名称表单时记住待修改条目及其版本。
   const renameTarget = entryAction?.kind === 'rename' ? entryAction.entry : null
+  const trashTarget = entryAction?.kind === 'trash' ? entryAction.entry : null
   const canModify = currentDirectory?.id === request.directoryId && listing.status === 'ready'
 
   // 2. 确认成功后从当前目录的首页重新读取。
@@ -85,9 +86,13 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
           readDirectoryPage={readDirectoryPage} moveEntry={moveEntry}
           onClose={() => setEntryAction(null)} onSaved={refreshAfterChange} />
       )}
-      {entryAction?.kind === 'trash' && (
-        <TrashEntryDialog entry={entryAction.entry} trashEntry={trashEntry}
-          onClose={() => setEntryAction(null)} onSaved={refreshAfterChange} />
+      {trashTarget && (
+        <EntryConfirmationDialog title="确认移入回收站" message={`将「${trashTarget.name}」移入回收站？`}
+          confirmText="移入回收站" danger onClose={() => setEntryAction(null)}
+          onConfirm={async idempotencyKey => {
+            await trashEntry({ entryId: trashTarget.id, expectedRevision: trashTarget.revision, idempotencyKey })
+            refreshAfterChange()
+          }} />
       )}
       {listing.items.length > 0 && (
         <table className="directory-items" aria-label={`${directoryLabel}条目`}>

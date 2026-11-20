@@ -84,8 +84,9 @@
 }
 .directory-items th:first-child { width: 46%; }
 .directory-items th:last-child { width: 22%; }
-.trash-items th:first-child { width: 34%; }
-.trash-items th:last-child { width: 28%; }
+.trash-items th:first-child { width: 28%; }
+.trash-items th:nth-child(3) { width: 24%; }
+.trash-items th:last-child { width: 14%; }
 .directory-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .directory-items + button { margin-top: 12px; }
 .create-directory-trigger { margin-bottom: 10px; }

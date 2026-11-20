@@ -3,8 +3,8 @@ import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
-import { createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, renameEntry, trashEntry } from './api/drive'
-import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher, TrashPageReader } from './api/drive'
+import { createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, renameEntry, restoreEntry, trashEntry } from './api/drive'
+import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
 import TrashBrowser from './TrashBrowser'
@@ -93,6 +93,13 @@ export default function AuthPage() {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
     await trashEntry(session.accessToken, trash)
+  }
+
+  const submitEntryRestore: EntryRestorer = async restore => {
+    // 使用当前内存令牌直接提交一次经用户确认的恢复。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return restoreEntry(session.accessToken, restore)
   }
 
   useEffect(() => {
@@ -198,7 +205,8 @@ export default function AuthPage() {
                 readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation}
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
-            {view === 'trash' && <TrashBrowser readTrashPage={readTrashPage} />}
+            {view === 'trash' && <TrashBrowser rootEntryId={profile.root_entry_id} readTrashPage={readTrashPage}
+              readDirectoryPage={readDirectoryPage} restoreEntry={submitEntryRestore} />}
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>

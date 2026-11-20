@@ -24,6 +24,7 @@ export type DirectoryPageReader = (parentId: string, cursor: string | null, sign
 export interface TrashEntrySummary {
   id: string
   name: string
+  revision: string
   originalPath: DirectoryBreadcrumb[]
   deletedAt: string
 }
@@ -34,6 +35,41 @@ interface TrashPage {
 }
 
 export type TrashPageReader = (cursor: string | null, signal: AbortSignal) => Promise<TrashPage>
+
+interface EntryRestore {
+  entryId: string
+  expectedRevision: string
+  idempotencyKey: string
+}
+
+export interface RestoredEntryLocation {
+  name: string
+  parentId: string
+}
+
+export type EntryRestorer = (restore: EntryRestore) => Promise<RestoredEntryLocation>
+
+export async function restoreEntry(accessToken: string, restore: EntryRestore): Promise<RestoredEntryLocation> {
+  // 1. 使用回收项 ID、原版本及幂等键请求恢复。
+  const data = await requestData(`/api/v1/trash/${encodeURIComponent(restore.entryId)}/restore`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': restore.idempotencyKey,
+    },
+    body: JSON.stringify({ expected_revision: restore.expectedRevision }),
+    redirect: 'error',
+  })
+
+  // 2. 交付服务端返回的实际名称与目标父目录。
+  const entry = data.entry
+  if (!isRecord(entry) || entry.id !== restore.entryId || entry.status !== 'ACTIVE' ||
+      typeof entry.name !== 'string' || !entry.name || typeof entry.parent_id !== 'string' || !entry.parent_id) {
+    throw new ApiError(200, '服务返回的恢复结果格式有误。')
+  }
+  return { name: entry.name, parentId: entry.parent_id }
+}
 
 export async function listTrashPage(accessToken: string, cursor: string | null, signal: AbortSignal): Promise<TrashPage> {
   // 1. 使用当前访问令牌和可选游标读取回收站。
@@ -52,6 +88,7 @@ export async function listTrashPage(accessToken: string, cursor: string | null, 
   const items = data.items.map((item: unknown): TrashEntrySummary => {
     if (!isRecord(item) || typeof item.id !== 'string' || !item.id ||
         typeof item.name !== 'string' || item.status !== 'TRASHED' ||
+        typeof item.revision !== 'string' || !/^[1-9][0-9]{0,19}$/.test(item.revision) ||
         typeof item.deleted_at !== 'string' || !Number.isFinite(Date.parse(item.deleted_at))) {
       throw new ApiError(200, '服务返回的回收站条目格式有误。')
     }
@@ -59,7 +96,7 @@ export async function listTrashPage(accessToken: string, cursor: string | null, 
     if (originalPath.at(-1)?.id !== item.parent_id) {
       throw new ApiError(200, '服务返回的回收站原位置有误。')
     }
-    return { id: item.id, name: item.name, originalPath, deletedAt: item.deleted_at }
+    return { id: item.id, name: item.name, revision: item.revision, originalPath, deletedAt: item.deleted_at }
   })
   return { items, nextCursor }
 }
