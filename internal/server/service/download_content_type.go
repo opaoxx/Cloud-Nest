@@ -24,7 +24,7 @@ var downloadMediaTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9!#$&^_.+-]*/[
 // 预览仅允许已确认的栅格图片和大小符合上限的纯文本。
 func ResolveDownloadContentType(purpose string, storedMIME *string, sizeBytes uint64) (string, error) {
 	// 1. 校验用途，解析已保存的 MIME。
-	if purpose != domain.DownloadPurposeDownload && purpose != domain.DownloadPurposePreview {
+	if !domain.ValidDownloadPurpose(purpose) {
 		return "", domain.ErrInvalidDownloadPurpose
 	}
 	contentType := normalizeDownloadMediaType(storedMIME)

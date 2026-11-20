@@ -1480,7 +1480,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	if uploadStorage != nil {
 		t.Run("upload content", func(t *testing.T) {
-			verifyServerUploadContent(t, ctx, pool, uploadStorage, "http://"+address, foreignToken.Token, webRefreshed.Data.AccessToken)
+			uploadActor := domain.Actor{UserID: foreignSession.UserID, DeviceID: foreignSession.DeviceID, SessionID: foreignSession.ID}
+			verifyServerUploadContent(t, ctx, pool, uploadStorage, uploadActor, "http://"+address, foreignToken.Token, webRefreshed.Data.AccessToken)
 		})
 	}
 	// 两类任务数据跨真实服务重启保持一致，各次请求使用当前请求 ID。

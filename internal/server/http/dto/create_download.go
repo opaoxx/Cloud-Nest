@@ -31,7 +31,7 @@ func ParseCreateDownloadRequest(request CreateDownloadRequest) (*CreateDownloadI
 	}
 
 	// 2. 校验用途是否明确为 download 或 preview。
-	if request.Purpose == nil || (*request.Purpose != domain.DownloadPurposeDownload && *request.Purpose != domain.DownloadPurposePreview) {
+	if request.Purpose == nil || !domain.ValidDownloadPurpose(*request.Purpose) {
 		return nil, &FieldError{Field: "purpose", Message: domain.ErrInvalidDownloadPurpose.Error()}
 	}
 

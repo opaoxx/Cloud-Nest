@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
+	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
 type serverUploadContentBucket struct {
@@ -85,7 +88,7 @@ func prepareServerUploadContentBucket(t *testing.T, ctx context.Context) *server
 	return &serverUploadContentBucket{client: client, name: bucket}
 }
 
-func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, target *serverUploadContentBucket, baseURL, token, otherToken string) {
+func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, target *serverUploadContentBucket, actor domain.Actor, baseURL, token, otherToken string) {
 	t.Helper()
 	store, err := repository.NewStore(pool)
 	if err != nil {
@@ -128,7 +131,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 	}
 
 	before := readServerUploadCreationState(t, ctx, pool)
-	const userID = 3
+	userID := actor.UserID
 	var usedBefore uint64
 	if err := pool.QueryRowContext(ctx, "SELECT used_storage FROM users WHERE id=?", userID).Scan(&usedBefore); err != nil {
 		t.Fatal(err)
@@ -158,11 +161,11 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 			}
 			read := func() (*domain.UploadTask, *domain.StoredObject) {
 				t.Helper()
-				task, err := store.FindUserUploadTask(ctx, 3, taskID.TaskID)
+				task, err := store.FindUserUploadTask(ctx, userID, taskID.TaskID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				object, err := store.FindUserStoredObject(ctx, 3, task.StagedObjectID)
+				object, err := store.FindUserStoredObject(ctx, userID, task.StagedObjectID)
 				if err != nil || object.Bucket != target.name {
 					t.Fatal("任务未绑定本次独占存储桶", err)
 				}
@@ -220,6 +223,22 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 		defer stopWaiting()
 
 		// 2. 从查询接口和数据库核对已发布结果、实测摘要及配额结算。
+		settings, err := config.LoadStorageConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings.Bucket, settings.PublicEndpointURL = target.name, settings.EndpointURL
+		downloadStorage, err := storage.NewClient(ctx, settings)
+		if err != nil {
+			t.Fatal("创建联测下载客户端失败", err)
+		}
+		defer downloadStorage.Close()
+		downloadTargets := service.NewEntryDownloadTargetService(func(requestContext context.Context, read func(context.Context, service.EntryDownloadTargetReader) error) error {
+			return store.WithFileEntrySnapshot(requestContext, func(snapshotContext context.Context, snapshot *repository.Store) error {
+				return read(snapshotContext, snapshot)
+			})
+		})
+		downloads := service.NewEntryDownloadService(downloadTargets.Get, downloadStorage.CheckDownloadObject, downloadStorage.SignDownloadURL)
 		var publishedBytes uint64
 		for _, original := range received {
 			task := awaitServerUploadPublication(t, waitContext, store, userID, original.ID)
@@ -243,6 +262,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 				task.CompletedAt == nil || !confirmed.Data.CompletedAt.Equal(*task.CompletedAt) {
 				t.Fatal("正式完成确认未返回后台实际发布结果", confirmed.Data)
 			}
+			verifyServerPublishedDownload(t, ctx, httpClient, downloads, actor, task)
 			publishedBytes += original.ReservedBytes
 		}
 		var usedAfter uint64
@@ -255,6 +275,39 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 			t.Fatal("从预占转为已用的配额不符", usedBefore, usedAfter, settled)
 		}
 	})
+}
+
+// verifyServerPublishedDownload 用实际发布结果验证内部下载授权和真实 MinIO GET。
+func verifyServerPublishedDownload(t *testing.T, ctx context.Context, httpClient *http.Client, downloads *service.EntryDownloadService, actor domain.Actor, task *domain.UploadTask) {
+	t.Helper()
+	// 1. 以已认证的上传用户请求新发布文件的初始版本。
+	entryID := *task.ResultEntryID
+	result, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload)
+	if err != nil || result == nil || result.ObjectID != *task.PublishedObjectID || result.Revision != 1 ||
+		result.SizeBytes != task.FileSize || result.VerifiedSHA256 != *task.ExpectedSHA256 ||
+		result.MIMEType != "application/octet-stream" || !result.Link.ExpiresAt.After(time.Now()) {
+		t.Fatal("真实发布文件的内部下载授权不符", err)
+	}
+	if blocked, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposePreview); blocked != nil || !errors.Is(err, domain.ErrUnsupportedPreview) {
+		t.Fatal("尚未保存 MIME 的实际发布文件未按规则拒绝预览", err)
+	}
+
+	// 2. 通过签名地址读取对象字节，核对大小、摘要和交付头。
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, result.Link.URL, nil)
+	if err != nil {
+		t.Fatal("无法构造联测签名请求")
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal("实际发布文件的签名链接访问失败")
+	}
+	data, readError := io.ReadAll(io.LimitReader(response.Body, int64(task.FileSize)+1))
+	closeError := response.Body.Close()
+	if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != result.SizeBytes ||
+		sha256.Sum256(data) != result.VerifiedSHA256 || response.Header.Get("Content-Type") != result.MIMEType ||
+		response.Header.Get("Content-Disposition") != result.Disposition {
+		t.Fatal("实际发布文件的远程字节或交付头不符", response.StatusCode)
+	}
 }
 
 // awaitServerUploadPublication 轮询已交给生产 worker 的任务，完成后交还数据库事实。
