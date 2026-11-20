@@ -3,12 +3,15 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -96,6 +99,25 @@ func TestTrashEntryServiceIntegration(t *testing.T) {
 			if err := pool.QueryRowContext(ctx, "SELECT deleted_at FROM file_entries WHERE user_id=? AND id=?", actor.UserID, target.entryID).
 				Scan(&deletedAt); err != nil || !deletedAt.Equal(result.DeletedAt) {
 				t.Fatal("服务回收时间与数据库不符", err)
+			}
+
+			// 核对实际提交的回收结果可直接转换为七字段公开快照。
+			snapshot, err := dto.NewTrashEntryData(result)
+			if err != nil {
+				t.Fatal("无法转换已提交的回收结果", err)
+			}
+			encoded, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal("无法编码公开回收快照", err)
+			}
+			var decoded map[string]map[string]string
+			expectedEntry := map[string]string{
+				"id": strconv.FormatUint(target.entryID, 10), "parent_id": strconv.FormatUint(*result.ParentID, 10),
+				"name": result.Name, "entry_type": result.EntryType, "status": "TRASHED",
+				"revision": strconv.FormatUint(target.revision+1, 10), "deleted_at": deletedAt.UTC().Format(time.RFC3339Nano),
+			}
+			if err := json.Unmarshal(encoded, &decoded); err != nil || len(decoded) != 1 || !reflect.DeepEqual(decoded["entry"], expectedEntry) {
+				t.Fatal("已提交记录的七字段快照不符", string(encoded), err)
 			}
 		}
 		result, err := trash.Trash(ctx, actor, 17, 1)
