@@ -66,7 +66,8 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			if err != nil || fmt.Sprintf("%x", fingerprint) != "bc153a0f7df0fe9c078dab05127989f8c445b325f611c4989b3a506c2e5e921e" {
 				return fmt.Errorf("实际子树指纹为 %x，错误 %v", fingerprint, err)
 			}
-			signer, err := service.NewPurgePreviewSigner(bytes.Repeat([]byte{9}, sha256.Size))
+			masterKey := bytes.Repeat([]byte{9}, sha256.Size)
+			signer, err := service.NewPurgePreviewSigner(masterKey)
 			if err != nil {
 				return err
 			}
@@ -74,6 +75,14 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			credential, err := signer.Sign(target.UserID, target.ID, fingerprint, issuedAt)
 			if err != nil || credential.PreviewDigest == "" || !credential.ExpiresAt.Equal(issuedAt.Add(5*time.Minute)) {
 				return fmt.Errorf("为实际清理范围签发预检凭证失败: %v", err)
+			}
+			verifier, err := service.NewPurgePreviewVerifier(masterKey)
+			if err != nil {
+				return err
+			}
+			verified, err := verifier.Verify(actor.UserID, target.ID, credential.PreviewDigest, issuedAt.Add(time.Minute))
+			if err != nil || verified != fingerprint {
+				return fmt.Errorf("签发和校验得到的实际子树指纹不一致: %x，错误 %v", verified, err)
 			}
 			return nil
 		}); err != nil {

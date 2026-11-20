@@ -961,3 +961,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.BuildPurgePreviewSubtreeFingerprint`，按保留目录项的标识、版本和状态生成子树指纹。[第 439 步学习记录](docs/开发学习记录.md#第-439-步生成永久清理子树指纹)
 
 已提供 `service.PurgePreviewSigner`，绑定用户、目标和子树指纹，签发五分钟有效的清理预检凭证。[第 440 步学习记录](docs/开发学习记录.md#第-440-步签发永久清理预检凭证)
+
+已提供 `service.PurgePreviewVerifier`，校验签名、当前用户、目标及有效期，取回签发时的子树指纹。[第 441 步学习记录](docs/开发学习记录.md#第-441-步校验永久清理预检凭证)
