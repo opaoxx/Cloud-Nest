@@ -14,16 +14,12 @@ type TrashEntryInput struct {
 
 // ParseTrashEntryRequest 解析预期版本，实际版本比对由后续事务处理。
 func ParseTrashEntryRequest(request TrashEntryRequest) (*TrashEntryInput, *FieldError) {
-	// 1. 读取版本字符串，用现有规则校验格式和范围。
-	var revisionText string
-	if request.ExpectedRevision != nil {
-		revisionText = *request.ExpectedRevision
+	// 1. 复用目录项的预期版本校验。
+	expectedRevision, fieldError := parseExpectedRevision(request.ExpectedRevision)
+	if fieldError != nil {
+		return nil, fieldError
 	}
-	expectedRevision, valid := parsePathID(revisionText)
 
-	// 2. 失败时返回固定字段错误，成功时交付 uint64 版本。
-	if !valid {
-		return nil, &FieldError{Field: "expected_revision", Message: "预期版本须为 1～18446744073709551615 的标准十进制整数"}
-	}
+	// 2. 返回后续事务使用的整数版本。
 	return &TrashEntryInput{ExpectedRevision: expectedRevision}, nil
 }
