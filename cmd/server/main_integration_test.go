@@ -1428,6 +1428,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	sizeBeforeRestart, sizeStarredBeforeRestart, sizeBudgetBeforeRestart, sizeTieBeforeRestart := verifyServerSizeEntries(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, *globalBeforeRestart.Data.NextCursor, *recentBeforeRestart.Data.NextCursor, *nameBeforeRestart.Data.NextCursor, jwtConfig.SigningKey)
 	loginSecrets = append(loginSecrets, *sizeBeforeRestart.Data.NextCursor, *sizeStarredBeforeRestart.Data.NextCursor, *sizeBudgetBeforeRestart.Data.NextCursor, *sizeTieBeforeRestart.Data.NextCursor)
 
+	// 正式回收衔接列表与详情，持久化结果供重启复用。
+	trashedBeforeRestart := verifyServerEntryTrash(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
+	getEntryDetail(t, serverTrashDirectoryID, webRefreshed.Data.AccessToken, 404, "ENTRY_NOT_FOUND", "")
+	getEntryDetail(t, "74003", webRefreshed.Data.AccessToken, 404, "ENTRY_NOT_FOUND", "")
+	if page := listDirectory(t, "parent_id=74001", webRefreshed.Data.AccessToken, 200, "", ""); len(page.Data.Items) != 0 {
+		t.Fatal("正式目录列表仍显示已回收项")
+	}
+
 	// 正式任务查询贯穿已有授权与持久记录，保存结果供重启后对照。
 	uploadBeforeRestart, completedUploadBeforeRestart := verifyServerUploadTasks(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, nativeRefreshed.Data.AccessToken, foreignToken.Token)
 	// 上传创建使用既有账号 3，独立对照配额、任务与稳定结果。
@@ -1617,6 +1625,11 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	starredPageAfterRestart := listDirectory(t, "parent_id=80002", webRefreshed.Data.AccessToken, 200, "", "")
 	if !reflect.DeepEqual(starredPageBeforeRestart.Data, starredPageAfterRestart.Data) {
 		t.Fatal("重启后收藏目录列表错误")
+	}
+	trashedAfterRestart := requestServerTrashEntry(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, serverTrashDirectoryID,
+		serverTrashDirectoryKey, serverTrashDirectoryBody, 200, "", nil)
+	if !reflect.DeepEqual(trashedBeforeRestart.Data, trashedAfterRestart.Data) || trashedBeforeRestart.RequestID == trashedAfterRestart.RequestID {
+		t.Fatal("重启后正式回收的原快照或本次请求 ID 错误")
 	}
 	movedEntryAfterRestart := requestServerMoveEntry(t, "http://"+address, webRefreshed.Data.AccessToken, "70001", serverMoveEntryKey, serverMoveEntryBody, 200, "", "")
 	if !reflect.DeepEqual(movedEntryBeforeRestart.Data, movedEntryAfterRestart.Data) || movedEntryBeforeRestart.RequestID == movedEntryAfterRestart.RequestID {

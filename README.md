@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/complete、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/entries/{id}/download、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/complete、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、POST /api/v1/entries/{id}/trash、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/entries/{id}/download、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -864,7 +864,7 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 
 新上传文件发布时保存识别出的 MIME。符合首期规则的文件可以用 `purpose=preview` 申请预览签名，未知类型可申请普通下载。[第 391 步学习记录](docs/开发学习记录.md#第-391-步在发布目录项时保存文件媒体类型)
 
-单项回收 `POST /api/v1/entries/{id}/trash` 已定义计划契约，后续接入请求解析、事务和路由。[第 392 步学习记录](docs/开发学习记录.md#第-392-步定义单项回收接口契约)
+单项回收契约定义了预期版本、幂等键、回收快照及祖先可见性规则。[第 392 步学习记录](docs/开发学习记录.md#第-392-步定义单项回收接口契约)
 
 已实现单项回收正文的版本校验，将合法的 `expected_revision` 字符串转换为完整的无符号整数。[第 393 步学习记录](docs/开发学习记录.md#第-393-步解析单项回收请求的预期版本)
 
@@ -887,3 +887,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供单项回收成功响应，将稳定快照与当前请求 ID 一起交付为禁止缓存的 HTTP 200 JSON。[第 402 步学习记录](docs/开发学习记录.md#第-402-步交付单项回收成功响应)
 
 已提供单项回收请求处理函数，在测试 POST 入口串联共享认证、输入校验、幂等服务与公开响应。[第 403 步学习记录](docs/开发学习记录.md#第-403-步处理单项回收请求)
+
+已注册 `POST /api/v1/entries/{id}/trash`，正式入口支持单项回收与同键重试。[第 404 步学习记录](docs/开发学习记录.md#第-404-步注册正式单项回收路由)

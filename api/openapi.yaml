@@ -128,7 +128,7 @@ info:
     访问处理函数组合 Actor、路径、用途 DTO、核心服务及成功交付，目录目标定位 id，用途错误定位 purpose，不可见目标复用 TargetEntryNotFound。
     POST /api/v1/entries/{id}/access 已由启动入口绑定共享授权及用户事务，按 preview/open 记录文件访问，六十秒内合并并返回已存时间。
     POST /api/v1/entries/{id}/download 定义短期下载与预览授权的计划契约，返回绑定具体存储对象的 GET URL。
-    POST /api/v1/entries/{id}/trash 定义单项回收的计划契约，使用预期版本及幂等键，交付回收后的快照。
+    POST /api/v1/entries/{id}/trash 已接入启动入口，使用预期版本及幂等键，交付回收后的快照。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -424,7 +424,7 @@ paths:
       operationId: trashEntry
       summary: 按预期版本回收当前用户的文件或目录
       description: |
-        计划契约，后端实现后注册路由。
+        服务启动时绑定此路由，并装配共享授权、MySQL 用户事务与回收快照编解码。
         1. Bearer 授权通过后，依次校验路径 id、Idempotency-Key、受限 JSON 及 expected_revision。用户事务复查账号、设备与会话。
         2. 首次执行时检查目标归属及完整祖先链，要求目标和祖先均为 ACTIVE。真实根目录禁止回收，随后比对目标版本。
         3. 仅将选中的目录项标记为 TRASHED，记录数据库 UTC 回收时间并将版本加一。保留 parent_id、对象引用、配额和文件偏好。
