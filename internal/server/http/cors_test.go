@@ -57,7 +57,7 @@ func TestCORSRequestPolicy(t *testing.T) {
 		{name: "purge preflight headers across lines", method: "OPTIONS", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, methods: []string{"DELETE"}, headers: []string{"authorization, Idempotency-Key", " \tX-CLOUDNEST-EXPECTED-REVISION \t, x-CloudNest-Purge-Preview"}, wantStatus: 204, wantAllow: true},
 		{name: "purge preflight unknown origin", method: "OPTIONS", path: "/api/v1/trash/14", origins: []string{"https://private-preflight.example"}, methods: []string{"DELETE"}, headers: []string{purgeConfirmPreflightHeaders}, wantStatus: 403},
 		{name: "purge preflight unknown lookalike header", method: "OPTIONS", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, methods: []string{"DELETE"}, headers: []string{purgeConfirmPreflightHeaders + ", x-cloudnest-purge-preview-extra"}, wantStatus: 403},
-		{name: "purge actual path not registered yet", method: "DELETE", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, wantStatus: 404, wantAllow: true},
+		{name: "base router without purge registration", method: "DELETE", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, wantStatus: 404, wantAllow: true},
 		{name: "preflight head", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"HEAD"}, wantStatus: 204, wantAllow: true},
 		{name: "preflight options", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"OPTIONS"}, wantStatus: 204, wantAllow: true},
 		{name: "preflight unknown origin", method: "OPTIONS", origins: []string{"https://private-preflight.example"}, methods: []string{"POST"}, wantStatus: 403},

@@ -999,3 +999,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.PurgeEntry`，在测试路由串联 Bearer 认证、确认参数校验、幂等受理和 HTTP 202 交付。真实 JWT 和隔离 MySQL 联测覆盖预检、首次受理及同键重试。[第 458 步学习记录](docs/开发学习记录.md#第-458-步处理永久清理确认请求)
 
 共享 CORS 规则已允许白名单来源的 DELETE 预检声明 `X-CloudNest-Expected-Revision` 和 `X-CloudNest-Purge-Preview`。[第 459 步学习记录](docs/开发学习记录.md#第-459-步允许永久清理确认请求头通过跨域预检)
+
+已注册 `DELETE /api/v1/trash/{id}`。使用上一次预检返回的版本和凭证，以及请求的幂等键，确认成功后返回 202 并将目标标记为 `PURGING`。进度查询与后台分批清理将在后续接入。[第 460 步学习记录](docs/开发学习记录.md#第-460-步注册正式永久清理确认路由)

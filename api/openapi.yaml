@@ -132,7 +132,7 @@ info:
     GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
     POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
     GET /api/v1/trash/{id}/purge-preview 已接入启动入口，使用只读快照返回受影响范围与短时确认凭证。
-    DELETE /api/v1/trash/{id} 定义确认永久清理的计划契约，受理后返回 202 和进度查询地址。
+    DELETE /api/v1/trash/{id} 在服务启动时注册，受理后返回 202 和计划中的进度查询地址。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -465,11 +465,11 @@ paths:
       operationId: confirmEntryPurge
       summary: 确认永久清理当前用户的顶层回收项
       description: |
-        计划契约。请求参数全部由路径和请求头提供。使用预检返回的 revision 作为 X-CloudNest-Expected-Revision，原样传回 preview_digest 作为 X-CloudNest-Purge-Preview。
+        服务启动时注册。请求参数全部由路径和请求头提供。使用预检返回的 revision 作为 X-CloudNest-Expected-Revision，原样传回 preview_digest 作为 X-CloudNest-Purge-Preview。
         1. Bearer 授权通过后校验路径 id、Idempotency-Key 和两个预检请求头。身份取自认证上下文。
         2. 在已认证用户事务内，先按用户、操作和幂等键查找已保存结果。请求摘要绑定目标、预期版本和完整预检凭证。同键同参在记录保留期内返回首次 202 受理快照和本次请求 ID，即使凭证已到期或后台状态已推进。记录保留八天。
         3. 首次受理时在同一用户事务中复查目标归属、TRASHED 状态和活动父链，验证凭证签名、用户、目标与截止时间，重新读取完整子树并比较指纹。凭证到期、指纹变化或当前范围超过 10000 个保留目录项，均返回 PURGE_PREVIEW_CHANGED。
-        4. 当前指纹匹配后比较目标版本。条件更新将目标改为 PURGING，记录清理开始时间并递增版本，与 202 受理快照在同一事务内保存。提交后子树立即不可访问，空间结算和内容引用释放由后台分批推进。数据结构异常或版本无法递增时回滚并返回 500。
+        4. 当前指纹匹配后比较目标版本。条件更新将目标改为 PURGING，记录清理开始时间并递增版本，与 202 受理快照在同一事务内保存。提交后子树立即不可访问。后续阶段实现进度查询、分批清理、空间结算和内容引用释放。数据结构异常或版本无法递增时回滚并返回 500。
         5. 请求结果未知时，以原幂等键、版本和凭证重试。收到 PURGE_PREVIEW_CHANGED 或 REVISION_CONFLICT 时，重新预检并获得用户确认，再以新幂等键提交。
       security:
         - BearerAuth: []
@@ -579,7 +579,7 @@ paths:
            单次范围最多 10000 个保留目录项，含目标和 PURGED 墓碑。超出时返回 400，details.field 为 id。父链或子树结构异常时返回 500。
         3. 文件数、目录数和逻辑字节数统计尚未 PURGED 的项，包含 ACTIVE、TRASHED 和 PURGING。逻辑字节数按每个文件目录项的 file_size 累加，多个引用同一对象的文件各自计入。
         4. 签发五分钟有效的 preview_digest。摘要绑定当前用户、目标 ID、子树目录项的 ID、revision、status 和到期时间。仍保留的 PURGED 项参与子树摘要。
-           客户端原样保留凭证。后续 DELETE /api/v1/trash/{id} 将该凭证置于 X-CloudNest-Purge-Preview，将本次 revision 置于 X-CloudNest-Expected-Revision。服务在用户锁内复查，凭证到期或子树变化时返回 409 PURGE_PREVIEW_CHANGED，客户端重新预检并确认。
+           客户端原样保留凭证。确认时调用 DELETE /api/v1/trash/{id}，将该凭证置于 X-CloudNest-Purge-Preview，将本次 revision 置于 X-CloudNest-Expected-Revision。服务在用户锁内复查，凭证到期或子树变化时返回 409 PURGE_PREVIEW_CHANGED，客户端重新预检并确认。
       security:
         - BearerAuth: []
       parameters:
@@ -4753,7 +4753,7 @@ components:
           schema:
             $ref: '#/components/schemas/PurgePreviewResponse'
     PurgeEntryAccepted:
-      description: 永久清理已受理 HTTP 202，交付稳定受理快照、计划中的进度查询地址和本次请求 ID。后台分批完成清理。
+      description: 永久清理已受理 HTTP 202，交付稳定受理快照、计划中的进度查询地址和本次请求 ID。后台分批清理由后续阶段实现。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

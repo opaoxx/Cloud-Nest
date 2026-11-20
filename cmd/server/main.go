@@ -472,6 +472,38 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		})
 	}, purgePreviewSigner, time.Now)
 
+	// 3. 用与预检签发器相同的主密钥创建凭证校验器。
+	purgePreviewVerifier, err := service.NewPurgePreviewVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配永久清理预检校验器失败", "stage", "application", "error", err)
+		return err
+	}
+
+	// 4. 绑定用户事务、快照编解码和时钟，装配幂等清理确认。
+	purgeEntryService := service.NewIdempotentPurgeEntryService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentPurgeEntryTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+		purgePreviewVerifier,
+		func(entry *domain.FileEntry) (json.RawMessage, error) {
+			data, err := dto.NewPurgeEntryAcceptedData(entry)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(data)
+		},
+		func(body []byte) (string, error) {
+			data, err := dto.DecodePurgeEntryAcceptedData(body)
+			if err != nil {
+				return "", err
+			}
+			return data.EntryID, nil
+		},
+		time.Now,
+	)
+
 	// 22. 绑定当前用户事务，装配收藏核心服务。
 	setStarredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -565,6 +597,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterTrashPageRoute(router, authorizationService.Authorize, trashPageService.List)
 	serverhttp.RegisterRestoreEntryRoute(router, authorizationService.Authorize, restoreEntryService.Restore)
 	serverhttp.RegisterPurgePreviewRoute(router, authorizationService.Authorize, purgePreviewService.Preview)
+	serverhttp.RegisterPurgeEntryRoute(router, authorizationService.Authorize, purgeEntryService.Begin)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
 	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
 	serverhttp.RegisterCreateDownloadRoute(router, authorizationService.Authorize, downloads.Create)
