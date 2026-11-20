@@ -124,17 +124,24 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 		t.Fatal("写回失败后未保留待恢复删除记录", pending, err)
 	}
 
-	// 3. 用扫描恢复的记录重试，MinIO 确认目标缺失后提交完成状态。
+	// 3. 恢复批次先遇到无法定位的旧记录，再处理已经物理删除的对象。
 	execute("DROP TRIGGER fixture_fail_object_deletion_writeback")
-	completed, err = processor.Process(ctx, &pending[0])
-	if err != nil || completed == nil || completed.Status != domain.StoredObjectStatusDeleted {
-		t.Fatal("已缺失对象的删除恢复未完成", completed, err)
+	execute(`INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size,status)
+		VALUES(34,8,'fixture_other_provider',?,'users/8/objects/unavailable-location',0,'DELETING')`, bucket)
+	batch := service.NewStoredObjectDeletionRecoveryBatch(store.ListDeletingStoredObjects, processor.Process)
+	summary, err := batch.RunOnce(ctx, 2)
+	if err != nil || summary.Scanned != 2 || summary.Completed != 1 || len(summary.CandidateErrors) != 1 {
+		t.Fatal("删除恢复批次结果不符", summary, err)
+	}
+	failure := summary.CandidateErrors[0]
+	if failure.ObjectID != 34 || failure.OwnerUserID != 8 || !errors.Is(failure.Err, domain.ErrInvalidStoredObjectData) {
+		t.Fatal("未正确记录无法定位的旧对象", failure)
 	}
 	current, err := store.FindUserStoredObject(ctx, claimed.OwnerUserID, claimed.ID)
-	if err != nil || !reflect.DeepEqual(current, completed) {
-		t.Fatal("写回结果与已提交记录不符", current, err)
+	if err != nil || current == nil || current.Status != domain.StoredObjectStatusDeleted || !sameStoredObjectLocation(current, claimed) {
+		t.Fatal("批次未提交已缺失对象的完成状态", current, err)
 	}
-	if pending, err := store.ListDeletingStoredObjects(ctx, 1); err != nil || len(pending) != 0 {
-		t.Fatal("已完成对象仍出现在恢复扫描", pending, err)
+	if pending, err := store.ListDeletingStoredObjects(ctx, 2); err != nil || len(pending) != 1 || pending[0].ID != failure.ObjectID {
+		t.Fatal("恢复扫描应只保留本轮失败对象", pending, err)
 	}
 }
