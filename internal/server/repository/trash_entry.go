@@ -120,12 +120,12 @@ func (store *Store) TrashUserFileEntry(ctx context.Context, entryID, expectedRev
 	}, nil
 }
 
-// readLockedTrashEntry 读取当前事务锁住的目录项及其回收时间。
+// readLockedTrashEntry 读取当前事务锁住的目录项及其回收和清理开始时间。
 func (store *Store) readLockedTrashEntry(ctx context.Context, userID, entryID uint64) (*models.FileEntryTrash, error) {
 	// 1. 按用户和主键当前读，获取或继续持有目标行锁。
 	var entry models.FileEntryTrash
 	queryError := store.database.WithContext(ctx).
-		Select("id", "user_id", "parent_id", "name", "entry_type", "file_size", "revision", "status", "created_at", "modified_at", "updated_at", "deleted_at").
+		Select("id", "user_id", "parent_id", "name", "entry_type", "file_size", "revision", "status", "created_at", "modified_at", "updated_at", "deleted_at", "purge_started_at").
 		Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("user_id = ? AND id = ?", userID, entryID).Take(&entry).Error
 	if err := ctx.Err(); err != nil {
