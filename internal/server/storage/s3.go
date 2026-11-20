@@ -18,6 +18,8 @@ import (
 type Client struct {
 	// sdkClient 承载签名请求，SDK 类型不向 HTTP 层暴露。
 	sdkClient *minio.Client
+	// downloadSigner 使用客户端可访问的地址生成短期 GET 签名。
+	downloadSigner *minio.Client
 	// transport 由本客户端独占，供失败和退出时清理空闲连接。
 	transport *http.Transport
 	// bucket 是已经过配置校验的目标桶名。
@@ -41,8 +43,9 @@ func NewClient(ctx context.Context, storageConfig config.StorageConfig) (*Client
 	}
 	transport.ResponseHeaderTimeout = 5 * time.Second
 	transport.TLSHandshakeTimeout = 5 * time.Second
+	identity := credentials.NewStaticV4(storageConfig.AccessKey, storageConfig.SecretKey, "")
 	sdkClient, err := minio.New(storageConfig.EndpointURL.Host, &minio.Options{
-		Creds:        credentials.NewStaticV4(storageConfig.AccessKey, storageConfig.SecretKey, ""),
+		Creds:        identity,
 		Secure:       secure,
 		Transport:    transport,
 		BucketLookup: minio.BucketLookupPath,
@@ -56,13 +59,40 @@ func NewClient(ctx context.Context, storageConfig config.StorageConfig) (*Client
 	// 2. 保存桶名与连接管理对象，明确清理责任。
 	client := &Client{sdkClient: sdkClient, transport: transport, bucket: storageConfig.Bucket}
 
-	// 3. 只读检查已有桶，失败时释放连接并返回错误。
-	if err := client.CheckBucket(ctx); err != nil {
+	// 3. 通过内部地址只读检查已有桶，从同一 SDK 客户端取得桶区域。
+	startupContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := client.CheckBucket(startupContext); err != nil {
 		client.Close()
 		return nil, err
 	}
+	region, err := sdkClient.GetBucketLocation(startupContext, client.bucket)
+	if contextError := startupContext.Err(); contextError != nil {
+		client.Close()
+		return nil, contextError
+	}
+	if err != nil || region == "" {
+		client.Close()
+		return nil, fmt.Errorf("无法确定 MinIO 签名区域")
+	}
 
-	// 4. 返回通过检查的存储客户端。
+	// 4. 绑定客户端访问地址及已知区域，签名时直接使用该地址。
+	publicEndpoint := storageConfig.PublicEndpointURL
+	if publicEndpoint == nil {
+		publicEndpoint = storageConfig.EndpointURL
+	}
+	client.downloadSigner, err = minio.New(publicEndpoint.Host, &minio.Options{
+		Creds:        identity,
+		Secure:       publicEndpoint.Scheme == "https",
+		Transport:    transport,
+		Region:       region,
+		BucketLookup: minio.BucketLookupPath,
+		MaxRetries:   1,
+	})
+	if err != nil {
+		client.Close()
+		return nil, fmt.Errorf("创建 MinIO 下载签名客户端失败，请检查客户端访问地址")
+	}
 	return client, nil
 }
 

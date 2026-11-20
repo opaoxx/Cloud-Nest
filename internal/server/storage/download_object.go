@@ -22,17 +22,13 @@ func (client *Client) CheckDownloadObject(ctx context.Context, target *domain.En
 	if err := checkContext.Err(); err != nil {
 		return err
 	}
-	if target == nil || target.ObjectID == 0 || target.UserID == 0 || target.Provider != "local_minio" || target.Bucket != client.bucket {
-		return domain.ErrInvalidStoredObjectData
-	}
-	location := domain.CreateStagedObjectInput{Provider: target.Provider, Bucket: target.Bucket, ObjectKey: target.ObjectKey}
-	options, err := objectReadOptions(location, target.StorageVersionID)
+	options, err := client.downloadObjectOptions(target)
 	if err != nil {
 		return err
 	}
 
 	// 2. 向 MinIO 查询指定版本的元数据。
-	info, err := client.sdkClient.StatObject(checkContext, client.bucket, location.ObjectKey, options)
+	info, err := client.sdkClient.StatObject(checkContext, client.bucket, target.ObjectKey, options)
 	if contextError := checkContext.Err(); contextError != nil {
 		return contextError
 	}
@@ -56,4 +52,15 @@ func (client *Client) CheckDownloadObject(ctx context.Context, target *domain.En
 		return domain.ErrDownloadTargetUnavailable
 	}
 	return nil
+}
+
+// downloadObjectOptions 让元数据检查和下载签名使用相同的对象定位规则。
+func (client *Client) downloadObjectOptions(target *domain.EntryDownloadTarget) (minio.GetObjectOptions, error) {
+	// 1. 核对对象引用及客户端负责的存储范围。
+	if target == nil || target.ObjectID == 0 || target.UserID == 0 || target.Provider != "local_minio" || target.Bucket != client.bucket {
+		return minio.GetObjectOptions{}, domain.ErrInvalidStoredObjectData
+	}
+	// 2. 校验实际对象键和可空版本。
+	location := domain.CreateStagedObjectInput{Provider: target.Provider, Bucket: target.Bucket, ObjectKey: target.ObjectKey}
+	return objectReadOptions(location, target.StorageVersionID)
 }

@@ -6,6 +6,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -186,6 +190,64 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 			mismatch, ok := err.(*domain.UploadVerificationSizeMismatch)
 			if result != nil || !ok || mismatch.DeclaredSizeBytes != declared || mismatch.ObservedSizeBytes != uint64(len(oldBytes)) {
 				t.Fatal("历史版本读回未返回大小证据", result, err)
+			}
+		}
+	})
+
+	t.Run("presigned download through client endpoint", func(t *testing.T) {
+		// 1. 为同一个 MinIO 配置独立入口，转发时保留客户端访问主机。
+		proxy := httputil.NewSingleHostReverseProxy(settings.EndpointURL)
+		public := httptest.NewServer(proxy)
+		defer public.Close()
+		publicSettings := settings
+		publicEndpoint, err := url.Parse(public.URL)
+		if err != nil {
+			t.Fatal("读取联测客户端地址失败")
+		}
+		publicSettings.PublicEndpointURL = publicEndpoint
+		signer, err := storage.NewClient(ctx, publicSettings)
+		if err != nil {
+			t.Fatal("创建签名客户端失败", err)
+		}
+		defer signer.Close()
+		target := domain.EntryDownloadTarget{
+			EntryID: 13, UserID: 7, ObjectID: 23, SizeBytes: uint64(len(oldBytes)),
+			Provider: settings.Provider, Bucket: bucket, ObjectKey: key, StorageVersionID: &old.VersionID,
+		}
+		disposition, err := service.BuildDownloadDisposition(domain.DownloadPurposeDownload, "学习资料.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := signer.SignDownloadURL(ctx, &target, "text/plain", disposition)
+		if err != nil || result == nil || !strings.HasPrefix(result.URL, public.URL+"/") {
+			t.Fatal("未签发指向独立访问地址的下载链接", err)
+		}
+
+		// 2. 用签名链接读取旧版本，并在同一个链接上验证单段 Range。
+		for _, scenario := range []struct {
+			byteRange string
+			status    int
+			data      []byte
+		}{{"", http.StatusOK, oldBytes}, {"bytes=1-2", http.StatusPartialContent, oldBytes[1:3]}} {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, result.URL, nil)
+			if err != nil {
+				t.Fatal("构造联测下载请求失败")
+			}
+			if scenario.byteRange != "" {
+				request.Header.Set("Range", scenario.byteRange)
+			}
+			response, err := public.Client().Do(request)
+			if err != nil {
+				t.Fatal("访问签名下载地址失败")
+			}
+			data, readError := io.ReadAll(io.LimitReader(response.Body, int64(len(oldBytes))+1))
+			closeError := response.Body.Close()
+			if readError != nil || closeError != nil || response.StatusCode != scenario.status || !bytes.Equal(data, scenario.data) {
+				t.Fatal("签名读取状态或版本字节错误", response.StatusCode)
+			}
+			if scenario.status == http.StatusOK && (response.Header.Get("Content-Type") != "text/plain" ||
+				response.Header.Get("Content-Disposition") != disposition) {
+				t.Fatal("MinIO 未返回签入地址的媒体类型和文件名")
 			}
 		}
 	})

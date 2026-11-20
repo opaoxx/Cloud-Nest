@@ -845,3 +845,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.BuildDownloadDisposition`，按下载或预览用途生成带 ASCII 备用名和 UTF-8 文件名的响应头值。[第 381 步学习记录](docs/开发学习记录.md#第-381-步生成下载和预览的文件名响应头值)
 
 已提供 `service.ResolveDownloadContentType`，为下载选择基础媒体类型，并按已存 MIME 和字节数判断首期预览资格。[第 382 步学习记录](docs/开发学习记录.md#第-382-步选择下载媒体类型并校验预览资格)
+
+已提供 `storage.Client.SignDownloadURL`，用客户端访问地址签发 15 分钟有效的 GET 链接，绑定对象版本与交付响应头。[第 383 步学习记录](docs/开发学习记录.md#第-383-步签发指定对象版本的短期下载地址)
