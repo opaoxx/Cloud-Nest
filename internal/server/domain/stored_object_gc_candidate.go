@@ -1,9 +1,15 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // MaxStoredObjectGCCandidates 限定一次到期对象扫描返回的数量。
 const MaxStoredObjectGCCandidates = 100
+
+// ErrStoredObjectGCCandidateStale 表示当前对象状态或计时已不符合扫描候选。
+var ErrStoredObjectGCCandidateStale = errors.New("对象回收候选已失效")
 
 // StoredObjectGCCandidate 保存扫描时的对象归属、状态和回收计时。
 type StoredObjectGCCandidate struct {
