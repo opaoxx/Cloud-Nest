@@ -129,6 +129,7 @@ info:
     POST /api/v1/entries/{id}/access 已由启动入口绑定共享授权及用户事务，按 preview/open 记录文件访问，六十秒内合并并返回已存时间。
     POST /api/v1/entries/{id}/download 定义短期下载与预览授权的计划契约，返回绑定具体存储对象的 GET URL。
     POST /api/v1/entries/{id}/trash 已接入启动入口，使用预期版本及幂等键，交付回收后的快照。
+    GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -416,6 +417,43 @@ paths:
           $ref: '#/components/responses/RequestBodyTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/trash:
+    get:
+      tags: [Entries]
+      operationId: listTrashedEntries
+      summary: 分页读取当前用户的顶层回收项
+      description: |
+        计划契约，后端实现后注册路由。
+        Bearer 授权通过后读取 cursor、limit，符合查询编码的额外参数沿用列表接口的忽略策略。
+        仅显示当前用户自身为 TRASHED 且从父目录至真实根目录均为活动目录的项目。
+        具有 TRASHED、PURGING 或 PURGED 祖先的嵌套项从列表隐藏。
+        按 deleted_at、id 双降序分页，候选、祖先链及原路径在同一只读快照内读取。
+        原路径根据保留的 parent_id 沿当前父链生成，从真实根目录到原父目录，采用读取时的名称和位置。
+        保留截止时间为 deleted_at 加 30 天。仍为 TRASHED 的到期项继续展示，进入清理状态后移出列表。
+        limit 默认 50、上限 100。每次最多检查 1000 个候选，预算耗尽时允许短页或空页带下一页游标。
+        续页使用最后消费的候选位置，候选耗尽时 next_cursor 为 null。页间采用弱一致性，客户端按 ID 合并去重。
+        游标通过回收站列表专用签名绑定当前用户和排序位置。同一用户的有效会话可原样续读，持久化签名配置重启后可继续使用。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/TrashListCursor'
+        - $ref: '#/components/parameters/DirectoryLimit'
+      responses:
+        '200':
+          $ref: '#/components/responses/TrashEntriesListed'
+        '400':
+          $ref: '#/components/responses/TrashListQueryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/entries/{id}/trash:
@@ -2372,6 +2410,82 @@ components:
             revision: '4'
             deleted_at: '2026-11-20T04:30:00.123456Z'
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    TrashListItem:
+      type: object
+      additionalProperties: false
+      required: [id, parent_id, name, entry_type, size_bytes, status, revision, deleted_at, original_path, retention_expires_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/parent_id'
+        name:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/name'
+        entry_type:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/entry_type'
+        size_bytes:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/size_bytes'
+        status:
+          $ref: '#/components/schemas/TrashEntryData/properties/entry/properties/status'
+        revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        deleted_at:
+          $ref: '#/components/schemas/TrashEntryData/properties/entry/properties/deleted_at'
+        original_path:
+          type: array
+          minItems: 1
+          maxItems: 32
+          description: 从当前用户的真实根目录到保留的原父目录，根目录名称为空，末项 ID 与 parent_id 一致。展示名称和位置取自本次快照。
+          items:
+            $ref: '#/components/schemas/DirectoryBreadcrumb'
+        retention_expires_at:
+          type: string
+          format: date-time
+          pattern: '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z$'
+          description: 回收时间加 30 天得到的保留截止时间，采用 UTC 微秒精度。
+    TrashPageData:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          description: 按 deleted_at、id 双降序排列的当前页顶层回收项，空页为 []。
+          items:
+            $ref: '#/components/schemas/TrashListItem'
+        next_cursor:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 1024
+          description: 下一页签名游标，预算短页或空页可返回文本，候选耗尽时返回 null。
+    TrashPageResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/TrashPageData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          items:
+            - id: '23'
+              parent_id: '12'
+              name: 学习笔记.md
+              entry_type: FILE
+              size_bytes: 2048
+              status: TRASHED
+              revision: '4'
+              deleted_at: '2026-11-20T04:30:00.123456Z'
+              original_path:
+                - {id: '11', name: ''}
+                - {id: '12', name: 学习资料}
+              retention_expires_at: '2026-12-20T04:30:00.123456Z'
+          next_cursor: null
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateDownloadRequest:
       type: object
       additionalProperties: false
@@ -2939,6 +3053,32 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    TrashListQueryRejected:
+      description: |
+        HTTP 400，查询编码及字段错误使用 INVALID_ARGUMENT，details.field 定位 query、cursor 或 limit。
+        游标签名、用户绑定或游标内部位置无效使用 INVALID_CURSOR，details.field 为 cursor。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_CURSOR
+              message: 回收站分页游标无效，请重新查询
+              details:
+                field: cursor
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TrashEntryRejected:
       description: |
         HTTP 400，INVALID_ARGUMENT。字段错误定位 id、Idempotency-Key 或 expected_revision。
@@ -4149,6 +4289,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RenameEntryResponse'
+    TrashEntriesListed:
+      description: 回收站查询成功 HTTP 200，返回当前页条目、续页游标和本次请求 ID。响应采用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TrashPageResponse'
     TrashEntrySucceeded:
       description: 回收成功 HTTP 200，返回提交时的 data.entry 快照和本次请求 ID，响应使用 no-store 和 Pragma no-cache。
       headers:
@@ -5153,6 +5310,18 @@ components:
       schema:
         type: string
         enum: [modified_desc, name_asc, size_desc, last_opened_desc]
+    TrashListCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        单个回收站列表游标，省略或显式空值表示首页，解码后最多 1024 字节。
+        续页原样提交上一页的 next_cursor，由服务校验签名及当前用户的回收站排序位置。
+      schema:
+        type: string
+        maxLength: 1024
+        default: ''
     EntryListCursor:
       name: cursor
       in: query
