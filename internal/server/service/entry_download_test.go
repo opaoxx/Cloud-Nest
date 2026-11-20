@@ -15,9 +15,11 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 	targetUnavailable := domain.ErrDownloadTargetUnavailable
 	storageUnavailable := domain.ErrDownloadStorageUnavailable
 	staleVersion := &domain.EntryRevisionConflictError{CurrentRevision: 4}
+	commitFailure := errors.New("fixture access commit failure")
 	for _, scenario := range []struct {
 		name, purpose, storedMIME, wantMIME, wantDisposition string
 		targetError, objectError, signError, wantError       error
+		accessError, commitError                             error
 		editTarget                                           func(*domain.EntryDownloadTarget) *domain.EntryDownloadTarget
 		editLink                                             func(*domain.SignedDownloadURL) *domain.SignedDownloadURL
 		cancelAfter                                          string
@@ -25,10 +27,10 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 	}{
 		{name: "download falls back", purpose: "download", wantMIME: "application/octet-stream",
 			wantDisposition: `attachment; filename="download.png"; filename*=UTF-8''%E5%9B%BE%E7%89%87.png`,
-			wantCalls:       []string{"target", "check", "sign"}},
+			wantCalls:       []string{"target", "check", "sign", "access"}},
 		{name: "preview", purpose: "preview", storedMIME: "IMAGE/PNG", wantMIME: "image/png",
 			wantDisposition: `inline; filename="download.png"; filename*=UTF-8''%E5%9B%BE%E7%89%87.png`,
-			wantCalls:       []string{"target", "check", "sign"}},
+			wantCalls:       []string{"target", "check", "sign", "access"}},
 		{name: "invalid purpose", purpose: "open", wantError: domain.ErrInvalidDownloadPurpose},
 		{name: "missing entry", targetError: domain.ErrFileEntryNotFound, wantError: domain.ErrFileEntryNotFound, wantCalls: []string{"target"}},
 		{name: "stale revision", targetError: staleVersion, wantError: staleVersion, wantCalls: []string{"target"}},
@@ -64,9 +66,15 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 		{name: "cancel after HEAD", cancelAfter: "check", objectError: targetUnavailable,
 			wantError: context.Canceled, wantCalls: []string{"target", "check"}},
 		{name: "cancel after signing", cancelAfter: "sign", wantError: context.Canceled, wantCalls: []string{"target", "check", "sign"}},
+		{name: "revoked session before access", accessError: domain.ErrSessionRevoked, wantError: domain.ErrSessionRevoked,
+			wantCalls: []string{"target", "check", "sign", "access"}},
+		{name: "access commit failed", commitError: commitFailure, wantError: commitFailure,
+			wantCalls: []string{"target", "check", "sign", "access"}},
+		{name: "cancel after access", cancelAfter: "access commit", wantError: context.Canceled,
+			wantCalls: []string{"target", "check", "sign", "access"}},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			// 1. 准备可控的三个依赖，记录调用顺序及传入数据。
+			// 1. 准备可控的读取、签名与访问事务，记录调用顺序。
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			actor := domain.Actor{UserID: 7, DeviceID: 19, SessionID: 17}
@@ -85,6 +93,11 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 			link := &domain.SignedDownloadURL{URL: signedURL, ExpiresAt: expiresAt}
 			if scenario.editLink != nil {
 				link = scenario.editLink(link)
+			}
+			_, accessStore := recordAccessServiceFixture()
+			access := &downloadAccessTransactionStub{
+				recordAccessTransactionStub: accessStore,
+				content:                     &domain.FileEntryContent{ID: entryID, UserID: actor.UserID, ObjectID: new(uint64(41))},
 			}
 			var calls []string
 			record := func(stage string) {
@@ -115,6 +128,25 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 						t.Error("签名目标、媒体类型或文件名不符")
 					}
 					return link, scenario.signError
+				},
+				func(receivedContext context.Context, identity domain.Actor, action func(context.Context, DownloadAccessTransaction) error) error {
+					record("access")
+					if receivedContext != ctx || identity != actor {
+						t.Error("访问事务未取得当前请求及认证身份")
+					}
+					if scenario.accessError != nil {
+						return scenario.accessError
+					}
+					if err := action(ctx, access); err != nil {
+						return err
+					}
+					if access.writeCalls != 1 {
+						t.Error("事务未写入最近访问")
+					}
+					if scenario.cancelAfter == "access commit" {
+						cancel()
+					}
+					return scenario.commitError
 				},
 			)
 			purpose := scenario.purpose
@@ -157,6 +189,10 @@ func TestEntryDownloadServiceInvalidInput(t *testing.T) {
 		}, func(context.Context, *domain.EntryDownloadTarget) error { return nil },
 		func(context.Context, *domain.EntryDownloadTarget, string, string) (*domain.SignedDownloadURL, error) {
 			return nil, nil
+		},
+		func(context.Context, domain.Actor, func(context.Context, DownloadAccessTransaction) error) error {
+			t.Fatal("无效输入开启了访问事务")
+			return nil
 		},
 	)
 	for _, scenario := range []struct {

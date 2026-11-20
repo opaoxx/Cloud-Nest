@@ -238,7 +238,12 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 				return read(snapshotContext, snapshot)
 			})
 		})
-		downloads := service.NewEntryDownloadService(downloadTargets.Get, downloadStorage.CheckDownloadObject, downloadStorage.SignDownloadURL)
+		downloads := service.NewEntryDownloadService(downloadTargets.Get, downloadStorage.CheckDownloadObject, downloadStorage.SignDownloadURL,
+			func(requestContext context.Context, owner domain.Actor, action func(context.Context, service.DownloadAccessTransaction) error) error {
+				return store.WithUserTransaction(requestContext, owner, func(txContext context.Context, txStore *repository.Store) error {
+					return action(txContext, txStore)
+				})
+			})
 		var publishedBytes uint64
 		for _, original := range received {
 			task := awaitServerUploadPublication(t, waitContext, store, userID, original.ID)
@@ -262,7 +267,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 				task.CompletedAt == nil || !confirmed.Data.CompletedAt.Equal(*task.CompletedAt) {
 				t.Fatal("正式完成确认未返回后台实际发布结果", confirmed.Data)
 			}
-			verifyServerPublishedDownload(t, ctx, httpClient, downloads, actor, task)
+			verifyServerPublishedDownload(t, ctx, pool, httpClient, downloads, actor, task)
 			publishedBytes += original.ReservedBytes
 		}
 		var usedAfter uint64
@@ -278,21 +283,49 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 }
 
 // verifyServerPublishedDownload 用实际发布结果验证内部下载授权和真实 MinIO GET。
-func verifyServerPublishedDownload(t *testing.T, ctx context.Context, httpClient *http.Client, downloads *service.EntryDownloadService, actor domain.Actor, task *domain.UploadTask) {
+func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.DB, httpClient *http.Client, downloads *service.EntryDownloadService, actor domain.Actor, task *domain.UploadTask) {
 	t.Helper()
-	// 1. 以已认证的上传用户请求新发布文件的初始版本。
+	// 1. 尚未保存 MIME 时，拒绝预览且不写访问时间。
 	entryID := *task.ResultEntryID
+	readOpenedAt := func() time.Time {
+		var openedAt sql.NullTime
+		err := pool.QueryRowContext(ctx, "SELECT last_opened_at FROM user_entry_preferences WHERE user_id=? AND entry_id=?", actor.UserID, entryID).Scan(&openedAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal("读取真实最近访问记录失败", err)
+		}
+		return openedAt.Time
+	}
+	if blocked, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposePreview); blocked != nil ||
+		!errors.Is(err, domain.ErrUnsupportedPreview) || !readOpenedAt().IsZero() {
+		t.Fatal("未授权的预览处理或访问记录不符", err)
+	}
+
+	// 2. 确认下载授权写入真实时间，并验证六十秒合并规则。
 	result, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload)
 	if err != nil || result == nil || result.ObjectID != *task.PublishedObjectID || result.Revision != 1 ||
 		result.SizeBytes != task.FileSize || result.VerifiedSHA256 != *task.ExpectedSHA256 ||
 		result.MIMEType != "application/octet-stream" || !result.Link.ExpiresAt.After(time.Now()) {
 		t.Fatal("真实发布文件的内部下载授权不符", err)
 	}
-	if blocked, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposePreview); blocked != nil || !errors.Is(err, domain.ErrUnsupportedPreview) {
-		t.Fatal("尚未保存 MIME 的实际发布文件未按规则拒绝预览", err)
+	firstOpenedAt := readOpenedAt()
+	if firstOpenedAt.IsZero() {
+		t.Fatal("首次签发未提交最近访问时间")
+	}
+	if repeated, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload); err != nil || repeated == nil ||
+		!readOpenedAt().Equal(firstOpenedAt) {
+		t.Fatal("窗口内授权未复用原访问时间", err)
+	}
+	const setPastAccess = "UPDATE user_entry_preferences SET last_opened_at=UTC_TIMESTAMP(6)-INTERVAL 61 SECOND WHERE user_id=? AND entry_id=?"
+	if _, err := pool.ExecContext(ctx, setPastAccess, actor.UserID, entryID); err != nil {
+		t.Fatal("设置联测访问时间失败", err)
+	}
+	pastOpenedAt := readOpenedAt()
+	if renewed, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload); err != nil || renewed == nil ||
+		!readOpenedAt().After(pastOpenedAt) {
+		t.Fatal("窗口外授权未更新访问时间", err)
 	}
 
-	// 2. 通过签名地址读取对象字节，核对大小、摘要和交付头。
+	// 3. 通过已交付的签名地址读取对象字节，核对大小、摘要和交付头。
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, result.Link.URL, nil)
 	if err != nil {
 		t.Fatal("无法构造联测签名请求")

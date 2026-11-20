@@ -17,23 +17,26 @@ type EntryDownloadService struct {
 	checkObject func(context.Context, *domain.EntryDownloadTarget) error
 	// signURL 将同一个目标和交付头值绑定到短期链接。
 	signURL func(context.Context, *domain.EntryDownloadTarget, string, string) (*domain.SignedDownloadURL, error)
+	// withAccessTransaction 同步执行访问复查和写入，提交后返回 nil。
+	withAccessTransaction func(context.Context, domain.Actor, func(context.Context, DownloadAccessTransaction) error) error
 }
 
-// NewEntryDownloadService 绑定下载目标读取、元数据检查和签名方法。
+// NewEntryDownloadService 绑定下载目标读取、对象检查、签名及访问事务。
 func NewEntryDownloadService(
 	getTarget func(context.Context, domain.Actor, uint64, uint64) (*domain.EntryDownloadTarget, error),
 	checkObject func(context.Context, *domain.EntryDownloadTarget) error,
 	signURL func(context.Context, *domain.EntryDownloadTarget, string, string) (*domain.SignedDownloadURL, error),
+	withAccessTransaction func(context.Context, domain.Actor, func(context.Context, DownloadAccessTransaction) error) error,
 ) *EntryDownloadService {
-	// 1. 检查并保存三个阶段所需的依赖。
-	if getTarget == nil || checkObject == nil || signURL == nil {
-		panic("下载授权服务需要目标读取、对象检查和签名方法")
+	// 1. 检查并保存授权阶段所需的依赖。
+	if getTarget == nil || checkObject == nil || signURL == nil || withAccessTransaction == nil {
+		panic("下载授权服务需要目标读取、对象检查、签名和访问事务")
 	}
-	return &EntryDownloadService{getTarget: getTarget, checkObject: checkObject, signURL: signURL}
+	return &EntryDownloadService{getTarget: getTarget, checkObject: checkObject, signURL: signURL, withAccessTransaction: withAccessTransaction}
 }
 
 // Create 为已认证 Actor 的指定文件版本签发下载或预览授权。
-// 任一阶段失败或请求取消时返回 nil 与原错误类别。
+// 访问事务提交后才交付链接，失败或取消时返回 nil 与原错误类别。
 func (downloadService *EntryDownloadService) Create(ctx context.Context, actor domain.Actor, entryID, expectedRevision uint64, purpose string) (*domain.EntryDownloadAuthorization, error) {
 	// 1. 校验请求，读取当前用户的下载目标。
 	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 || entryID == 0 || expectedRevision == 0 {
@@ -85,7 +88,7 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 		return nil, signError
 	}
 
-	// 4. 核对签名结果，交付下载授权信息。
+	// 4. 核对已经生成的签名结果。
 	if link == nil || link.ExpiresAt.IsZero() {
 		return nil, domain.ErrDownloadStorageUnavailable
 	}
@@ -93,6 +96,15 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 	if err != nil || (address.Scheme != "http" && address.Scheme != "https") || address.Hostname() == "" ||
 		address.User != nil || strings.ContainsAny(link.URL, "# \r\n\t") {
 		return nil, domain.ErrDownloadStorageUnavailable
+	}
+
+	// 5. 复查并提交最近访问记录，成功后再交付链接。
+	accessError := downloadService.recordDownloadAccess(ctx, actor, target)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if accessError != nil {
+		return nil, accessError
 	}
 	return &domain.EntryDownloadAuthorization{
 		Link:           domain.SignedDownloadURL{URL: link.URL, ExpiresAt: link.ExpiresAt.UTC()},
