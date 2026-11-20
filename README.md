@@ -941,3 +941,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.DecodeRestoreEntryData`，校验并解码已保存的单项恢复快照。[第 429 步学习记录](docs/开发学习记录.md#第-429-步校验并解码单项恢复快照)
 
 已提供 `service.ValidateRestoreEntryReplay`，核对已保存的恢复结果是否对应当前请求。[第 430 步学习记录](docs/开发学习记录.md#第-430-步校验单项恢复幂等结果的复用条件)
+
+已提供 `service.IdempotentRestoreEntryService`，在同一用户事务中保存首次恢复结果，或复用同键同参快照。[第 431 步学习记录](docs/开发学习记录.md#第-431-步组合单项恢复幂等服务)
