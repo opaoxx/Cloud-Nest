@@ -2,9 +2,7 @@ package service
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
@@ -18,16 +16,7 @@ func BuildTrashEntryRequestHash(entryID, expectedRevision uint64) ([sha256.Size]
 	}
 
 	// 2. 将操作名、目标 ID 和版本按固定顺序编码。
-	request := struct {
-		Operation        string `json:"operation"`
-		EntryID          string `json:"entry_id"`
-		ExpectedRevision string `json:"expected_revision"`
-	}{
-		Operation:        domain.TrashEntryOperation,
-		EntryID:          strconv.FormatUint(entryID, 10),
-		ExpectedRevision: strconv.FormatUint(expectedRevision, 10),
-	}
-	encoded, err := json.Marshal(request)
+	encoded, err := encodeEntryRevisionRequest(domain.TrashEntryOperation, entryID, expectedRevision)
 	if err != nil {
 		return [sha256.Size]byte{}, fmt.Errorf("编码回收请求摘要失败: %w", err)
 	}
