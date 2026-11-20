@@ -14,6 +14,7 @@ export class AuthApiError extends Error {
 
 const installationKey = 'cloudnest.web.installation_id'
 const installationPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+let pendingRefresh: Promise<string> | undefined
 
 function browserInstallationId(): string {
   const storedId = localStorage.getItem(installationKey)
@@ -45,6 +46,13 @@ async function requestData(path: string, init: RequestInit): Promise<unknown> {
   return payload.data
 }
 
+function readAccessToken(data: unknown): string {
+  if (!isRecord(data) || typeof data.access_token !== 'string' || !data.access_token) {
+    throw new AuthApiError(200, '服务响应缺少访问凭证。')
+  }
+  return data.access_token
+}
+
 export async function login(username: string, password: string): Promise<string> {
   // 1. 复用浏览器安装标识，提交 Web 登录契约。
   const data = await requestData('/api/v1/auth/login', {
@@ -61,10 +69,25 @@ export async function login(username: string, password: string): Promise<string>
   })
 
   // 2. 只取 Access Token，浏览器自行管理 HttpOnly 刷新 Cookie。
-  if (!isRecord(data) || typeof data.access_token !== 'string' || !data.access_token) {
-    throw new AuthApiError(200, '登录响应缺少访问凭证。')
-  }
-  return data.access_token
+  return readAccessToken(data)
+}
+
+export function refreshWebSession(): Promise<string> {
+  // 1. 同一页面内共享正在进行的刷新，避免重复轮换 Cookie。
+  if (pendingRefresh) return pendingRefresh
+
+  // 2. 发送 Web 刷新请求，浏览器自动携带 HttpOnly Cookie。
+  const response = requestData('/api/v1/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CloudNest-Client': 'web' },
+    body: JSON.stringify({ client_type: 'web' }),
+  })
+
+  // 3. 交付新的 Access Token，刷新结束后释放共享请求。
+  pendingRefresh = response.then(readAccessToken).finally(() => {
+    pendingRefresh = undefined
+  })
+  return pendingRefresh
 }
 
 export async function getCurrentUser(accessToken: string): Promise<CurrentUserProfile> {

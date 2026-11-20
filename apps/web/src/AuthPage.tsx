@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
-import { AuthApiError, getCurrentUser, login } from './api/auth'
+import { AuthApiError, getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
 import { formatSize } from './demo'
 import './auth.css'
@@ -19,8 +19,38 @@ export default function AuthPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [session, setSession] = useState<WebSession | null>(null)
+  const [restoring, setRestoring] = useState(true)
   const [busy, setBusy] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+
+  useEffect(() => {
+    let active = true
+
+    async function restoreSession() {
+      try {
+        // 1. 页面加载时通过刷新接口尝试恢复会话。
+        const accessToken = await refreshWebSession()
+        if (!active) return
+
+        // 2. 用新的访问令牌读取本人资料，两步都成功后写入内存会话。
+        const profile = await getCurrentUser(accessToken)
+        if (active) setSession({ accessToken, profile })
+      } catch (error) {
+        // 3. 收到 401 时回到登录页，其他错误显示提示。
+        if (active && !(error instanceof AuthApiError && error.status === 401)) {
+          setErrorMessage(messageFor(error))
+        }
+      } finally {
+        if (active) setRestoring(false)
+      }
+    }
+
+    void restoreSession()
+    return () => {
+      // 页面离开时忽略结果，让已送达后端的刷新请求完成 Cookie 交付。
+      active = false
+    }
+  }, [])
 
   async function submitLogin(event: FormEvent<HTMLFormElement>) {
     // 1. 取出本次凭据，清空输入框并开始登录。
@@ -64,9 +94,11 @@ export default function AuthPage() {
     <main className="auth-shell">
       <section className="auth-card" aria-labelledby="auth-title">
         <div className="auth-brand"><img src="/favicon.svg" alt="" />CloudNest</div>
-        <h1 id="auth-title">{session ? '本人资料' : '登录'}</h1>
+        <h1 id="auth-title">
+          {restoring ? <span role="status">正在检查会话…</span> : session ? '本人资料' : '登录'}
+        </h1>
         {errorMessage && <p className="auth-error" role="alert">{errorMessage}</p>}
-        {session ? (
+        {!restoring && (session ? (
           <>
             <dl className="auth-profile">
               <div><dt>显示名称</dt><dd>{session.profile.user.display_name}</dd></div>
@@ -87,7 +119,7 @@ export default function AuthPage() {
               onChange={event => setPassword(event.target.value)} disabled={busy} />
             <Button type="primary" htmlType="submit" loading={busy} disabled={busy}>登录</Button>
           </form>
-        )}
+        ))}
       </section>
     </main>
   )

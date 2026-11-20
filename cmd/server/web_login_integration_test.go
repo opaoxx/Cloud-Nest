@@ -27,7 +27,7 @@ const webLoginFixtureDisplayName = "隔离登录测试用户"
 
 func TestServerWebLoginIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_WEB_LOGIN_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录")
+		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录与刷新")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
@@ -64,12 +64,27 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		}
 		return request
 	}
+	refreshSession := func(origin string) *http.Request {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/auth/refresh", strings.NewReader(`{"client_type":"web"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CloudNest-Client", "web")
+		request.Header.Set("Origin", origin)
+		return request
+	}
 
-	// 1. 未登录请求经同源代理到达正式路由，确认拒绝理由。
+	// 1. 未登录时，本人资料和刷新请求均经正式路由返回 401。
 	var anonymous dto.ErrorResponse
 	read(getProfile(""), http.StatusUnauthorized, &anonymous)
 	if anonymous.Error.Code != "AUTH_REQUIRED" {
 		t.Fatal("匿名本人资料请求的错误码不符", anonymous.Error.Code)
+	}
+	read(refreshSession(baseURL), http.StatusUnauthorized, &anonymous)
+	if anonymous.Error.Code != "AUTH_REQUIRED" {
+		t.Fatal("缺少刷新 Cookie 的错误码不符", anonymous.Error.Code)
 	}
 
 	// 2. 通过现有 Web 登录契约取得 Access Token 和浏览器 Cookie。
@@ -106,7 +121,24 @@ func TestServerWebLoginIntegration(t *testing.T) {
 	if profile.Data != want {
 		t.Fatal("登录后读回的本人资料不符", profile.Data)
 	}
-	t.Log("Vite 同源代理通过：匿名 /me 返回 401，Web 登录返回 200，Bearer /me 返回隔离账号资料")
+	// 4. 已登录时仍要求合法 Origin，合法请求仅凭 Cookie 换取新令牌。
+	var forbidden dto.ErrorResponse
+	read(refreshSession("http://127.0.0.1:1"), http.StatusForbidden, &forbidden)
+	var refreshed dto.RefreshResponse
+	rotatedCookies := read(refreshSession(baseURL), http.StatusOK, &refreshed)
+	if refreshed.Data.AccessToken == "" || refreshed.Data.RefreshToken != "" ||
+		len(rotatedCookies) != 1 || rotatedCookies[0].Name != cookies[0].Name ||
+		rotatedCookies[0].Value == "" || rotatedCookies[0].Value == cookies[0].Value ||
+		!rotatedCookies[0].HttpOnly || rotatedCookies[0].SameSite != http.SameSiteStrictMode ||
+		rotatedCookies[0].Path != cookies[0].Path {
+		t.Fatal("Web 刷新未按契约轮换 Cookie 或交付访问令牌")
+	}
+	var restoredProfile dto.UserProfileResponse
+	read(getProfile(refreshed.Data.AccessToken), http.StatusOK, &restoredProfile)
+	if restoredProfile.Data != want {
+		t.Fatal("刷新后读回的本人资料不符", restoredProfile.Data)
+	}
+	t.Log("同源登录和刷新成功，Cookie 已轮换，新令牌读回本人资料，缺 Cookie 返回 401，非白名单来源返回 403")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

@@ -29,7 +29,7 @@ $env:CLOUDNEST_WEB_API_TARGET = 'http://127.0.0.1:18081'
 pnpm --dir apps/web dev
 ~~~
 
-使用本地测试账号登录后，页面会调用 `GET /api/v1/me` 取得显示名称、用户名和配额。Access Token 保存在内存中，浏览器自行管理后端交付的 HttpOnly 刷新 Cookie。当前重新加载页面会回到登录页。[隔离验收与复验命令](../../docs/开发学习记录.md#第-508-步接通-web-登录与本人资料)
+使用本地测试账号登录后，页面会调用 `GET /api/v1/me` 取得显示名称、用户名和配额。Access Token 保存在内存中，浏览器自行管理后端交付的 HttpOnly 刷新 Cookie。重载时，页面先调用 `POST /api/v1/auth/refresh`，成功后用新的 Access Token 读取本人资料。缺少有效会话时显示登录页。[隔离验收与复验命令](../../docs/开发学习记录.md#第-509-步恢复-web-重载后的会话与本人资料)
 
 ## 可以体验的操作
 
