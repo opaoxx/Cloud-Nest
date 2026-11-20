@@ -2344,7 +2344,7 @@ components:
           sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
           mime_type: application/octet-stream
           disposition: >-
-            attachment; filename="notes.txt"; filename*=UTF-8''%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0.txt
+            attachment; filename="download.txt"; filename*=UTF-8''%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0.txt
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RecordAccessData:
       type: object

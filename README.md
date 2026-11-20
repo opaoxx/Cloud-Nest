@@ -841,3 +841,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 下载目标检查已在同一快照内读取所引用的存储对象，核对 READY、文件大小与验证事实，并交付对象位置和 SHA-256。[第 379 步学习记录](docs/开发学习记录.md#第-379-步核对下载目标引用的存储对象)
 
 已提供 `storage.Client.CheckDownloadObject`，向 MinIO 查询下载目标指定版本的元数据，并核对对象是否存在和大小是否一致。[第 380 步学习记录](docs/开发学习记录.md#第-380-步核对-minio-中的下载对象版本和大小)
+
+已提供 `service.BuildDownloadDisposition`，按下载或预览用途生成带 ASCII 备用名和 UTF-8 文件名的响应头值。[第 381 步学习记录](docs/开发学习记录.md#第-381-步生成下载和预览的文件名响应头值)

@@ -1,5 +1,7 @@
 package dto
 
+import "github.com/opaoxx/cloud-nest/internal/server/domain"
+
 // CreateDownloadRequest 保存下载授权正文的两个必填 JSON 字段。
 type CreateDownloadRequest struct {
 	// ExpectedRevision 是客户端读到的目录项版本。缺失或 null 为 nil。
@@ -29,8 +31,8 @@ func ParseCreateDownloadRequest(request CreateDownloadRequest) (*CreateDownloadI
 	}
 
 	// 2. 校验用途是否明确为 download 或 preview。
-	if request.Purpose == nil || (*request.Purpose != "download" && *request.Purpose != "preview") {
-		return nil, &FieldError{Field: "purpose", Message: "下载授权用途须明确为 download 或 preview"}
+	if request.Purpose == nil || (*request.Purpose != domain.DownloadPurposeDownload && *request.Purpose != domain.DownloadPurposePreview) {
+		return nil, &FieldError{Field: "purpose", Message: domain.ErrInvalidDownloadPurpose.Error()}
 	}
 
 	// 3. 返回校验后的独立参数。
