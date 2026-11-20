@@ -1015,3 +1015,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.NewPurgeEntryProgressData`，将进度结果转换为完整十进制 ID、状态与剩余项数，并校验状态和计数的组合。[第 466 步学习记录](docs/开发学习记录.md#第-466-步转换永久清理进度响应数据)
 
 已提供 `handler.PurgeEntryProgressSuccess`，把进度结果写成带当次请求 ID 和禁止缓存头的 HTTP 200，已通过测试路由验证。[第 467 步学习记录](docs/开发学习记录.md#第-467-步交付永久清理进度响应)
+
+已提供 `handler.PurgeEntryProgress`，在测试路由串联 Bearer 认证、目标 ID 校验、只读进度服务和统一响应，已通过真实 JWT 与 MySQL 验证。[第 468 步学习记录](docs/开发学习记录.md#第-468-步处理永久清理进度查询请求)
