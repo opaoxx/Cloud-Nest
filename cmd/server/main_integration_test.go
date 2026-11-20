@@ -33,17 +33,15 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func TestServerCurrentUserIntegration(t *testing.T) {
-	if os.Getenv("CLOUDNEST_SERVER_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_SERVER_TEST=1 后使用独占库、临时用户配置目录和现有 MinIO 验证真实启动")
-	}
-	// 1. 创建独占数据库，使用固定正式迁移建立启动检查及用户夹具。
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
-	defer cancel()
+// prepareServerIntegrationDatabase 为正式启动测试创建并迁移本轮独占库。
+func prepareServerIntegrationDatabase(t *testing.T, ctx context.Context) (*sql.DB, string) {
+	t.Helper()
+	// 1. 建立管理连接，只用于创建和清理本轮独占库。
 	databaseConfig, err := config.LoadDatabaseConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
+	databaseConfig.DatabaseName = ""
 	admin, err := repository.OpenMySQL(ctx, databaseConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +72,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Error("独占启动测试库清理复核失败")
 		}
 	})
+
+	// 2. 在独占库应用正式迁移，供生产启动检查。
 	driverConfig := mysql.NewConfig()
 	driverConfig.Net, driverConfig.Addr, driverConfig.DBName = "tcp", databaseConfig.Address, databaseName
 	driverConfig.User, driverConfig.Passwd = databaseConfig.Username, databaseConfig.Password
@@ -99,6 +99,17 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(1,?,false)", checksum); err != nil {
 		t.Fatal(err)
 	}
+	return pool, databaseName
+}
+
+func TestServerCurrentUserIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_SERVER_TEST") != "1" {
+		t.Skip("设置 CLOUDNEST_SERVER_TEST=1 后使用独占库、临时用户配置目录和现有 MinIO 验证真实启动")
+	}
+	// 1. 创建已应用正式迁移的独占库，并准备用户夹具。
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	defer cancel()
+	pool, databaseName := prepareServerIntegrationDatabase(t, ctx)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota,used_storage,reserved_storage) VALUES(1,'fixture_one','真实启动用户','fixture_hash',100,60,40)",
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(3,'fixture_other','其他启动用户','fixture_hash',100)",

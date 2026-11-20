@@ -39,7 +39,7 @@ func main() {
 	logger.Info("服务已退出")
 }
 
-// run 装配服务所需资源并启动 HTTP，返回前关闭已创建的数据库连接池。
+// run 装配服务所需资源并启动 HTTP，返回前等待后台任务退出，再释放连接。
 // 各失败环节在此记录原因，main 在清理完成后设置进程退出码。
 func run(ctx context.Context, logger *slog.Logger) error {
 	// 1. 读取并校验监听配置，失败时记录原因并停止启动。
@@ -644,7 +644,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	stopPurgeRoot := startServerPurgeRootWorker(ctx, purgeRootBatch.RunOnce, logger)
 	defer stopPurgeRoot()
 
-	// 33. 启动 HTTP 并处理退出通知。
+	// 33. 用已有 MySQL 仓储和 MinIO 客户端装配回收批次。
+	objectDeletion := service.NewStoredObjectDeletionProcessor(storageClient.DeleteStoredObject, store.CompleteStoredObjectGC)
+	objectDeletionRecovery := service.NewStoredObjectDeletionRecoveryBatch(store.ListDeletingStoredObjects, objectDeletion.Process)
+	objectGCCandidate := service.NewStoredObjectGCCandidateProcessor(store.ClaimStoredObjectGC, objectDeletion.Process)
+	objectGCBatch := service.NewStoredObjectGCBatch(store.ListStoredObjectGCCandidates, objectGCCandidate.Process)
+	objectGCRound := service.NewStoredObjectGCRound(objectDeletionRecovery.RunOnce, objectGCBatch.RunOnce)
+
+	// 34. 启动回收 worker，登记取消并等待的回调，使其先于连接清理执行。
+	stopObjectGC := startServerStoredObjectGCWorker(ctx, objectGCRound.RunOnce, logger)
+	defer stopObjectGC()
+
+	// 35. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
