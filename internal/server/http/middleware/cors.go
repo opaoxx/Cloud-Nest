@@ -5,18 +5,24 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 )
 
 const corsMethods = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
-const corsHeaders = "Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-Request-ID"
+const corsHeaders = "Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, " +
+	dto.PurgeExpectedRevisionHeader + ", " + dto.PurgePreviewDigestHeader + ", " + RequestIDHeader
 
 // CORS 使用启动时已校验的明确来源列表处理跨域请求，不承担用户认证。
 // reject 由路由层注入，所有拒绝分支均停止后续 Handler。
 func CORS(allowedOrigins []string, reject gin.HandlerFunc) gin.HandlerFunc {
-	// 1. 复制白名单为只读查找表，避免运行期间受调用方切片修改影响。
+	// 1. 复制来源白名单，从响应头的允许列表生成请求头查找表。
 	originSet := make(map[string]bool, len(allowedOrigins))
 	for _, origin := range allowedOrigins {
 		originSet[origin] = true
+	}
+	allowedHeaderNames := make(map[string]bool)
+	for _, name := range strings.Split(corsHeaders, ", ") {
+		allowedHeaderNames[strings.ToLower(name)] = true
 	}
 	return func(requestContext *gin.Context) {
 		// 2. 添加缓存区分标记；无 Origin 时继续，有 Origin 时严格匹配白名单。
@@ -37,10 +43,11 @@ func CORS(allowedOrigins []string, reject gin.HandlerFunc) gin.HandlerFunc {
 			return
 		}
 
-		// 3. OPTIONS 预检校验目标方法和请求头，通过后返回无正文的 204。
+		// 3. OPTIONS 预检校验目标方法和请求头，回送同一允许列表和无正文的 204。
 		requestedMethods := request.Header.Values("Access-Control-Request-Method")
 		if request.Method == http.MethodOptions && len(requestedMethods) > 0 {
-			if len(requestedMethods) != 1 || !allowedPreflightMethod(requestedMethods[0]) || !allowedPreflightHeaders(request.Header.Values("Access-Control-Request-Headers")) {
+			if len(requestedMethods) != 1 || !allowedPreflightMethod(requestedMethods[0]) ||
+				!allowedPreflightHeaders(request.Header.Values("Access-Control-Request-Headers"), allowedHeaderNames) {
 				reject(requestContext)
 				requestContext.Abort()
 				return
@@ -74,14 +81,12 @@ func allowedPreflightMethod(method string) bool {
 }
 
 // allowedPreflightHeaders 校验可跨行出现的逗号列表；未声明任何头时直接通过。
-func allowedPreflightHeaders(headerLines []string) bool {
+func allowedPreflightHeaders(headerLines []string, allowedHeaderNames map[string]bool) bool {
 	// 1. 拆开所有列表项，逐项去掉 HTTP 列表空白并忽略头名称大小写。
 	for _, line := range headerLines {
 		for _, name := range strings.Split(line, ",") {
-			// 2. 只接受固定名称，空项、通配符及非法名称均返回 false。
-			switch strings.ToLower(strings.Trim(name, " \t")) {
-			case "authorization", "content-type", "idempotency-key", "x-cloudnest-client", "x-request-id":
-			default:
+			// 2. 用允许列表逐项查找，拒绝空项、通配符和未知头。
+			if !allowedHeaderNames[strings.ToLower(strings.Trim(name, " \t"))] {
 				return false
 			}
 		}

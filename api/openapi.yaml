@@ -5651,7 +5651,7 @@ components:
         Access-Control-Allow-Headers:
           schema:
             type: string
-            enum: ['Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-Request-ID']
+            enum: ['Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-CloudNest-Expected-Revision, X-CloudNest-Purge-Preview, X-Request-ID']
         Cache-Control:
           schema:
             type: string

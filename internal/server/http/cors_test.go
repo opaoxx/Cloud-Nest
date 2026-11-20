@@ -16,6 +16,9 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 )
 
+const corsTestAllowHeaders = "Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-CloudNest-Expected-Revision, X-CloudNest-Purge-Preview, X-Request-ID"
+const purgeConfirmPreflightHeaders = "authorization, idempotency-key, x-cloudnest-expected-revision, x-cloudnest-purge-preview"
+
 func TestCORSRequestPolicy(t *testing.T) {
 	// 1. 经生产路由检查来源、预检和原有错误响应，拒绝分支不能执行接口回调。
 	const allowedOrigin = "http://127.0.0.1:5173"
@@ -47,10 +50,14 @@ func TestCORSRequestPolicy(t *testing.T) {
 		{name: "uppercase not serialized origin", origins: []string{"HTTP://127.0.0.1:5173"}, wantStatus: 403},
 		{name: "origin whitespace", origins: []string{" " + allowedOrigin}, wantStatus: 403},
 		{name: "preflight minimal", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"GET"}, wantStatus: 204, wantAllow: true},
-		{name: "preflight all headers", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"POST"}, headers: []string{"Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-Request-ID"}, wantStatus: 204, wantAllow: true},
+		{name: "preflight all headers", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"POST"}, headers: []string{corsTestAllowHeaders}, wantStatus: 204, wantAllow: true},
 		{name: "preflight header case and whitespace", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"PATCH"}, headers: []string{" \tx-request-id\t, CONTENT-TYPE "}, wantStatus: 204, wantAllow: true},
 		{name: "preflight multiple header lines", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"PUT"}, headers: []string{"authorization", "x-request-id"}, wantStatus: 204, wantAllow: true},
 		{name: "preflight unknown path", method: "OPTIONS", path: "/not-implemented", origins: []string{allowedOrigin}, methods: []string{"DELETE"}, wantStatus: 204, wantAllow: true},
+		{name: "purge preflight headers across lines", method: "OPTIONS", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, methods: []string{"DELETE"}, headers: []string{"authorization, Idempotency-Key", " \tX-CLOUDNEST-EXPECTED-REVISION \t, x-CloudNest-Purge-Preview"}, wantStatus: 204, wantAllow: true},
+		{name: "purge preflight unknown origin", method: "OPTIONS", path: "/api/v1/trash/14", origins: []string{"https://private-preflight.example"}, methods: []string{"DELETE"}, headers: []string{purgeConfirmPreflightHeaders}, wantStatus: 403},
+		{name: "purge preflight unknown lookalike header", method: "OPTIONS", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, methods: []string{"DELETE"}, headers: []string{purgeConfirmPreflightHeaders + ", x-cloudnest-purge-preview-extra"}, wantStatus: 403},
+		{name: "purge actual path not registered yet", method: "DELETE", path: "/api/v1/trash/14", origins: []string{allowedOrigin}, wantStatus: 404, wantAllow: true},
 		{name: "preflight head", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"HEAD"}, wantStatus: 204, wantAllow: true},
 		{name: "preflight options", method: "OPTIONS", origins: []string{allowedOrigin}, methods: []string{"OPTIONS"}, wantStatus: 204, wantAllow: true},
 		{name: "preflight unknown origin", method: "OPTIONS", origins: []string{"https://private-preflight.example"}, methods: []string{"POST"}, wantStatus: 403},
@@ -112,7 +119,7 @@ func TestCORSRequestPolicy(t *testing.T) {
 					t.Fatal("允许来源或凭证头错误")
 				}
 				if response.Code == 204 {
-					if response.Body.Len() != 0 || response.Header().Get("Access-Control-Allow-Methods") != "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS" || response.Header().Get("Access-Control-Allow-Headers") != "Authorization, Content-Type, Idempotency-Key, X-CloudNest-Client, X-Request-ID" || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Access-Control-Max-Age") != "" {
+					if response.Body.Len() != 0 || response.Header().Get("Access-Control-Allow-Methods") != "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS" || response.Header().Get("Access-Control-Allow-Headers") != corsTestAllowHeaders || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Access-Control-Max-Age") != "" {
 						t.Fatal("预检正文、允许列表或缓存策略错误")
 					}
 				} else if response.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID, Retry-After" {
@@ -176,28 +183,37 @@ func TestCORSRequestPolicy(t *testing.T) {
 }
 
 func TestCORSOverRealHTTP(t *testing.T) {
-	// 1. 真实 TCP 验证预检无正文、拒绝的 HEAD 无正文，以及合法实际请求保持原 JSON。
+	// 1. 真实 TCP 验证预检允许列表和空正文，以及普通请求的响应。
 	origins := []string{"http://127.0.0.1:5173"}
 	router := NewRouter(logging.New(io.Discard), origins, func(context.Context) bool { return true })
 	origins[0] = "https://private-mutated.example"
 	server := httptest.NewServer(router)
 	defer server.Close()
 	for _, testCase := range []struct {
-		method, origin, preflight string
+		method, origin, path      string
+		preflight, requestHeaders string
 		status                    int
 		body                      string
 	}{
 		{method: "OPTIONS", origin: "http://127.0.0.1:5173", preflight: "POST", status: 204},
+		{method: "OPTIONS", origin: "http://127.0.0.1:5173", path: "/api/v1/trash/14", preflight: "DELETE", requestHeaders: purgeConfirmPreflightHeaders, status: 204},
 		{method: "GET", origin: "http://127.0.0.1:5173", status: 200, body: `{"status":"ok"}`},
 		{method: "HEAD", origin: "https://private-mutated.example", status: 403},
 	} {
-		request, err := http.NewRequest(testCase.method, server.URL+"/health/live", nil)
+		path := testCase.path
+		if path == "" {
+			path = "/health/live"
+		}
+		request, err := http.NewRequest(testCase.method, server.URL+path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		request.Header.Set("Origin", testCase.origin)
 		if testCase.preflight != "" {
 			request.Header.Set("Access-Control-Request-Method", testCase.preflight)
+		}
+		if testCase.requestHeaders != "" {
+			request.Header.Set("Access-Control-Request-Headers", testCase.requestHeaders)
 		}
 		response, err := server.Client().Do(request)
 		if err != nil {
@@ -207,6 +223,9 @@ func TestCORSOverRealHTTP(t *testing.T) {
 		_ = response.Body.Close()
 		if readError != nil || response.StatusCode != testCase.status || string(body) != testCase.body {
 			t.Fatalf("真实 HTTP status=%d body=%s err=%v", response.StatusCode, body, readError)
+		}
+		if testCase.preflight != "" && response.Header.Get("Access-Control-Allow-Headers") != corsTestAllowHeaders {
+			t.Fatalf("真实 HTTP 预检的允许头错误：%q", response.Header.Get("Access-Control-Allow-Headers"))
 		}
 		if _, err := uuid.Parse(response.Header.Get("X-Request-ID")); err != nil {
 			t.Fatal("真实响应没有请求 ID")
