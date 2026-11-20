@@ -101,7 +101,7 @@ info:
     CreateUploadSucceeded 定义上传创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
     UploadContentAcceptedData/UploadContentAcceptedResponse 定义上传内容接收后的 HTTP 202 响应数据。
     UploadContentAccepted 定义该成功响应的请求 ID 与禁止缓存头，供后续内容接收操作引用。
-    单文件上传完成的计划契约使用 POST /api/v1/uploads/{id}/complete，确认校验进度或返回已保存的发布结果。
+    POST /api/v1/uploads/{id}/complete 由启动入口绑定共享授权与完成确认服务，确认校验进度或返回已保存的发布结果。
     POST /api/v1/uploads/{id}/cancel 由启动入口绑定共享授权与取消受理事务，按任务状态返回 HTTP 202 或 HTTP 200。
     UploadContentTimedOut/UploadContentConflict/UploadContentTooLarge/UploadContentStorageUnavailable 定义内容接收失败时可公开的错误。
     CreateUploadRejected/CreateUploadConflict/CreateUploadTooLarge/CreateUploadQuotaExceeded 定义创建参数、幂等冲突/到期、文件声明上限和配额不足响应。
@@ -298,7 +298,7 @@ paths:
       operationId: completeUpload
       summary: 确认当前用户的单文件上传完成状态
       description: |
-        计划契约，服务端路由随完成流程实现注册。
+        服务启动时绑定共享 Bearer 授权和单文件上传完成确认服务。
         1. Bearer 授权通过后解析路径 id，按当前用户归属读取任务。同账号的其他设备也可确认完成状态，MULTIPART 返回 TASK_NOT_READY。
         2. SINGLE 任务处于 VERIFYING 时返回 202 和当前快照，涵盖等待校验、执行校验和等待重试。
            COMPLETED 返回 200 和已保存的发布结果，data.result_entry_id 为已经发布的目录项 ID。

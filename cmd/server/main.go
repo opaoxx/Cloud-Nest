@@ -461,7 +461,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 28. 注册业务接口，将上传接收与取消受理绑定到正式路由。
+	// 28. 注册业务接口，将上传接收、完成确认与取消受理绑定到正式路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
@@ -469,6 +469,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)
 	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize, createUploadService.Create)
 	serverhttp.RegisterUploadContentRoute(router, authorizationService.Authorize, uploadTaskService.Get, receiveUploadContent.Receive)
+	serverhttp.RegisterUploadCompletionRoute(router, authorizationService.Authorize, uploadTaskService.ConfirmCompletion)
 	serverhttp.RegisterUploadCancellationRoute(router, authorizationService.Authorize, store.BeginUserUploadCancellation)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)

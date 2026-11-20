@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/complete、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -827,3 +827,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.UploadCompletionSuccess`，复用公开任务正文交付完成确认结果。`VERIFYING` 返回 202，`COMPLETED` 返回 200 和原发布结果。[第 372 步学习记录](docs/开发学习记录.md#第-372-步交付单文件上传完成确认成功响应)
 
 已提供 `handler.UploadCompletion`，将认证身份和路径任务 ID 交给完成确认服务，通过测试专用 POST 交付 202、200 或约定错误。[第 373 步学习记录](docs/开发学习记录.md#第-373-步处理单文件上传完成确认请求)
+
+正式 `POST /api/v1/uploads/{id}/complete` 已接入后端启动流程。校验中返回 202，后台发布后返回 200 和已保存的目录项 ID。[第 374 步学习记录](docs/开发学习记录.md#第-374-步注册正式单文件上传完成确认路由)

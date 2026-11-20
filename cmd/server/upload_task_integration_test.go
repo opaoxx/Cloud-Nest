@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -152,5 +153,61 @@ func verifyServerUploadTasks(t *testing.T, ctx context.Context, pool *sql.DB, ba
 	if foreign := requestServerUploadTask(t, baseURL, foreignToken, "500011", 200, "", ""); foreign.Data.ParentID != "33" {
 		t.Fatal("正式其他用户的独立任务查询错误")
 	}
+	// 3. 通过同一正式服务确认不同阶段，并核对授权和归属。
+	requestServerUploadCompletion(t, ctx, baseURL, "", "0", 401, "AUTH_REQUIRED", "")
+	requestServerUploadCompletion(t, ctx, baseURL, token, "0", 400, "INVALID_ARGUMENT", "id")
+	requestServerUploadCompletion(t, ctx, baseURL, foreignToken, completed.Data.ID, 404, "UPLOAD_NOT_FOUND", "")
+	requestServerUploadCompletion(t, ctx, baseURL, token, "599999", 404, "UPLOAD_NOT_FOUND", "")
+	requestServerUploadCompletion(t, ctx, baseURL, token, uploading.Data.ID, 409, "TASK_NOT_READY", "")
+	verifying := requestServerUploadCompletion(t, ctx, baseURL, otherDeviceToken, "500004", 202, "", "")
+	if verifying.Data.Status != "VERIFYING" || verifying.Data.ResultEntryID != nil || verifying.Data.CompletedAt != nil ||
+		verifying.Data.LastError == nil || verifying.Data.LastError.Code != "INTERNAL_ERROR" {
+		t.Fatal("跨设备确认未返回持久化的校验中快照", verifying.Data)
+	}
+	confirmed := requestServerUploadCompletion(t, ctx, baseURL, token, completed.Data.ID, 200, "", "")
+	if !reflect.DeepEqual(confirmed.Data, completed.Data) || confirmed.RequestID == completed.RequestID {
+		t.Fatal("正式完成确认与已有发布结果不符", confirmed.Data)
+	}
 	return uploading, completed
+}
+
+// requestServerUploadCompletion 通过正式 POST 核对完成确认的公开响应。
+func requestServerUploadCompletion(t *testing.T, ctx context.Context, baseURL, token, taskID string, status int, code, field string) dto.UploadTaskResponse {
+	t.Helper()
+	// 1. 发送无正文请求，凭证通过 Authorization 传入。
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/uploads/"+taskID+"/complete", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const origin = "http://127.0.0.1:5173"
+	request.Header.Set("Origin", origin)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal("正式上传完成确认请求失败", err)
+	}
+	defer response.Body.Close()
+	encoded, err := io.ReadAll(response.Body)
+	requestID := response.Header.Get("X-Request-ID")
+	if err != nil || response.StatusCode != status || requestID == "" || response.Header.Get("Cache-Control") != "no-store" ||
+		response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Access-Control-Allow-Origin") != origin {
+		t.Fatal("正式上传完成确认状态、正文或响应头不符", response.StatusCode, status, err, string(encoded))
+	}
+	// 2. 校验公开任务或固定错误，并核对请求 ID。
+	var payload dto.UploadTaskResponse
+	if code == "" {
+		if json.Unmarshal(encoded, &payload) != nil || payload.Data.ID != taskID || payload.RequestID != requestID {
+			t.Fatal("正式上传完成确认成功响应不符", string(encoded))
+		}
+		return payload
+	}
+	var failure dto.ErrorResponse
+	if json.Unmarshal(encoded, &failure) != nil || failure.RequestID != requestID || failure.Error.Code != code ||
+		(field == "" && failure.Error.Details != nil) || (field != "" && (len(failure.Error.Details) != 1 || failure.Error.Details["field"] != field)) {
+		t.Fatal("正式上传完成确认错误结构不符", string(encoded))
+	}
+	return payload
 }

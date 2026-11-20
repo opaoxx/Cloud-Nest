@@ -1490,6 +1490,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 			t.Fatal("正式上传任务的重启数据或请求 ID 错误")
 		}
 	}
+	completedAfterRestart := requestServerUploadCompletion(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, completedUploadBeforeRestart.Data.ID, 200, "", "")
+	if !reflect.DeepEqual(completedAfterRestart.Data, completedUploadBeforeRestart.Data) || completedAfterRestart.RequestID == completedUploadBeforeRestart.RequestID {
+		t.Fatal("重启后的完成确认未返回已有发布结果")
+	}
 	// 名称普通、收藏、预算和长键首页分别复用原文本，并与首次事实对照。
 	for _, fixture := range []struct {
 		raw     string

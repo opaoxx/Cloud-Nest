@@ -237,6 +237,12 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 			if queried.Data.Status != "COMPLETED" || queried.Data.ResultEntryID == nil || *queried.Data.ResultEntryID != strconv.FormatUint(*task.ResultEntryID, 10) {
 				t.Fatal("正式查询未返回完成状态和目录项", queried.Data)
 			}
+			confirmed := requestServerUploadCompletion(t, ctx, baseURL, token, queried.Data.ID, 200, "", "")
+			if confirmed.Data.Status != "COMPLETED" || confirmed.Data.ResultEntryID == nil ||
+				*confirmed.Data.ResultEntryID != *queried.Data.ResultEntryID || confirmed.Data.CompletedAt == nil ||
+				task.CompletedAt == nil || !confirmed.Data.CompletedAt.Equal(*task.CompletedAt) {
+				t.Fatal("正式完成确认未返回后台实际发布结果", confirmed.Data)
+			}
 			publishedBytes += original.ReservedBytes
 		}
 		var usedAfter uint64
