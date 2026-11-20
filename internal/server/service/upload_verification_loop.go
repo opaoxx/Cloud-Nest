@@ -14,5 +14,5 @@ func RunUploadVerificationLoop(
 	report func(UploadVerificationBatchResult, error),
 ) error {
 	// 1. 使用校验批次的结果类型，沿用上传后台任务的共同循环。
-	return runUploadBatchLoop(ctx, "定时上传校验", interval, runOnce, report)
+	return runBatchLoop(ctx, "定时上传校验", interval, runOnce, report)
 }

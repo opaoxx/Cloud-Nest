@@ -14,5 +14,5 @@ func RunUploadExpirationLoop(
 	report func(UploadExpirationBatchResult, error),
 ) error {
 	// 1. 使用过期批次的结果类型，沿用上传后台任务的共同循环。
-	return runUploadBatchLoop(ctx, "定时上传过期处理", interval, runOnce, report)
+	return runBatchLoop(ctx, "定时上传过期处理", interval, runOnce, report)
 }

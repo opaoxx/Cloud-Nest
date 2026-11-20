@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// runUploadBatchLoop 负责在各轮完成和汇报后等待指定间隔。
-func runUploadBatchLoop[Result any](
+// runBatchLoop 负责在各轮完成和汇报后等待指定间隔。
+func runBatchLoop[Result any](
 	ctx context.Context,
 	operation string,
 	interval time.Duration,
