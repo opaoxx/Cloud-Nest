@@ -425,7 +425,7 @@ paths:
       operationId: listTrashedEntries
       summary: 分页读取当前用户的顶层回收项
       description: |
-        计划契约，后端实现后注册路由。
+        服务启动时注册，供已登录用户查看回收站。
         Bearer 授权通过后读取 cursor、limit，符合查询编码的额外参数沿用列表接口的忽略策略。
         仅显示当前用户自身为 TRASHED 且从父目录至真实根目录均为活动目录的项目。
         具有 TRASHED、PURGING 或 PURGED 祖先的嵌套项从列表隐藏。

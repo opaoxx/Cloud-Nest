@@ -1435,6 +1435,9 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if page := listDirectory(t, "parent_id=74001", webRefreshed.Data.AccessToken, 200, "", ""); len(page.Data.Items) != 0 {
 		t.Fatal("正式目录列表仍显示已回收项")
 	}
+	trashFirstBeforeRestart, trashNextBeforeRestart, trashNextQuery := verifyServerTrashPage(
+		t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, trashedBeforeRestart.Data.Entry,
+	)
 
 	// 正式任务查询贯穿已有授权与持久记录，保存结果供重启后对照。
 	uploadBeforeRestart, completedUploadBeforeRestart := verifyServerUploadTasks(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, nativeRefreshed.Data.AccessToken, foreignToken.Token)
@@ -1630,6 +1633,14 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		serverTrashDirectoryKey, serverTrashDirectoryBody, 200, "", nil)
 	if !reflect.DeepEqual(trashedBeforeRestart.Data, trashedAfterRestart.Data) || trashedBeforeRestart.RequestID == trashedAfterRestart.RequestID {
 		t.Fatal("重启后正式回收的原快照或本次请求 ID 错误")
+	}
+	trashFirstAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, serverTrashFirstQuery, 200, "", "")
+	trashNextAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, trashNextQuery, 200, "", "")
+	if !reflect.DeepEqual(trashFirstBeforeRestart.Data, trashFirstAfterRestart.Data) ||
+		!reflect.DeepEqual(trashNextBeforeRestart.Data, trashNextAfterRestart.Data) ||
+		trashFirstBeforeRestart.RequestID == trashFirstAfterRestart.RequestID ||
+		trashNextBeforeRestart.RequestID == trashNextAfterRestart.RequestID {
+		t.Fatal("重启后正式回收站的首页、原游标续页或请求 ID 不符")
 	}
 	movedEntryAfterRestart := requestServerMoveEntry(t, "http://"+address, webRefreshed.Data.AccessToken, "70001", serverMoveEntryKey, serverMoveEntryBody, 200, "", "")
 	if !reflect.DeepEqual(movedEntryBeforeRestart.Data, movedEntryAfterRestart.Data) || movedEntryBeforeRestart.RequestID == movedEntryAfterRestart.RequestID {

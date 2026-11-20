@@ -418,6 +418,27 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
+	// 1. 使用目录项只读快照读取回收候选和原父路径。
+	trashListService := service.NewTrashEntryListService(func(ctx context.Context, read func(context.Context, service.TrashEntryListReader) error) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+			return read(snapshotContext, snapshotStore)
+		})
+	})
+
+	// 2. 从已有签名配置派生回收站游标的专用密钥。
+	trashCursorSigner, err := service.NewTrashEntryCursorSigner(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配回收站游标签发器失败", "stage", "application", "error", err)
+		return err
+	}
+	trashCursorVerifier, err := service.NewTrashEntryCursorVerifier(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配回收站游标校验器失败", "stage", "application", "error", err)
+		return err
+	}
+	// 3. 组合游标校验、快照列表和下一页签发。
+	trashPageService := service.NewTrashEntryPageService(trashCursorVerifier.Verify, trashListService.List, trashCursorSigner.Sign)
+
 	// 22. 绑定当前用户事务，装配收藏核心服务。
 	setStarredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -508,6 +529,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)
 	serverhttp.RegisterTrashEntryRoute(router, authorizationService.Authorize, trashEntryService.Trash)
+	serverhttp.RegisterTrashPageRoute(router, authorizationService.Authorize, trashPageService.List)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
 	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
 	serverhttp.RegisterCreateDownloadRoute(router, authorizationService.Authorize, downloads.Create)
