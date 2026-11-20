@@ -52,30 +52,13 @@ func (store *Store) MarkUserStagedObjectOrphaned(ctx context.Context, objectID u
 
 // markUnreferencedUploadObjectOrphaned 处理已锁定且阶段已复核的上传对象。
 func (lockedStore *Store) markUnreferencedUploadObjectOrphaned(ctx context.Context, object *domain.StoredObject) (*domain.StoredObject, error) {
-	userID, objectID := object.OwnerUserID, object.ID
 	// 1. 当前读检查文件与未终结上传任务的有效引用。
-	for _, scope := range []struct {
-		table, condition string
-		arguments        []any
-	}{
-		{"file_entries", "user_id = ? AND object_id = ? AND status <> 'PURGED'", []any{userID, objectID}},
-		{"upload_tasks", "user_id = ? AND status NOT IN ('COMPLETED','CANCELLED','EXPIRED','FAILED') AND (staged_object_id = ? OR published_object_id = ?)", []any{userID, objectID, objectID}},
-	} {
-		var reference struct{ ID uint64 }
-		queryError := lockedStore.database.WithContext(ctx).Table(scope.table).Select("id").
-			Where(scope.condition, scope.arguments...).Take(&reference).Error
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if queryError == nil {
-			return nil, domain.ErrStoredObjectInUse
-		}
-		if !errors.Is(queryError, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("检查暂存对象有效引用失败: %w", queryError)
-		}
+	if err := lockedStore.checkStoredObjectUnreferenced(ctx, object); err != nil {
+		return nil, err
 	}
 
 	// 2. 复用已有孤立记录，或条件写入孤立状态及七天宽限期。
+	userID, objectID := object.OwnerUserID, object.ID
 	if object.UnreferencedAt != nil {
 		if object.GCAfter.Before(object.UnreferencedAt.Add(7 * 24 * time.Hour)) {
 			return nil, domain.ErrInvalidStoredObjectData
