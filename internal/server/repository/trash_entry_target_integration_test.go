@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"reflect"
@@ -14,12 +15,11 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestValidateTrashEntryTargetIntegration(t *testing.T) {
+func trashEntryTestDatabase(t *testing.T, ctx context.Context) (*sql.DB, *Store, domain.Actor) {
+	t.Helper()
 	// 1. 在独占库安装正式表，通过单连接验证读取能力来自当前事务。
 	pool := userProfileDatabase(t)
 	pool.SetMaxOpenConns(1)
-	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
-	defer cancel()
 	start := strings.Index(migrations.InitialSQL, "CREATE TABLE auth_sessions (")
 	end := strings.Index(migrations.InitialSQL, "CREATE TABLE stored_objects (")
 	if start < 0 || end <= start {
@@ -50,6 +50,13 @@ func TestValidateTrashEntryTargetIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	actor := domain.Actor{UserID: 1, DeviceID: 19, SessionID: 17}
+	return pool, store, actor
+}
+
+func TestValidateTrashEntryTargetIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	defer cancel()
+	_, store, actor := trashEntryTestDatabase(t, ctx)
 	readEntries := func() map[uint64]*domain.FileEntry {
 		t.Helper()
 		entries := make(map[uint64]*domain.FileEntry)
