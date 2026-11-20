@@ -3,11 +3,10 @@ package repository
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -175,7 +174,9 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		snapshotCalls := 0
 		list := service.NewTrashEntryListService(func(listContext context.Context, read func(context.Context, service.TrashEntryListReader) error) error {
+			snapshotCalls++
 			return store.WithFileEntrySnapshot(listContext, func(snapshotContext context.Context, reader *Store) error {
 				return read(snapshotContext, reader)
 			})
@@ -190,9 +191,17 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var before *domain.TrashEntryPosition
-		for index, expected := range [][]uint64{{}, {31, 45}, {44}} {
-			page, err := list.List(ctx, actor, 2, before)
+		pages := service.NewTrashEntryPageService(verifier.Verify, list.List, signer.Sign)
+		cursor := ""
+		for index, expected := range []struct {
+			limit string
+			ids   []uint64
+		}{{"1", nil}, {"2", []uint64{31, 45}}, {"1", []uint64{44}}} {
+			query, fieldError := dto.ParseTrashPageQuery(url.Values{"cursor": {cursor}, "limit": {expected.limit}}.Encode())
+			if fieldError != nil || query == nil || query.Cursor != cursor {
+				t.Fatalf("分页查询解析失败，字段错误为 %v", fieldError)
+			}
+			page, err := pages.List(ctx, actor, query.PageSize, query.Cursor)
 			if err != nil || page == nil || page.Entries == nil {
 				t.Fatalf("第 %d 页为 %+v，错误为 %v", index+1, page, err)
 			}
@@ -204,35 +213,25 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 					t.Fatalf("目录项 %d 的原父路径为 %+v", item.Entry.ID, path)
 				}
 			}
-			if !slices.Equal(ids, expected) || (page.NextPosition != nil) != (index < 2) {
-				t.Fatalf("第 %d 页项目为 %v，续读位置为 %+v", index+1, ids, page.NextPosition)
+			if !slices.Equal(ids, expected.ids) || (page.NextCursor != nil) != (index < 2) || snapshotCalls != index+1 {
+				t.Fatalf("第 %d 页项目为 %v，续页游标为 %+v，快照次数为 %d", index+1, ids, page.NextCursor, snapshotCalls)
 			}
-			if index == 0 && (page.NextPosition.ID != 2000 || !page.NextPosition.DeletedAt.Equal(hiddenTime)) {
-				t.Fatalf("空页续读点为 %+v，期望最后消费的隐藏候选 2000", page.NextPosition)
-			}
-			if page.NextPosition == nil {
+			if page.NextCursor == nil {
 				break
 			}
-			// 将客户端原样提交的游标还原为下一轮实际查询使用的位置。
-			cursor, err := signer.Sign(actor.UserID, *page.NextPosition)
-			if err != nil {
-				t.Fatal(err)
-			}
-			query, fieldError := dto.ParseTrashPageQuery(url.Values{"cursor": {cursor}, "limit": {"2"}}.Encode())
-			if fieldError != nil || query == nil || query.Cursor != cursor || query.PageSize != 2 {
-				t.Fatalf("回收站游标无法经 URL 查询原样传递，字段错误为 %v", fieldError)
-			}
+			cursor = *page.NextCursor
 			if index == 0 {
-				payload, _, _ := strings.Cut(query.Cursor, ".")
-				decoded, err := base64.RawURLEncoding.Strict().DecodeString(payload)
-				want := `{"version":1,"user_id":"3","deleted_at":"2026-11-20T01:31:00.123456Z","entry_id":"2000"}`
-				if err != nil || string(decoded) != want {
-					t.Fatalf("空页游标载荷为 %s，错误为 %v", decoded, err)
+				position, err := verifier.Verify(actor.UserID, cursor)
+				if err != nil || position == nil || position.ID != 2000 || !position.DeletedAt.Equal(hiddenTime) {
+					t.Fatalf("空页的游标还原为 %+v，错误为 %v", position, err)
 				}
-			}
-			before, err = verifier.Verify(actor.UserID, query.Cursor)
-			if err != nil || before == nil || *before != *page.NextPosition {
-				t.Fatalf("第 %d 页还原的续读位置为 %+v，错误为 %v", index+1, before, err)
+				// 另一账号提交该游标，校验失败时不会打开列表快照。
+				otherActor := actor
+				otherActor.UserID = 1
+				rejected, err := pages.List(ctx, otherActor, 2, cursor)
+				if rejected != nil || !errors.Is(err, domain.ErrInvalidTrashEntryCursor) || snapshotCalls != 1 {
+					t.Fatalf("其他账号结果为 %+v，错误为 %v，快照次数为 %d", rejected, err, snapshotCalls)
+				}
 			}
 		}
 	})
