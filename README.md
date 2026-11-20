@@ -1061,3 +1061,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `storage.Client.DeleteStoredObject`，按已提交的删除记录定位 MinIO 对象和目标版本。[第 489 步学习记录](docs/开发学习记录.md#第-489-步按对象位置删除存储内容)
 
 已提供 `Store.CompleteStoredObjectGC`，在确认目标内容已删除后，按同一对象位置和版本写回 `DELETED`。[第 490 步学习记录](docs/开发学习记录.md#第-490-步确认存储对象删除完成)
+
+已提供 `StoredObjectDeletionProcessor.Process`，先删除单个对象的 MinIO 内容，确认目标已不存在后再写回 MySQL。[第 491 步学习记录](docs/开发学习记录.md#第-491-步串联单个存储对象的删除与回写)
