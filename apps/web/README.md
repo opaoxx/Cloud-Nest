@@ -1,6 +1,6 @@
 # CloudNest Web 页面 Demo
 
-采用 React、TypeScript、Vite、Ant Design 和 Lucide 图标。默认进入本地 Demo，可体验文件浏览、整理和传输交互。另有一个可选的 API 模式，用于真实登录和查看本人资料。
+采用 React、TypeScript、Vite、Ant Design 和 Lucide 图标。默认进入本地 Demo，可体验文件浏览、整理和传输交互。另有一个可选的 API 模式，用于真实登录、查看本人资料和读取根目录。
 
 ## 启动
 
@@ -30,6 +30,8 @@ pnpm --dir apps/web dev
 ~~~
 
 使用本地测试账号登录后，页面会调用 `GET /api/v1/me` 取得显示名称、用户名和配额。Access Token 保存在内存中，浏览器自行管理后端交付的 HttpOnly 刷新 Cookie。重载时，页面先调用 `POST /api/v1/auth/refresh`，成功后用新的 Access Token 读取本人资料。缺少有效会话时显示登录页。[隔离验收与复验命令](../../docs/开发学习记录.md#第-509-步恢复-web-重载后的会话与本人资料)
+
+拿到本人资料后，页面使用其中的 `root_entry_id` 读取根目录，显示条目名称、类型和文件大小。列表支持加载更多，空目录会显示提示，读取失败可重试当前页。[根目录隔离验收](../../docs/开发学习记录.md#第-510-步接通-web-根目录只读列表)
 
 ## 可以体验的操作
 

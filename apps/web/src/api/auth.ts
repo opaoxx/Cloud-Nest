@@ -1,15 +1,11 @@
+import { ApiError, isByteCount, isRecord, requestData } from './http'
+
 export interface CurrentUserProfile {
   user: { id: string; username: string; display_name: string }
   root_entry_id: string
   quota_bytes: number
   used_bytes: number
   reserved_bytes: number
-}
-
-export class AuthApiError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message)
-  }
 }
 
 const installationKey = 'cloudnest.web.installation_id'
@@ -24,31 +20,9 @@ function browserInstallationId(): string {
   return installationId
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-function isByteCount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
-
-async function requestData(path: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(path, { ...init, credentials: 'same-origin', cache: 'no-store' })
-  const payload: unknown = await response.json().catch(() => null)
-  if (!response.ok) {
-    const error = isRecord(payload) && isRecord(payload.error) ? payload.error : null
-    const message = error && typeof error.message === 'string' ? error.message : '服务暂时无法完成请求，请重试。'
-    throw new AuthApiError(response.status, message)
-  }
-  if (!isRecord(payload) || !isRecord(payload.data)) {
-    throw new AuthApiError(response.status, '服务返回的数据格式有误。')
-  }
-  return payload.data
-}
-
-function readAccessToken(data: unknown): string {
-  if (!isRecord(data) || typeof data.access_token !== 'string' || !data.access_token) {
-    throw new AuthApiError(200, '服务响应缺少访问凭证。')
+function readAccessToken(data: Record<string, unknown>): string {
+  if (typeof data.access_token !== 'string' || !data.access_token) {
+    throw new ApiError(200, '服务响应缺少访问凭证。')
   }
   return data.access_token
 }
@@ -97,11 +71,11 @@ export async function getCurrentUser(accessToken: string): Promise<CurrentUserPr
   })
 
   // 2. 核对资料形状，保留服务端的字符串 ID 和字节计数。
-  if (!isRecord(data) || !isRecord(data.user) ||
+  if (!isRecord(data.user) ||
       typeof data.user.id !== 'string' || typeof data.user.username !== 'string' ||
       typeof data.user.display_name !== 'string' || typeof data.root_entry_id !== 'string' ||
       !isByteCount(data.quota_bytes) || !isByteCount(data.used_bytes) || !isByteCount(data.reserved_bytes)) {
-    throw new AuthApiError(200, '服务返回的本人资料格式有误。')
+    throw new ApiError(200, '服务返回的本人资料格式有误。')
   }
   return {
     user: { id: data.user.id, username: data.user.username, display_name: data.user.display_name },

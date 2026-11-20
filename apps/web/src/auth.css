@@ -46,3 +46,18 @@
 }
 .auth-profile dt { color: #50675b; }
 .auth-profile dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+
+.auth-card--signed-in { width: min(100%, 640px); }
+.root-directory { margin-top: 28px; }
+.root-directory h2 { margin: 0 0 12px; font-size: 18px; }
+.root-directory p { margin: 12px 0; }
+.root-directory-items { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.root-directory-items th,
+.root-directory-items td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.root-directory-items th:first-child { width: 58%; }
+.root-directory-items + button { margin-top: 12px; }

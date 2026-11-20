@@ -1,18 +1,16 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
-import { AuthApiError, getCurrentUser, login, refreshWebSession } from './api/auth'
+import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
+import { ApiError, apiErrorMessage } from './api/http'
+import RootDirectory from './RootDirectory'
 import { formatSize } from './demo'
 import './auth.css'
 
 type WebSession = {
   accessToken: string
   profile: CurrentUserProfile
-}
-
-function messageFor(error: unknown): string {
-  return error instanceof AuthApiError ? error.message : '暂时无法连接到服务，请重试。'
 }
 
 export default function AuthPage() {
@@ -37,8 +35,8 @@ export default function AuthPage() {
         if (active) setSession({ accessToken, profile })
       } catch (error) {
         // 3. 收到 401 时回到登录页，其他错误显示提示。
-        if (active && !(error instanceof AuthApiError && error.status === 401)) {
-          setErrorMessage(messageFor(error))
+        if (active && !(error instanceof ApiError && error.status === 401)) {
+          setErrorMessage(apiErrorMessage(error))
         }
       } finally {
         if (active) setRestoring(false)
@@ -67,7 +65,7 @@ export default function AuthPage() {
       setSession({ accessToken, profile })
     } catch (error) {
       // 3. 登录或资料读取失败时，交付可重试的错误提示。
-      setErrorMessage(messageFor(error))
+      setErrorMessage(apiErrorMessage(error))
     } finally {
       setBusy(false)
     }
@@ -83,8 +81,8 @@ export default function AuthPage() {
       setSession({ accessToken: session.accessToken, profile })
     } catch (error) {
       // 2. 401 表明需要重新登录，其他失败保留已显示资料。
-      if (error instanceof AuthApiError && error.status === 401) setSession(null)
-      setErrorMessage(messageFor(error))
+      if (error instanceof ApiError && error.status === 401) setSession(null)
+      setErrorMessage(apiErrorMessage(error))
     } finally {
       setBusy(false)
     }
@@ -92,7 +90,7 @@ export default function AuthPage() {
 
   return (
     <main className="auth-shell">
-      <section className="auth-card" aria-labelledby="auth-title">
+      <section className={session ? 'auth-card auth-card--signed-in' : 'auth-card'} aria-labelledby="auth-title">
         <div className="auth-brand"><img src="/favicon.svg" alt="" />CloudNest</div>
         <h1 id="auth-title">
           {restoring ? <span role="status">正在检查会话…</span> : session ? '本人资料' : '登录'}
@@ -108,6 +106,8 @@ export default function AuthPage() {
               <div><dt>预占空间</dt><dd>{formatSize(session.profile.reserved_bytes)}</dd></div>
             </dl>
             <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
+            <RootDirectory key={session.profile.root_entry_id} rootEntryId={session.profile.root_entry_id}
+              accessToken={session.accessToken} />
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>
