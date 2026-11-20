@@ -12,6 +12,9 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 )
 
+const serverPurgeRestartRootID = "74202"
+const serverPurgeRestartProgressPath = "/api/v1/trash/" + serverPurgeRestartRootID + "/purge"
+
 func requestServerPurgeEntryProgress(
 	t *testing.T, ctx context.Context, baseURL, path, token string, status int, code string,
 ) dto.PurgeEntryProgressResponse {
@@ -62,43 +65,51 @@ func requestServerPurgeEntryProgress(
 
 func verifyServerPurgeEntryProgress(
 	t *testing.T, ctx context.Context, baseURL, token, foreignToken string, accepted dto.PurgeEntryAcceptedResponse,
-) dto.PurgeEntryProgressResponse {
+) {
 	t.Helper()
-	// 1. 用 202 给出的地址验证认证、归属和受理后的初始进度。
+	// 1. 用 202 给出的地址验证认证、归属及后台可能已经推进的进度。
 	requestServerPurgeEntryProgress(t, ctx, baseURL, "/api/v1/trash/0/purge", "", http.StatusUnauthorized, "AUTH_REQUIRED")
 	requestServerPurgeEntryProgress(t, ctx, baseURL, "/api/v1/trash/0/purge", token, http.StatusBadRequest, "INVALID_ARGUMENT")
 	requestServerPurgeEntryProgress(t, ctx, baseURL, accepted.Data.ProgressURL, foreignToken, http.StatusNotFound, "ENTRY_NOT_FOUND")
 	initial := requestServerPurgeEntryProgress(t, ctx, baseURL, accepted.Data.ProgressURL, token, http.StatusOK, "")
-	want := dto.PurgeEntryProgressData{EntryID: accepted.Data.EntryID, Status: "PURGING", RemainingCount: 1}
-	if initial.Data != want || initial.RequestID == accepted.RequestID {
+	pending := dto.PurgeEntryProgressData{EntryID: accepted.Data.EntryID, Status: "PURGING", RemainingCount: 1}
+	completed := dto.PurgeEntryProgressData{EntryID: accepted.Data.EntryID, Status: "PURGED", RemainingCount: 0}
+	if (initial.Data != pending && initial.Data != completed) || initial.RequestID == accepted.RequestID {
 		t.Fatal("从受理地址查询到的初始进度不符", initial)
 	}
-	return initial
 }
 
-func verifyServerPurgeEntryProgressAfterRestart(
-	t *testing.T, ctx context.Context, pool *sql.DB, baseURL, token string, progressPath string, before dto.PurgeEntryProgressResponse,
-) {
+func prepareServerPurgeRestartRoot(t *testing.T, ctx context.Context, pool *sql.DB) {
 	t.Helper()
-	// 1. 在新实例用同账号另一有效会话查询已保存的清理状态。
-	restarted := requestServerPurgeEntryProgress(t, ctx, baseURL, progressPath, token, http.StatusOK, "")
-	if restarted.Data != before.Data || restarted.RequestID == before.RequestID {
-		t.Fatal("重启后进度数据或本次请求 ID 不符", restarted)
+	// 1. 在两次启动之间保存一个已受理根目录和它的空子目录。
+	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,purge_started_at)
+		VALUES(?,1,11,'重启清理根项',CAST('重启清理根项' AS BINARY),'DIR','PURGING',UTC_TIMESTAMP(6)),
+		      (74203,1,?,'重启清理子项',CAST('重启清理子项' AS BINARY),'DIR','ACTIVE',NULL)`,
+		serverPurgeRestartRootID, serverPurgeRestartRootID); err != nil {
+		t.Fatal("准备重启待清理记录失败", err)
 	}
+}
 
-	// 2. 在独占库模拟空目录完成清理，再用原地址读取最新状态。
-	result, err := pool.ExecContext(ctx, `UPDATE file_entries
-		SET status='PURGED',purged_at=UTC_TIMESTAMP(6),revision=revision+1,modified_at=UTC_TIMESTAMP(6),updated_at=UTC_TIMESTAMP(6)
-		WHERE user_id=1 AND id=? AND status='PURGING'`, before.Data.EntryID)
-	if err != nil {
-		t.Fatal("推进清理进度夹具失败", err)
-	}
-	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-		t.Fatal("只应推进清理进度夹具一行", affected, err)
-	}
-	finished := requestServerPurgeEntryProgress(t, ctx, baseURL, progressPath, token, http.StatusOK, "")
-	want := dto.PurgeEntryProgressData{EntryID: before.Data.EntryID, Status: "PURGED", RemainingCount: 0}
-	if finished.Data != want || finished.RequestID == restarted.RequestID {
-		t.Fatal("正式路径未返回完成状态和本次请求 ID", finished)
+func waitServerPurgeEntryCompleted(t *testing.T, ctx context.Context, baseURL, progressPath, token, entryID string) {
+	t.Helper()
+	// 1. 在有限时间内用正式进度路由等待 worker 推进，保留最近一次进度用于诊断。
+	pollContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	poll := time.NewTicker(100 * time.Millisecond)
+	defer poll.Stop()
+	want := dto.PurgeEntryProgressData{EntryID: entryID, Status: "PURGED", RemainingCount: 0}
+	for {
+		progress := requestServerPurgeEntryProgress(t, pollContext, baseURL, progressPath, token, http.StatusOK, "")
+		if progress.Data == want {
+			return
+		}
+		if progress.Data.EntryID != entryID || progress.Data.Status != "PURGING" || progress.Data.RemainingCount < 1 {
+			t.Fatal("后台推进时返回异常进度", progress.Data)
+		}
+		select {
+		case <-pollContext.Done():
+			t.Fatal("永久清理 worker 未在期限内完成", progress.Data, pollContext.Err())
+		case <-poll.C:
+		}
 	}
 }

@@ -1455,7 +1455,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 正式清理确认使用独立回收项，保存原始确认参数以便在新实例重试。
 	purgeConfirmation, purgeAcceptedBeforeRestart := verifyServerPurgeEntry(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
 	loginSecrets = append(loginSecrets, purgeConfirmation.PreviewDigest)
-	purgeProgressBeforeRestart := verifyServerPurgeEntryProgress(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, purgeAcceptedBeforeRestart)
+	verifyServerPurgeEntryProgress(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, purgeAcceptedBeforeRestart)
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1464,6 +1464,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopFirst()
+	prepareServerPurgeRestartRoot(t, ctx, pool)
 	// 允许新实例处理创建用例留在数据库中的过期任务。
 	leaseExpired, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6)
 		WHERE id=? AND user_id=3 AND status='VERIFYING' AND lease_owner='create-upload-fixture'`, createdUploadBeforeRestart.Data.Task.ID)
@@ -1654,9 +1655,10 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	}
 	purgePreviewAfterRestart := verifyServerPurgePreviewAfterRestart(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, purgePreviewBeforeRestart)
 	loginSecrets = append(loginSecrets, purgePreviewAfterRestart.Data.PreviewDigest)
+	waitServerPurgeEntryCompleted(t, ctx, "http://"+address, purgeAcceptedBeforeRestart.Data.ProgressURL,
+		nativeRefreshed.Data.AccessToken, purgeAcceptedBeforeRestart.Data.EntryID)
+	waitServerPurgeEntryCompleted(t, ctx, "http://"+address, serverPurgeRestartProgressPath, nativeRefreshed.Data.AccessToken, serverPurgeRestartRootID)
 	verifyServerPurgeEntryAfterRestart(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, purgeConfirmation, purgeAcceptedBeforeRestart)
-	verifyServerPurgeEntryProgressAfterRestart(t, ctx, pool, "http://"+address, nativeRefreshed.Data.AccessToken,
-		purgeAcceptedBeforeRestart.Data.ProgressURL, purgeProgressBeforeRestart)
 	trashFirstAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, serverTrashFirstQuery, 200, "", "")
 	trashNextAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, trashNextQuery, 200, "", "")
 	if !reflect.DeepEqual(trashFirstBeforeRestart.Data, trashFirstAfterRestart.Data) ||
@@ -1923,7 +1925,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if len(startupSegments) != 3 || strings.Count(logs.String(), "上传临时目录检查通过") != 2 || !strings.Contains(startupSegments[0], "上传临时目录检查通过") || !strings.Contains(startupSegments[1], "上传临时目录检查通过") {
 		t.Fatal("两轮临时目录检查未先于 HTTP 启动")
 	}
-	for _, worker := range []string{"上传校验", "上传过期", "上传取消"} {
+	for _, worker := range []string{"上传校验", "上传过期", "上传取消", "永久清理"} {
 		workerStops := strings.Split(logs.String(), worker+" worker 已停止")
 		if len(workerStops) != 3 || strings.Count(logs.String(), worker+" worker 已启动") != 2 {
 			t.Fatal("每次真实启动应对应一个 worker 的启动和停止", worker)

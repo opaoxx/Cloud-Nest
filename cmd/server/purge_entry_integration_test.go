@@ -135,12 +135,14 @@ func verifyServerPurgeEntryAfterRestart(
 	requestServerPurgeEntry(t, ctx, baseURL, token, serverPurgeEntryKey, conflict, 409, "IDEMPOTENCY_CONFLICT", nil)
 	requestServerPurgeEntry(t, ctx, baseURL, token, "server-purge-new-key", preview, 404, "ENTRY_NOT_FOUND", nil)
 
-	// 2. 核对状态只递增一次，且数据库中的快照与公开 data 对应。
+	// 2. 核对受理及完成各递增一次，受理快照仍和公开 data 对应。
 	var status string
 	var revision uint64
 	var startedAt sql.NullTime
-	if err := pool.QueryRowContext(ctx, "SELECT status,revision,purge_started_at FROM file_entries WHERE user_id=1 AND id=?", serverPurgeEntryID).
-		Scan(&status, &revision, &startedAt); err != nil || status != "PURGING" || revision != 2 || !startedAt.Valid {
+	var purgedAt sql.NullTime
+	if err := pool.QueryRowContext(ctx, "SELECT status,revision,purge_started_at,purged_at FROM file_entries WHERE user_id=1 AND id=?", serverPurgeEntryID).
+		Scan(&status, &revision, &startedAt, &purgedAt); err != nil || status != "PURGED" || revision != 3 || !startedAt.Valid ||
+		!purgedAt.Valid || purgedAt.Time.Before(startedAt.Time) {
 		t.Fatal("正式清理确认的持久状态不符", status, revision, err)
 	}
 	var stableBody []byte

@@ -639,7 +639,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	stopUploadCancellation := startServerUploadCancellationWorker(ctx, uploadCancellationBatch.RunOnce, logger)
 	defer stopUploadCancellation()
 
-	// 32. 启动 HTTP 并处理退出通知。
+	// 32. 用真实 MySQL 扫描和结算启动永久清理，退出时等待清理事务结束。
+	purgeRootBatch := service.NewPurgeRootBatch(store.ListPurgeRootCandidates, store.CompletePurgeLeafBatch)
+	stopPurgeRoot := startServerPurgeRootWorker(ctx, purgeRootBatch.RunOnce, logger)
+	defer stopPurgeRoot()
+
+	// 33. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
