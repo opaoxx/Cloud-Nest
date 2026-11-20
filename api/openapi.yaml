@@ -2315,7 +2315,7 @@ components:
           pattern: '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'
           not:
             pattern: '[\x00-\x1f\x7f]'
-          description: 本次交付使用的小写媒体类型。下载时无法确认 MIME 采用 application/octet-stream，预览要求已校验的支持类型。
+          description: 本次交付使用的小写基础媒体类型，不带参数。下载时无法确认 MIME 采用 application/octet-stream，预览要求已校验的支持类型。
         disposition:
           type: string
           pattern: '^(attachment|inline);.'
