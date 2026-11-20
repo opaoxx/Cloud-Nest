@@ -147,4 +147,56 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+
+	// 5. 在独占库中用真实的千条隐藏候选验证空页续读。
+	t.Run("list continues after empty budget page", func(t *testing.T) {
+		_, err := pool.ExecContext(ctx, `INSERT INTO file_entries
+			(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at)
+			VALUES (44,3,33,'可见目录一',CAST('可见目录一' AS BINARY),'DIR','TRASHED',?),
+			       (45,3,33,'可见目录二',CAST('可见目录二' AS BINARY),'DIR','TRASHED',?)`, stamp, stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hiddenTime := stamp.Add(time.Minute)
+		_, err = pool.ExecContext(ctx, `INSERT INTO file_entries
+			(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at)
+			WITH RECURSIVE fixture_ids AS (
+				SELECT 0 AS fixture_index
+				UNION ALL SELECT fixture_index+1 FROM fixture_ids WHERE fixture_index < 999
+			)
+			SELECT 2000+fixture_index, 3, 31, CONCAT('隐藏目录-', fixture_index),
+			       CAST(CONCAT('隐藏目录-', fixture_index) AS BINARY), 'DIR', 'TRASHED', ?
+			FROM fixture_ids`, hiddenTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		list := service.NewTrashEntryListService(func(listContext context.Context, read func(context.Context, service.TrashEntryListReader) error) error {
+			return store.WithFileEntrySnapshot(listContext, func(snapshotContext context.Context, reader *Store) error {
+				return read(snapshotContext, reader)
+			})
+		})
+		actor := domain.Actor{UserID: 3, SessionID: 17, DeviceID: 19}
+		var before *domain.TrashEntryPosition
+		for index, expected := range [][]uint64{{}, {31, 45}, {44}} {
+			page, err := list.List(ctx, actor, 2, before)
+			if err != nil || page == nil || page.Entries == nil {
+				t.Fatalf("第 %d 页为 %+v，错误为 %v", index+1, page, err)
+			}
+			ids := make([]uint64, 0, len(page.Entries))
+			for _, item := range page.Entries {
+				ids = append(ids, item.Entry.ID)
+				path := item.OriginalPath.Entries
+				if len(path) == 0 || path[0].ID != 33 || path[len(path)-1].ID != *item.Entry.ParentID {
+					t.Fatalf("目录项 %d 的原父路径为 %+v", item.Entry.ID, path)
+				}
+			}
+			if !slices.Equal(ids, expected) || (page.NextPosition != nil) != (index < 2) {
+				t.Fatalf("第 %d 页项目为 %v，续读位置为 %+v", index+1, ids, page.NextPosition)
+			}
+			if index == 0 && (page.NextPosition.ID != 2000 || !page.NextPosition.DeletedAt.Equal(hiddenTime)) {
+				t.Fatalf("空页续读点为 %+v，期望最后消费的隐藏候选 2000", page.NextPosition)
+			}
+			before = page.NextPosition
+		}
+	})
 }
