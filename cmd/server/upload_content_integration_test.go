@@ -325,8 +325,23 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 		t.Fatal("窗口外授权未更新访问时间", err)
 	}
 
-	// 3. 通过已交付的签名地址读取对象字节，核对大小、摘要和交付头。
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, result.Link.URL, nil)
+	// 3. 将授权编码为公开 JSON，从解码后的链接读取实际文件。
+	publicData, err := dto.NewCreateDownloadData(result)
+	if err != nil {
+		t.Fatal("真实授权无法转换为公开下载数据", err)
+	}
+	requestID := uuid.NewString()
+	wire, err := json.Marshal(dto.CreateDownloadResponse{Data: *publicData, RequestID: requestID})
+	if err != nil {
+		t.Fatal("真实下载响应编码失败", err)
+	}
+	var decoded dto.CreateDownloadResponse
+	if err := json.Unmarshal(wire, &decoded); err != nil || decoded.RequestID != requestID ||
+		decoded.Data.ObjectID != strconv.FormatUint(*task.PublishedObjectID, 10) || decoded.Data.Revision != "1" ||
+		!decoded.Data.ExpiresAt.Equal(result.Link.ExpiresAt) || decoded.Data.URL != result.Link.URL {
+		t.Fatal("下载 JSON 未保留公开标识、签名地址和到期时间")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, decoded.Data.URL, nil)
 	if err != nil {
 		t.Fatal("无法构造联测签名请求")
 	}
@@ -336,9 +351,9 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 	}
 	data, readError := io.ReadAll(io.LimitReader(response.Body, int64(task.FileSize)+1))
 	closeError := response.Body.Close()
-	if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != result.SizeBytes ||
-		sha256.Sum256(data) != result.VerifiedSHA256 || response.Header.Get("Content-Type") != result.MIMEType ||
-		response.Header.Get("Content-Disposition") != result.Disposition {
+	if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != decoded.Data.SizeBytes ||
+		fmt.Sprintf("%x", sha256.Sum256(data)) != decoded.Data.SHA256 || response.Header.Get("Content-Type") != decoded.Data.MIMEType ||
+		response.Header.Get("Content-Disposition") != decoded.Data.Disposition {
 		t.Fatal("实际发布文件的远程字节或交付头不符", response.StatusCode)
 	}
 }

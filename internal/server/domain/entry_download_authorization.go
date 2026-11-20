@@ -1,6 +1,12 @@
 package domain
 
-import "crypto/sha256"
+import (
+	"crypto/sha256"
+	"errors"
+)
+
+// ErrInvalidDownloadAuthorizationData 表示内部授权结果不能转换为公开响应。
+var ErrInvalidDownloadAuthorizationData = errors.New("下载授权数据异常")
 
 // EntryDownloadAuthorization 保存同一次授权中的短期链接和公开内容事实。
 type EntryDownloadAuthorization struct {

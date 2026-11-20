@@ -3,8 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"strings"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
@@ -89,12 +87,7 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 	}
 
 	// 4. 核对已经生成的签名结果。
-	if link == nil || link.ExpiresAt.IsZero() {
-		return nil, domain.ErrDownloadStorageUnavailable
-	}
-	address, err := url.Parse(link.URL)
-	if err != nil || (address.Scheme != "http" && address.Scheme != "https") || address.Hostname() == "" ||
-		address.User != nil || strings.ContainsAny(link.URL, "# \r\n\t") {
+	if link == nil || !link.IsValid() {
 		return nil, domain.ErrDownloadStorageUnavailable
 	}
 
