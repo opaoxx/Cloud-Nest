@@ -8,8 +8,6 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-const trashRetentionPeriod = 30 * 24 * time.Hour
-
 // TrashListItem 保存回收站的一条公开记录。
 type TrashListItem struct {
 	TrashedEntrySummary
@@ -103,7 +101,7 @@ func newTrashListItem(item domain.TrashEntryListItem) (TrashListItem, error) {
 	}
 
 	// 3. 计算保留截止时间，组装公开条目。
-	retentionExpiresAt := snapshot.Entry.DeletedAt.Add(trashRetentionPeriod)
+	retentionExpiresAt := snapshot.Entry.DeletedAt.Add(domain.TrashRetentionDays * 24 * time.Hour)
 	if retentionExpiresAt.Year() > 9999 {
 		return TrashListItem{}, domain.ErrInvalidFileEntryData
 	}
