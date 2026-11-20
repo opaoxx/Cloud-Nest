@@ -5,12 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -114,6 +121,32 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 		if err != nil || !bytes.Equal(first, replayed) || !reflect.DeepEqual(readEntry(t, 15), current) {
 			t.Fatal("重试未复用首次快照，或改变了当前记录", err)
 		}
+		// 将两份已提交正文交给测试 HTTP 入口，核对快照相同且各带当次 ID。
+		const path = "/test-restore-success"
+		var stableBody []byte
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.POST(path, func(c *gin.Context) { handler.RestoreEntrySuccess(c, stableBody) })
+		for _, delivery := range []struct {
+			requestID string
+			body      []byte
+		}{
+			{"28ee758a-0727-42de-ae7d-3bb33155e148", first},
+			{"28ee758a-0727-42de-ae7d-3bb33155e149", replayed},
+		} {
+			stableBody = delivery.body
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.Header.Set("X-Request-ID", delivery.requestID)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			var actual dto.RestoreEntryResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &actual); err != nil || response.Code != http.StatusOK ||
+				actual.RequestID != delivery.requestID || response.Header().Get("X-Request-ID") != delivery.requestID ||
+				response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" ||
+				actual.Data != *data {
+				t.Fatal("已提交的恢复快照未按 HTTP 契约交付", response.Code, actual, err)
+			}
+		}
+
 		if _, err := pool.ExecContext(ctx, `UPDATE idempotency_records
 			SET created_at='2000-01-01 00:00:00', expires_at='2000-01-09 00:00:00'
 			WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.RestoreEntryOperation, key); err != nil {
