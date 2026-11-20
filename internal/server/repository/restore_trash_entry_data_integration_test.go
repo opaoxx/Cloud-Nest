@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -15,10 +16,9 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestRestoreTrashEntryDataIntegration(t *testing.T) {
+func trashEntryIdempotencyTestDatabase(t *testing.T, ctx context.Context) (*sql.DB, *Store, domain.Actor) {
+	t.Helper()
 	// 1. 在独占 MySQL 库安装正式幂等记录表。
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
 	pool, store, actor := trashEntryTestDatabase(t, ctx)
 	start := strings.Index(migrations.InitialSQL, "CREATE TABLE idempotency_records (")
 	if start < 0 {
@@ -27,7 +27,13 @@ func TestRestoreTrashEntryDataIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:]); err != nil {
 		t.Fatal(err)
 	}
+	return pool, store, actor
+}
 
+func TestRestoreTrashEntryDataIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
 	for _, fixture := range []struct {
 		key               string
 		entryID, revision uint64
