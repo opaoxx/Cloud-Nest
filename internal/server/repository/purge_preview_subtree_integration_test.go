@@ -28,6 +28,8 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		         (17,1,14,'清理中后代',CAST('清理中后代' AS BINARY),'DIR','PURGING',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`,
 		`INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,file_size,status,deleted_at,purged_at,revision)
 		  VALUES (8,1,9,'保留墓碑.md',CAST('保留墓碑.md' AS BINARY),'FILE','DOCUMENT',1024,'PURGED',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),7)`,
+		`INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size,status,deleted_at)
+		  VALUES (10,1,9,'共享对象.md',CAST('共享对象.md' AS BINARY),'FILE','DOCUMENT',41,2048,'TRASHED',UTC_TIMESTAMP(6))`,
 	} {
 		if _, err := pool.ExecContext(ctx, statement); err != nil {
 			t.Fatal("准备清理子树夹具失败", err)
@@ -39,6 +41,7 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		want := []domain.PurgePreviewSubtreeEntry{
 			{ID: 8, EntryType: "FILE", Status: "PURGED", Revision: 7, FileSize: 1024},
 			{ID: 9, EntryType: "DIR", Status: "TRASHED", Revision: 1},
+			{ID: 10, EntryType: "FILE", Status: "TRASHED", Revision: 1, FileSize: 2048},
 			{ID: 14, EntryType: "DIR", Status: "TRASHED", Revision: 1},
 			{ID: 15, EntryType: "FILE", Status: "ACTIVE", Revision: 5, FileSize: 2048},
 			{ID: 17, EntryType: "DIR", Status: "PURGING", Revision: 1},
@@ -51,6 +54,11 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			actual, err := txStore.ListUserPurgePreviewSubtree(snapshotContext, target.UserID, target.ID)
 			if err != nil || !reflect.DeepEqual(actual, want) {
 				return fmt.Errorf("子树记录为 %+v，错误 %v", actual, err)
+			}
+			// 两个文件引用对象 41，各计一次逻辑大小。已结算墓碑保留在范围中。
+			summary, err := service.SummarizePurgePreviewSubtree(actual)
+			if err != nil || summary != (domain.PurgePreviewSummary{FileCount: 2, DirectoryCount: 3, LogicalBytes: 4096}) {
+				return fmt.Errorf("子树汇总为 %+v，错误 %v", summary, err)
 			}
 			return nil
 		}); err != nil {
@@ -88,7 +96,7 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 				return err
 			}
 			entries, err := txStore.ListUserPurgePreviewSubtree(snapshotContext, target.UserID, target.ID)
-			if err != nil || len(entries) != 5 {
+			if err != nil || len(entries) != 6 {
 				return fmt.Errorf("同一快照中子树结果为 %+v，错误 %v", entries, err)
 			}
 			return nil
@@ -96,7 +104,7 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		entries, err := store.ListUserPurgePreviewSubtree(ctx, actor.UserID, 14)
-		if err != nil || len(entries) != 6 || entries[len(entries)-1].ID != 19 {
+		if err != nil || len(entries) != 7 || entries[len(entries)-1].ID != 19 {
 			t.Fatal("新快照没有读到并发新增", entries, err)
 		}
 	})
@@ -173,6 +181,10 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		want := []domain.PurgePreviewSubtreeEntry{{ID: maximum, EntryType: "FILE", Status: "ACTIVE", Revision: maximum, FileSize: maximum}}
 		if err != nil || !reflect.DeepEqual(entries, want) {
 			t.Fatal("无符号字段未完整保留", entries, err)
+		}
+		summary, err := service.SummarizePurgePreviewSubtree(entries)
+		if err != nil || summary != (domain.PurgePreviewSummary{FileCount: 1, LogicalBytes: maximum}) {
+			t.Fatal("最大逻辑用量的汇总不符", summary, err)
 		}
 	})
 }

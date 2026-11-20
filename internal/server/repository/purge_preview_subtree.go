@@ -59,29 +59,27 @@ ORDER BY id`
 		return nil, domain.ErrFileEntrySubtreeTooLarge
 	}
 	byID := make(map[uint64]*models.PurgePreviewSubtreeRow, len(rows))
+	entries := make([]domain.PurgePreviewSubtreeEntry, 0, len(rows))
 	for index := range rows {
 		row := &rows[index]
-		if row.ID == 0 || row.UserID != userID || row.Revision == 0 || row.RelativeDepth > domain.MaxFileEntryDepth ||
-			(row.RelativeDepth == 0) != (row.ID == entryID) ||
-			(row.EntryType != "FILE" && row.EntryType != "DIR") || (row.EntryType == "DIR" && row.FileSize != 0) {
+		entry := domain.PurgePreviewSubtreeEntry{
+			ID: row.ID, EntryType: row.EntryType, Status: row.Status, Revision: row.Revision, FileSize: row.FileSize,
+		}
+		if row.UserID != userID || row.RelativeDepth > domain.MaxFileEntryDepth ||
+			(row.RelativeDepth == 0) != (row.ID == entryID) || !entry.IsValid() {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		if _, duplicate := byID[row.ID]; duplicate {
 			return nil, domain.ErrInvalidFileEntryData
 		}
-		switch row.Status {
-		case "ACTIVE", "TRASHED", "PURGING", "PURGED":
-		default:
-			return nil, domain.ErrInvalidFileEntryData
-		}
 		byID[row.ID] = row
+		entries = append(entries, entry)
 	}
 	root := byID[entryID]
 	if root == nil || (root.ParentID != nil && (*root.ParentID == 0 || byID[*root.ParentID] != nil)) {
 		return nil, domain.ErrInvalidFileEntryData
 	}
 
-	entries := make([]domain.PurgePreviewSubtreeEntry, 0, len(rows))
 	for _, row := range rows {
 		if row.ID != entryID {
 			if row.ParentID == nil {
@@ -92,9 +90,6 @@ ORDER BY id`
 				return nil, domain.ErrInvalidFileEntryData
 			}
 		}
-		entries = append(entries, domain.PurgePreviewSubtreeEntry{
-			ID: row.ID, EntryType: row.EntryType, Status: row.Status, Revision: row.Revision, FileSize: row.FileSize,
-		})
 	}
 	if err := queryContext.Err(); err != nil {
 		return nil, err

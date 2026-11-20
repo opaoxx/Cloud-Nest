@@ -955,3 +955,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.ValidatePurgePreviewTarget`，在同一只读快照中核对预检目标的归属、状态及完整活动父链。[第 436 步学习记录](docs/开发学习记录.md#第-436-步校验永久清理预检目标)
 
 已提供 `Store.ListUserPurgePreviewSubtree`，有界读取清理目标与全部保留后代的目录项事实。[第 437 步学习记录](docs/开发学习记录.md#第-437-步有界读取永久清理子树)
+
+已提供 `service.SummarizePurgePreviewSubtree`，汇总待清理文件数、目录数和预计释放的逻辑字节。[第 438 步学习记录](docs/开发学习记录.md#第-438-步汇总永久清理预检范围)
