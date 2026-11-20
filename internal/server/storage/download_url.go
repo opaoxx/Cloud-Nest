@@ -52,7 +52,7 @@ func (client *Client) SignDownloadURL(ctx context.Context, target *domain.EntryD
 		return nil, contextError
 	}
 	if err != nil {
-		return nil, storageObjectReadError(err, domain.ErrDownloadStorageUnavailable)
+		return nil, storageObjectError(err, domain.ErrDownloadStorageUnavailable)
 	}
 
 	// 3. 根据签名时间计算 UTC 到期时间。

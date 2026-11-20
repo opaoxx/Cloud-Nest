@@ -38,7 +38,7 @@ func (client *Client) CheckDownloadObject(ctx context.Context, target *domain.En
 			(info.IsDeleteMarker && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusMethodNotAllowed)) {
 			return domain.ErrDownloadTargetUnavailable
 		}
-		return storageObjectReadError(err, domain.ErrDownloadStorageUnavailable)
+		return storageObjectError(err, domain.ErrDownloadStorageUnavailable)
 	}
 
 	// 3. 核对版本和大小，返回检查结果。

@@ -43,7 +43,7 @@ func (client *Client) OpenUploadVerificationObject(ctx context.Context, object *
 		case "NoSuchKey", "NoSuchVersion":
 			return nil, domain.ErrUploadObjectMissing
 		default:
-			return nil, storageObjectReadError(err, domain.ErrUploadStorageUnavailable)
+			return nil, storageObjectError(err, domain.ErrUploadStorageUnavailable)
 		}
 	}
 	// 版本功能开启前的 null 版本可以省略版本响应头，请求仍明确携带 versionId=null。
@@ -71,14 +71,14 @@ func (body *uploadVerificationObjectBody) Read(buffer []byte) (int, error) {
 		return count, contextError
 	}
 	if err != nil && err != io.EOF {
-		return count, storageObjectReadError(err, domain.ErrUploadStorageUnavailable)
+		return count, storageObjectError(err, domain.ErrUploadStorageUnavailable)
 	}
 	return count, err
 }
 
 func (body *uploadVerificationObjectBody) Close() error {
 	if err := body.ReadCloser.Close(); err != nil {
-		return storageObjectReadError(err, domain.ErrUploadStorageUnavailable)
+		return storageObjectError(err, domain.ErrUploadStorageUnavailable)
 	}
 	return nil
 }

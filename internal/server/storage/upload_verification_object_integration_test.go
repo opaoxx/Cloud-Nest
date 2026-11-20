@@ -93,6 +93,25 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 		return info
 	}
 	initial := put([]byte("before versioning"))
+	t.Run("delete unversioned object", func(t *testing.T) {
+		// 1. 在启用版本功能前写入并删除独立对象。
+		const unversionedKey = "users/7/objects/delete-unversioned"
+		data := []byte("delete before versioning")
+		if _, err := verifier.PutObject(ctx, bucket, unversionedKey, bytes.NewReader(data), int64(len(data)),
+			minio.PutObjectOptions{DisableMultipart: true}); err != nil {
+			t.Fatal("写入独立待删除对象失败", minio.ToErrorResponse(err).Code)
+		}
+		record := domain.StoredObject{ID: 24, OwnerUserID: 7, Provider: settings.Provider, Bucket: bucket,
+			ObjectKey: unversionedKey, Status: domain.StoredObjectStatusDeleting}
+		for range 2 {
+			if err := client.DeleteStoredObject(ctx, &record); err != nil {
+				t.Fatal("删除或重复删除无版本对象失败", err)
+			}
+		}
+		if _, err := verifier.StatObject(ctx, bucket, unversionedKey, minio.StatObjectOptions{}); minio.ToErrorResponse(err).StatusCode != http.StatusNotFound {
+			t.Fatal("无版本对象删除后仍可读取，或读回异常", minio.ToErrorResponse(err).Code)
+		}
+	})
 	if err := verifier.EnableVersioning(ctx, bucket); err != nil {
 		t.Fatal("无法启用独占桶的版本功能")
 	}
@@ -327,6 +346,32 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 		target.StorageVersionID, target.SizeBytes = &old.VersionID, uint64(len(oldBytes))
 		if err := client.CheckDownloadObject(ctx, &target); err != nil {
 			t.Fatal("删除标记不应遮蔽明确指定的历史版本", err)
+		}
+	})
+
+	t.Run("delete exact stored versions", func(t *testing.T) {
+		// 1. 当前存在删除标记时，缺少版本的记录不能定位明确的物理内容。
+		record := object
+		record.Status, record.StorageVersionID = domain.StoredObjectStatusDeleting, nil
+		if err := client.DeleteStoredObject(ctx, &record); !errors.Is(err, domain.ErrInvalidStoredObjectData) {
+			t.Fatal("当前删除标记未阻止缺少版本的删除", err)
+		}
+
+		// 2. 删除明确的历史版本与 null 版本，并验证重复调用和其他版本。
+		for _, version := range []string{old.VersionID, "null"} {
+			record.StorageVersionID = &version
+			for range 2 {
+				if err := client.DeleteStoredObject(ctx, &record); err != nil {
+					t.Fatal("删除或重复删除指定版本失败", err)
+				}
+			}
+			if _, err := verifier.StatObject(ctx, bucket, key, minio.StatObjectOptions{VersionID: version}); minio.ToErrorResponse(err).StatusCode != http.StatusNotFound {
+				t.Fatal("指定版本删除后仍可读取，或读回异常", minio.ToErrorResponse(err).Code)
+			}
+		}
+		info, err := verifier.StatObject(ctx, bucket, key, minio.StatObjectOptions{VersionID: latest.VersionID})
+		if err != nil || info.VersionID != latest.VersionID || info.IsDeleteMarker {
+			t.Fatal("其他版本未完整保留", minio.ToErrorResponse(err).Code)
 		}
 	})
 }

@@ -38,8 +38,8 @@ func matchesObjectReadVersion(requested, observed string) bool {
 	return requested == "" || observed == requested || (requested == "null" && observed == "")
 }
 
-// storageObjectReadError 保留取消和超时，其他存储故障使用调用方的公开类别。
-func storageObjectReadError(err, unavailable error) error {
+// storageObjectError 保留取消和超时，其他存储故障使用调用方的公开类别。
+func storageObjectError(err, unavailable error) error {
 	// 1. 判断取消和超时，隐藏原始存储响应。
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
