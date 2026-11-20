@@ -3,6 +3,7 @@ package repository
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -60,6 +61,10 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			if err != nil || summary != (domain.PurgePreviewSummary{FileCount: 2, DirectoryCount: 3, LogicalBytes: 4096}) {
 				return fmt.Errorf("子树汇总为 %+v，错误 %v", summary, err)
 			}
+			fingerprint, err := service.BuildPurgePreviewSubtreeFingerprint(actual)
+			if err != nil || fmt.Sprintf("%x", fingerprint) != "bc153a0f7df0fe9c078dab05127989f8c445b325f611c4989b3a506c2e5e921e" {
+				return fmt.Errorf("实际子树指纹为 %x，错误 %v", fingerprint, err)
+			}
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -87,8 +92,17 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 	t.Run("consistent snapshot across concurrent insert", func(t *testing.T) {
 		pool.SetMaxOpenConns(2)
 		defer pool.SetMaxOpenConns(1)
+		var originalFingerprint [sha256.Size]byte
 		if err := store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, txStore *Store) error {
 			target, err := service.ValidatePurgePreviewTarget(snapshotContext, actor, 14, txStore)
+			if err != nil {
+				return err
+			}
+			beforeInsert, err := txStore.ListUserPurgePreviewSubtree(snapshotContext, target.UserID, target.ID)
+			if err != nil {
+				return err
+			}
+			originalFingerprint, err = service.BuildPurgePreviewSubtreeFingerprint(beforeInsert)
 			if err != nil {
 				return err
 			}
@@ -99,6 +113,10 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			if err != nil || len(entries) != 6 {
 				return fmt.Errorf("同一快照中子树结果为 %+v，错误 %v", entries, err)
 			}
+			current, err := service.BuildPurgePreviewSubtreeFingerprint(entries)
+			if err != nil || current != originalFingerprint {
+				return fmt.Errorf("同一快照内的指纹改变为 %x，错误 %v", current, err)
+			}
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -106,6 +124,10 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		entries, err := store.ListUserPurgePreviewSubtree(ctx, actor.UserID, 14)
 		if err != nil || len(entries) != 7 || entries[len(entries)-1].ID != 19 {
 			t.Fatal("新快照没有读到并发新增", entries, err)
+		}
+		fingerprint, err := service.BuildPurgePreviewSubtreeFingerprint(entries)
+		if err != nil || fingerprint == originalFingerprint {
+			t.Fatal("新快照指纹未反映并发新增", err)
 		}
 	})
 
@@ -136,6 +158,9 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 				return cmp.Compare(first.ID, second.ID)
 			}) {
 			t.Fatal("10000 条范围或顺序不正确", len(entries), err)
+		}
+		if _, err := service.BuildPurgePreviewSubtreeFingerprint(entries); err != nil {
+			t.Fatal("无法为 10000 条保留记录生成指纹", err)
 		}
 		if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at,purged_at)
 		  VALUES(20000,1,60,'额外墓碑',CAST('额外墓碑' AS BINARY),'DIR','PURGED',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`); err != nil {
