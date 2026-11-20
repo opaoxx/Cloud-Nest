@@ -25,7 +25,7 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_UPLOAD_STORAGE_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_UPLOAD_STORAGE_TEST=1 后在独占桶验证物理删除恢复")
 	}
-	// 1. 准备独占的 MySQL 库和 MinIO 桶，创建一个真实到期对象。
+	// 1. 准备独占的 MySQL 库和 MinIO 桶，创建三个真实到期对象。
 	pool, _ := uploadTaskDatabase(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
@@ -39,7 +39,14 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 	}
 	const bucketPrefix = "cloudnest-gc-it-"
 	bucket := bucketPrefix + uuid.NewString()
-	const key = "users/7/objects/gc-writeback-fixture"
+	const writebackKey = "users/7/objects/gc-writeback-fixture"
+	const staleKey = "users/7/objects/gc-stale-fixture"
+	const successKey = "users/7/objects/gc-success-fixture"
+	fixtures := []struct {
+		id          uint64
+		key         string
+		daysOverdue int
+	}{{33, writebackKey, 3}, {35, staleKey, 2}, {36, successKey, 1}}
 	secure := settings.EndpointURL.Scheme == "https"
 	transport, err := minio.DefaultTransport(secure)
 	if err != nil {
@@ -63,9 +70,10 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 		}
 		cleanupContext, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
-		if err := verifier.RemoveObject(cleanupContext, bucket, key, minio.RemoveObjectOptions{VersionID: "null"}); err != nil {
-			t.Error("清理独占对象失败", minio.ToErrorResponse(err).Code)
-			return
+		for _, fixture := range fixtures {
+			if err := verifier.RemoveObject(cleanupContext, bucket, fixture.key, minio.RemoveObjectOptions{VersionID: "null"}); err != nil {
+				t.Error("清理独占对象失败", minio.ToErrorResponse(err).Code)
+			}
 		}
 		if err := verifier.RemoveBucket(cleanupContext, bucket); err != nil {
 			t.Error("清理独占桶失败", minio.ToErrorResponse(err).Code)
@@ -80,58 +88,79 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Close)
-	data := []byte("retired fixture content")
-	receipt, err := client.PutUploadContent(ctx, key, bytes.NewReader(data), uint64(len(data)))
-	if err != nil {
-		t.Fatal("写入待回收内容失败", err)
-	}
 	execute := func(statement string, args ...any) {
 		t.Helper()
 		if _, err := pool.ExecContext(ctx, statement, args...); err != nil {
 			t.Fatal("设置删除恢复夹具失败", err)
 		}
 	}
-	digest := sha256.Sum256(data)
-	execute(`INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,storage_version_id,file_size,
-		verified_sha256,status,storage_etag,verified_at,unreferenced_at,gc_after)
-		VALUES(33,7,?,?,?,?,?,?,'READY',?,UTC_TIMESTAMP(6)-INTERVAL 9 DAY,
-		       UTC_TIMESTAMP(6)-INTERVAL 8 DAY,UTC_TIMESTAMP(6)-INTERVAL 1 DAY)`,
-		settings.Provider, bucket, key, receipt.StorageVersionID, receipt.SizeBytes, digest[:], receipt.StorageETag)
-	candidates, err := store.ListStoredObjectGCCandidates(ctx, 1)
-	if err != nil || len(candidates) != 1 || candidates[0].ObjectID != 33 {
-		t.Fatal("未取得真实删除候选", candidates, err)
+	for _, fixture := range fixtures {
+		data := []byte(fixture.key)
+		receipt, err := client.PutUploadContent(ctx, fixture.key, bytes.NewReader(data), uint64(len(data)))
+		if err != nil {
+			t.Fatal("写入待回收内容失败", err)
+		}
+		digest := sha256.Sum256(data)
+		execute(`INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,storage_version_id,file_size,
+			verified_sha256,status,storage_etag,verified_at,unreferenced_at,gc_after)
+			VALUES(?,7,?,?,?,?,?,?,'READY',?,UTC_TIMESTAMP(6)-INTERVAL 12 DAY,
+			       UTC_TIMESTAMP(6)-INTERVAL ? DAY,UTC_TIMESTAMP(6)-INTERVAL ? DAY)`,
+			fixture.id, settings.Provider, bucket, fixture.key, receipt.StorageVersionID, receipt.SizeBytes,
+			digest[:], receipt.StorageETag, fixture.daysOverdue+7, fixture.daysOverdue)
 	}
-	candidate := candidates[0]
 
-	// 2. 从待领取候选执行真实删除，只阻断完成写回，保留已提交的删除意图。
+	// 2. 跑到期批次，模拟中间候选计时被清空，并阻断第一个对象的完成写回。
 	execute(`CREATE TRIGGER fixture_fail_object_deletion_writeback BEFORE UPDATE ON stored_objects
 		FOR EACH ROW BEGIN
-			IF NEW.status = 'DELETED' THEN
+			IF NEW.id = 33 AND NEW.status = 'DELETED' THEN
 				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'fixture blocks deletion writeback';
 			END IF;
 		END`)
 	processor := service.NewStoredObjectDeletionProcessor(client.DeleteStoredObject, store.CompleteStoredObjectGC)
 	candidateProcessor := service.NewStoredObjectGCCandidateProcessor(store.ClaimStoredObjectGC, processor.Process)
-	completed, err := candidateProcessor.Process(ctx, candidate)
-	var writeError *mysql.MySQLError
-	if completed != nil || !errors.As(err, &writeError) || writeError.Number != 1644 {
-		t.Fatal("未保留写回失败原因", completed, err)
+	var writebackCandidate domain.StoredObjectGCCandidate
+	dueBatch := service.NewStoredObjectGCBatch(func(scanContext context.Context, limit int) ([]domain.StoredObjectGCCandidate, error) {
+		candidates, err := store.ListStoredObjectGCCandidates(scanContext, limit)
+		if err != nil || len(candidates) != 3 || candidates[0].ObjectID != 33 || candidates[1].ObjectID != 35 || candidates[2].ObjectID != 36 {
+			t.Fatal("未按到期时间取得三个真实候选", candidates, err)
+		}
+		writebackCandidate = candidates[0]
+		execute("UPDATE stored_objects SET unreferenced_at = NULL, gc_after = NULL WHERE owner_user_id = 7 AND id = 35")
+		return candidates, nil
+	}, candidateProcessor.Process)
+	dueSummary, err := dueBatch.RunOnce(ctx, len(fixtures))
+	if err != nil || dueSummary.Scanned != 3 || dueSummary.Completed != 1 || dueSummary.StaleCandidates != 1 || len(dueSummary.CandidateErrors) != 1 {
+		t.Fatal("到期批次结果不符", dueSummary, err)
 	}
-	if _, err := verifier.StatObject(ctx, bucket, key, minio.StatObjectOptions{}); minio.ToErrorResponse(err).StatusCode != http.StatusNotFound {
-		t.Fatal("第一次处理后未确认物理目标缺失", minio.ToErrorResponse(err).Code)
+	dueFailure := dueSummary.CandidateErrors[0]
+	var writeError *mysql.MySQLError
+	if dueFailure.ObjectID != 33 || dueFailure.OwnerUserID != 7 || !errors.As(dueFailure.Err, &writeError) || writeError.Number != 1644 {
+		t.Fatal("未保留写回失败原因", dueFailure)
+	}
+	for _, key := range []string{writebackKey, successKey} {
+		if _, err := verifier.StatObject(ctx, bucket, key, minio.StatObjectOptions{}); minio.ToErrorResponse(err).StatusCode != http.StatusNotFound {
+			t.Fatal("批次处理后目标仍存在或查询异常", key, minio.ToErrorResponse(err).Code)
+		}
+	}
+	if _, err := verifier.StatObject(ctx, bucket, staleKey, minio.StatObjectOptions{}); err != nil {
+		t.Fatal("候选失效后应保留原内容", minio.ToErrorResponse(err).Code)
+	}
+	completed, err := store.FindUserStoredObject(ctx, 7, 36)
+	if err != nil || completed == nil || completed.Status != domain.StoredObjectStatusDeleted {
+		t.Fatal("批次未写回已完成对象", completed, err)
 	}
 	pending, err := store.ListDeletingStoredObjects(ctx, 1)
 	if err != nil || len(pending) != 1 {
 		t.Fatal("写回失败后未保留待恢复删除记录", pending, err)
 	}
 	claimed := &pending[0]
-	if claimed.ID != candidate.ObjectID || claimed.OwnerUserID != candidate.OwnerUserID ||
-		claimed.Status != domain.StoredObjectStatusDeleting || claimed.Bucket != bucket || claimed.ObjectKey != key ||
-		claimed.UnreferencedAt == nil || !claimed.UnreferencedAt.Equal(candidate.UnreferencedAt) ||
-		claimed.GCAfter == nil || !claimed.GCAfter.Equal(candidate.GCAfter) {
+	if claimed.ID != writebackCandidate.ObjectID || claimed.OwnerUserID != writebackCandidate.OwnerUserID ||
+		claimed.Status != domain.StoredObjectStatusDeleting || claimed.Bucket != bucket || claimed.ObjectKey != writebackKey ||
+		claimed.UnreferencedAt == nil || !claimed.UnreferencedAt.Equal(writebackCandidate.UnreferencedAt) ||
+		claimed.GCAfter == nil || !claimed.GCAfter.Equal(writebackCandidate.GCAfter) {
 		t.Fatal("待恢复记录与已领取候选不符", claimed)
 	}
-	if result, err := candidateProcessor.Process(ctx, candidate); result != nil || !errors.Is(err, domain.ErrStoredObjectGCCandidateStale) {
+	if result, err := candidateProcessor.Process(ctx, writebackCandidate); result != nil || !errors.Is(err, domain.ErrStoredObjectGCCandidateStale) {
 		t.Fatal("已领取候选应失效", result, err)
 	}
 
