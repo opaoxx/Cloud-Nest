@@ -194,6 +194,27 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("detect MIME from historical object bytes", func(t *testing.T) {
+		// 1. 选择具有 application/octet-stream 元数据的原始文本版本。
+		record := object
+		record.StorageVersionID, record.StorageETag = new("null"), &initial.ETag
+		const contents = "before versioning"
+		record.FileSize = uint64(len(contents))
+		expected := sha256.Sum256([]byte(contents))
+		now := time.Now().UTC()
+		task := &domain.UploadTask{
+			ID: 19, UserID: record.OwnerUserID, StagedObjectID: record.ID, UploadMode: "SINGLE", Status: domain.UploadStatusVerifying,
+			FileSize: record.FileSize, ExpectedSHA256: &expected,
+			LeaseVersion: 1, LeaseOwner: new("fixture-worker"), UpdatedAt: now, LeaseUntil: new(now.Add(time.Minute)),
+		}
+
+		// 2. 用正常校验入口读回并识别该版本的实际内容。
+		result, err := service.VerifyUploadObject(ctx, task, &record, client.OpenUploadVerificationObject)
+		if err != nil || result == nil || result.DetectedMIMEType != "text/plain" || result.SHA256 != expected {
+			t.Fatal("真实历史对象的媒体类型或摘要不符", result, err)
+		}
+	})
+
 	t.Run("presigned download through client endpoint", func(t *testing.T) {
 		// 1. 为同一个 MinIO 配置独立入口，转发时保留客户端访问主机。
 		proxy := httputil.NewSingleHostReverseProxy(settings.EndpointURL)

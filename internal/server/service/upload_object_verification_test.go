@@ -157,6 +157,29 @@ func TestVerifyUploadObjectLifecycle(t *testing.T) {
 	}
 }
 
+func TestVerifyUploadObjectMediaTypeRequiresMatchingChecksum(t *testing.T) {
+	contents := "CloudNest 学习记录"
+	task, object := uploadObjectVerificationFixture(uint64(len(contents)))
+	expected := sha256.Sum256([]byte(contents))
+	task.ExpectedSHA256 = &expected
+	open := func(context.Context, *domain.StoredObject) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewBufferString(contents)), nil
+	}
+	// 1. 对象读回通过摘要校验，识别结果可交给后续发布流程。
+	result, err := VerifyUploadObject(t.Context(), task, object, open)
+	if err != nil || result == nil || result.DetectedMIMEType != "text/plain" || result.SHA256 != expected {
+		t.Fatal("校验成功后未交付识别结果", result, err)
+	}
+
+	// 2. 摘要失配时保存原有摘要证据。
+	task.ExpectedSHA256 = new([sha256.Size]byte{})
+	result, err = VerifyUploadObject(t.Context(), task, object, open)
+	mismatch, ok := err.(*domain.UploadVerificationChecksumMismatch)
+	if result != nil || !ok || mismatch.Actual.SHA256 != expected || mismatch.Actual.DetectedMIMEType != "" {
+		t.Fatal("失配时的校验结果或证据不符", result, err)
+	}
+}
+
 func TestVerifyUploadObjectSizeMismatchEvidence(t *testing.T) {
 	readFailure := domain.ErrUploadStorageUnavailable
 	closeFailure := errors.New("fixture close failure")

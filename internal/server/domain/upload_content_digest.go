@@ -51,4 +51,6 @@ type UploadContentDigest struct {
 	SizeBytes uint64
 	// SHA256 是本次完整内容的二进制摘要。
 	SHA256 [sha256.Size]byte
+	// DetectedMIMEType 是对象校验读取时识别的基础媒体类型，空字符串表示未知。
+	DetectedMIMEType string
 }

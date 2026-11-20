@@ -85,6 +85,8 @@ func VerifyUploadObject(
 		return nil, err
 	}
 	if err := ValidateUploadContentChecksum(actual.SHA256, expected); err != nil {
+		// 失配证据只需要大小和摘要，媒体类型随通过校验的结果交付。
+		actual.DetectedMIMEType = ""
 		return nil, &domain.UploadVerificationChecksumMismatch{
 			TaskID: taskID, UserID: userID, StagedObjectID: objectID, LeaseVersion: leaseVersion,
 			ExpectedSHA256: *expected, Actual: *actual,

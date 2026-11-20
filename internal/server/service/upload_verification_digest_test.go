@@ -46,8 +46,55 @@ func TestReadUploadVerificationDigest(t *testing.T) {
 				}
 				return
 			}
-			if digest == nil || digest.SizeBytes != fixture.declared || digest.SHA256 != sha256.Sum256(fixture.content) {
-				t.Fatal("对象大小或摘要不正确", digest)
+			if digest == nil || digest.SizeBytes != fixture.declared || digest.SHA256 != sha256.Sum256(fixture.content) ||
+				digest.DetectedMIMEType != "" {
+				t.Fatal("对象大小、摘要或媒体类型不正确", digest)
+			}
+		})
+	}
+}
+
+func TestReadUploadVerificationDigestMediaType(t *testing.T) {
+	pngHeader := []byte("\x89PNG\r\n\x1a\n")
+	atTextLimit := bytes.Repeat([]byte{'a'}, maxTextPreviewBytes)
+	for _, fixture := range []struct {
+		name    string
+		content []byte
+		want    string
+	}{
+		{"png signature", pngHeader, "image/png"},
+		{"jpeg signature", []byte("\xff\xd8\xff\xe0"), "image/jpeg"},
+		{"gif signature", []byte("GIF89a"), "image/gif"},
+		{"webp signature", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp"},
+		{"image larger than text limit", append(bytes.Clone(pngHeader), atTextLimit...), "image/png"},
+		{"multibyte UTF-8 text", []byte("学习记录\tCloudNest\r\n"), "text/plain"},
+		{"UTF-8 BOM", []byte("\xef\xbb\xbf学习记录"), "text/plain"},
+		{"text at limit", atTextLimit, "text/plain"},
+		{"text over limit", append(bytes.Clone(atTextLimit), 'a'), ""},
+		{"UTF-8 rune split by signature boundary", append(bytes.Repeat([]byte{'a'}, uploadMIMESampleBytes-1), []byte("云")...), "text/plain"},
+		{"invalid UTF-8 beyond signature", append(bytes.Repeat([]byte{'a'}, uploadMIMESampleBytes), 0xff), ""},
+		{"NUL beyond signature", append(bytes.Repeat([]byte{'a'}, uploadMIMESampleBytes), 0), ""},
+		{"Unicode control code", []byte("sample\u0085text"), ""},
+		{"UTF-16 text", []byte{0xff, 0xfe, 'a', 0}, ""},
+		{"HTML", []byte("<!DOCTYPE html><html></html>"), ""},
+		{"PDF", []byte("%PDF-1.7"), ""},
+		{"partial PNG signature", pngHeader[:6], ""},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			// 1. 以分段读取验证文件头和跨读取边界的多字节文本。
+			var reader io.Reader = bytes.NewReader(fixture.content)
+			if len(fixture.content) < 1024 {
+				reader = iotest.OneByteReader(reader)
+			}
+			source := &uploadCopySource{reader: reader}
+			declaredSize := uint64(len(fixture.content))
+			digest, err := ReadUploadVerificationDigest(t.Context(), source, declaredSize)
+
+			// 2. 核对实际读完的字节、完整摘要及可选 MIME。
+			if err != nil || digest == nil || digest.DetectedMIMEType != fixture.want ||
+				digest.SizeBytes != declaredSize || digest.SHA256 != sha256.Sum256(fixture.content) ||
+				source.bytesRead != len(fixture.content) || source.closes != 0 {
+				t.Fatal("流式媒体类型识别结果不符", digest, err, source.bytesRead)
 			}
 		})
 	}
