@@ -907,3 +907,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.TrashEntryCursorVerifier`，校验回收站游标的签名、用户和编码，并还原续读位置。[第 412 步学习记录](docs/开发学习记录.md#第-412-步校验回收站游标并还原位置)
 
 已提供 `service.TrashEntryPageService`，支持空游标读首页、文本游标续读，以及有后续候选时签发下一页游标。[第 413 步学习记录](docs/开发学习记录.md#第-413-步组合带文本游标的回收站分页服务)
+
+已提供 `dto.NewTrashPageData`，转换公开回收项、原父路径、30 天保留截止时间和可空续页游标。[第 414 步学习记录](docs/开发学习记录.md#第-414-步转换回收站分页响应数据)

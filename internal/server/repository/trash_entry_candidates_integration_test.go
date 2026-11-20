@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -205,12 +206,24 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 			if err != nil || page == nil || page.Entries == nil {
 				t.Fatalf("第 %d 页为 %+v，错误为 %v", index+1, page, err)
 			}
+			data, err := dto.NewTrashPageData(page)
+			if err != nil || data == nil || data.Items == nil || len(data.Items) != len(page.Entries) ||
+				(data.NextCursor == nil) != (page.NextCursor == nil) {
+				t.Fatalf("第 %d 页的公开数据为 %+v，错误为 %v", index+1, data, err)
+			}
 			ids := make([]uint64, 0, len(page.Entries))
-			for _, item := range page.Entries {
+			for itemIndex, item := range page.Entries {
 				ids = append(ids, item.Entry.ID)
 				path := item.OriginalPath.Entries
 				if len(path) == 0 || path[0].ID != 33 || path[len(path)-1].ID != *item.Entry.ParentID {
 					t.Fatalf("目录项 %d 的原父路径为 %+v", item.Entry.ID, path)
+				}
+				publicItem := data.Items[itemIndex]
+				if publicItem.ID != strconv.FormatUint(item.Entry.ID, 10) || len(publicItem.OriginalPath) != len(path) ||
+					publicItem.OriginalPath[0].ID != "33" ||
+					publicItem.OriginalPath[len(publicItem.OriginalPath)-1].ID != publicItem.ParentID ||
+					!publicItem.RetentionExpiresAt.Equal(item.Entry.DeletedAt.AddDate(0, 0, 30)) {
+					t.Fatalf("目录项 %d 的公开字段为 %+v", item.Entry.ID, publicItem)
 				}
 			}
 			if !slices.Equal(ids, expected.ids) || (page.NextCursor != nil) != (index < 2) || snapshotCalls != index+1 {
@@ -219,7 +232,7 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 			if page.NextCursor == nil {
 				break
 			}
-			cursor = *page.NextCursor
+			cursor = *data.NextCursor
 			if index == 0 {
 				position, err := verifier.Verify(actor.UserID, cursor)
 				if err != nil || position == nil || position.ID != 2000 || !position.DeletedAt.Equal(hiddenTime) {
