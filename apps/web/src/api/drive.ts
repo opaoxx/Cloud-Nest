@@ -7,8 +7,14 @@ export interface DirectoryEntry {
   sizeBytes: number
 }
 
+export interface DirectoryBreadcrumb {
+  id: string
+  name: string
+}
+
 interface DirectoryPage {
   items: DirectoryEntry[]
+  breadcrumbs: DirectoryBreadcrumb[]
   nextCursor: string | null
 }
 
@@ -40,5 +46,19 @@ export async function listDirectoryPage(
     }
     return { id: item.id, name: item.name, type: item.entry_type, sizeBytes: item.size_bytes }
   })
-  return { items, nextCursor }
+  // 3. 解析后端返回的根到当前目录路径，保留每一级的 ID 和名称。
+  if (!Array.isArray(data.breadcrumbs) || data.breadcrumbs.length === 0) {
+    throw new ApiError(200, '服务返回的目录路径格式有误。')
+  }
+  const breadcrumbs = data.breadcrumbs.map((crumb: unknown, index): DirectoryBreadcrumb => {
+    if (!isRecord(crumb) || typeof crumb.id !== 'string' || !crumb.id ||
+        typeof crumb.name !== 'string' || (index === 0 ? crumb.name !== '' : crumb.name === '')) {
+      throw new ApiError(200, '服务返回的目录路径格式有误。')
+    }
+    return { id: crumb.id, name: crumb.name }
+  })
+  if (breadcrumbs.at(-1)?.id !== parentId) {
+    throw new ApiError(200, '服务返回的目录路径与请求不符。')
+  }
+  return { items, breadcrumbs, nextCursor }
 }

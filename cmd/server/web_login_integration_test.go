@@ -31,7 +31,7 @@ const webEmptyRootFixtureUsername = "fixture_web_empty_root"
 
 func TestServerWebLoginIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_WEB_LOGIN_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录、刷新与根目录")
+		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录、刷新与目录浏览")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
@@ -198,6 +198,48 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("跨账号目录查询错误码不符", denied.Error.Code)
 	}
 	t.Log("根目录登录与会话恢复一致：50 项首页、1 项续页，独立账号根目录为空，跨账号返回 404 ENTRY_NOT_FOUND")
+
+	// 7. 沿文件夹进入两层目录，核对服务端面包屑和空页。
+	var subdirectory dto.DirectoryPageResponse
+	rootFolder := firstPageItems[1]
+	read(getDirectory(refreshed.Data.AccessToken, rootFolder.ID, nil), http.StatusOK, &subdirectory)
+	wantSubdirectoryPath := []dto.DirectoryBreadcrumb{
+		{ID: restoredProfile.Data.RootEntryID, Name: ""},
+		{ID: rootFolder.ID, Name: rootFolder.Name},
+	}
+	if !slices.Equal(subdirectory.Data.Breadcrumbs, wantSubdirectoryPath) || len(subdirectory.Data.Items) != 1 {
+		t.Fatal("子目录的面包屑或条目不符", subdirectory.Data)
+	}
+	nestedFolder := subdirectory.Data.Items[0]
+	if nestedFolder.ParentID != rootFolder.ID || nestedFolder.Name != "子目录中的条目" || nestedFolder.EntryType != "DIR" {
+		t.Fatal("子目录未返回预期的下一层入口", nestedFolder)
+	}
+	var nestedPage dto.DirectoryPageResponse
+	read(getDirectory(refreshed.Data.AccessToken, nestedFolder.ID, nil), http.StatusOK, &nestedPage)
+	wantNestedPath := append(wantSubdirectoryPath, dto.DirectoryBreadcrumb{ID: nestedFolder.ID, Name: nestedFolder.Name})
+	if !slices.Equal(nestedPage.Data.Breadcrumbs, wantNestedPath) ||
+		nestedPage.Data.Items == nil || len(nestedPage.Data.Items) != 0 || nestedPage.Data.NextCursor != nil {
+		t.Fatal("空子目录应返回完整面包屑和空数组", nestedPage.Data)
+	}
+
+	// 8. 按面包屑返回上级，不可见目录仍由现有授权规则拒绝。
+	var returned dto.DirectoryPageResponse
+	ancestor := nestedPage.Data.Breadcrumbs[1]
+	read(getDirectory(refreshed.Data.AccessToken, ancestor.ID, nil), http.StatusOK, &returned)
+	if !slices.Equal(returned.Data.Breadcrumbs, wantSubdirectoryPath) ||
+		!slices.Equal(returned.Data.Items, subdirectory.Data.Items) {
+		t.Fatal("按面包屑返回后的目录不符", returned.Data)
+	}
+	for _, deniedRequest := range []*http.Request{
+		getDirectory(emptyUser.Data.AccessToken, rootFolder.ID, nil),
+		getDirectory(refreshed.Data.AccessToken, "56", nil),
+	} {
+		read(deniedRequest, http.StatusNotFound, &denied)
+		if denied.Error.Code != "ENTRY_NOT_FOUND" {
+			t.Fatal("子目录不可见时的错误码不符", denied.Error.Code)
+		}
+	}
+	t.Log("子目录联测通过：两层面包屑、空子目录、返回上级、跨账号和已回收目录拒绝")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

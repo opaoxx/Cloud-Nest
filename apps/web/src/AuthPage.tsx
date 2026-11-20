@@ -4,7 +4,7 @@ import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
 import { ApiError, apiErrorMessage } from './api/http'
-import RootDirectory from './RootDirectory'
+import DirectoryBrowser from './DirectoryBrowser'
 import { formatSize } from './demo'
 import './auth.css'
 
@@ -106,7 +106,7 @@ export default function AuthPage() {
               <div><dt>预占空间</dt><dd>{formatSize(session.profile.reserved_bytes)}</dd></div>
             </dl>
             <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
-            <RootDirectory key={session.profile.root_entry_id} rootEntryId={session.profile.root_entry_id}
+            <DirectoryBrowser key={session.profile.root_entry_id} rootEntryId={session.profile.root_entry_id}
               accessToken={session.accessToken} />
           </>
         ) : (
