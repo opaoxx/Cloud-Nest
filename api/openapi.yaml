@@ -132,6 +132,7 @@ info:
     GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
     POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
     GET /api/v1/trash/{id}/purge-preview 已接入启动入口，使用只读快照返回受影响范围与短时确认凭证。
+    DELETE /api/v1/trash/{id} 定义确认永久清理的计划契约，受理后返回 202 和进度查询地址。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -458,6 +459,56 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/trash/{id}:
+    delete:
+      tags: [Entries]
+      operationId: confirmEntryPurge
+      summary: 确认永久清理当前用户的顶层回收项
+      description: |
+        计划契约。请求参数全部由路径和请求头提供。使用预检返回的 revision 作为 X-CloudNest-Expected-Revision，原样传回 preview_digest 作为 X-CloudNest-Purge-Preview。
+        1. Bearer 授权通过后校验路径 id、Idempotency-Key 和两个预检请求头。身份取自认证上下文。
+        2. 在已认证用户事务内，先按用户、操作和幂等键查找已保存结果。请求摘要绑定目标、预期版本和完整预检凭证。同键同参在记录保留期内返回首次 202 受理快照和本次请求 ID，即使凭证已到期或后台状态已推进。记录保留八天。
+        3. 首次受理时在同一用户事务中复查目标归属、TRASHED 状态和活动父链，验证凭证签名、用户、目标与截止时间，重新读取完整子树并比较指纹。凭证到期、指纹变化或当前范围超过 10000 个保留目录项，均返回 PURGE_PREVIEW_CHANGED。
+        4. 当前指纹匹配后比较目标版本。条件更新将目标改为 PURGING，记录清理开始时间并递增版本，与 202 受理快照在同一事务内保存。提交后子树立即不可访问，空间结算和内容引用释放由后台分批推进。数据结构异常或版本无法递增时回滚并返回 500。
+        5. 请求结果未知时，以原幂等键、版本和凭证重试。收到 PURGE_PREVIEW_CHANGED 或 REVISION_CONFLICT 时，重新预检并获得用户确认，再以新幂等键提交。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/PurgeExpectedRevision'
+        - $ref: '#/components/parameters/PurgePreviewDigest'
+      responses:
+        '202':
+          $ref: '#/components/responses/PurgeEntryAccepted'
+        '400':
+          $ref: '#/components/responses/PurgeEntryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 真实根目录禁止永久清理，返回 ROOT_OPERATION_FORBIDDEN。账号禁用与来源拒绝沿用共享错误。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/PurgePreviewNotFound'
+        '409':
+          $ref: '#/components/responses/PurgeEntryConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/trash/{id}/restore:
     post:
       tags: [Entries]
@@ -528,7 +579,7 @@ paths:
            单次范围最多 10000 个保留目录项，含目标和 PURGED 墓碑。超出时返回 400，details.field 为 id。父链或子树结构异常时返回 500。
         3. 文件数、目录数和逻辑字节数统计尚未 PURGED 的项，包含 ACTIVE、TRASHED 和 PURGING。逻辑字节数按每个文件目录项的 file_size 累加，多个引用同一对象的文件各自计入。
         4. 签发五分钟有效的 preview_digest。摘要绑定当前用户、目标 ID、子树目录项的 ID、revision、status 和到期时间。仍保留的 PURGED 项参与子树摘要。
-           客户端原样保留凭证。后续 DELETE /api/v1/trash/{id} 确认请求携带该凭证和本次返回的 revision 作为 expected_revision，由服务在用户锁内复查。凭证过期或子树变化时返回 409 PURGE_PREVIEW_CHANGED，客户端重新预检并确认。
+           客户端原样保留凭证。后续 DELETE /api/v1/trash/{id} 将该凭证置于 X-CloudNest-Purge-Preview，将本次 revision 置于 X-CloudNest-Expected-Revision。服务在用户锁内复查，凭证到期或子树变化时返回 409 PURGE_PREVIEW_CHANGED，客户端重新预检并确认。
       security:
         - BearerAuth: []
       parameters:
@@ -2630,6 +2681,36 @@ components:
           preview_digest: eyJ2IjoxfQ.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
           expires_at: '2026-11-20T04:35:00.123456Z'
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    PurgeEntryAcceptedData:
+      type: object
+      additionalProperties: false
+      required: [entry_id, status, progress_url]
+      description: 首次受理时保存的稳定快照。当前清理状态通过进度地址获取。
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        status:
+          type: string
+          enum: [PURGING]
+        progress_url:
+          type: string
+          pattern: '^/api/v1/trash/[1-9][0-9]{0,19}/purge$'
+          description: 计划中的进度查询路径，包含同一个 entry_id，按当前 API 服务地址解析。
+    PurgeEntryAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/PurgeEntryAcceptedData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          entry_id: '23'
+          status: PURGING
+          progress_url: /api/v1/trash/23/purge
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TrashListItem:
       type: object
       additionalProperties: false
@@ -3307,6 +3388,69 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    PurgeEntryRejected:
+      description: |
+        HTTP 400，INVALID_ARGUMENT。details.field 为出错的 id、Idempotency-Key、X-CloudNest-Expected-Revision 或 X-CloudNest-Purge-Preview。
+        凭证格式错误、签名无效、所属用户或目标不匹配统一定位 X-CloudNest-Purge-Preview，使用固定提示。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: INVALID_ARGUMENT
+              message: 永久清理预检凭证无效
+              details:
+                field: X-CloudNest-Purge-Preview
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    PurgeEntryConflict:
+      description: |
+        HTTP 409，PURGE_PREVIEW_CHANGED 表示凭证已到截止时间、子树指纹变化或当前范围超限。重新读取预检并获得用户确认。
+        指纹匹配但预期版本与当前目标版本不一致时返回 REVISION_CONFLICT，details.current_revision 是非零 uint64 十进制字符串。
+        同键不同参数返回 IDEMPOTENCY_CONFLICT。记录到期返回 IDEMPOTENCY_EXPIRED，客户端先核对当前状态。
+        除版本冲突外，details 均为 null。冲突请求不改变清理状态。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            preview_changed:
+              value:
+                error:
+                  code: PURGE_PREVIEW_CHANGED
+                  message: 永久清理预检已变化，请重新预检并确认
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            revision_conflict:
+              value:
+                error:
+                  code: REVISION_CONFLICT
+                  message: 文件已发生变化，请刷新后重试
+                  details:
+                    current_revision: '4'
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TrashListQueryRejected:
       description: |
         HTTP 400，查询编码及字段错误使用 INVALID_ARGUMENT，details.field 定位 query、cursor 或 limit。
@@ -4608,6 +4752,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/PurgePreviewResponse'
+    PurgeEntryAccepted:
+      description: 永久清理已受理 HTTP 202，交付稳定受理快照、计划中的进度查询地址和本次请求 ID。后台分批完成清理。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PurgeEntryAcceptedResponse'
     TrashEntriesListed:
       description: 回收站查询成功 HTTP 200，返回当前页条目、续页游标和本次请求 ID。响应采用 no-store 和 Pragma no-cache。
       headers:
@@ -5558,6 +5719,26 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
   parameters:
+    PurgeExpectedRevision:
+      name: X-CloudNest-Expected-Revision
+      in: header
+      required: true
+      description: |
+        将同一目标预检返回的 revision 原样作为 expected_revision 提交，范围为 1～18446744073709551615。
+        仅接受单值的标准十进制字符串，缺失、空值、重复或逗号合并值返回该请求头的字段错误。
+      schema:
+        $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+      example: '4'
+    PurgePreviewDigest:
+      name: X-CloudNest-Purge-Preview
+      in: header
+      required: true
+      description: |
+        将同一目标预检返回的 preview_digest 原样传回，仅接受单值。缺失、空值、重复或逗号合并值返回该请求头的字段错误。
+        示例仅展示字段格式。
+      schema:
+        $ref: '#/components/schemas/PurgePreviewData/properties/preview_digest'
+      example: eyJ2IjoxfQ.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     IdempotencyKey:
       name: Idempotency-Key
       in: header
