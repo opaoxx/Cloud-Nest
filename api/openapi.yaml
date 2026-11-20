@@ -127,6 +127,7 @@ info:
     访问成功交付方法通过测试专用 POST 入口验证，共享响应见 RecordAccessSucceeded，关联当前请求 ID 并禁止缓存。
     访问处理函数组合 Actor、路径、用途 DTO、核心服务及成功交付，目录目标定位 id，用途错误定位 purpose，不可见目标复用 TargetEntryNotFound。
     POST /api/v1/entries/{id}/access 已由启动入口绑定共享授权及用户事务，按 preview/open 记录文件访问，六十秒内合并并返回已存时间。
+    POST /api/v1/entries/{id}/download 定义短期下载与预览授权的计划契约，返回绑定具体存储对象的 GET URL。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -416,6 +417,67 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/entries/{id}/download:
+    post:
+      tags: [Entries]
+      operationId: createEntryDownload
+      summary: 为当前用户可见的文件签发短期下载或预览地址
+      description: |
+        计划契约，后端实现后注册路由。
+        1. Bearer 授权通过后解析目录项 id、受限 JSON、expected_revision 和 purpose。每次请求重新授权，无需 Idempotency-Key。
+        2. 核对文件归属及完整祖先链可见性，比较目录项版本，再确认物理对象为 READY 且内容可用。只有满足预览规则的内容才可申请 preview。
+        3. 签发固定到该对象键的 GET URL，已有存储版本定位时一并绑定。初始有效期为 15 分钟，成功授权按 60 秒窗口合并记录 last_opened_at。
+        客户端使用返回的 URL 直接访问存储，可请求单段 Range。CloudNest Bearer 令牌仅用于授权接口。续签重新检查身份、可见性及版本，续传前须核对 object_id 仍指向原对象。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDownloadRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CreateDownloadSucceeded'
+        '400':
+          description: INVALID_ARGUMENT。路径或可见目标为目录时定位 id，版本与用途错误分别定位 expected_revision 或 purpose。正文结构错误使用统一错误响应。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/CreateDownloadConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: UNSUPPORTED_PREVIEW。内容 MIME 无法确认或不在支持范围内，或纯文本超过 2097152 字节。客户端仍可按 download 用途单独申请。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: 可识别的临时存储或数据库不可用分别返回 STORAGE_UNAVAILABLE 或 DATABASE_UNAVAILABLE。返回固定提示和 request_id。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/entries/{id}/access:
     post:
       tags: [Entries]
@@ -2201,6 +2263,88 @@ components:
       example:
         target_parent_id: '12'
         expected_revision: '3'
+    CreateDownloadRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, purpose]
+      properties:
+        expected_revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        purpose:
+          type: string
+          enum: [download, preview]
+          description: download 申请下载，preview 申请受支持的内容预览。
+      description: |
+        expected_revision 取自已读取的目录项，使用非零 uint64 十进制字符串，服务端校验至 18446744073709551615。
+        purpose 使用准确小写值，两个字段均不得为空。目录项 ID 来自路径，身份来自认证上下文。
+      example:
+        expected_revision: '3'
+        purpose: download
+    CreateDownloadData:
+      type: object
+      additionalProperties: false
+      required: [url, expires_at, object_id, revision, size_bytes, sha256, mime_type, disposition]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: '^https?://[^#\s]+$'
+          not:
+            pattern: '[\s\x00-\x1f\x7f]'
+          description: 客户端可访问的存储地址，含 GET 授权签名。使用原 URL 发起请求，避免在日志或持久队列中保存该值。
+        expires_at:
+          type: string
+          format: date-time
+          description: URL 的实际截止时间，以 UTC 表示。初始签发有效期为 15 分钟。
+        object_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        size_bytes:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/size_bytes'
+        sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[0-9a-f]{64}$'
+          description: 由服务端校验并随 READY 对象保存的内容 SHA-256，使用 64 位小写十六进制。
+        mime_type:
+          type: string
+          maxLength: 127
+          pattern: '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'
+          not:
+            pattern: '[\x00-\x1f\x7f]'
+          description: 本次交付使用的小写媒体类型。下载时无法确认 MIME 采用 application/octet-stream，预览要求已校验的支持类型。
+        disposition:
+          type: string
+          pattern: '^(attachment|inline);.'
+          not:
+            pattern: '[\x00-\x1f\x7f]'
+          description: 签名所绑定的 Content-Disposition 值，download 使用 attachment，preview 使用 inline。filename 提供安全 ASCII 名称，filename* 保留 UTF-8 文件名。
+      description: |
+        revision 是签发时的目录项版本，object_id 标识具体内容对象，续签后续传须比较对象身份。
+        初期预览允许已校验的 PNG、JPEG、GIF、WebP 或不超过 2 MiB 的纯文本。客户端将纯文本按文本转义渲染。
+    CreateDownloadResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/CreateDownloadData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          url: 'https://storage.example.invalid/cloudnest/example?X-Amz-Signature=example'
+          expires_at: '2026-11-20T08:15:00Z'
+          object_id: '41'
+          revision: '3'
+          size_bytes: 0
+          sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+          mime_type: application/octet-stream
+          disposition: >-
+            attachment; filename="notes.txt"; filename*=UTF-8''%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0.txt
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RecordAccessData:
       type: object
       additionalProperties: false
@@ -3393,6 +3537,58 @@ components:
               message: 会话不存在
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateDownloadSucceeded:
+      description: HTTP 200，返回短期 URL 及其绑定的对象快照。响应采用 no-store 和 Pragma no-cache，正文 request_id 与响应头一致。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CreateDownloadResponse'
+    CreateDownloadConflict:
+      description: |
+        对当前用户可见的文件，版本不符返回 REVISION_CONFLICT，并在 details.current_revision 中交付当前版本字符串。
+        确认对象缺失或尚不可用时返回 TARGET_UNAVAILABLE，details 为 null，服务端保留核对线索。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            revision_conflict:
+              value:
+                error:
+                  code: REVISION_CONFLICT
+                  message: 文件已发生变化，请刷新后重试
+                  details:
+                    current_revision: '4'
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            target_unavailable:
+              value:
+                error:
+                  code: TARGET_UNAVAILABLE
+                  message: 文件内容当前不可用
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RecordAccessSucceeded:
       description: |
         访问记录成功 HTTP 200，使用 last_opened_at 与当前请求 ID，响应采用 no-store 和 Pragma no-cache。
