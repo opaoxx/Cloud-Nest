@@ -131,6 +131,7 @@ info:
     POST /api/v1/entries/{id}/trash 已接入启动入口，使用预期版本及幂等键，交付回收后的快照。
     GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
     POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
+    GET /api/v1/trash/{id}/purge-preview 定义永久清理预检的计划契约，返回受影响范围与短时确认凭证。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -513,6 +514,52 @@ paths:
           $ref: '#/components/responses/RequestBodyTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/trash/{id}/purge-preview:
+    get:
+      tags: [Entries]
+      operationId: previewEntryPurge
+      summary: 预检当前用户的单项永久清理范围
+      description: |
+        计划契约，后端实现后注册路由。本操作只读。
+        1. Bearer 授权通过后校验路径 id。预检目标须是当前用户的顶层回收项，即自身为 TRASHED 且原父目录至真实根目录均为活动目录。仍为 TRASHED 的到期目标可以预检。真实根目录禁止预检。
+        2. 在同一只读快照读取目标、祖先和完整子树。范围包含目标自身以及按同用户 parent_id 关系到达的全部后代，包括已独立回收的后代。
+           单次范围最多 10000 个保留目录项，含目标和 PURGED 墓碑。超出时返回 400，details.field 为 id。父链或子树结构异常时返回 500。
+        3. 文件数、目录数和逻辑字节数统计尚未 PURGED 的项，包含 ACTIVE、TRASHED 和 PURGING。逻辑字节数按每个文件目录项的 file_size 累加，多个引用同一对象的文件各自计入。
+        4. 签发五分钟有效的 preview_digest。摘要绑定当前用户、目标 ID、子树目录项的 ID、revision、status 和到期时间。仍保留的 PURGED 项参与子树摘要。
+           客户端原样保留凭证。后续 DELETE /api/v1/trash/{id} 确认请求携带该凭证和本次返回的 revision 作为 expected_revision，由服务在用户锁内复查。凭证过期或子树变化时返回 409 PURGE_PREVIEW_CHANGED，客户端重新预检并确认。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+      responses:
+        '200':
+          $ref: '#/components/responses/PurgePreviewSucceeded'
+        '400':
+          $ref: '#/components/responses/PurgePreviewRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 真实根目录禁止永久清理预检，返回 ROOT_OPERATION_FORBIDDEN。账号禁用与来源拒绝沿用共享错误。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/PurgePreviewNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/entries/{id}/trash:
@@ -2528,6 +2575,61 @@ components:
             status: ACTIVE
             revision: '5'
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    PurgePreviewData:
+      type: object
+      additionalProperties: false
+      required: [entry_id, revision, file_count, directory_count, logical_bytes, preview_digest, expires_at]
+      description: 同一只读快照中的回收项版本、待清理数量和确认凭证。文件数与目录数之和为 1～10000。
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        revision:
+          allOf:
+            - $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+          description: 预检时的目标版本，后续确认请求将此值作为 expected_revision。
+        file_count:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          description: 待清理文件数，包含尚未清理的文件目标自身。
+        directory_count:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          description: 待清理目录数，包含尚未清理的目录目标自身。
+        logical_bytes:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,19})$'
+          description: 待释放的逻辑占用字节数，按文件目录项累加。使用 0～18446744073709551615 的标准十进制字符串。
+        preview_digest:
+          type: string
+          maxLength: 1024
+          pattern: '^[A-Za-z0-9_-]+.[A-Za-z0-9_-]{43}$'
+          description: 由无填充 Base64URL 载荷和 HMAC-SHA256 签名组成的确认凭证，客户端原样传递。示例仅展示格式。
+        expires_at:
+          type: string
+          format: date-time
+          pattern: '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(.[0-9]{1,6})?Z$'
+          description: 凭证到期时间，UTC，最多六位小数。达到此时刻即到期。
+    PurgePreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/PurgePreviewData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          entry_id: '23'
+          revision: '4'
+          file_count: 2
+          directory_count: 1
+          logical_bytes: '6144'
+          preview_digest: eyJ2IjoxfQ.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          expires_at: '2026-11-20T04:35:00.123456Z'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TrashListItem:
       type: object
       additionalProperties: false
@@ -3171,6 +3273,40 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    PurgePreviewRejected:
+      description: HTTP 400，INVALID_ARGUMENT。路径 ID 格式无效或完整范围超过 10000 个保留目录项，details.field 为 id。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PurgePreviewNotFound:
+      description: HTTP 404，ENTRY_NOT_FOUND。目标缺失、跨账号、未处于 TRASHED 或具有回收或清理中的祖先，统一返回目录项不存在，details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     TrashListQueryRejected:
       description: |
         HTTP 400，查询编码及字段错误使用 INVALID_ARGUMENT，details.field 定位 query、cursor 或 limit。
@@ -4455,6 +4591,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RenameEntryResponse'
+    PurgePreviewSucceeded:
+      description: 永久清理预检成功 HTTP 200，返回观察时的子树范围和短时确认凭证。响应禁止缓存。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PurgePreviewResponse'
     TrashEntriesListed:
       description: 回收站查询成功 HTTP 200，返回当前页条目、续页游标和本次请求 ID。响应采用 no-store 和 Pragma no-cache。
       headers:
