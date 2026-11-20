@@ -22,6 +22,9 @@ const TrashEntryOperation = "v1.entries.trash"
 // RestoreEntryOperation 是单项恢复摘要与幂等记录共用的版本化操作名。
 const RestoreEntryOperation = "v1.trash.restore"
 
+// PurgeEntryOperation 是确认永久清理的摘要与幂等记录共用的版本化操作名。
+const PurgeEntryOperation = "v1.trash.purge"
+
 // CreateUploadOperation 是上传创建摘要与幂等记录共用的版本化操作名。
 const CreateUploadOperation = "v1.uploads.create"
 

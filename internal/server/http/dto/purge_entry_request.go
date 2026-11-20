@@ -39,7 +39,7 @@ func ParsePurgeEntryHeaders(headers http.Header) (*PurgeEntryInput, *FieldError)
 
 	// 2. 读取唯一的凭证头，校验长度和格式。
 	digests := headers.Values(PurgePreviewDigestHeader)
-	if len(digests) != 1 || !validPurgePreviewDigestFormat(digests[0]) {
+	if len(digests) != 1 || !domain.ValidPurgePreviewDigestFormat(digests[0]) {
 		return nil, &FieldError{Field: PurgePreviewDigestHeader, Message: domain.ErrInvalidPurgePreviewDigest.Error()}
 	}
 

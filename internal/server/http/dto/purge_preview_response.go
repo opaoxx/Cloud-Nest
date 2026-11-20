@@ -1,19 +1,11 @@
 package dto
 
 import (
-	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
-
-var purgePreviewDigestPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$`)
-
-// validPurgePreviewDigestFormat 供签发响应和确认请求共用凭证格式约束。
-func validPurgePreviewDigestFormat(digest string) bool {
-	return len(digest) <= domain.MaxPurgePreviewDigestLength && purgePreviewDigestPattern.MatchString(digest)
-}
 
 // PurgePreviewData 是永久清理预检响应的七个公开字段。
 type PurgePreviewData struct {
@@ -56,7 +48,7 @@ func NewPurgePreviewData(result *domain.PurgePreview) (*PurgePreviewData, error)
 
 	// 2. 校验凭证格式与到期精度，转换为 UTC。
 	credential := result.Credential
-	if !validPurgePreviewDigestFormat(credential.PreviewDigest) {
+	if !domain.ValidPurgePreviewDigestFormat(credential.PreviewDigest) {
 		return nil, domain.ErrInvalidFileEntryData
 	}
 	expiresAt, valid := listResponseTime(&credential.ExpiresAt)

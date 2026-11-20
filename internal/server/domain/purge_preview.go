@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"regexp"
 	"time"
 )
 
@@ -10,6 +11,13 @@ const PurgePreviewLifetime = 5 * time.Minute
 
 // MaxPurgePreviewDigestLength 是确认请求中签名凭证的文本上限。
 const MaxPurgePreviewDigestLength = 1024
+
+var purgePreviewDigestPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$`)
+
+// ValidPurgePreviewDigestFormat 校验预检凭证的公开格式，供 HTTP 和请求摘要共用。
+func ValidPurgePreviewDigestFormat(digest string) bool {
+	return len(digest) <= MaxPurgePreviewDigestLength && purgePreviewDigestPattern.MatchString(digest)
+}
 
 // ErrInvalidPurgePreviewDigest 表示预检凭证无效。
 var ErrInvalidPurgePreviewDigest = errors.New("永久清理预检凭证无效")
