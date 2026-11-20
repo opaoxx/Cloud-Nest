@@ -74,6 +74,19 @@ func (store *Store) LockPurgeLeaf(ctx context.Context, candidate domain.PurgeLea
 	return &current, nil
 }
 
+// requireLockedPurgeLeaf 是单项清理写入共用的事务与输入检查。
+func (store *Store) requireLockedPurgeLeaf(ctx context.Context, leaf *domain.LockedPurgeLeaf) error {
+	// 1. 核对根项事务，再检查锁定结果的归属和字段。
+	root, err := store.requirePurgeRoot(ctx)
+	if err != nil {
+		return err
+	}
+	if leaf == nil || leaf.UserID != root.UserID || !leaf.IsValid() {
+		return domain.ErrInvalidFileEntryData
+	}
+	return nil
+}
+
 // checkPurgeLeafAncestors 在同一用户事务内复查父链是否到达锁定的根项。
 func (store *Store) checkPurgeLeafAncestors(ctx context.Context, root domain.PurgeRootCandidate, parentID uint64) error {
 	// 1. 由父目录向上查询，隔离用户，并限制在既有目录深度范围内。

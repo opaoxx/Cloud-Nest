@@ -12,12 +12,8 @@ import (
 // leaf 须来自当前根项事务的 LockPurgeLeaf，配额和偏好由外层在同一事务结算。
 func (store *Store) markPurgeLeafCompleted(ctx context.Context, leaf *domain.LockedPurgeLeaf) error {
 	// 1. 核对根项事务和锁定结果。
-	root, err := store.requirePurgeRoot(ctx)
-	if err != nil {
+	if err := store.requireLockedPurgeLeaf(ctx, leaf); err != nil {
 		return err
-	}
-	if leaf == nil || leaf.UserID != root.UserID || !leaf.IsValid() {
-		return domain.ErrInvalidFileEntryData
 	}
 
 	// 2. 按原状态、版本和对象引用执行条件更新。

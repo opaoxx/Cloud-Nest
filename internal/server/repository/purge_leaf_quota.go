@@ -11,12 +11,8 @@ import (
 // leaf 来自当前事务的 LockPurgeLeaf。调用方把扣减与同一叶子的完成写入一起提交。
 func (store *Store) releasePurgeLeafQuota(ctx context.Context, leaf *domain.LockedPurgeLeaf) error {
 	// 1. 核对根项事务、归属和锁定结果。
-	root, err := store.requirePurgeRoot(ctx)
-	if err != nil {
+	if err := store.requireLockedPurgeLeaf(ctx, leaf); err != nil {
 		return err
-	}
-	if leaf == nil || leaf.UserID != root.UserID || !leaf.IsValid() {
-		return domain.ErrInvalidFileEntryData
 	}
 	// 目录和零字节文件都无需改动账户账目。
 	if leaf.FileSize == 0 {
@@ -25,7 +21,7 @@ func (store *Store) releasePurgeLeafQuota(ctx context.Context, leaf *domain.Lock
 
 	// 2. 读取当前配额，检查已用空间是否足够扣减。
 	const allowDisabled = true
-	account, err := store.lockUploadQuota(ctx, root.UserID, allowDisabled)
+	account, err := store.lockUploadQuota(ctx, leaf.UserID, allowDisabled)
 	if err != nil {
 		return err
 	}
@@ -38,7 +34,7 @@ func (store *Store) releasePurgeLeafQuota(ctx context.Context, leaf *domain.Lock
 	result := store.database.WithContext(ctx).Exec(`
 		UPDATE users SET used_storage = ?, updated_at = UTC_TIMESTAMP(6)
 		WHERE id = ? AND status = ? AND storage_quota = ? AND used_storage = ? AND reserved_storage = ?`,
-		remainingUsed, root.UserID, account.Status, account.QuotaBytes, account.UsedBytes, account.ReservedBytes)
+		remainingUsed, leaf.UserID, account.Status, account.QuotaBytes, account.UsedBytes, account.ReservedBytes)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
