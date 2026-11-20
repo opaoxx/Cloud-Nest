@@ -96,16 +96,22 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 		}
 		return tasks.Get(queryContext, actor, taskID)
 	}))
+	const completionPath = "/api/v1/test-upload-tasks/:id/complete"
+	router.POST(completionPath, middleware.RequireAuthorization(authorization.Authorize, handler.AuthorizationFailure),
+		handler.UploadCompletion(func(confirmContext context.Context, actor domain.Actor, taskID uint64) (*domain.UploadTask, error) {
+			serviceCalls.Add(1)
+			return tasks.ConfirmCompletion(confirmContext, actor, taskID)
+		}))
 	server := httptest.NewServer(router)
 	defer server.Close()
 	client := server.Client()
 	client.Timeout = 3 * time.Second
 	sequence := 0
-	request := func(t *testing.T, token, path, mode string, status, expectedCalls int, code, field string) dto.UploadTaskResponse {
+	requestTask := func(t *testing.T, method, path, token, mode string, status, expectedCalls int, code, field string) dto.UploadTaskResponse {
 		t.Helper()
 		sequence++
 		before := serviceCalls.Load()
-		message, err := http.NewRequestWithContext(ctx, "GET", server.URL+"/api/v1/test-upload-tasks/"+path+"?id=99&user_id=8&note=private-query", strings.NewReader(`{"id":"20","user_id":"8","note":"private-body"}`))
+		message, err := http.NewRequestWithContext(ctx, method, server.URL+path+"?id=99&user_id=8&note=private-query", strings.NewReader(`{"id":"20","user_id":"8","note":"private-body"}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +142,7 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 		if (status == 401) != (response.Header.Get("WWW-Authenticate") == `Bearer realm="cloudnest"`) {
 			t.Fatal("真实任务查询认证提示错误")
 		}
-		if status != 200 {
+		if status != http.StatusOK && status != http.StatusAccepted {
 			var failure dto.ErrorResponse
 			if json.Unmarshal(encoded, &failure) != nil || failure.Error.Code != code || failure.RequestID != requestID {
 				t.Fatal("真实任务查询错误结构错误")
@@ -155,6 +161,10 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 			t.Fatal("真实任务查询成功 JSON 错误")
 		}
 		return result
+	}
+	request := func(t *testing.T, token, path, mode string, status, expectedCalls int, code, field string) dto.UploadTaskResponse {
+		t.Helper()
+		return requestTask(t, http.MethodGet, "/api/v1/test-upload-tasks/"+path, token, mode, status, expectedCalls, code, field)
 	}
 
 	// 2. 真实授权先于路径及服务，成功结果按用户范围交付。
@@ -218,6 +228,47 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("confirm completion with real authorization and task snapshots", func(t *testing.T) {
+		// 1. 通过真实 JWT 和 MySQL 验证认证优先、归属、缺失与任务未就绪。
+		confirm := func(token, taskID string, status, calls int, code, field string) dto.UploadTaskResponse {
+			t.Helper()
+			path := strings.Replace(completionPath, ":id", taskID, 1)
+			return requestTask(t, http.MethodPost, path, token, "", status, calls, code, field)
+		}
+		confirm("", "0", http.StatusUnauthorized, 0, "AUTH_REQUIRED", "")
+		confirm(ownerToken, "0", http.StatusBadRequest, 0, "INVALID_ARGUMENT", "id")
+		confirm(foreignToken, "19", http.StatusNotFound, 1, "UPLOAD_NOT_FOUND", "")
+		confirm(ownerToken, "999", http.StatusNotFound, 1, "UPLOAD_NOT_FOUND", "")
+		confirm(ownerToken, "19", http.StatusConflict, 1, "TASK_NOT_READY", "")
+
+		// 2. 准备校验中阶段，换用同账号的另一台设备确认进度。
+		if _, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET upload_mode='SINGLE', storage_upload_id=NULL,
+			part_size=NULL, part_count=NULL, status='VERIFYING', published_object_id=NULL, resolved_name=NULL,
+			result_entry_id=NULL, completed_at=NULL, reserved_bytes=file_size, lease_owner=NULL, lease_until=NULL,
+			last_error_code='DATABASE_UNAVAILABLE' WHERE user_id=7 AND id=19`); err != nil {
+			t.Fatal(err)
+		}
+		pending := confirm(otherDeviceToken, "19", http.StatusAccepted, 1, "", "")
+		if pending.Data.ID != "19" || pending.Data.Status != "VERIFYING" || pending.Data.ResultEntryID != nil || pending.Data.CompletedAt != nil ||
+			pending.Data.LastError == nil || pending.Data.LastError.Code != "DATABASE_UNAVAILABLE" {
+			t.Fatal("真实完成确认未返回校验快照及其公开重试摘要", pending)
+		}
+
+		// 3. 准备已发布事实，两次确认均复用同一结果，但关联各自请求 ID。
+		if _, err := pool.ExecContext(ctx, `UPDATE upload_tasks SET status='COMPLETED', reserved_bytes=0,
+			published_object_id=29, result_entry_id=31, resolved_name=?, completed_at=?, updated_at=?,
+			next_attempt_at=NULL, last_error_code=NULL, last_error_message=NULL WHERE user_id=7 AND id=19`,
+			*want.ResolvedName, *want.CompletedAt, *want.CompletedAt); err != nil {
+			t.Fatal(err)
+		}
+		completed := confirm(ownerToken, "19", http.StatusOK, 1, "", "")
+		repeated := confirm(otherDeviceToken, "19", http.StatusOK, 1, "", "")
+		if completed.Data.ID != "19" || completed.Data.Status != "COMPLETED" || completed.Data.ResultEntryID == nil || *completed.Data.ResultEntryID != "31" ||
+			completed.Data.CompletedAt == nil || !completed.Data.CompletedAt.Equal(*want.CompletedAt) || repeated.Data.ResultEntryID == nil ||
+			*repeated.Data.ResultEntryID != *completed.Data.ResultEntryID || repeated.RequestID == completed.RequestID {
+			t.Fatal("真实完成确认或重复提交未保留发布结果", completed, repeated)
+		}
+	})
 	t.Run("unsafe public size", func(t *testing.T) {
 		if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET file_size=9007199254740992 WHERE user_id=7 AND id=19"); err != nil {
 			t.Fatal(err)
@@ -250,7 +301,7 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 		}
 	})
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != sequence || sequence != 28 {
+	if len(lines) != sequence || sequence != 28+8 {
 		t.Fatal("真实任务查询次数或完成日志数错误", sequence)
 	}
 	for _, marker := range append(secrets, "private-", "学习笔记", "发布笔记", "曾经重试") {

@@ -825,3 +825,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `UploadTaskService.ConfirmCompletion`，按当前用户和任务 ID 读取最新快照，通过完成状态判断后交付独立的任务结果。[第 371 步学习记录](docs/开发学习记录.md#第-371-步组合单文件上传完成确认服务)
 
 已提供 `handler.UploadCompletionSuccess`，复用公开任务正文交付完成确认结果。`VERIFYING` 返回 202，`COMPLETED` 返回 200 和原发布结果。[第 372 步学习记录](docs/开发学习记录.md#第-372-步交付单文件上传完成确认成功响应)
+
+已提供 `handler.UploadCompletion`，将认证身份和路径任务 ID 交给完成确认服务，通过测试专用 POST 交付 202、200 或约定错误。[第 373 步学习记录](docs/开发学习记录.md#第-373-步处理单文件上传完成确认请求)
