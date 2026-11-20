@@ -7,7 +7,7 @@ import (
 )
 
 // ValidatePurgePreviewTarget 验证永久清理预检的目标是当前用户的顶层回收项。
-// 调用方使用同一只读快照继续读取子树。
+// 调用方使用同一只读快照或已认证用户事务继续读取子树。
 func ValidatePurgePreviewTarget(ctx context.Context, actor domain.Actor, entryID uint64, reader FileEntryPathReader) (*domain.FileEntry, error) {
 	// 1. 按当前用户读取目标，拒绝真实根目录和非回收状态。
 	target, err := readTrashedEntryTarget(ctx, actor, entryID, reader, domain.ErrRootEntryPurge)

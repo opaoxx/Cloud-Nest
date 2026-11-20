@@ -59,3 +59,15 @@ func BuildPurgePreviewSubtreeFingerprint(entries []domain.PurgePreviewSubtreeEnt
 	// 3. 计算 SHA-256，返回可复算的子树指纹。
 	return sha256.Sum256(encoded), nil
 }
+
+// buildPurgePreviewTargetFingerprint 确认子树包含完整且一致的目标记录。
+func buildPurgePreviewTargetFingerprint(target *domain.FileEntry, entries []domain.PurgePreviewSubtreeEntry) ([sha256.Size]byte, error) {
+	expectedTarget := domain.PurgePreviewSubtreeEntry{
+		ID: target.ID, EntryType: target.EntryType, Status: target.Status,
+		Revision: target.Revision, FileSize: target.FileSize,
+	}
+	if !slices.Contains(entries, expectedTarget) {
+		return [sha256.Size]byte{}, domain.ErrInvalidFileEntryData
+	}
+	return BuildPurgePreviewSubtreeFingerprint(entries)
+}

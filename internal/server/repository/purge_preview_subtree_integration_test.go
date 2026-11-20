@@ -57,6 +57,17 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			return action(snapshotContext, snapshotStore)
 		})
 	}, signer, clock)
+	recheck := func(entryID uint64, credential domain.PurgePreviewCredential, checkAt time.Time) (*domain.FileEntry, error) {
+		var target *domain.FileEntry
+		if err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			var recheckError error
+			target, recheckError = service.RecheckPurgePreview(txContext, actor, entryID, credential.PreviewDigest, txStore, verifier, func() time.Time { return checkAt })
+			return recheckError
+		}); err != nil {
+			return nil, err
+		}
+		return target, nil
+	}
 	const originalFingerprint = "bc153a0f7df0fe9c078dab05127989f8c445b325f611c4989b3a506c2e5e921e"
 	t.Run("all states ordered by ID", func(t *testing.T) {
 		want := []domain.PurgePreviewSubtreeEntry{
@@ -91,6 +102,13 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		verified, err := verifier.Verify(actor.UserID, 14, data.PreviewDigest, issuedAt.Add(time.Minute))
 		if err != nil || fmt.Sprintf("%x", verified) != originalFingerprint {
 			t.Fatalf("校验得到的实际子树指纹为 %x，错误 %v", verified, err)
+		}
+		target, err := recheck(14, preview.Credential, issuedAt.Add(time.Minute))
+		if err != nil || target == nil || target.ID != 14 || target.Revision != 1 || target.Status != "TRASHED" {
+			t.Fatal("用户事务未确认相同的子树范围", target, err)
+		}
+		if target, err := recheck(14, preview.Credential, preview.Credential.ExpiresAt); target != nil || !errors.Is(err, domain.ErrPurgePreviewChanged) {
+			t.Fatal("到期时应要求重新预检", target, err)
 		}
 	})
 
@@ -129,8 +147,11 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 					if entryID != 14 {
 						return nil
 					}
-					_, err := pool.ExecContext(snapshotContext, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(19,1,14,'并发加入',CAST('并发加入' AS BINARY),'DIR')")
-					return err
+					return store.WithUserTransaction(snapshotContext, actor, func(txContext context.Context, txStore *Store) error {
+						return txStore.database.WithContext(txContext).Exec(
+							"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(19,1,14,'并发加入',CAST('并发加入' AS BINARY),'DIR')",
+						).Error
+					})
 				}}
 				return action(snapshotContext, reader)
 			})
@@ -152,6 +173,12 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		afterFingerprint, err := verifier.Verify(actor.UserID, 14, after.Credential.PreviewDigest, issuedAt)
 		if err != nil || afterFingerprint == beforeFingerprint {
 			t.Fatal("新快照指纹应反映并发新增", err)
+		}
+		if target, err := recheck(14, before.Credential, issuedAt); target != nil || !errors.Is(err, domain.ErrPurgePreviewChanged) {
+			t.Fatal("用户锁内的确认应识别新增后代并拒绝旧范围", target, err)
+		}
+		if target, err := recheck(14, after.Credential, issuedAt); err != nil || target == nil || target.Revision != before.Revision {
+			t.Fatal("新凭证应通过复查并返回同一个目标版本", target, err)
 		}
 	})
 
@@ -186,6 +213,10 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		if _, err := service.BuildPurgePreviewSubtreeFingerprint(entries); err != nil {
 			t.Fatal("无法为 10000 条保留记录生成指纹", err)
 		}
+		preview, err := previewService.Preview(ctx, actor, 60)
+		if err != nil || preview == nil {
+			t.Fatal("达到 10000 条的子树应能签发凭证", err)
+		}
 		if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at,purged_at)
 		  VALUES(20000,1,60,'额外墓碑',CAST('额外墓碑' AS BINARY),'DIR','PURGED',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`); err != nil {
 			t.Fatal(err)
@@ -195,6 +226,9 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		}
 		if result, err := previewService.Preview(ctx, actor, 60); result != nil || !errors.Is(err, domain.ErrFileEntrySubtreeTooLarge) {
 			t.Fatal("超限范围应拒绝预检", result, err)
+		}
+		if target, err := recheck(60, preview.Credential, issuedAt); target != nil || !errors.Is(err, domain.ErrPurgePreviewChanged) {
+			t.Fatal("范围超限后确认应提示重新预检", target, err)
 		}
 	})
 

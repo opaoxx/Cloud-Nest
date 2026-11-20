@@ -25,6 +25,9 @@ var ErrInvalidPurgePreviewDigest = errors.New("永久清理预检凭证无效")
 // ErrPurgePreviewExpired 表示归属正确的预检凭证已到截止时间。
 var ErrPurgePreviewExpired = errors.New("永久清理预检凭证已过期")
 
+// ErrPurgePreviewChanged 表示首次确认时需要重新预检。
+var ErrPurgePreviewChanged = errors.New("永久清理预检已变化，请重新预检并确认")
+
 // PurgePreviewCredential 保存签发得到的凭证与对应截止时间。
 type PurgePreviewCredential struct {
 	// PreviewDigest 是客户端确认清理时原样传回的签名文本。

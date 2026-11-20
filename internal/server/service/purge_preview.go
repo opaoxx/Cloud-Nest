@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -68,14 +67,7 @@ func (previewService *PurgePreviewService) Preview(ctx context.Context, actor do
 		if err != nil {
 			return err
 		}
-		expectedTarget := domain.PurgePreviewSubtreeEntry{
-			ID: target.ID, EntryType: target.EntryType, Status: target.Status,
-			Revision: target.Revision, FileSize: target.FileSize,
-		}
-		if !slices.Contains(entries, expectedTarget) {
-			return domain.ErrInvalidFileEntryData
-		}
-		fingerprint, err = BuildPurgePreviewSubtreeFingerprint(entries)
+		fingerprint, err = buildPurgePreviewTargetFingerprint(target, entries)
 		if err != nil {
 			return err
 		}
