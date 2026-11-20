@@ -23,7 +23,7 @@ func UploadTaskSuccess(requestContext *gin.Context, result *domain.UploadTask) {
 	writeUploadTaskSuccess(requestContext, result, http.StatusOK)
 }
 
-// writeUploadTaskSuccess 为查询和取消响应写出同一套公开任务字段。
+// writeUploadTaskSuccess 为查询、取消和完成确认响应写出同一套公开任务字段。
 // 调用方已经检查响应状态并选好成功状态码。
 func writeUploadTaskSuccess(requestContext *gin.Context, result *domain.UploadTask, responseStatus int) {
 	// 1. 设置禁止缓存并检查请求取消。
