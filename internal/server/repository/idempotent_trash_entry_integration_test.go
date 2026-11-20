@@ -6,12 +6,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -62,6 +69,27 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 	// 2. 首次提交回收与快照。同键重试时即使文件已恢复且改名，仍返回历史结果。
 	t.Run("first commit and historical replay", func(t *testing.T) {
 		const key = "trash-first"
+		const path = "/test-trash-success-committed"
+		var stableBody json.RawMessage
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.POST(path, func(requestContext *gin.Context) {
+			handler.TrashEntrySuccess(requestContext, stableBody)
+		})
+		deliver := func(body json.RawMessage, requestID string, expected *dto.TrashEntryData) {
+			t.Helper()
+			stableBody = body
+			request := httptest.NewRequest(http.MethodPost, path, nil)
+			request.Header.Set("X-Request-ID", requestID)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			var delivered dto.TrashEntryResponse
+			if response.Code != http.StatusOK || response.Header().Get("X-Request-ID") != requestID ||
+				response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" ||
+				json.Unmarshal(response.Body.Bytes(), &delivered) != nil || delivered.RequestID != requestID ||
+				!reflect.DeepEqual(&delivered.Data, expected) {
+				t.Fatal("已提交的回收响应不符", response.Code, delivered)
+			}
+		}
 		first, err := trash.Trash(ctx, actor, 13, 3, key)
 		if err != nil {
 			t.Fatal(err)
@@ -75,6 +103,7 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 			record.ExpiresAt.Sub(record.CreatedAt) < 7*24*time.Hour {
 			t.Fatal("首次回收和稳定结果未一并提交", snapshot, err)
 		}
+		deliver(first, "28ee758a-0727-42de-ae7d-3bb33155e148", snapshot)
 		expectError(t, 13, 4, key, domain.ErrIdempotencyRequestConflict)
 		expectError(t, 13, 4, "trash-new-key", domain.ErrFileEntryNotFound)
 
@@ -88,6 +117,7 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		if err != nil || !bytes.Equal(first, replay) || !reflect.DeepEqual(before, read(t, 13)) {
 			t.Fatal("同键重试未保留原快照或改动了后续状态", err)
 		}
+		deliver(replay, "28ee758a-0727-42de-ae7d-3bb33155e149", snapshot)
 		if _, err := pool.ExecContext(ctx, `UPDATE idempotency_records
 			SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 DAY,created_at=UTC_TIMESTAMP(6)-INTERVAL 2 DAY
 			WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.TrashEntryOperation, key); err != nil {
