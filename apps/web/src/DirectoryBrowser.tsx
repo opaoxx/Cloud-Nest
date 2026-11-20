@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button } from 'antd'
-import { listDirectoryPage } from './api/drive'
-import type { DirectoryBreadcrumb, DirectoryEntry } from './api/drive'
+import type { DirectoryBreadcrumb, DirectoryEntry, DirectoryPageReader } from './api/drive'
 import { apiErrorMessage } from './api/http'
 import { formatSize } from './demo'
 
@@ -18,7 +17,10 @@ type DirectoryRequest = {
   cursor: string | null
 }
 
-export default function DirectoryBrowser({ accessToken, rootEntryId }: { accessToken: string; rootEntryId: string }) {
+export default function DirectoryBrowser({ rootEntryId, readDirectoryPage }: {
+  rootEntryId: string
+  readDirectoryPage: DirectoryPageReader
+}) {
   const [request, setRequest] = useState<DirectoryRequest>({ directoryId: rootEntryId, cursor: null })
   const [listing, setListing] = useState<DirectoryListing>({
     items: [], breadcrumbs: [], nextCursor: null, status: 'loading', errorMessage: '',
@@ -30,7 +32,7 @@ export default function DirectoryBrowser({ accessToken, rootEntryId }: { accessT
     async function loadPage() {
       try {
         // 1. 读取目标目录的一页子项和服务端确认的路径。
-        const page = await listDirectoryPage(accessToken, request.directoryId, request.cursor, controller.signal)
+        const page = await readDirectoryPage(request.directoryId, request.cursor, controller.signal)
         if (controller.signal.aborted) return
 
         // 2. 首页从空列表开始，后续页按字符串 ID 合并已有记录。
@@ -58,7 +60,7 @@ export default function DirectoryBrowser({ accessToken, rootEntryId }: { accessT
 
     void loadPage()
     return () => controller.abort()
-  }, [accessToken, request])
+  }, [readDirectoryPage, request])
 
   function requestPage(cursor: string | null) {
     setListing(previous => ({ ...previous, status: 'loading', errorMessage: '' }))

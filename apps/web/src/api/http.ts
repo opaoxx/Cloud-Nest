@@ -1,5 +1,5 @@
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly code?: string) {
     super(message)
   }
 }
@@ -22,7 +22,8 @@ export async function requestData(path: string, init: RequestInit): Promise<Reco
   if (!response.ok) {
     const error = isRecord(payload) && isRecord(payload.error) ? payload.error : null
     const message = error && typeof error.message === 'string' ? error.message : '服务暂时无法完成请求，请重试。'
-    throw new ApiError(response.status, message)
+    const code = error && typeof error.code === 'string' ? error.code : undefined
+    throw new ApiError(response.status, message, code)
   }
   if (!isRecord(payload) || !isRecord(payload.data)) {
     throw new ApiError(response.status, '服务返回的数据格式有误。')

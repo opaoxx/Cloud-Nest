@@ -33,6 +33,7 @@ func TestServerWebLoginIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_WEB_LOGIN_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录、刷新与目录浏览")
 	}
+	t.Setenv("ACCESS_TOKEN_TTL", "8s")
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
 	baseURL := prepareServerWebLoginFixture(t, ctx)
@@ -240,6 +241,36 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		}
 	}
 	t.Log("子目录联测通过：两层面包屑、空子目录、返回上级、跨账号和已回收目录拒绝")
+
+	// 9. 让真实测试令牌自然到期，使用同一个目录和游标验证刷新后的续页。
+	expiringLogin, _ := loginAs(webLoginFixtureUsername)
+	select {
+	case <-time.After(time.Duration(expiringLogin.Data.ExpiresIn+1) * time.Second):
+	case <-ctx.Done():
+		t.Fatal("等待隔离访问令牌到期", ctx.Err())
+	}
+	parentID, cursor := restoredProfile.Data.RootEntryID, restoredPage.Data.NextCursor
+	var expired dto.ErrorResponse
+	read(getDirectory(expiringLogin.Data.AccessToken, parentID, cursor), http.StatusUnauthorized, &expired)
+	if expired.Error.Code != "TOKEN_EXPIRED" {
+		t.Fatal("访问令牌到期后的目录错误码不符", expired.Error.Code)
+	}
+	var renewed dto.RefreshResponse
+	read(refreshSession(baseURL), http.StatusOK, &renewed)
+	var retriedPage dto.DirectoryPageResponse
+	read(getDirectory(renewed.Data.AccessToken, parentID, cursor), http.StatusOK, &retriedPage)
+	if !slices.Equal(retriedPage.Data.Items, nextPage.Data.Items) || retriedPage.Data.NextCursor != nil {
+		t.Fatal("刷新后的续页与原游标结果不符", retriedPage.Data)
+	}
+
+	// 10. 移除客户端 Cookie，确认刷新接口仍按认证失败返回 401。
+	client.Jar = nil
+	var invalidRefresh dto.ErrorResponse
+	read(refreshSession(baseURL), http.StatusUnauthorized, &invalidRefresh)
+	if invalidRefresh.Error.Code != "AUTH_REQUIRED" {
+		t.Fatal("刷新 Cookie 缺失时的错误码不符", invalidRefresh.Error.Code)
+	}
+	t.Log("目录续页过期联测通过：401 TOKEN_EXPIRED，刷新 200，原目录和游标重试 200，缺 Cookie 时刷新 401")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

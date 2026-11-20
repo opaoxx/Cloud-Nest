@@ -1,25 +1,61 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
+import { readDirectoryPageWithRefresh } from './api/drive'
+import type { DirectoryPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
 import { formatSize } from './demo'
 import './auth.css'
 
-type WebSession = {
-  accessToken: string
-  profile: CurrentUserProfile
-}
-
 export default function AuthPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [session, setSession] = useState<WebSession | null>(null)
+  const activeSession = useRef<{ accessToken: string } | null>(null)
+  const [profile, setProfile] = useState<CurrentUserProfile | null>(null)
   const [restoring, setRestoring] = useState(true)
   const [busy, setBusy] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+
+  const clearSession = useCallback((error: unknown) => {
+    activeSession.current = null
+    setProfile(null)
+    setErrorMessage(apiErrorMessage(error))
+  }, [])
+
+  const readDirectoryPage = useCallback<DirectoryPageReader>(async (parentId, cursor, signal) => {
+    // 1. 读取当前内存会话，并用它发起目录只读请求。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    const requestedToken = session.accessToken
+
+    const renewAccessToken = async () => {
+      // 2. 共享已有刷新请求，令牌更新后由当前会话继续使用。
+      if (activeSession.current !== session) throw new ApiError(401, '请登录后重试。')
+      if (session.accessToken !== requestedToken) return session.accessToken
+      try {
+        const renewedToken = await refreshWebSession()
+        if (activeSession.current !== session) throw new ApiError(401, '请登录后重试。')
+        session.accessToken = renewedToken
+        return renewedToken
+      } catch (error) {
+        if (activeSession.current === session) clearSession(error)
+        throw error
+      }
+    }
+
+    try {
+      return await readDirectoryPageWithRefresh(requestedToken, parentId, cursor, signal, renewAccessToken)
+    } catch (error) {
+      // 3. 列表返回其他 401 或重试仍返回 401 时，清理本地会话。
+      if (!signal.aborted && activeSession.current === session && error instanceof ApiError && error.status === 401) {
+        clearSession(error)
+      }
+      throw error
+    }
+  }, [clearSession])
 
   useEffect(() => {
     let active = true
@@ -32,7 +68,10 @@ export default function AuthPage() {
 
         // 2. 用新的访问令牌读取本人资料，两步都成功后写入内存会话。
         const profile = await getCurrentUser(accessToken)
-        if (active) setSession({ accessToken, profile })
+        if (active) {
+          activeSession.current = { accessToken }
+          setProfile(profile)
+        }
       } catch (error) {
         // 3. 收到 401 时回到登录页，其他错误显示提示。
         if (active && !(error instanceof ApiError && error.status === 401)) {
@@ -62,7 +101,8 @@ export default function AuthPage() {
       // 2. 登录后带 Access Token 读取本人资料，再展示已认证页面。
       const accessToken = await login(username, submittedPassword)
       const profile = await getCurrentUser(accessToken)
-      setSession({ accessToken, profile })
+      activeSession.current = { accessToken }
+      setProfile(profile)
     } catch (error) {
       // 3. 登录或资料读取失败时，交付可重试的错误提示。
       setErrorMessage(apiErrorMessage(error))
@@ -73,16 +113,19 @@ export default function AuthPage() {
 
   async function readProfileAgain() {
     // 1. 用当前内存会话重新读取资料。
+    const session = activeSession.current
     if (!session || busy) return
+    const requestedToken = session.accessToken
     setBusy(true)
     setErrorMessage('')
     try {
-      const profile = await getCurrentUser(session.accessToken)
-      setSession({ accessToken: session.accessToken, profile })
+      const profile = await getCurrentUser(requestedToken)
+      if (activeSession.current === session) setProfile(profile)
     } catch (error) {
       // 2. 401 表明需要重新登录，其他失败保留已显示资料。
-      if (error instanceof ApiError && error.status === 401) setSession(null)
-      setErrorMessage(apiErrorMessage(error))
+      if (activeSession.current !== session || session.accessToken !== requestedToken) return
+      if (error instanceof ApiError && error.status === 401) clearSession(error)
+      else setErrorMessage(apiErrorMessage(error))
     } finally {
       setBusy(false)
     }
@@ -90,24 +133,24 @@ export default function AuthPage() {
 
   return (
     <main className="auth-shell">
-      <section className={session ? 'auth-card auth-card--signed-in' : 'auth-card'} aria-labelledby="auth-title">
+      <section className={profile ? 'auth-card auth-card--signed-in' : 'auth-card'} aria-labelledby="auth-title">
         <div className="auth-brand"><img src="/favicon.svg" alt="" />CloudNest</div>
         <h1 id="auth-title">
-          {restoring ? <span role="status">正在检查会话…</span> : session ? '本人资料' : '登录'}
+          {restoring ? <span role="status">正在检查会话…</span> : profile ? '本人资料' : '登录'}
         </h1>
         {errorMessage && <p className="auth-error" role="alert">{errorMessage}</p>}
-        {!restoring && (session ? (
+        {!restoring && (profile ? (
           <>
             <dl className="auth-profile">
-              <div><dt>显示名称</dt><dd>{session.profile.user.display_name}</dd></div>
-              <div><dt>用户名</dt><dd>{session.profile.user.username}</dd></div>
-              <div><dt>总配额</dt><dd>{formatSize(session.profile.quota_bytes)}</dd></div>
-              <div><dt>已用空间</dt><dd>{formatSize(session.profile.used_bytes)}</dd></div>
-              <div><dt>预占空间</dt><dd>{formatSize(session.profile.reserved_bytes)}</dd></div>
+              <div><dt>显示名称</dt><dd>{profile.user.display_name}</dd></div>
+              <div><dt>用户名</dt><dd>{profile.user.username}</dd></div>
+              <div><dt>总配额</dt><dd>{formatSize(profile.quota_bytes)}</dd></div>
+              <div><dt>已用空间</dt><dd>{formatSize(profile.used_bytes)}</dd></div>
+              <div><dt>预占空间</dt><dd>{formatSize(profile.reserved_bytes)}</dd></div>
             </dl>
             <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
-            <DirectoryBrowser key={session.profile.root_entry_id} rootEntryId={session.profile.root_entry_id}
-              accessToken={session.accessToken} />
+            <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
+              readDirectoryPage={readDirectoryPage} />
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>

@@ -18,7 +18,32 @@ interface DirectoryPage {
   nextCursor: string | null
 }
 
-export async function listDirectoryPage(
+export type DirectoryPageReader = (parentId: string, cursor: string | null, signal: AbortSignal) => Promise<DirectoryPage>
+
+export async function readDirectoryPageWithRefresh(
+  accessToken: string,
+  parentId: string,
+  cursor: string | null,
+  signal: AbortSignal,
+  refreshAccessToken: () => Promise<string>,
+): Promise<DirectoryPage> {
+  // 1. 用当前访问令牌读取原目录页。
+  try {
+    return await listDirectoryPage(accessToken, parentId, cursor, signal)
+  } catch (error) {
+    if (!(error instanceof ApiError && error.status === 401 && error.code === 'TOKEN_EXPIRED')) throw error
+  }
+
+  // 2. 只在目录接口明确报告令牌过期时刷新。
+  signal.throwIfAborted()
+  const renewedToken = await refreshAccessToken()
+
+  // 3. 沿用原目录 ID 和游标重试一次。
+  signal.throwIfAborted()
+  return listDirectoryPage(renewedToken, parentId, cursor, signal)
+}
+
+async function listDirectoryPage(
   accessToken: string,
   parentId: string,
   cursor: string | null,
