@@ -14,3 +14,11 @@ type TrashedFileEntry struct {
 	// DeletedAt 是该目录项被标记为 TRASHED 的数据库 UTC 时间。
 	DeletedAt time.Time
 }
+
+// TrashEntryPage 保存回收站候选批次，供同一快照内的祖先检查使用。
+type TrashEntryPage struct {
+	// Entries 按回收时间和 ID 双降序排列，空页使用已初始化的切片。
+	Entries []TrashedFileEntry
+	// HasMore 表示批次之后还有候选。
+	HasMore bool
+}
