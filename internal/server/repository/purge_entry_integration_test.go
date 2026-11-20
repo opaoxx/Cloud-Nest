@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"math"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
 )
@@ -146,6 +148,15 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 			saved.ParentID == nil || *saved.ParentID != *before.ParentID || saved.Name != before.Name ||
 			!saved.CreatedAt.Equal(before.CreatedAt) || !reflect.DeepEqual(saved, read(t, 13)) {
 			t.Fatal("提交后的文件清理状态、版本或基本数据不符", saved, err)
+		}
+		accepted, err := dto.NewPurgeEntryAcceptedData(saved)
+		if err != nil {
+			t.Fatal("转换真实永久清理受理结果失败", err)
+		}
+		body, err := json.Marshal(accepted)
+		const wantBody = `{"entry_id":"13","status":"PURGING","progress_url":"/api/v1/trash/13/purge"}`
+		if err != nil || string(body) != wantBody {
+			t.Fatalf("提交后的受理快照为 %s，期望 %s，错误 %v", body, wantBody, err)
 		}
 		if err := pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&afterWrite); err != nil {
 			t.Fatal(err)

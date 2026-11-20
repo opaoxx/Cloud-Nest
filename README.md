@@ -985,3 +985,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.BeginUserEntryPurge`，按预期版本写入 `PURGING`、开始时间和新版本。[第 451 步学习记录](docs/开发学习记录.md#第-451-步按预期版本标记永久清理开始)
 
 已提供 `service.PurgeEntryService`，在同一用户事务中复查凭证与范围、核对版本并首次受理永久清理。[第 452 步学习记录](docs/开发学习记录.md#第-452-步组合首次永久清理受理服务)
+
+已提供 `dto.NewPurgeEntryAcceptedData`，将受理结果转换为目标 ID、`PURGING` 状态和进度地址组成的 202 快照。[第 453 步学习记录](docs/开发学习记录.md#第-453-步转换永久清理受理响应数据)
