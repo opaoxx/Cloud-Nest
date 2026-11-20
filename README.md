@@ -833,3 +833,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 短期下载与预览授权的计划契约已写入 OpenAPI。客户端用目录项 ID、版本和用途申请绑定具体对象的 GET URL。[第 375 步学习记录](docs/开发学习记录.md#第-375-步定义短期下载授权接口契约)
 
 已提供 `dto.ParseCreateDownloadRequest`，将下载授权正文的版本转换为完整 uint64，并校验 `download` 或 `preview` 用途。[第 376 步学习记录](docs/开发学习记录.md#第-376-步校验短期下载授权请求字段)
+
+已提供 `Store.FindUserFileEntryContent`，按用户和目录项 ID 读取当前物理对象引用及已存 MIME，供后续下载授权使用。[第 377 步学习记录](docs/开发学习记录.md#第-377-步按用户归属读取目录项内容引用)
