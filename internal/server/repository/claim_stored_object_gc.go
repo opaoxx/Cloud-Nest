@@ -44,9 +44,7 @@ func (store *Store) ClaimStoredObjectGC(ctx context.Context, candidate domain.St
 		}
 		if updated.Status != domain.StoredObjectStatusDeleting || updated.UnreferencedAt == nil || updated.GCAfter == nil ||
 			!updated.UnreferencedAt.Equal(*object.UnreferencedAt) || !updated.GCAfter.Equal(*object.GCAfter) ||
-			updated.Provider != object.Provider || updated.Bucket != object.Bucket || updated.ObjectKey != object.ObjectKey ||
-			(updated.StorageVersionID == nil) != (object.StorageVersionID == nil) ||
-			(updated.StorageVersionID != nil && *updated.StorageVersionID != *object.StorageVersionID) {
+			!sameStoredObjectLocation(updated, object) {
 			return domain.ErrInvalidStoredObjectData
 		}
 		claimed = updated

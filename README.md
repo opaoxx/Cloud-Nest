@@ -1059,3 +1059,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.ListDeletingStoredObjects`，从 MySQL 限量恢复已提交的删除记录和存储位置。[第 488 步学习记录](docs/开发学习记录.md#第-488-步扫描删除中的对象以恢复回收)
 
 已提供 `storage.Client.DeleteStoredObject`，按已提交的删除记录定位 MinIO 对象和目标版本。[第 489 步学习记录](docs/开发学习记录.md#第-489-步按对象位置删除存储内容)
+
+已提供 `Store.CompleteStoredObjectGC`，在确认目标内容已删除后，按同一对象位置和版本写回 `DELETED`。[第 490 步学习记录](docs/开发学习记录.md#第-490-步确认存储对象删除完成)

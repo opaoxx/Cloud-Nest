@@ -19,6 +19,13 @@ var storedObjectReadColumns = [...]string{
 	"unreferenced_at", "gc_after", "last_error_code", "created_at", "updated_at",
 }
 
+// sameStoredObjectLocation 比较对象位置及可空版本，区分缺失版本和显式 null 版本。
+func sameStoredObjectLocation(first, second *domain.StoredObject) bool {
+	return first.Provider == second.Provider && first.Bucket == second.Bucket && first.ObjectKey == second.ObjectKey &&
+		((first.StorageVersionID == nil && second.StorageVersionID == nil) ||
+			(first.StorageVersionID != nil && second.StorageVersionID != nil && *first.StorageVersionID == *second.StorageVersionID))
+}
+
 // FindUserStoredObject 按可信用户归属读取物理对象，保留全部合法生命周期状态。
 // 缺失返回 ErrStoredObjectNotFound，异常记录返回 ErrInvalidStoredObjectData。
 // 返回值独立持有可空字段，具体操作的授权和写入由上层用户事务复核。
