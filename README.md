@@ -927,3 +927,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.ReadRestoreEntryAncestors`，检查恢复目标到真实根目录的原父链，供后续选择恢复位置。[第 422 步学习记录](docs/开发学习记录.md#第-422-步检查恢复目标的原父链)
 
 已提供 `service.SelectRestoreEntryParent`，结合完整父链和子树深度选择恢复父目录。[第 423 步学习记录](docs/开发学习记录.md#第-423-步选择单项恢复的实际父目录)
+
+已提供 `service.BuildRestoreConflictName`，为回收的文件或目录生成符合长度限制的编号候选名。[第 424 步学习记录](docs/开发学习记录.md#第-424-步生成单项恢复的编号候选名)
