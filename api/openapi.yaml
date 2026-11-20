@@ -456,6 +456,64 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/trash/{id}/restore:
+    post:
+      tags: [Entries]
+      operationId: restoreEntry
+      summary: 按预期版本恢复当前用户的单个回收项
+      description: |
+        计划契约，后端实现后注册路由。
+        1. Bearer 授权通过后，依次校验路径 id、Idempotency-Key、受限 JSON 及 expected_revision。在用户锁内复查账号、设备与会话。
+        2. 首次执行时检查归属和状态，真实根目录禁止恢复。目标须为 TRASHED，且原父链中没有 PURGING 或 PURGED 项。仍处于 TRASHED 的到期项可恢复，直到清理开始。
+        3. 持锁比对版本。优先选择完整活动路径上的原父目录。原父链含 TRASHED 目录时，可按目标 ID 恢复到用户真实根目录。
+           恢复后的目录项及子树须符合 32 层限制。原位置无法容纳时尝试根目录，根目录仍无法容纳时返回 409。
+        4. 按同用户同父目录的活动名称键判重，原名可用时保留。冲突时依次选择最小可用编号后缀，例如 学习笔记 (1).md。文件后缀放在末级扩展名之前，目录后缀放在名称末尾，必要时截短基名。
+        5. 仅将选中项改为 ACTIVE，写入实际父目录和名称，清除 deleted_at，版本加一。对象引用、配额、文件偏好和后代自身状态保持。后代按恢复后的完整路径判断可见性。
+        若清理先取得用户锁并提交 PURGING，恢复按目标不可用返回 404。异常父链、真实根目录缺失或版本无法递增时按内部错误处理并回滚。
+        恢复更新与稳定 data.entry 快照在同一事务提交，幂等结果保留八天。同一用户、同一操作、同键同参数重试返回首次快照和本次 request_id。
+        摘要绑定目标 id 和 expected_revision。同键不同参数或记录已到期返回 409。用新键重复恢复已经活动的项返回 404。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreEntryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/RestoreEntrySucceeded'
+        '400':
+          $ref: '#/components/responses/TrashEntryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 真实根目录禁止恢复返回 ROOT_OPERATION_FORBIDDEN，账号禁用和来源拒绝沿用共享错误。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/RestoreEntryNotFound'
+        '409':
+          $ref: '#/components/responses/RestoreEntryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/entries/{id}/trash:
     post:
       tags: [Entries]
@@ -2410,6 +2468,65 @@ components:
             revision: '4'
             deleted_at: '2026-11-20T04:30:00.123456Z'
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RestoreEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      description: |
+        目标目录项 ID 来自路径，用户身份来自认证上下文。
+        expected_revision 为当前回收项的非零 uint64 标准十进制字符串，上限为 18446744073709551615。
+        解码成功后，缺失、null 或值不符合版本规则时返回 expected_revision 字段错误。
+      properties:
+        expected_revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+      example:
+        expected_revision: '4'
+    RestoreEntryData:
+      type: object
+      additionalProperties: false
+      required: [entry]
+      description: 恢复提交时的稳定快照，供同键同参重试复用。
+      properties:
+        entry:
+          type: object
+          additionalProperties: false
+          required: [id, parent_id, name, entry_type, status, revision]
+          properties:
+            id:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+            parent_id:
+              allOf:
+                - $ref: '#/components/schemas/DirectoryEntrySummary/properties/parent_id'
+              description: 实际恢复到的父目录，包括回退到真实根目录时的非零 ID。
+            name:
+              allOf:
+                - $ref: '#/components/schemas/DirectoryEntrySummary/properties/name'
+              description: 恢复后的最终展示名称，含解决同名冲突时选用的后缀。
+            entry_type:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/entry_type'
+            status:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/status'
+            revision:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+    RestoreEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/RestoreEntryData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          entry:
+            id: '23'
+            parent_id: '11'
+            name: 学习笔记 (1).md
+            entry_type: FILE
+            status: ACTIVE
+            revision: '5'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     TrashListItem:
       type: object
       additionalProperties: false
@@ -3133,6 +3250,54 @@ components:
                   code: IDEMPOTENCY_CONFLICT
                   message: 幂等键已用于不同请求参数
                   details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    RestoreEntryNotFound:
+      description: |
+        HTTP 404，ENTRY_NOT_FOUND。目标缺失、跨账号、未处于 TRASHED，或目标及祖先已进入永久清理时，返回统一错误。
+        details 为 null，固定提示为目录项不存在。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RestoreEntryConflict:
+      description: |
+        HTTP 409。可恢复目标的当前版本与 expected_revision 不一致时返回 REVISION_CONFLICT，details.current_revision 为非零 uint64 十进制字符串。
+        同键不同参数返回 IDEMPOTENCY_CONFLICT，已保存记录到期返回 IDEMPOTENCY_EXPIRED，客户端应先核对目录项当前状态。
+        无法生成合法的空闲名称返回 NAME_CONFLICT，恢复位置无法容纳目录层级返回 TARGET_UNAVAILABLE。这两类错误及幂等错误的 details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            revision_conflict:
+              value:
+                error:
+                  code: REVISION_CONFLICT
+                  message: 文件已发生变化，请刷新后重试
+                  details:
+                    current_revision: '5'
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     MoveEntryRejected:
       description: |
@@ -4323,6 +4488,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/TrashEntryResponse'
+    RestoreEntrySucceeded:
+      description: 恢复成功 HTTP 200，返回实际父目录、最终名称和新版本所在的稳定 data.entry，以及本次请求 ID。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RestoreEntryResponse'
     MoveEntrySucceeded:
       description: |
         移动成功 HTTP 200，使用 data.entry 稳定快照与当前请求 ID。
