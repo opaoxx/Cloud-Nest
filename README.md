@@ -855,3 +855,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.NewCreateDownloadData`，将内部授权转换为八个公开字段，保留完整 ID 并编码 SHA-256。[第 386 步学习记录](docs/开发学习记录.md#第-386-步转换下载授权的公开响应数据)
 
 已提供 `handler.CreateDownloadSuccess`，以 HTTP 200 JSON 交付下载授权，关联当前请求 ID 和禁止缓存头。[第 387 步学习记录](docs/开发学习记录.md#第-387-步交付下载授权成功响应)
+
+已提供 `handler.CreateDownload`，串联已认证身份、路径及正文校验、授权服务和公开错误，已接入测试专用 POST。[第 388 步学习记录](docs/开发学习记录.md#第-388-步处理下载授权请求)

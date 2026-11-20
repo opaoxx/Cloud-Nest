@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql/driver"
 	"errors"
 	"reflect"
 	"testing"
@@ -49,6 +50,10 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 			wantError: domain.ErrInvalidEntryName, wantCalls: []string{"target"}},
 		{name: "object missing", objectError: targetUnavailable, wantError: targetUnavailable, wantCalls: []string{"target", "check"}},
 		{name: "dependency unavailable", objectError: storageUnavailable, wantError: storageUnavailable, wantCalls: []string{"target", "check"}},
+		{name: "database connection failure", targetError: driver.ErrBadConn, wantError: domain.ErrDownloadDatabaseUnavailable, wantCalls: []string{"target"}},
+		{name: "database lookup timeout", targetError: context.DeadlineExceeded, wantError: domain.ErrDownloadDatabaseUnavailable, wantCalls: []string{"target"}},
+		{name: "storage check timeout", objectError: context.DeadlineExceeded, wantError: storageUnavailable, wantCalls: []string{"target", "check"}},
+		{name: "storage signing timeout", signError: context.DeadlineExceeded, wantError: storageUnavailable, wantCalls: []string{"target", "check", "sign"}},
 		{name: "signing failure", signError: storageUnavailable, wantError: storageUnavailable, wantCalls: []string{"target", "check", "sign"}},
 		{name: "missing signature result", editLink: func(*domain.SignedDownloadURL) *domain.SignedDownloadURL { return nil },
 			wantError: storageUnavailable, wantCalls: []string{"target", "check", "sign"}},
@@ -69,6 +74,8 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 		{name: "revoked session before access", accessError: domain.ErrSessionRevoked, wantError: domain.ErrSessionRevoked,
 			wantCalls: []string{"target", "check", "sign", "access"}},
 		{name: "access commit failed", commitError: commitFailure, wantError: commitFailure,
+			wantCalls: []string{"target", "check", "sign", "access"}},
+		{name: "access commit timeout", commitError: context.DeadlineExceeded, wantError: domain.ErrDownloadDatabaseUnavailable,
 			wantCalls: []string{"target", "check", "sign", "access"}},
 		{name: "cancel after access", cancelAfter: "access commit", wantError: context.Canceled,
 			wantCalls: []string{"target", "check", "sign", "access"}},
@@ -162,6 +169,13 @@ func TestEntryDownloadServiceCreate(t *testing.T) {
 			if scenario.wantError != nil {
 				if result != nil {
 					t.Fatal("失败时仍返回了下载授权")
+				}
+				if errors.Is(scenario.wantError, domain.ErrDownloadDatabaseUnavailable) || errors.Is(scenario.wantError, storageUnavailable) {
+					for _, cause := range []error{scenario.targetError, scenario.objectError, scenario.signError, scenario.commitError} {
+						if cause != nil && !errors.Is(err, cause) {
+							t.Fatal("标记依赖故障后丢失原始错误")
+						}
+					}
 				}
 				return
 			}

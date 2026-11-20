@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -51,7 +53,7 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 		return nil, contextError
 	}
 	if err != nil {
-		return nil, err
+		return nil, markDownloadDatabaseError(err)
 	}
 	if target == nil || target.EntryID != entryID || target.UserID != actor.UserID || target.Revision != expectedRevision || target.ObjectID == 0 {
 		return nil, domain.ErrInvalidFileEntryData
@@ -76,14 +78,14 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 		return nil, err
 	}
 	if objectError != nil {
-		return nil, objectError
+		return nil, markDownloadDependencyTimeout(objectError, domain.ErrDownloadStorageUnavailable)
 	}
 	link, signError := downloadService.signURL(ctx, target, contentType, disposition)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if signError != nil {
-		return nil, signError
+		return nil, markDownloadDependencyTimeout(signError, domain.ErrDownloadStorageUnavailable)
 	}
 
 	// 4. 核对已经生成的签名结果。
@@ -97,7 +99,7 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 		return nil, err
 	}
 	if accessError != nil {
-		return nil, accessError
+		return nil, markDownloadDatabaseError(accessError)
 	}
 	return &domain.EntryDownloadAuthorization{
 		Link:           domain.SignedDownloadURL{URL: link.URL, ExpiresAt: link.ExpiresAt.UTC()},
@@ -108,4 +110,20 @@ func (downloadService *EntryDownloadService) Create(ctx context.Context, actor d
 		MIMEType:       contentType,
 		Disposition:    disposition,
 	}, nil
+}
+
+func markDownloadDatabaseError(err error) error {
+	// 1. 只为可识别的连接问题或依赖超时标记数据库不可用。
+	if errors.Is(err, driver.ErrBadConn) {
+		return errors.Join(domain.ErrDownloadDatabaseUnavailable, err)
+	}
+	return markDownloadDependencyTimeout(err, domain.ErrDownloadDatabaseUnavailable)
+}
+
+func markDownloadDependencyTimeout(err, unavailable error) error {
+	// 1. 保留原有超时原因，同时标记发生故障的依赖。
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(unavailable, err)
+	}
+	return err
 }

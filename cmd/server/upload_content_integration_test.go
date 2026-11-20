@@ -10,18 +10,24 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
+	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
@@ -287,6 +293,22 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 	t.Helper()
 	// 1. 尚未保存 MIME 时，拒绝预览且不写访问时间。
 	entryID := *task.ResultEntryID
+	const testPath = "/test-download/"
+	requestID := uuid.NewString()
+	router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+	router.POST(testPath+":id", func(requestContext *gin.Context) {
+		identityContext := requestcontext.WithActor(requestContext.Request.Context(), actor)
+		requestContext.Request = requestContext.Request.WithContext(identityContext)
+	}, handler.CreateDownload(downloads.Create))
+	requestDownload := func(purpose string) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"expected_revision":"1","purpose":%q}`, purpose)
+		request := httptest.NewRequest(http.MethodPost, testPath+strconv.FormatUint(entryID, 10), strings.NewReader(body)).WithContext(ctx)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Request-ID", requestID)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
 	readOpenedAt := func() time.Time {
 		var openedAt sql.NullTime
 		err := pool.QueryRowContext(ctx, "SELECT last_opened_at FROM user_entry_preferences WHERE user_id=? AND entry_id=?", actor.UserID, entryID).Scan(&openedAt)
@@ -295,9 +317,11 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 		}
 		return openedAt.Time
 	}
-	if blocked, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposePreview); blocked != nil ||
-		!errors.Is(err, domain.ErrUnsupportedPreview) || !readOpenedAt().IsZero() {
-		t.Fatal("未授权的预览处理或访问记录不符", err)
+	preview := requestDownload(domain.DownloadPurposePreview)
+	var failure dto.ErrorResponse
+	if preview.Code != http.StatusUnprocessableEntity || json.Unmarshal(preview.Body.Bytes(), &failure) != nil ||
+		failure.Error.Code != "UNSUPPORTED_PREVIEW" || failure.RequestID != requestID || !readOpenedAt().IsZero() {
+		t.Fatal("未授权的预览处理或访问记录不符", preview.Code)
 	}
 
 	// 2. 确认下载授权写入真实时间，并验证六十秒合并规则。
@@ -320,25 +344,17 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 		t.Fatal("设置联测访问时间失败", err)
 	}
 	pastOpenedAt := readOpenedAt()
-	if renewed, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload); err != nil || renewed == nil ||
-		!readOpenedAt().After(pastOpenedAt) {
-		t.Fatal("窗口外授权未更新访问时间", err)
+	renewed := requestDownload(domain.DownloadPurposeDownload)
+	if renewed.Code != http.StatusOK || !readOpenedAt().After(pastOpenedAt) {
+		t.Fatal("窗口外授权未更新访问时间", renewed.Code)
 	}
 
-	// 3. 将授权编码为公开 JSON，从解码后的链接读取实际文件。
-	publicData, err := dto.NewCreateDownloadData(result)
-	if err != nil {
-		t.Fatal("真实授权无法转换为公开下载数据", err)
-	}
-	requestID := uuid.NewString()
-	wire, err := json.Marshal(dto.CreateDownloadResponse{Data: *publicData, RequestID: requestID})
-	if err != nil {
-		t.Fatal("真实下载响应编码失败", err)
-	}
+	// 3. 通过测试入口的公开响应读取实际文件。
 	var decoded dto.CreateDownloadResponse
-	if err := json.Unmarshal(wire, &decoded); err != nil || decoded.RequestID != requestID ||
+	if err := json.Unmarshal(renewed.Body.Bytes(), &decoded); err != nil || decoded.RequestID != requestID ||
+		renewed.Header().Get("X-Request-ID") != requestID || renewed.Header().Get("Cache-Control") != "no-store" ||
 		decoded.Data.ObjectID != strconv.FormatUint(*task.PublishedObjectID, 10) || decoded.Data.Revision != "1" ||
-		!decoded.Data.ExpiresAt.Equal(result.Link.ExpiresAt) || decoded.Data.URL != result.Link.URL {
+		!decoded.Data.ExpiresAt.After(time.Now()) {
 		t.Fatal("下载 JSON 未保留公开标识、签名地址和到期时间")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, decoded.Data.URL, nil)
