@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -79,4 +81,31 @@ func TestCountPurgeRemainingEntriesIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatal("未完成的根目标应计为一项", err)
 	}
+
+	// 4. 用完整进度服务读取根项目最后一项及完成后的零项。
+	t.Run("progress service before and after root completion", func(t *testing.T) {
+		progressService := service.NewPurgeProgressService(func(requestContext context.Context, read func(context.Context, service.PurgeProgressReader) error) error {
+			return store.WithFileEntrySnapshot(requestContext, func(snapshotContext context.Context, snapshotStore *Store) error {
+				return read(snapshotContext, snapshotStore)
+			})
+		})
+		checkProgress := func(status string, remainingCount int) {
+			t.Helper()
+			progress, err := progressService.Get(ctx, actor, 14)
+			want := domain.PurgeProgress{EntryID: 14, Status: status, RemainingCount: remainingCount}
+			if err != nil || progress == nil || *progress != want {
+				t.Fatal("进度服务返回了错误的状态或计数", progress, err)
+			}
+		}
+		checkProgress("PURGING", 1)
+		if _, err := pool.ExecContext(ctx, `UPDATE file_entries
+			SET status='PURGED',purged_at='2026-01-02 03:04:08.123456',revision=revision+1
+			WHERE user_id=1 AND id=14`); err != nil {
+			t.Fatal("推进根项目完成失败", err)
+		}
+		checkProgress("PURGED", 0)
+		if progress, err := progressService.Get(ctx, actor, 21); progress != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
+			t.Fatal("进度服务应隐藏跨账号的目标", progress, err)
+		}
+	})
 }

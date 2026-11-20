@@ -1009,3 +1009,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.ReadPurgeProgressTarget`，识别可独立查询的清理目标，校验状态与清理时间，并区分未找到与数据异常。[第 463 步学习记录](docs/开发学习记录.md#第-463-步校验永久清理进度查询资格)
 
 已提供 `service.CountPurgeRemainingEntries`，从已读取的清理子树统计目标自身和未完成后代。[第 464 步学习记录](docs/开发学习记录.md#第-464-步统计永久清理剩余项)
+
+已提供 `service.PurgeProgressService`，在同一只读快照判断目标资格并返回状态和剩余项数，已完成目标直接得到 `PURGED` 和 `0`。[第 465 步学习记录](docs/开发学习记录.md#第-465-步组合永久清理只读进度服务)
