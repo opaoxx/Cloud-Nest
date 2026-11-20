@@ -1079,3 +1079,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 `main.run` 已启动对象回收 worker，使用现有 MySQL 与 MinIO 依赖。关停时先等待 worker 退出，再释放连接。[第 498 步学习记录](docs/开发学习记录.md#第-498-步接入服务启动与关停的对象回收)
 
 `Store.ListExpiredTrashRootCandidates` 已支持只读列出超过 30 天且祖先均为活动目录的回收项，每批最多 100 条。[第 499 步学习记录](docs/开发学习记录.md#第-499-步只读扫描到期回收站根项)
+
+`Store.WithExpiredTrashRootTransaction` 已支持在所属用户事务中锁定并复核单条到期候选，检查回收状态、保留期、版本和当前祖先链。[第 500 步学习记录](docs/开发学习记录.md#第-500-步加锁复核到期回收站根项)
