@@ -1069,3 +1069,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `StoredObjectGCCandidateProcessor.Process`，领取一条新到期候选，提交 `DELETING` 后执行存储删除与完成写回。[第 493 步学习记录](docs/开发学习记录.md#第-493-步领取并删除单个到期存储对象)
 
 已提供 `StoredObjectGCBatch.RunOnce`，一次限量扫描，逐项领取并处理到期对象，汇总完成、失效和失败结果。[第 494 步学习记录](docs/开发学习记录.md#第-494-步批量处理到期存储对象)
+
+已提供 `StoredObjectGCRound.RunOnce`，先恢复已提交的删除记录，再处理新到期候选，返回两个批次的结果。[第 495 步学习记录](docs/开发学习记录.md#第-495-步串联存储对象删除恢复与到期回收)

@@ -25,7 +25,7 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_UPLOAD_STORAGE_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_UPLOAD_STORAGE_TEST=1 后在独占桶验证物理删除恢复")
 	}
-	// 1. 准备独占的 MySQL 库和 MinIO 桶，创建三个真实到期对象。
+	// 1. 准备独占的 MySQL 库和 MinIO 桶，创建三个到期对象和一个稍后到期的对象。
 	pool, _ := uploadTaskDatabase(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
@@ -42,11 +42,12 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 	const writebackKey = "users/7/objects/gc-writeback-fixture"
 	const staleKey = "users/7/objects/gc-stale-fixture"
 	const successKey = "users/7/objects/gc-success-fixture"
+	const nextDueKey = "users/7/objects/gc-next-due-fixture"
 	fixtures := []struct {
 		id          uint64
 		key         string
 		daysOverdue int
-	}{{33, writebackKey, 3}, {35, staleKey, 2}, {36, successKey, 1}}
+	}{{33, writebackKey, 3}, {35, staleKey, 2}, {36, successKey, 1}, {37, nextDueKey, -1}}
 	secure := settings.EndpointURL.Scheme == "https"
 	transport, err := minio.DefaultTransport(secure)
 	if err != nil {
@@ -164,22 +165,40 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 		t.Fatal("已领取候选应失效", result, err)
 	}
 
-	// 3. 恢复批次先遇到无法定位的旧记录，再处理已经物理删除的对象。
+	// 3. 用统一入口先恢复旧删除记录，再处理另一个刚到期的对象。
 	execute("DROP TRIGGER fixture_fail_object_deletion_writeback")
 	execute(`INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size,status)
 		VALUES(34,8,'fixture_other_provider',?,'users/8/objects/unavailable-location',0,'DELETING')`, bucket)
-	batch := service.NewStoredObjectDeletionRecoveryBatch(store.ListDeletingStoredObjects, processor.Process)
-	summary, err := batch.RunOnce(ctx, 2)
-	if err != nil || summary.Scanned != 2 || summary.Completed != 1 || len(summary.CandidateErrors) != 1 {
-		t.Fatal("删除恢复批次结果不符", summary, err)
+	execute(`UPDATE stored_objects
+		SET unreferenced_at = UTC_TIMESTAMP(6)-INTERVAL 8 DAY, gc_after = UTC_TIMESTAMP(6)-INTERVAL 1 DAY
+		WHERE owner_user_id = 7 AND id = 37`)
+	recoveryBatch := service.NewStoredObjectDeletionRecoveryBatch(store.ListDeletingStoredObjects, processor.Process)
+	nextDueBatch := service.NewStoredObjectGCBatch(func(scanContext context.Context, limit int) ([]domain.StoredObjectGCCandidate, error) {
+		current, err := store.FindUserStoredObject(scanContext, claimed.OwnerUserID, claimed.ID)
+		if err != nil || current == nil || current.Status != domain.StoredObjectStatusDeleted || !sameStoredObjectLocation(current, claimed) {
+			t.Fatal("扫描新候选前应已写回旧对象的删除状态", current, err)
+		}
+		return store.ListStoredObjectGCCandidates(scanContext, limit)
+	}, candidateProcessor.Process)
+	round := service.NewStoredObjectGCRound(recoveryBatch.RunOnce, nextDueBatch.RunOnce)
+	result, err := round.RunOnce(ctx, 2, 1)
+	recovery := result.Recovery
+	if err != nil || recovery.Scanned != 2 || recovery.Completed != 1 || len(recovery.CandidateErrors) != 1 {
+		t.Fatal("删除恢复批次结果不符", result, err)
 	}
-	failure := summary.CandidateErrors[0]
+	failure := recovery.CandidateErrors[0]
 	if failure.ObjectID != 34 || failure.OwnerUserID != 8 || !errors.Is(failure.Err, domain.ErrInvalidStoredObjectData) {
 		t.Fatal("未正确记录无法定位的旧对象", failure)
 	}
-	current, err := store.FindUserStoredObject(ctx, claimed.OwnerUserID, claimed.ID)
-	if err != nil || current == nil || current.Status != domain.StoredObjectStatusDeleted || !sameStoredObjectLocation(current, claimed) {
-		t.Fatal("批次未提交已缺失对象的完成状态", current, err)
+	if result.Due.Scanned != 1 || result.Due.Completed != 1 || result.Due.StaleCandidates != 0 || len(result.Due.CandidateErrors) != 0 {
+		t.Fatal("统一入口未完成新到期对象", result.Due)
+	}
+	nextCompleted, err := store.FindUserStoredObject(ctx, 7, 37)
+	if err != nil || nextCompleted == nil || nextCompleted.Status != domain.StoredObjectStatusDeleted {
+		t.Fatal("未提交新到期对象的完成状态", nextCompleted, err)
+	}
+	if _, err := verifier.StatObject(ctx, bucket, nextDueKey, minio.StatObjectOptions{}); minio.ToErrorResponse(err).StatusCode != http.StatusNotFound {
+		t.Fatal("未确认新到期对象的物理内容缺失", minio.ToErrorResponse(err).Code)
 	}
 	if pending, err := store.ListDeletingStoredObjects(ctx, 2); err != nil || len(pending) != 1 || pending[0].ID != failure.ObjectID {
 		t.Fatal("恢复扫描应只保留本轮失败对象", pending, err)
