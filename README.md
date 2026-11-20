@@ -909,3 +909,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.TrashEntryPageService`，支持空游标读首页、文本游标续读，以及有后续候选时签发下一页游标。[第 413 步学习记录](docs/开发学习记录.md#第-413-步组合带文本游标的回收站分页服务)
 
 已提供 `dto.NewTrashPageData`，转换公开回收项、原父路径、30 天保留截止时间和可空续页游标。[第 414 步学习记录](docs/开发学习记录.md#第-414-步转换回收站分页响应数据)
+
+已提供 `handler.TrashPageSuccess`，在测试 GET 入口交付带请求 ID 和缓存控制头的回收站分页响应。[第 415 步学习记录](docs/开发学习记录.md#第-415-步交付回收站分页成功响应)
