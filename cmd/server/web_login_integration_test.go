@@ -31,7 +31,7 @@ const webEmptyRootFixtureUsername = "fixture_web_empty_root"
 
 func TestServerWebLoginIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_WEB_LOGIN_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录、刷新与目录浏览")
+		t.Skip("设置 CLOUDNEST_WEB_LOGIN_TEST=1 后用独占库和本地 Vite 代理验证 Web 登录、刷新、目录浏览与创建")
 	}
 	t.Setenv("ACCESS_TOKEN_TTL", "8s")
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
@@ -271,6 +271,63 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("刷新 Cookie 缺失时的错误码不符", invalidRefresh.Error.Code)
 	}
 	t.Log("目录续页过期联测通过：401 TOKEN_EXPIRED，刷新 200，原目录和游标重试 200，缺 Cookie 时刷新 401")
+
+	// 11. 在当前合成子目录提交创建及同键同参数请求，再确认列表只有一项新记录。
+	createFolder := func(accessToken, parentID, name, key string) *http.Request {
+		t.Helper()
+		input, err := json.Marshal(map[string]string{"parent_id": parentID, "name": name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/directories", bytes.NewReader(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", key)
+		request.Header.Set("Origin", baseURL)
+		return request
+	}
+	const createKey = "fba342b8-ff85-4c1e-a6f2-a0a74b83af05"
+	const folderName = "隔离新建目录"
+	const submittedName = "  " + folderName + "  "
+	var created, repeated dto.CreateDirectoryResponse
+	read(createFolder(renewed.Data.AccessToken, rootFolder.ID, submittedName, createKey), http.StatusCreated, &created)
+	read(createFolder(renewed.Data.AccessToken, rootFolder.ID, submittedName, createKey), http.StatusCreated, &repeated)
+	if repeated.Data != created.Data || repeated.RequestID == created.RequestID || created.Data.Entry.ID == "" ||
+		created.Data.Entry.Name != folderName || created.Data.Entry.ParentID != rootFolder.ID || created.Data.Entry.EntryType != "DIR" {
+		t.Fatal("同键重试未返回相同的创建快照")
+	}
+
+	// 12. 核对重名、非法名称、跨账号父目录及过期会话的正式错误。
+	for _, failure := range []struct {
+		request *http.Request
+		status  int
+		code    string
+	}{
+		{createFolder(renewed.Data.AccessToken, rootFolder.ID, folderName, "web-create-name-conflict"), http.StatusConflict, "NAME_CONFLICT"},
+		{createFolder(renewed.Data.AccessToken, rootFolder.ID, "非法/目录", "web-create-invalid-name"), http.StatusBadRequest, "INVALID_NAME"},
+		{createFolder(renewed.Data.AccessToken, emptyProfile.Data.RootEntryID, folderName, "web-create-foreign"), http.StatusNotFound, "ENTRY_NOT_FOUND"},
+		{createFolder(expiringLogin.Data.AccessToken, rootFolder.ID, "过期请求", "web-create-expired"), http.StatusUnauthorized, "TOKEN_EXPIRED"},
+	} {
+		var failureResponse dto.ErrorResponse
+		read(failure.request, failure.status, &failureResponse)
+		if failureResponse.Error.Code != failure.code {
+			t.Fatal("创建目录失败响应不符", failureResponse.Error.Code, failure.code)
+		}
+	}
+	var afterCreate dto.DirectoryPageResponse
+	read(getDirectory(renewed.Data.AccessToken, rootFolder.ID, nil), http.StatusOK, &afterCreate)
+	if len(afterCreate.Data.Items) != 2 || !slices.Contains(afterCreate.Data.Items, created.Data.Entry.DirectoryEntrySummary) {
+		t.Fatal("重新读取当前子目录未找到唯一创建结果", afterCreate.Data.Items)
+	}
+	emptyUser, _ = loginAs(webEmptyRootFixtureUsername)
+	read(getDirectory(emptyUser.Data.AccessToken, emptyProfile.Data.RootEntryID, nil), http.StatusOK, &emptyPage)
+	if len(emptyPage.Data.Items) != 0 {
+		t.Fatal("跨账号拒绝后目标目录应保持为空")
+	}
+	t.Log("Web 创建目录联测通过：同键两次 201 同一条目，当前目录重读，重名 409、非法名称 400、跨账号 404 和过期 401")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {

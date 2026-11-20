@@ -83,3 +83,6 @@
 }
 .directory-items th:first-child { width: 58%; }
 .directory-items + button { margin-top: 12px; }
+.create-directory-trigger { margin-bottom: 10px; }
+.create-directory-form { display: grid; gap: 8px; }
+.create-directory-form .auth-error { margin: 0; }

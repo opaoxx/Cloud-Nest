@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Button } from 'antd'
-import type { DirectoryBreadcrumb, DirectoryEntry, DirectoryPageReader } from './api/drive'
+import type { DirectoryBreadcrumb, DirectoryCreator, DirectoryEntry, DirectoryPageReader } from './api/drive'
 import { apiErrorMessage } from './api/http'
 import { formatSize } from './demo'
+import CreateDirectoryForm from './CreateDirectoryForm'
 
 type DirectoryListing = {
   items: DirectoryEntry[]
@@ -17,9 +18,10 @@ type DirectoryRequest = {
   cursor: string | null
 }
 
-export default function DirectoryBrowser({ rootEntryId, readDirectoryPage }: {
+export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
+  createDirectory: DirectoryCreator
 }) {
   const [request, setRequest] = useState<DirectoryRequest>({ directoryId: rootEntryId, cursor: null })
   const [listing, setListing] = useState<DirectoryListing>({
@@ -79,6 +81,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage }: {
   // 2. 使用服务端确认的目录路径生成当前位置和上级入口。
   const isRoot = request.directoryId === rootEntryId
   const directoryLabel = isRoot ? '根目录' : '文件夹'
+  const currentDirectory = listing.breadcrumbs.at(-1)
 
   return (
     <section className="directory-browser" aria-labelledby="directory-browser-title">
@@ -102,6 +105,11 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage }: {
             })}
           </ol>
         </nav>
+      )}
+      {currentDirectory?.id === request.directoryId && (
+        <CreateDirectoryForm key={currentDirectory.id} parentId={currentDirectory.id}
+          parentName={currentDirectory.name || '根目录'} disabled={listing.status !== 'ready'}
+          createDirectory={createDirectory} onCreated={() => requestPage(null)} />
       )}
       {listing.items.length > 0 && (
         <table className="directory-items" aria-label={`${directoryLabel}条目`}>

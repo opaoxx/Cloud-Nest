@@ -3,8 +3,8 @@ import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
-import { readDirectoryPageWithRefresh } from './api/drive'
-import type { DirectoryPageReader } from './api/drive'
+import { createDirectory, readDirectoryPageWithRefresh } from './api/drive'
+import type { DirectoryCreator, DirectoryPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
 import { formatSize } from './demo'
@@ -56,6 +56,13 @@ export default function AuthPage() {
       throw error
     }
   }, [clearSession])
+
+  const submitDirectoryCreation: DirectoryCreator = async creation => {
+    // 从当前内存会话取令牌，写请求直接提交一次。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    await createDirectory(session.accessToken, creation)
+  }
 
   useEffect(() => {
     let active = true
@@ -150,7 +157,7 @@ export default function AuthPage() {
             </dl>
             <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
             <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
-              readDirectoryPage={readDirectoryPage} />
+              readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation} />
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>

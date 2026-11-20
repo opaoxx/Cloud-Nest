@@ -20,6 +20,35 @@ interface DirectoryPage {
 
 export type DirectoryPageReader = (parentId: string, cursor: string | null, signal: AbortSignal) => Promise<DirectoryPage>
 
+export interface DirectoryCreation {
+  parentId: string
+  name: string
+  idempotencyKey: string
+}
+
+export type DirectoryCreator = (creation: DirectoryCreation) => Promise<void>
+
+export async function createDirectory(accessToken: string, creation: DirectoryCreation): Promise<void> {
+  // 1. 按正式契约提交父目录、原始名称和本次幂等键。
+  const data = await requestData('/api/v1/directories', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': creation.idempotencyKey,
+    },
+    body: JSON.stringify({ parent_id: creation.parentId, name: creation.name }),
+    redirect: 'error',
+  })
+
+  // 2. 核对创建结果属于请求的父目录。
+  const entry = data.entry
+  if (!isRecord(entry) || typeof entry.id !== 'string' || !entry.id ||
+      entry.parent_id !== creation.parentId || entry.entry_type !== 'DIR' || entry.status !== 'ACTIVE') {
+    throw new ApiError(201, '服务返回的创建结果格式有误。')
+  }
+}
+
 export async function readDirectoryPageWithRefresh(
   accessToken: string,
   parentId: string,
