@@ -995,3 +995,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.IdempotentPurgeEntryService`，在同一用户事务中首次受理并保存 202 快照，或复用已保存的同参结果。[第 456 步学习记录](docs/开发学习记录.md#第-456-步组合永久清理幂等受理服务)
 
 已提供 `handler.PurgeEntryAccepted`，将受理快照写为带当次请求 ID 和禁止缓存响应头的 HTTP 202，已在测试路由验证。[第 457 步学习记录](docs/开发学习记录.md#第-457-步交付永久清理受理响应)
+
+已提供 `handler.PurgeEntry`，在测试路由串联 Bearer 认证、确认参数校验、幂等受理和 HTTP 202 交付。真实 JWT 和隔离 MySQL 联测覆盖预检、首次受理及同键重试。[第 458 步学习记录](docs/开发学习记录.md#第-458-步处理永久清理确认请求)

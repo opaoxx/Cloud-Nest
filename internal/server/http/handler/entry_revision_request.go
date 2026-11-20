@@ -17,7 +17,7 @@ type entryRevisionRequestScope struct {
 	key     string
 }
 
-// readEntryRevisionRequestScope 读取回收和恢复共用的认证身份、目标和幂等键。
+// readEntryRevisionRequestScope 读取目录项版本操作共用的认证身份、目标和幂等键。
 func readEntryRevisionRequestScope(requestContext *gin.Context) (entryRevisionRequestScope, bool) {
 	// 1. 检查请求状态和认证身份，准备统一的响应头。
 	if requestContext.Writer.Written() || requestContext.IsAborted() {
@@ -36,7 +36,7 @@ func readEntryRevisionRequestScope(requestContext *gin.Context) (entryRevisionRe
 		return entryRevisionRequestScope{}, false
 	}
 
-	// 2. 依次检查路径和幂等头，交给调用方解析专属正文。
+	// 2. 依次检查路径和幂等头，交给调用方解析所需的业务参数。
 	path, fieldError := dto.ParseEntryPath(requestContext.Param("id"))
 	if fieldError != nil {
 		InvalidArgument(requestContext, fieldError)
@@ -50,7 +50,7 @@ func readEntryRevisionRequestScope(requestContext *gin.Context) (entryRevisionRe
 	return entryRevisionRequestScope{actor: actor, entryID: path.EntryID, key: key}, true
 }
 
-// writeEntryRevisionFailure 交付回收和恢复共用的失败响应。
+// writeEntryRevisionFailure 交付目录项版本操作共用的失败响应。
 func writeEntryRevisionFailure(requestContext *gin.Context, err, rootError error) {
 	// 1. 按已知业务错误选择状态和固定提示，认证失败沿用共享响应。
 	status := http.StatusConflict

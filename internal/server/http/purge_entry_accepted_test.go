@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +31,7 @@ func TestPurgeEntryAcceptedHTTP(t *testing.T) {
 		requestContext.Header("Content-Type", "application/octet-stream")
 		requestContext.Header("Content-Length", "3")
 		requestContext.Header("Content-Encoding", "gzip")
-		handler.PurgeEntryAccepted(requestContext, stableBody)
+		handler.PurgeEntryAccepted(requestContext, math.MaxUint64, stableBody)
 	}, func(*gin.Context) { t.Error("写出 202 后继续执行了下游") })
 	server := httptest.NewServer(router)
 	defer server.Close()
@@ -102,7 +103,7 @@ func TestPurgeEntryAcceptedFailures(t *testing.T) {
 					}
 					requestContext.Request = requestContext.Request.WithContext(ctx)
 				}
-				handler.PurgeEntryAccepted(requestContext, []byte(stableBody))
+				handler.PurgeEntryAccepted(requestContext, math.MaxUint64, []byte(stableBody))
 			}, func(*gin.Context) { t.Error("写出错误后继续执行了下游") })
 
 			response := httptest.NewRecorder()
