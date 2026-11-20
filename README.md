@@ -1065,3 +1065,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `StoredObjectDeletionProcessor.Process`，先删除单个对象的 MinIO 内容，确认目标已不存在后再写回 MySQL。[第 491 步学习记录](docs/开发学习记录.md#第-491-步串联单个存储对象的删除与回写)
 
 已提供 `StoredObjectDeletionRecoveryBatch.RunOnce`，限量扫描删除中记录，逐项处理并汇总已完成项和失败原因。[第 492 步学习记录](docs/开发学习记录.md#第-492-步批量恢复删除中的存储对象)
+
+已提供 `StoredObjectGCCandidateProcessor.Process`，领取一条新到期候选，提交 `DELETING` 后执行存储删除与完成写回。[第 493 步学习记录](docs/开发学习记录.md#第-493-步领取并删除单个到期存储对象)

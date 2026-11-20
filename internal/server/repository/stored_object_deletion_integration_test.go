@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -102,16 +101,18 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 	if err != nil || len(candidates) != 1 || candidates[0].ObjectID != 33 {
 		t.Fatal("未取得真实删除候选", candidates, err)
 	}
-	claimed, err := store.ClaimStoredObjectGC(ctx, candidates[0])
-	if err != nil || claimed == nil {
-		t.Fatal("未提交删除意图", claimed, err)
-	}
+	candidate := candidates[0]
 
-	// 2. 执行真实 MinIO 删除，在写回处注入错误，验证内容已删除但 MySQL 仍可恢复。
+	// 2. 从待领取候选执行真实删除，只阻断完成写回，保留已提交的删除意图。
 	execute(`CREATE TRIGGER fixture_fail_object_deletion_writeback BEFORE UPDATE ON stored_objects
-		FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'fixture blocks deletion writeback'`)
+		FOR EACH ROW BEGIN
+			IF NEW.status = 'DELETED' THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'fixture blocks deletion writeback';
+			END IF;
+		END`)
 	processor := service.NewStoredObjectDeletionProcessor(client.DeleteStoredObject, store.CompleteStoredObjectGC)
-	completed, err := processor.Process(ctx, claimed)
+	candidateProcessor := service.NewStoredObjectGCCandidateProcessor(store.ClaimStoredObjectGC, processor.Process)
+	completed, err := candidateProcessor.Process(ctx, candidate)
 	var writeError *mysql.MySQLError
 	if completed != nil || !errors.As(err, &writeError) || writeError.Number != 1644 {
 		t.Fatal("未保留写回失败原因", completed, err)
@@ -120,8 +121,18 @@ func TestStoredObjectDeletionRecoveryIntegration(t *testing.T) {
 		t.Fatal("第一次处理后未确认物理目标缺失", minio.ToErrorResponse(err).Code)
 	}
 	pending, err := store.ListDeletingStoredObjects(ctx, 1)
-	if err != nil || len(pending) != 1 || !reflect.DeepEqual(pending[0], *claimed) {
+	if err != nil || len(pending) != 1 {
 		t.Fatal("写回失败后未保留待恢复删除记录", pending, err)
+	}
+	claimed := &pending[0]
+	if claimed.ID != candidate.ObjectID || claimed.OwnerUserID != candidate.OwnerUserID ||
+		claimed.Status != domain.StoredObjectStatusDeleting || claimed.Bucket != bucket || claimed.ObjectKey != key ||
+		claimed.UnreferencedAt == nil || !claimed.UnreferencedAt.Equal(candidate.UnreferencedAt) ||
+		claimed.GCAfter == nil || !claimed.GCAfter.Equal(candidate.GCAfter) {
+		t.Fatal("待恢复记录与已领取候选不符", claimed)
+	}
+	if result, err := candidateProcessor.Process(ctx, candidate); result != nil || !errors.Is(err, domain.ErrStoredObjectGCCandidateStale) {
+		t.Fatal("已领取候选应失效", result, err)
 	}
 
 	// 3. 恢复批次先遇到无法定位的旧记录，再处理已经物理删除的对象。
