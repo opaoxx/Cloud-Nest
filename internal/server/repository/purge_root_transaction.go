@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"gorm.io/gorm"
 )
 
 // WithPurgeRootTransaction 锁定并复核待清理根项，在同一用户事务内执行回调。
@@ -61,4 +62,20 @@ func (store *Store) WithPurgeRootTransaction(ctx context.Context, candidate doma
 		purgeStore.purgeRoot = &lockedCandidate
 		return action(txContext, &purgeStore)
 	})
+}
+
+// requirePurgeRoot 检查 Store 是否来自已验证且持锁的根项事务。
+func (store *Store) requirePurgeRoot(ctx context.Context) (domain.PurgeRootCandidate, error) {
+	// 1. 核对根项绑定与事务连接。
+	if store == nil || store.database == nil || ctx == nil || store.purgeRoot == nil {
+		return domain.PurgeRootCandidate{}, fmt.Errorf("清理叶子操作需要已验证的根项事务和上下文")
+	}
+	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
+		return domain.PurgeRootCandidate{}, fmt.Errorf("清理叶子操作必须使用根项事务 Store")
+	}
+	root := *store.purgeRoot
+	if root.UserID != store.loginUserID || !root.IsValid() {
+		return domain.PurgeRootCandidate{}, domain.ErrInvalidFileEntryData
+	}
+	return root, ctx.Err()
 }

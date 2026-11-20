@@ -6,23 +6,18 @@ import (
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
-	"gorm.io/gorm"
 )
 
 // ListPurgeLeafCandidates 读取已锁定清理根项下本批可处理的叶子。
 // 调用方使用 WithPurgeRootTransaction 传入的上下文和 Store。
 func (store *Store) ListPurgeLeafCandidates(ctx context.Context, limit int) ([]domain.PurgeLeafCandidate, error) {
 	// 1. 核对事务绑定的清理根项和批量大小。
-	if store == nil || store.database == nil || ctx == nil || store.purgeRoot == nil ||
-		limit < 1 || limit > domain.MaxPurgeLeafCandidates {
-		return nil, fmt.Errorf("读取清理叶子需要已验证的根项事务、上下文和 1～%d 条的批量大小", domain.MaxPurgeLeafCandidates)
+	if limit < 1 || limit > domain.MaxPurgeLeafCandidates {
+		return nil, fmt.Errorf("读取清理叶子需要 1～%d 条的批量大小", domain.MaxPurgeLeafCandidates)
 	}
-	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
-		return nil, fmt.Errorf("读取清理叶子必须使用根项事务 Store")
-	}
-	root := *store.purgeRoot
-	if root.UserID != store.loginUserID || !root.IsValid() {
-		return nil, domain.ErrInvalidFileEntryData
+	root, err := store.requirePurgeRoot(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// 2. 读取完整子树，标记仍有待清理子项的父目录。
