@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -76,7 +78,17 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			!preview.Credential.ExpiresAt.Equal(issuedAt.Add(5*time.Minute)) {
 			t.Fatalf("预检结果为 %+v，错误 %v", preview, err)
 		}
-		verified, err := verifier.Verify(actor.UserID, 14, preview.Credential.PreviewDigest, issuedAt.Add(time.Minute))
+		data, err := dto.NewPurgePreviewData(preview)
+		if err != nil || data == nil {
+			t.Fatal("无法转换预检结果", data, err)
+		}
+		wire, err := json.Marshal(data)
+		wantData := fmt.Sprintf(`{"entry_id":"14","revision":"1","file_count":2,"directory_count":3,"logical_bytes":"4096","preview_digest":%q,"expires_at":"2026-11-20T04:35:00.123456Z"}`,
+			preview.Credential.PreviewDigest)
+		if err != nil || string(wire) != wantData {
+			t.Fatalf("真实预检 JSON 为 %s，期望 %s，错误 %v", wire, wantData, err)
+		}
+		verified, err := verifier.Verify(actor.UserID, 14, data.PreviewDigest, issuedAt.Add(time.Minute))
 		if err != nil || fmt.Sprintf("%x", verified) != originalFingerprint {
 			t.Fatalf("校验得到的实际子树指纹为 %x，错误 %v", verified, err)
 		}
