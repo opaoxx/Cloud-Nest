@@ -1081,3 +1081,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 `Store.ListExpiredTrashRootCandidates` 已支持只读列出超过 30 天且祖先均为活动目录的回收项，每批最多 100 条。[第 499 步学习记录](docs/开发学习记录.md#第-499-步只读扫描到期回收站根项)
 
 `Store.WithExpiredTrashRootTransaction` 已支持在所属用户事务中锁定并复核单条到期候选，检查回收状态、保留期、版本和当前祖先链。[第 500 步学习记录](docs/开发学习记录.md#第-500-步加锁复核到期回收站根项)
+
+`Store.MarkExpiredTrashRootPurging` 已支持在锁内复核后提交单条到期根项的 `PURGING` 状态和清理开始时间。[第 501 步学习记录](docs/开发学习记录.md#第-501-步将到期回收站根项标记为清理中)
