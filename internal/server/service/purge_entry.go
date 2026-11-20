@@ -52,46 +52,13 @@ func (purgeService *PurgeEntryService) Begin(ctx context.Context, actor domain.A
 
 	var prepared *domain.FileEntry
 	transactionError := purgeService.withTransaction(ctx, actor, func(txContext context.Context, txStore PurgeEntryTransaction) error {
-		// 2. 复查预检范围，再比较当前版本与预期版本。
-		target, err := RecheckPurgePreview(txContext, actor, entryID, digest, txStore, purgeService.verifier, purgeService.now)
-		if err != nil {
-			return err
-		}
-		if err := ValidateEntryRevision(target.Revision, expectedRevision); err != nil {
-			return err
-		}
-		if target.Revision == math.MaxUint64 {
-			return domain.ErrEntryRevisionExhausted
-		}
-
-		// 3. 写入 PURGING，核对写回的目标和版本。
-		saved, writeError := txStore.BeginUserEntryPurge(txContext, target.ID, expectedRevision)
-		if err := txContext.Err(); err != nil {
-			return err
-		}
-		if writeError != nil {
-			return fmt.Errorf("写入永久清理受理状态失败: %w", writeError)
-		}
-		if saved == nil || saved.ID != target.ID || saved.UserID != target.UserID ||
-			saved.ParentID == nil || *saved.ParentID != *target.ParentID || saved.Name != target.Name ||
-			saved.EntryType != target.EntryType || saved.FileSize != target.FileSize ||
-			saved.Status != "PURGING" || saved.Revision != expectedRevision+1 ||
-			saved.CreatedAt.IsZero() || !saved.CreatedAt.Equal(target.CreatedAt) {
-			return domain.ErrInvalidFileEntryData
-		}
-		startedAt := saved.ModifiedAt.UTC()
-		if startedAt.Year() < 1000 || startedAt.Year() > 9999 || startedAt.Nanosecond()%1000 != 0 || !saved.UpdatedAt.Equal(startedAt) {
-			return domain.ErrInvalidFileEntryData
-		}
-
-		result := *saved
-		result.ParentID = copyOptionalValue(saved.ParentID)
-		result.ModifiedAt, result.UpdatedAt = startedAt, startedAt
-		prepared = &result
-		return nil
+		// 2. 在事务内复查并写入 PURGING。
+		var err error
+		prepared, err = beginPurgeEntryInTransaction(txContext, actor, entryID, expectedRevision, digest, txStore, purgeService.verifier, purgeService.now)
+		return err
 	})
 
-	// 4. 确认事务提交后返回结果。
+	// 3. 确认事务提交后返回结果。
 	if transactionError != nil {
 		return nil, fmt.Errorf("永久清理受理事务失败: %w", transactionError)
 	}
@@ -99,4 +66,53 @@ func (purgeService *PurgeEntryService) Begin(ctx context.Context, actor domain.A
 		return nil, domain.ErrInvalidFileEntryData
 	}
 	return prepared, nil
+}
+
+// beginPurgeEntryInTransaction 执行首次受理，调用方持有用户锁并负责提交。
+func beginPurgeEntryInTransaction(
+	ctx context.Context,
+	actor domain.Actor,
+	entryID, expectedRevision uint64,
+	digest string,
+	txStore PurgeEntryTransaction,
+	verifier *PurgePreviewVerifier,
+	now func() time.Time,
+) (*domain.FileEntry, error) {
+	// 1. 复查预检范围，再比较当前版本与预期版本。
+	target, err := RecheckPurgePreview(ctx, actor, entryID, digest, txStore, verifier, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateEntryRevision(target.Revision, expectedRevision); err != nil {
+		return nil, err
+	}
+	if target.Revision == math.MaxUint64 {
+		return nil, domain.ErrEntryRevisionExhausted
+	}
+
+	// 2. 写入 PURGING，核对写回的目标和版本。
+	saved, writeError := txStore.BeginUserEntryPurge(ctx, target.ID, expectedRevision)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if writeError != nil {
+		return nil, fmt.Errorf("写入永久清理受理状态失败: %w", writeError)
+	}
+	if saved == nil || saved.ID != target.ID || saved.UserID != target.UserID ||
+		saved.ParentID == nil || *saved.ParentID != *target.ParentID || saved.Name != target.Name ||
+		saved.EntryType != target.EntryType || saved.FileSize != target.FileSize ||
+		saved.Status != "PURGING" || saved.Revision != expectedRevision+1 ||
+		saved.CreatedAt.IsZero() || !saved.CreatedAt.Equal(target.CreatedAt) {
+		return nil, domain.ErrInvalidFileEntryData
+	}
+	startedAt := saved.ModifiedAt.UTC()
+	if startedAt.Year() < 1000 || startedAt.Year() > 9999 || startedAt.Nanosecond()%1000 != 0 || !saved.UpdatedAt.Equal(startedAt) {
+		return nil, domain.ErrInvalidFileEntryData
+	}
+
+	// 3. 复制目录项与可空字段，供当前事务继续处理。
+	result := *saved
+	result.ParentID = copyOptionalValue(saved.ParentID)
+	result.ModifiedAt, result.UpdatedAt = startedAt, startedAt
+	return &result, nil
 }
