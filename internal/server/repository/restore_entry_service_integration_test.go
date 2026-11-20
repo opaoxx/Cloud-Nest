@@ -3,12 +3,15 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -104,6 +107,26 @@ func TestRestoreEntryServiceIntegration(t *testing.T) {
 				!reflect.DeepEqual(read(t, scenario.entryID), result) {
 				t.Fatalf("服务交付的恢复结果与已提交记录不符，结果 %+v，错误 %v", result, err)
 			}
+
+			// 5. 把实际提交的目录项转换为稳定的六字段公开快照。
+			snapshot, err := dto.NewRestoreEntryData(result)
+			if err != nil {
+				t.Fatal("无法转换恢复结果", err)
+			}
+			body, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal("无法编码恢复快照", err)
+			}
+			wantEntry := map[string]string{
+				"id": strconv.FormatUint(scenario.entryID, 10), "parent_id": strconv.FormatUint(scenario.wantParentID, 10),
+				"name": scenario.wantName, "entry_type": "FILE", "status": "ACTIVE",
+				"revision": strconv.FormatUint(scenario.revision+1, 10),
+			}
+			var decoded map[string]map[string]string
+			if err := json.Unmarshal(body, &decoded); err != nil || len(decoded) != 1 || !reflect.DeepEqual(decoded["entry"], wantEntry) {
+				t.Fatal("提交结果的公开快照不符", string(body), err)
+			}
+
 			if again, err := core.Restore(ctx, actor, scenario.entryID, scenario.revision); again != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
 				t.Fatal("再次恢复活动项时应返回未找到", again, err)
 			}
