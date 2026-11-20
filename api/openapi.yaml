@@ -133,6 +133,7 @@ info:
     POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
     GET /api/v1/trash/{id}/purge-preview 已接入启动入口，使用只读快照返回受影响范围与短时确认凭证。
     DELETE /api/v1/trash/{id} 在服务启动时注册，受理后返回 202 和计划中的进度查询地址。
+    GET /api/v1/trash/{id}/purge 定义计划中的进度查询契约，按当前用户返回清理状态和剩余项数。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -611,6 +612,47 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           $ref: '#/components/responses/PurgePreviewNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/trash/{id}/purge:
+    get:
+      tags: [Entries]
+      operationId: getEntryPurgeProgress
+      summary: 查询当前用户的单项永久清理进度
+      description: |
+        计划契约。客户端可从确认清理返回的 progress_url 发起只读查询。
+        1. Bearer 授权通过后校验路径 id，按认证用户查询目标。同一账号的有效会话均可查询。仅需路径 ID 和有效访问令牌，预检凭证和幂等记录的有效期不影响进度读取。
+        2. 目标须为当前用户的非真实根目录项，自身处于 PURGING 或 PURGED，并有 purge_started_at。该时间标识清理根项，清理结束后仍保留；仅随祖先清理且无自身开始时间的后代不符合查询条件。已受理目标的查询资格不依赖祖先当前的可见性。
+        3. 从同一只读快照取得状态和剩余项数。PURGING 时沿同用户 parent_id 关系统计目标及全部尚未 PURGED 的后代，包含已回收的后代。PURGED 项不计数。目标自身尚未完成时计为 1，故 PURGING 返回 1～10000。
+        4. 目标在完成所有后代后进入 PURGED，remaining_count 为 0。墓碑仍保留时可继续查询，被清理后按目标不存在处理。
+        数据库故障、无法读取完整清理范围或已受理目标的数据违反状态约束时返回统一 500。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+      responses:
+        '200':
+          $ref: '#/components/responses/PurgeEntryProgressRead'
+        '400':
+          $ref: '#/components/responses/PurgeEntryProgressRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，全局来源策略拒绝使用 CORS_FORBIDDEN。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/PurgeEntryProgressNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
   /api/v1/entries/{id}/trash:
@@ -2711,6 +2753,45 @@ components:
           status: PURGING
           progress_url: /api/v1/trash/23/purge
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    PurgeEntryProgressData:
+      type: object
+      additionalProperties: false
+      required: [entry_id, status, remaining_count]
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        status:
+          type: string
+          enum: [PURGING, PURGED]
+        remaining_count:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          description: 尚未进入 PURGED 的目录项数量，包含未完成的清理目标自身。
+      oneOf:
+        - properties:
+            status:
+              type: string
+              enum: [PURGING]
+            remaining_count:
+              type: integer
+              minimum: 1
+        - properties:
+            status:
+              type: string
+              enum: [PURGED]
+            remaining_count:
+              type: integer
+              enum: [0]
+    PurgeEntryProgressResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/PurgeEntryProgressData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
     TrashListItem:
       type: object
       additionalProperties: false
@@ -3354,6 +3435,43 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    PurgeEntryProgressRejected:
+      description: HTTP 400，路径 ID 格式或范围不合法，返回 INVALID_ARGUMENT，details.field 为 id。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PurgeEntryProgressNotFound:
+      description: HTTP 404，目标缺失、跨账号、是真实根目录、尚未进入清理或只是随祖先清理的后代时，统一返回 ENTRY_NOT_FOUND，details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: {code: ENTRY_NOT_FOUND, message: 目录项不存在, details: null}
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     PurgePreviewRejected:
       description: HTTP 400，INVALID_ARGUMENT。路径 ID 格式无效或完整范围超过 10000 个保留目录项，details.field 为 id。
       headers:
@@ -4769,6 +4887,32 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/PurgeEntryAcceptedResponse'
+    PurgeEntryProgressRead:
+      description: HTTP 200，返回本次只读快照中的目标状态、剩余项数和当次请求 ID。响应禁止缓存。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PurgeEntryProgressResponse'
+          examples:
+            purging:
+              value:
+                data: {entry_id: '23', status: PURGING, remaining_count: 2}
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            purged:
+              value:
+                data: {entry_id: '23', status: PURGED, remaining_count: 0}
+                request_id: 0adfc616-05b0-4469-a138-806e7aa667f8
     TrashEntriesListed:
       description: 回收站查询成功 HTTP 200，返回当前页条目、续页游标和本次请求 ID。响应采用 no-store 和 Pragma no-cache。
       headers:

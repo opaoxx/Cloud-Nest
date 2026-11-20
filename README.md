@@ -1001,3 +1001,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 共享 CORS 规则已允许白名单来源的 DELETE 预检声明 `X-CloudNest-Expected-Revision` 和 `X-CloudNest-Purge-Preview`。[第 459 步学习记录](docs/开发学习记录.md#第-459-步允许永久清理确认请求头通过跨域预检)
 
 已注册 `DELETE /api/v1/trash/{id}`。使用上一次预检返回的版本和凭证，以及请求的幂等键，确认成功后返回 202 并将目标标记为 `PURGING`。进度查询与后台分批清理将在后续接入。[第 460 步学习记录](docs/开发学习记录.md#第-460-步注册正式永久清理确认路由)
+
+已定义 `GET /api/v1/trash/{id}/purge` 的计划契约。清理目标所属账号可查询状态和剩余项数，完成后返回 `PURGED` 与 `0`。[第 461 步学习记录](docs/开发学习记录.md#第-461-步定义永久清理进度查询接口契约)
