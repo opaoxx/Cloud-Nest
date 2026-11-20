@@ -11,6 +11,9 @@ var ErrRootEntryTrash = errors.New("根目录不能回收")
 // ErrRootEntryRestore 表示用户的真实根目录禁止恢复。
 var ErrRootEntryRestore = errors.New("根目录不能恢复")
 
+// ErrRestoreTargetUnavailable 表示真实根目录也无法容纳待恢复子树的深度。
+var ErrRestoreTargetUnavailable = errors.New("恢复位置无法容纳目录层级")
+
 // TrashedFileEntry 保存回收后的目录项及回收时间。
 type TrashedFileEntry struct {
 	FileEntry

@@ -925,3 +925,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.ReadRestoreEntryTarget` 和 `ValidateRestoreEntryRevision`，供用户事务检查恢复目标及版本。[第 421 步学习记录](docs/开发学习记录.md#第-421-步检查单项恢复目标)
 
 已提供 `service.ReadRestoreEntryAncestors`，检查恢复目标到真实根目录的原父链，供后续选择恢复位置。[第 422 步学习记录](docs/开发学习记录.md#第-422-步检查恢复目标的原父链)
+
+已提供 `service.SelectRestoreEntryParent`，结合完整父链和子树深度选择恢复父目录。[第 423 步学习记录](docs/开发学习记录.md#第-423-步选择单项恢复的实际父目录)
