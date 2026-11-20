@@ -74,8 +74,8 @@ func TestServerStoredObjectGCIntegration(t *testing.T) {
 	}
 	t.Setenv("CLOUDNEST_HTTP_ADDR", address)
 	var logs bytes.Buffer
-	gate := &storedObjectGCLogGate{
-		Handler: logging.New(&logs).Handler(), reportStarted: make(chan struct{}),
+	gate := &serverWorkerReportGate{
+		Handler: logging.New(&logs).Handler(), reportMessage: "对象回收轮次结束", reportStarted: make(chan struct{}),
 		releaseReport: make(chan struct{}), httpStopped: make(chan struct{}), deadline: ctx.Done(),
 	}
 	releaseReport := sync.OnceFunc(func() { close(gate.releaseReport) })
@@ -102,7 +102,7 @@ func TestServerStoredObjectGCIntegration(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("回收首轮没有在期限内汇报")
 	}
-	waitForStoredObjectGCTestHTTP(t, ctx, address)
+	waitForServerIntegrationHTTP(t, ctx, address)
 	for _, fixture := range fixtures {
 		var status domain.StoredObjectStatus
 		if err := pool.QueryRowContext(ctx, "SELECT status FROM stored_objects WHERE owner_user_id=1 AND id=?", fixture.id).Scan(&status); err != nil {
@@ -158,16 +158,17 @@ func TestServerStoredObjectGCIntegration(t *testing.T) {
 	t.Log("HTTP 先停止，回收汇报结束和 worker 停止后才释放 MinIO、关闭 MySQL")
 }
 
-// storedObjectGCLogGate 只暂停回收汇报，允许其余日志并行写入。
-type storedObjectGCLogGate struct {
+// serverWorkerReportGate 只暂停指定的轮次汇报，允许其余日志并行写入。
+type serverWorkerReportGate struct {
 	slog.Handler
+	reportMessage                             string
 	reportStarted, releaseReport, httpStopped chan struct{}
 	deadline                                  <-chan struct{}
 }
 
-func (gate *storedObjectGCLogGate) Handle(ctx context.Context, record slog.Record) error {
+func (gate *serverWorkerReportGate) Handle(ctx context.Context, record slog.Record) error {
 	switch record.Message {
-	case "对象回收轮次结束":
+	case gate.reportMessage:
 		close(gate.reportStarted)
 		select {
 		case <-gate.releaseReport:
@@ -179,7 +180,7 @@ func (gate *storedObjectGCLogGate) Handle(ctx context.Context, record slog.Recor
 	return gate.Handler.Handle(ctx, record)
 }
 
-func waitForStoredObjectGCTestHTTP(t *testing.T, ctx context.Context, address string) {
+func waitForServerIntegrationHTTP(t *testing.T, ctx context.Context, address string) {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
 	defer client.CloseIdleConnections()

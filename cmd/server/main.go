@@ -42,6 +42,15 @@ func main() {
 // run 装配服务所需资源并启动 HTTP，返回前等待后台任务退出，再释放连接。
 // 各失败环节在此记录原因，main 在清理完成后设置进程退出码。
 func run(ctx context.Context, logger *slog.Logger) error {
+	return runWithPurgeRootWorker(ctx, logger, startServerPurgeRootWorker)
+}
+
+// runWithPurgeRootWorker 在同一启动流程中绑定调用方提供的永久清理 worker。
+func runWithPurgeRootWorker(
+	ctx context.Context,
+	logger *slog.Logger,
+	startPurgeRoot func(context.Context, func(context.Context, int, int) (service.PurgeRootBatchResult, error), *slog.Logger) func(),
+) error {
 	// 1. 读取并校验监听配置，失败时记录原因并停止启动。
 	listenAddress, err := config.LoadHTTPAddress()
 	if err != nil {
@@ -641,7 +650,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 32. 用真实 MySQL 扫描和结算启动永久清理，退出时等待清理事务结束。
 	purgeRootBatch := service.NewPurgeRootBatch(store.ListPurgeRootCandidates, store.CompletePurgeLeafBatch)
-	stopPurgeRoot := startServerPurgeRootWorker(ctx, purgeRootBatch.RunOnce, logger)
+	stopPurgeRoot := startPurgeRoot(ctx, purgeRootBatch.RunOnce, logger)
 	defer stopPurgeRoot()
 
 	// 33. 用已有 MySQL 仓储和 MinIO 客户端装配回收批次。
@@ -655,7 +664,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	stopObjectGC := startServerStoredObjectGCWorker(ctx, objectGCRound.RunOnce, logger)
 	defer stopObjectGC()
 
-	// 35. 启动 HTTP 并处理退出通知。
+	// 35. 绑定已有到期扫描和单项条件标记。
+	expiredTrashRoots := service.NewExpiredTrashRootBatch(store.ListExpiredTrashRootCandidates, store.MarkExpiredTrashRootPurging)
+
+	// 36. 启动到期标记 worker，登记取消并等待的回调，使其先于数据库清理执行。
+	stopExpiredTrashRoots := startServerExpiredTrashRootWorker(ctx, expiredTrashRoots.RunOnce, logger)
+	defer stopExpiredTrashRoots()
+
+	// 37. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
