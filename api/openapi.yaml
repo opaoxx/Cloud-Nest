@@ -423,7 +423,7 @@ paths:
       operationId: createEntryDownload
       summary: 为当前用户可见的文件签发短期下载或预览地址
       description: |
-        计划契约，后端实现后注册路由。
+        服务启动时注册此接口，并装配共享授权、MySQL 下载目标与 MinIO 签名。
         1. Bearer 授权通过后解析目录项 id、受限 JSON、expected_revision 和 purpose。每次请求重新授权，无需 Idempotency-Key。
         2. 核对文件归属及完整祖先链可见性，比较目录项版本，再确认物理对象为 READY 且内容可用。只有满足预览规则的内容才可申请 preview。
         3. 签发固定到该对象键的 GET URL，已有存储版本定位时一并绑定。初始有效期为 15 分钟，成功授权按 60 秒窗口合并记录 last_opened_at。

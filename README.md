@@ -2,7 +2,7 @@
 
 学习导向的自用文件云盘，采用 Go 后端、React Web、Wails 桌面端和 Flutter 安卓端。
 
-当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/complete、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
+当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/complete、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/entries/{id}/download、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
 ## 数据库迁移
 
@@ -857,3 +857,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.CreateDownloadSuccess`，以 HTTP 200 JSON 交付下载授权，关联当前请求 ID 和禁止缓存头。[第 387 步学习记录](docs/开发学习记录.md#第-387-步交付下载授权成功响应)
 
 已提供 `handler.CreateDownload`，串联已认证身份、路径及正文校验、授权服务和公开错误，已接入测试专用 POST。[第 388 步学习记录](docs/开发学习记录.md#第-388-步处理下载授权请求)
+
+已注册 `POST /api/v1/entries/{id}/download`。在正式接口使用 Bearer 令牌申请下载，成功后由客户端使用返回的短期 GET 地址读回文件。[第 389 步学习记录](docs/开发学习记录.md#第-389-步注册正式文件下载授权路由)

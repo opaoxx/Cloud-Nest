@@ -10,26 +10,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
-	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
-	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
-	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
-	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
-	"github.com/opaoxx/cloud-nest/internal/server/service"
-	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
 type serverUploadContentBucket struct {
@@ -91,6 +83,8 @@ func prepareServerUploadContentBucket(t *testing.T, ctx context.Context) *server
 		t.Fatal("开启独占桶版本控制失败", err)
 	}
 	t.Setenv("CLOUDNEST_S3_BUCKET", bucket)
+	// 联测返回的签名链接使用测试进程可以直接访问的 MinIO 地址。
+	t.Setenv("CLOUDNEST_S3_PUBLIC_ENDPOINT", settings.EndpointURL.String())
 	return &serverUploadContentBucket{client: client, name: bucket}
 }
 
@@ -229,27 +223,6 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 		defer stopWaiting()
 
 		// 2. 从查询接口和数据库核对已发布结果、实测摘要及配额结算。
-		settings, err := config.LoadStorageConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
-		settings.Bucket, settings.PublicEndpointURL = target.name, settings.EndpointURL
-		downloadStorage, err := storage.NewClient(ctx, settings)
-		if err != nil {
-			t.Fatal("创建联测下载客户端失败", err)
-		}
-		defer downloadStorage.Close()
-		downloadTargets := service.NewEntryDownloadTargetService(func(requestContext context.Context, read func(context.Context, service.EntryDownloadTargetReader) error) error {
-			return store.WithFileEntrySnapshot(requestContext, func(snapshotContext context.Context, snapshot *repository.Store) error {
-				return read(snapshotContext, snapshot)
-			})
-		})
-		downloads := service.NewEntryDownloadService(downloadTargets.Get, downloadStorage.CheckDownloadObject, downloadStorage.SignDownloadURL,
-			func(requestContext context.Context, owner domain.Actor, action func(context.Context, service.DownloadAccessTransaction) error) error {
-				return store.WithUserTransaction(requestContext, owner, func(txContext context.Context, txStore *repository.Store) error {
-					return action(txContext, txStore)
-				})
-			})
 		var publishedBytes uint64
 		for _, original := range received {
 			task := awaitServerUploadPublication(t, waitContext, store, userID, original.ID)
@@ -273,7 +246,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 				task.CompletedAt == nil || !confirmed.Data.CompletedAt.Equal(*task.CompletedAt) {
 				t.Fatal("正式完成确认未返回后台实际发布结果", confirmed.Data)
 			}
-			verifyServerPublishedDownload(t, ctx, pool, httpClient, downloads, actor, task)
+			verifyServerPublishedDownload(t, ctx, pool, httpClient, userID, task, baseURL, token, otherToken)
 			publishedBytes += original.ReservedBytes
 		}
 		var usedAfter uint64
@@ -288,76 +261,96 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 	})
 }
 
-// verifyServerPublishedDownload 用实际发布结果验证内部下载授权和真实 MinIO GET。
-func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.DB, httpClient *http.Client, downloads *service.EntryDownloadService, actor domain.Actor, task *domain.UploadTask) {
+// verifyServerPublishedDownload 用实际发布结果验证正式下载授权和真实 MinIO GET。
+func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.DB, httpClient *http.Client, userID uint64, task *domain.UploadTask, baseURL, token, otherToken string) {
 	t.Helper()
-	// 1. 尚未保存 MIME 时，拒绝预览且不写访问时间。
 	entryID := *task.ResultEntryID
-	const testPath = "/test-download/"
-	requestID := uuid.NewString()
-	router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
-	router.POST(testPath+":id", func(requestContext *gin.Context) {
-		identityContext := requestcontext.WithActor(requestContext.Request.Context(), actor)
-		requestContext.Request = requestContext.Request.WithContext(identityContext)
-	}, handler.CreateDownload(downloads.Create))
-	requestDownload := func(purpose string) *httptest.ResponseRecorder {
-		body := fmt.Sprintf(`{"expected_revision":"1","purpose":%q}`, purpose)
-		request := httptest.NewRequest(http.MethodPost, testPath+strconv.FormatUint(entryID, 10), strings.NewReader(body)).WithContext(ctx)
+	requestDownload := func(targetID, revision uint64, accessToken, purpose string, status int, code string) dto.CreateDownloadData {
+		t.Helper()
+		body := fmt.Sprintf(`{"expected_revision":"%d","purpose":%q}`, revision, purpose)
+		path := "/api/v1/entries/" + strconv.FormatUint(targetID, 10) + "/download"
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal("构造正式下载授权请求失败")
+		}
+		requestID := uuid.NewString()
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-Request-ID", requestID)
-		response := httptest.NewRecorder()
-		router.ServeHTTP(response, request)
-		return response
+		if accessToken != "" {
+			request.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		response, err := httpClient.Do(request)
+		if err != nil {
+			t.Fatal("发送正式下载授权请求失败")
+		}
+		data, readError := io.ReadAll(response.Body)
+		closeError := response.Body.Close()
+		if readError != nil || closeError != nil || response.StatusCode != status ||
+			response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Cache-Control") != "no-store" ||
+			response.Header.Get("Content-Type") != "application/json; charset=utf-8" ||
+			(status != http.StatusUnauthorized && response.Header.Get("Pragma") != "no-cache") {
+			t.Fatalf("正式下载授权响应不符，预期状态 %d，实际 %d", status, response.StatusCode)
+		}
+		if status != http.StatusOK {
+			var failure dto.ErrorResponse
+			if json.Unmarshal(data, &failure) != nil || failure.Error.Code != code || failure.RequestID != requestID {
+				t.Fatalf("正式下载授权错误响应不符，预期错误 %s", code)
+			}
+			if code == "REVISION_CONFLICT" && failure.Error.Details["current_revision"] != "1" {
+				t.Fatal("版本冲突未返回实际目录项版本")
+			}
+			return dto.CreateDownloadData{}
+		}
+
+		var result dto.CreateDownloadResponse
+		if json.Unmarshal(data, &result) != nil || result.RequestID != requestID ||
+			result.Data.ObjectID != strconv.FormatUint(*task.PublishedObjectID, 10) || result.Data.Revision != "1" ||
+			result.Data.SizeBytes != task.FileSize || result.Data.SHA256 != fmt.Sprintf("%x", *task.ExpectedSHA256) ||
+			result.Data.MIMEType != "application/octet-stream" || !result.Data.ExpiresAt.After(time.Now()) {
+			t.Fatal("正式下载 JSON 未保留公开标识或已验证内容信息")
+		}
+		return result.Data
 	}
 	readOpenedAt := func() time.Time {
+		t.Helper()
 		var openedAt sql.NullTime
-		err := pool.QueryRowContext(ctx, "SELECT last_opened_at FROM user_entry_preferences WHERE user_id=? AND entry_id=?", actor.UserID, entryID).Scan(&openedAt)
+		err := pool.QueryRowContext(ctx, "SELECT last_opened_at FROM user_entry_preferences WHERE user_id=? AND entry_id=?", userID, entryID).Scan(&openedAt)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			t.Fatal("读取真实最近访问记录失败", err)
 		}
 		return openedAt.Time
 	}
-	preview := requestDownload(domain.DownloadPurposePreview)
-	var failure dto.ErrorResponse
-	if preview.Code != http.StatusUnprocessableEntity || json.Unmarshal(preview.Body.Bytes(), &failure) != nil ||
-		failure.Error.Code != "UNSUPPORTED_PREVIEW" || failure.RequestID != requestID || !readOpenedAt().IsZero() {
-		t.Fatal("未授权的预览处理或访问记录不符", preview.Code)
+	// 1. 通过正式入口验证认证、归属、版本及预览拒绝，都不产生访问记录。
+	requestDownload(0, 1, "", domain.DownloadPurposeDownload, http.StatusUnauthorized, "AUTH_REQUIRED")
+	requestDownload(entryID, 1, otherToken, domain.DownloadPurposeDownload, http.StatusNotFound, "ENTRY_NOT_FOUND")
+	requestDownload(entryID, 2, token, domain.DownloadPurposeDownload, http.StatusConflict, "REVISION_CONFLICT")
+	requestDownload(entryID, 1, token, domain.DownloadPurposePreview, http.StatusUnprocessableEntity, "UNSUPPORTED_PREVIEW")
+	if !readOpenedAt().IsZero() {
+		t.Fatal("下载授权被拒绝后产生了访问记录")
 	}
 
 	// 2. 确认下载授权写入真实时间，并验证六十秒合并规则。
-	result, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload)
-	if err != nil || result == nil || result.ObjectID != *task.PublishedObjectID || result.Revision != 1 ||
-		result.SizeBytes != task.FileSize || result.VerifiedSHA256 != *task.ExpectedSHA256 ||
-		result.MIMEType != "application/octet-stream" || !result.Link.ExpiresAt.After(time.Now()) {
-		t.Fatal("真实发布文件的内部下载授权不符", err)
-	}
+	requestDownload(entryID, 1, token, domain.DownloadPurposeDownload, http.StatusOK, "")
 	firstOpenedAt := readOpenedAt()
 	if firstOpenedAt.IsZero() {
 		t.Fatal("首次签发未提交最近访问时间")
 	}
-	if repeated, err := downloads.Create(ctx, actor, entryID, 1, domain.DownloadPurposeDownload); err != nil || repeated == nil ||
-		!readOpenedAt().Equal(firstOpenedAt) {
-		t.Fatal("窗口内授权未复用原访问时间", err)
+	requestDownload(entryID, 1, token, domain.DownloadPurposeDownload, http.StatusOK, "")
+	if !readOpenedAt().Equal(firstOpenedAt) {
+		t.Fatal("窗口内授权未复用原访问时间")
 	}
 	const setPastAccess = "UPDATE user_entry_preferences SET last_opened_at=UTC_TIMESTAMP(6)-INTERVAL 61 SECOND WHERE user_id=? AND entry_id=?"
-	if _, err := pool.ExecContext(ctx, setPastAccess, actor.UserID, entryID); err != nil {
+	if _, err := pool.ExecContext(ctx, setPastAccess, userID, entryID); err != nil {
 		t.Fatal("设置联测访问时间失败", err)
 	}
 	pastOpenedAt := readOpenedAt()
-	renewed := requestDownload(domain.DownloadPurposeDownload)
-	if renewed.Code != http.StatusOK || !readOpenedAt().After(pastOpenedAt) {
-		t.Fatal("窗口外授权未更新访问时间", renewed.Code)
+	renewed := requestDownload(entryID, 1, token, domain.DownloadPurposeDownload, http.StatusOK, "")
+	if !readOpenedAt().After(pastOpenedAt) {
+		t.Fatal("窗口外授权未更新访问时间")
 	}
 
-	// 3. 通过测试入口的公开响应读取实际文件。
-	var decoded dto.CreateDownloadResponse
-	if err := json.Unmarshal(renewed.Body.Bytes(), &decoded); err != nil || decoded.RequestID != requestID ||
-		renewed.Header().Get("X-Request-ID") != requestID || renewed.Header().Get("Cache-Control") != "no-store" ||
-		decoded.Data.ObjectID != strconv.FormatUint(*task.PublishedObjectID, 10) || decoded.Data.Revision != "1" ||
-		!decoded.Data.ExpiresAt.After(time.Now()) {
-		t.Fatal("下载 JSON 未保留公开标识、签名地址和到期时间")
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, decoded.Data.URL, nil)
+	// 3. 使用正式授权响应中的签名 URL，从 MinIO 读取实际文件。
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, renewed.URL, nil)
 	if err != nil {
 		t.Fatal("无法构造联测签名请求")
 	}
@@ -367,9 +360,9 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 	}
 	data, readError := io.ReadAll(io.LimitReader(response.Body, int64(task.FileSize)+1))
 	closeError := response.Body.Close()
-	if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != decoded.Data.SizeBytes ||
-		fmt.Sprintf("%x", sha256.Sum256(data)) != decoded.Data.SHA256 || response.Header.Get("Content-Type") != decoded.Data.MIMEType ||
-		response.Header.Get("Content-Disposition") != decoded.Data.Disposition {
+	if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != renewed.SizeBytes ||
+		fmt.Sprintf("%x", sha256.Sum256(data)) != renewed.SHA256 || response.Header.Get("Content-Type") != renewed.MIMEType ||
+		response.Header.Get("Content-Disposition") != renewed.Disposition {
 		t.Fatal("实际发布文件的远程字节或交付头不符", response.StatusCode)
 	}
 }

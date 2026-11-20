@@ -461,7 +461,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 28. 注册业务接口，将上传接收、完成确认与取消受理绑定到正式路由。
+	// 下载目标在只读快照内检查，签发后通过当前用户事务复查并记录访问。
+	downloadTargets := service.NewEntryDownloadTargetService(func(ctx context.Context, read func(context.Context, service.EntryDownloadTargetReader) error) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+			return read(snapshotContext, snapshotStore)
+		})
+	})
+	downloads := service.NewEntryDownloadService(downloadTargets.Get, storageClient.CheckDownloadObject, storageClient.SignDownloadURL,
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.DownloadAccessTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+	)
+
+	// 28. 注册业务接口，将上传流程及下载授权绑定到正式路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
@@ -476,6 +490,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
 	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
+	serverhttp.RegisterCreateDownloadRoute(router, authorizationService.Authorize, downloads.Create)
 	serverhttp.RegisterCurrentUserRoute(router, authorizationService.Authorize, profileService.Get)
 	serverhttp.RegisterUserSessionsRoute(router, authorizationService.Authorize, sessionListService.List)
 	serverhttp.RegisterUserDevicesRoute(router, authorizationService.Authorize, deviceListService.List)
