@@ -55,29 +55,51 @@ func TestDecodeRestoreEntryDataIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal("建立持久恢复快照失败", err)
 	}
-	readSnapshot := func(t *testing.T) []byte {
+	readRecord := func(t *testing.T) *domain.IdempotencyRecord {
 		t.Helper()
 		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.RestoreEntryOperation, key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return record.ResponseBody
+		return record
 	}
 
-	// 2. 从真实 MySQL JSON 列读回快照，核对实际位置和版本。
-	originalBody := readSnapshot(t)
+	// 2. 确认同键同参可复用，且再次请求会保留首次恢复快照。
+	committed := readRecord(t)
+	digest, err := service.BuildRestoreEntryRequestHash(entryID, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := service.ValidateRestoreEntryReplay(committed, actor.UserID, entryID, revision, key, digest, now); err != nil {
+		t.Fatal("刚提交的恢复记录无法复用", err)
+	}
+	otherDigest, err := service.BuildRestoreEntryRequestHash(entryID, revision+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ValidateRestoreEntryReplay(committed, actor.UserID, entryID, revision+1, key, otherDigest, now); !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+		t.Fatal("同键不同预期版本未报冲突", err)
+	}
+	if err := service.ValidateRestoreEntryReplay(committed, actor.UserID, entryID, revision+1, key, otherDigest, committed.ExpiresAt); !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+		t.Fatal("到达保留截止时间时应先拒绝复用", err)
+	}
+	originalBody := committed.ResponseBody
 	decoded, err := dto.DecodeRestoreEntryData(originalBody)
 	if err != nil || decoded == nil || *decoded != *expected || decoded.Entry.ParentID != "11" || decoded.Entry.Revision != "6" {
 		t.Fatal("持久 JSON 未恢复为预期快照", decoded, err)
 	}
 
-	// 3. MySQL 可保存不符合业务契约的 JSON，验证解码器逐项拒绝。
+	// 3. 核对记录关联与完整快照各自拦截的不一致情况。
 	for _, scenario := range []struct {
-		name, statement string
+		name, statement        string
+		badReplay, badSnapshot bool
 	}{
-		{"numeric revision", "UPDATE idempotency_records SET response_body=JSON_SET(?, '$.entry.revision', 6) WHERE user_id=? AND operation=? AND idempotency_key=?"},
-		{"wrong status", "UPDATE idempotency_records SET response_body=JSON_SET(?, '$.entry.status', 'TRASHED') WHERE user_id=? AND operation=? AND idempotency_key=?"},
-		{"missing parent", "UPDATE idempotency_records SET response_body=JSON_REMOVE(?, '$.entry.parent_id') WHERE user_id=? AND operation=? AND idempotency_key=?"},
+		{"numeric revision", "UPDATE idempotency_records SET response_body=JSON_SET(?, '$.entry.revision', 6) WHERE user_id=? AND operation=? AND idempotency_key=?", true, true},
+		{"wrong status", "UPDATE idempotency_records SET response_body=JSON_SET(?, '$.entry.status', 'TRASHED') WHERE user_id=? AND operation=? AND idempotency_key=?", false, true},
+		{"missing parent", "UPDATE idempotency_records SET response_body=JSON_REMOVE(?, '$.entry.parent_id') WHERE user_id=? AND operation=? AND idempotency_key=?", false, true},
+		{"valid snapshot for another entry", "UPDATE idempotency_records SET response_body=JSON_SET(?, '$.entry.id', '16') WHERE user_id=? AND operation=? AND idempotency_key=?", true, false},
+		{"valid snapshot with wrong version", "UPDATE idempotency_records SET response_body=JSON_SET(?, '$.entry.revision', '7') WHERE user_id=? AND operation=? AND idempotency_key=?", true, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			update, err := pool.ExecContext(ctx, scenario.statement, string(originalBody), actor.UserID, domain.RestoreEntryOperation, key)
@@ -87,9 +109,15 @@ func TestDecodeRestoreEntryDataIntegration(t *testing.T) {
 			if count, err := update.RowsAffected(); err != nil || count != 1 {
 				t.Fatal("未更新独占库的快照", count, err)
 			}
-			data, err := dto.DecodeRestoreEntryData(readSnapshot(t))
-			if data != nil || !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
-				t.Fatal("异常数据库快照被解码为成功结果", data, err)
+			record := readRecord(t)
+			replayError := service.ValidateRestoreEntryReplay(record, actor.UserID, entryID, revision, key, digest, now)
+			if scenario.badReplay && !errors.Is(replayError, domain.ErrInvalidIdempotencyRecordData) || !scenario.badReplay && replayError != nil {
+				t.Fatal("持久记录与请求的关联判断不符", replayError)
+			}
+			data, decodeError := dto.DecodeRestoreEntryData(record.ResponseBody)
+			if scenario.badSnapshot && (data != nil || !errors.Is(decodeError, domain.ErrInvalidIdempotencyRecordData)) ||
+				!scenario.badSnapshot && (data == nil || decodeError != nil) {
+				t.Fatal("持久快照的解码结果不符", data, decodeError)
 			}
 		})
 	}

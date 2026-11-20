@@ -939,3 +939,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.NewRestoreEntryData`，将单项恢复结果转换为包含实际位置、名称和新版本的公开快照。[第 428 步学习记录](docs/开发学习记录.md#第-428-步转换单项恢复成功响应数据)
 
 已提供 `dto.DecodeRestoreEntryData`，校验并解码已保存的单项恢复快照。[第 429 步学习记录](docs/开发学习记录.md#第-429-步校验并解码单项恢复快照)
+
+已提供 `service.ValidateRestoreEntryReplay`，核对已保存的恢复结果是否对应当前请求。[第 430 步学习记录](docs/开发学习记录.md#第-430-步校验单项恢复幂等结果的复用条件)
