@@ -1,8 +1,10 @@
 package dto
 
-import "net/url"
+import (
+	"net/url"
 
-const maxTrashListCursorBytes = 1024
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
+)
 
 // TrashPageQuery 保存回收站列表的类型化分页参数。
 type TrashPageQuery struct {
@@ -24,7 +26,7 @@ func ParseTrashPageQuery(rawQuery string) (*TrashPageQuery, *FieldError) {
 	// 2. 校验游标的数量和解码后的字节数，保留游标原文。
 	var cursor string
 	if cursorValues, present := values["cursor"]; present {
-		if len(cursorValues) != 1 || len(cursorValues[0]) > maxTrashListCursorBytes {
+		if len(cursorValues) != 1 || len(cursorValues[0]) > domain.MaxTrashEntryCursorLength {
 			return nil, &FieldError{Field: "cursor", Message: "回收站游标须为单个不超过 1024 字节的文本"}
 		}
 		cursor = cursorValues[0]

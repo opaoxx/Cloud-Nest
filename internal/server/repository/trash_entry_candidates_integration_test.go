@@ -1,13 +1,18 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"net/url"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
@@ -195,6 +200,27 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 			}
 			if index == 0 && (page.NextPosition.ID != 2000 || !page.NextPosition.DeletedAt.Equal(hiddenTime)) {
 				t.Fatalf("空页续读点为 %+v，期望最后消费的隐藏候选 2000", page.NextPosition)
+			}
+			if index == 0 {
+				// 用本页返回的位置签发游标，再从客户端查询参数读回原文。
+				signer, err := service.NewTrashEntryCursorSigner(bytes.Repeat([]byte{9}, 32))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cursor, err := signer.Sign(actor.UserID, *page.NextPosition)
+				if err != nil {
+					t.Fatal(err)
+				}
+				query, fieldError := dto.ParseTrashPageQuery(url.Values{"cursor": {cursor}, "limit": {"2"}}.Encode())
+				if fieldError != nil || query == nil || query.Cursor != cursor || query.PageSize != 2 {
+					t.Fatalf("空页游标无法经 URL 查询原样传递，字段错误为 %v", fieldError)
+				}
+				payload, _, _ := strings.Cut(query.Cursor, ".")
+				decoded, err := base64.RawURLEncoding.Strict().DecodeString(payload)
+				want := `{"version":1,"user_id":"3","deleted_at":"2026-11-20T01:31:00.123456Z","entry_id":"2000"}`
+				if err != nil || string(decoded) != want {
+					t.Fatalf("空页游标载荷为 %s，错误为 %v", decoded, err)
+				}
 			}
 			before = page.NextPosition
 		}
