@@ -1049,3 +1049,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.StartReadyObjectGCTimer`，在用户事务内为无有效引用的 `READY` 对象记录七天宽限期。[第 483 步学习记录](docs/开发学习记录.md#第-483-步为无引用的-ready-对象启动回收计时)
 
 单项永久清理已接入对象回收计时。最后一个有效引用解除时，七天期限与文件结算在同一事务提交。[第 484 步学习记录](docs/开发学习记录.md#第-484-步在永久清理中启动对象回收计时)
+
+已提供 `Store.ListStoredObjectGCCandidates`，按回收时间和对象 ID 限量读取 `READY` 与 `ORPHANED` 的到期候选。[第 485 步学习记录](docs/开发学习记录.md#第-485-步扫描已到期的对象回收候选)
