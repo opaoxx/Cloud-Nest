@@ -989,3 +989,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.NewPurgeEntryAcceptedData`，将受理结果转换为目标 ID、`PURGING` 状态和进度地址组成的 202 快照。[第 453 步学习记录](docs/开发学习记录.md#第-453-步转换永久清理受理响应数据)
 
 已提供 `dto.DecodePurgeEntryAcceptedData`，校验已保存的受理快照及进度地址和目标 ID 的对应关系。[第 454 步学习记录](docs/开发学习记录.md#第-454-步校验并解码永久清理受理快照)
+
+已提供 `service.ValidatePurgeEntryReplay`，校验已保存的 202 受理记录能否用于本次确认。[第 455 步学习记录](docs/开发学习记录.md#第-455-步校验永久清理幂等结果的复用条件)

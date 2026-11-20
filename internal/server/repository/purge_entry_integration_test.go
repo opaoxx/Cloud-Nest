@@ -201,6 +201,27 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 		if err != nil || decoded == nil || *decoded != *accepted {
 			t.Fatal("MySQL 返回的快照未解码成原受理结果", decoded, err)
 		}
+		decodeEntryID := func(body []byte) (string, error) {
+			data, err := dto.DecodePurgeEntryAcceptedData(body)
+			if err != nil {
+				return "", err
+			}
+			return data.EntryID, nil
+		}
+		checkAt := record.ExpiresAt.Add(-time.Nanosecond)
+		if err := service.ValidatePurgeEntryReplay(record, actor.UserID, saved.ID, key, requestHash, checkAt, decodeEntryID); err != nil {
+			t.Fatal("同键同参的受理快照应可复用", err)
+		}
+		differentHash, err := service.BuildPurgeEntryRequestHash(preview.EntryID, preview.Revision+1, preview.Credential.PreviewDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.ValidatePurgeEntryReplay(record, actor.UserID, saved.ID, key, differentHash, checkAt, decodeEntryID); !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+			t.Fatal("同键异参应返回冲突", err)
+		}
+		if err := service.ValidatePurgeEntryReplay(record, actor.UserID, saved.ID, key, differentHash, record.ExpiresAt, decodeEntryID); !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+			t.Fatal("记录到期应先于参数冲突", err)
+		}
 		update, err := pool.ExecContext(ctx, `UPDATE idempotency_records
 		  SET response_body=JSON_SET(response_body, '$.progress_url', '/api/v1/trash/14/purge')
 		  WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.PurgeEntryOperation, key)
@@ -216,6 +237,9 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 		}
 		if decoded, err := dto.DecodePurgeEntryAcceptedData(record.ResponseBody); decoded != nil || !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
 			t.Fatal("能存入 MySQL 的错误进度地址也应被拒绝", decoded, err)
+		}
+		if err := service.ValidatePurgeEntryReplay(record, actor.UserID, saved.ID, key, requestHash, checkAt, decodeEntryID); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+			t.Fatal("同键同参的记录仍须通过完整快照校验", err)
 		}
 	})
 
