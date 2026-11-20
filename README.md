@@ -921,3 +921,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.ParseRestoreEntryRequest`，将单项恢复正文中的合法字符串版本转换为完整整数。[第 419 步学习记录](docs/开发学习记录.md#第-419-步解析单项恢复请求的预期版本)
 
 已提供 `service.BuildRestoreEntryRequestHash`，将恢复操作、目标 ID 和预期版本生成稳定摘要。[第 420 步学习记录](docs/开发学习记录.md#第-420-步生成单项恢复的幂等请求摘要)
+
+已提供 `service.ReadRestoreEntryTarget` 和 `ValidateRestoreEntryRevision`，供用户事务检查恢复目标及版本。[第 421 步学习记录](docs/开发学习记录.md#第-421-步检查单项恢复目标)
