@@ -132,8 +132,8 @@ info:
     GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
     POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
     GET /api/v1/trash/{id}/purge-preview 已接入启动入口，使用只读快照返回受影响范围与短时确认凭证。
-    DELETE /api/v1/trash/{id} 在服务启动时注册，受理后返回 202 和计划中的进度查询地址。
-    GET /api/v1/trash/{id}/purge 定义计划中的进度查询契约，按当前用户返回清理状态和剩余项数。
+    DELETE /api/v1/trash/{id} 在服务启动时注册，受理后返回 202 和进度查询地址。
+    GET /api/v1/trash/{id}/purge 在服务启动时注册，按当前用户返回清理状态和剩余项数。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -470,7 +470,7 @@ paths:
         1. Bearer 授权通过后校验路径 id、Idempotency-Key 和两个预检请求头。身份取自认证上下文。
         2. 在已认证用户事务内，先按用户、操作和幂等键查找已保存结果。请求摘要绑定目标、预期版本和完整预检凭证。同键同参在记录保留期内返回首次 202 受理快照和本次请求 ID，即使凭证已到期或后台状态已推进。记录保留八天。
         3. 首次受理时在同一用户事务中复查目标归属、TRASHED 状态和活动父链，验证凭证签名、用户、目标与截止时间，重新读取完整子树并比较指纹。凭证到期、指纹变化或当前范围超过 10000 个保留目录项，均返回 PURGE_PREVIEW_CHANGED。
-        4. 当前指纹匹配后比较目标版本。条件更新将目标改为 PURGING，记录清理开始时间并递增版本，与 202 受理快照在同一事务内保存。提交后子树立即不可访问。后续阶段实现进度查询、分批清理、空间结算和内容引用释放。数据结构异常或版本无法递增时回滚并返回 500。
+        4. 当前指纹匹配后比较目标版本。条件更新将目标改为 PURGING，记录清理开始时间并递增版本，与 202 受理快照在同一事务内保存。提交后子树立即不可访问，客户端可查询进度。后续阶段实现分批清理、空间结算和内容引用释放。数据结构异常或版本无法递增时回滚并返回 500。
         5. 请求结果未知时，以原幂等键、版本和凭证重试。收到 PURGE_PREVIEW_CHANGED 或 REVISION_CONFLICT 时，重新预检并获得用户确认，再以新幂等键提交。
       security:
         - BearerAuth: []
@@ -620,7 +620,7 @@ paths:
       operationId: getEntryPurgeProgress
       summary: 查询当前用户的单项永久清理进度
       description: |
-        计划契约。客户端可从确认清理返回的 progress_url 发起只读查询。
+        服务启动时注册，绑定共享 Bearer 认证和 MySQL 只读快照。客户端可从确认清理返回的 progress_url 发起只读查询。
         1. Bearer 授权通过后校验路径 id，按认证用户查询目标。同一账号的有效会话均可查询。仅需路径 ID 和有效访问令牌，预检凭证和幂等记录的有效期不影响进度读取。
         2. 目标须为当前用户的非真实根目录项，自身处于 PURGING 或 PURGED，并有 purge_started_at。该时间标识清理根项，清理结束后仍保留；仅随祖先清理且无自身开始时间的后代不符合查询条件。已受理目标的查询资格不依赖祖先当前的可见性。
         3. 从同一只读快照取得状态和剩余项数。PURGING 时沿同用户 parent_id 关系统计目标及全部尚未 PURGED 的后代，包含已回收的后代。PURGED 项不计数。目标自身尚未完成时计为 1，故 PURGING 返回 1～10000。
@@ -2737,7 +2737,7 @@ components:
         progress_url:
           type: string
           pattern: '^/api/v1/trash/[1-9][0-9]{0,19}/purge$'
-          description: 计划中的进度查询路径，包含同一个 entry_id，按当前 API 服务地址解析。
+          description: 进度查询路径，包含同一个 entry_id，按当前 API 服务地址解析。
     PurgeEntryAcceptedResponse:
       type: object
       additionalProperties: false
@@ -4871,7 +4871,7 @@ components:
           schema:
             $ref: '#/components/schemas/PurgePreviewResponse'
     PurgeEntryAccepted:
-      description: 永久清理已受理 HTTP 202，交付稳定受理快照、计划中的进度查询地址和本次请求 ID。后台分批清理由后续阶段实现。
+      description: 永久清理已受理 HTTP 202，交付稳定受理快照、进度查询地址和本次请求 ID。后台分批清理由后续阶段实现。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'

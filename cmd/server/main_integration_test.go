@@ -1455,6 +1455,7 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	// 正式清理确认使用独立回收项，保存原始确认参数以便在新实例重试。
 	purgeConfirmation, purgeAcceptedBeforeRestart := verifyServerPurgeEntry(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
 	loginSecrets = append(loginSecrets, purgeConfirmation.PreviewDigest)
+	purgeProgressBeforeRestart := verifyServerPurgeEntryProgress(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, purgeAcceptedBeforeRestart)
 
 	// 3. 重启后沿用原 JWT，再验证数据库禁用及会话撤销立即影响后续请求。
 	secretPath := filepath.Join(configurationDirectory, "CloudNest", "jwt-secret")
@@ -1654,6 +1655,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	purgePreviewAfterRestart := verifyServerPurgePreviewAfterRestart(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, purgePreviewBeforeRestart)
 	loginSecrets = append(loginSecrets, purgePreviewAfterRestart.Data.PreviewDigest)
 	verifyServerPurgeEntryAfterRestart(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, purgeConfirmation, purgeAcceptedBeforeRestart)
+	verifyServerPurgeEntryProgressAfterRestart(t, ctx, pool, "http://"+address, nativeRefreshed.Data.AccessToken,
+		purgeAcceptedBeforeRestart.Data.ProgressURL, purgeProgressBeforeRestart)
 	trashFirstAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, serverTrashFirstQuery, 200, "", "")
 	trashNextAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, trashNextQuery, 200, "", "")
 	if !reflect.DeepEqual(trashFirstBeforeRestart.Data, trashFirstAfterRestart.Data) ||

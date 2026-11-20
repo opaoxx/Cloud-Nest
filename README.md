@@ -1000,9 +1000,9 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 
 共享 CORS 规则已允许白名单来源的 DELETE 预检声明 `X-CloudNest-Expected-Revision` 和 `X-CloudNest-Purge-Preview`。[第 459 步学习记录](docs/开发学习记录.md#第-459-步允许永久清理确认请求头通过跨域预检)
 
-已注册 `DELETE /api/v1/trash/{id}`。使用上一次预检返回的版本和凭证，以及请求的幂等键，确认成功后返回 202 并将目标标记为 `PURGING`。进度查询与后台分批清理将在后续接入。[第 460 步学习记录](docs/开发学习记录.md#第-460-步注册正式永久清理确认路由)
+已注册 `DELETE /api/v1/trash/{id}`。使用上一次预检返回的版本和凭证，以及请求的幂等键，确认成功后返回 202 与进度地址，并将目标标记为 `PURGING`。[第 460 步学习记录](docs/开发学习记录.md#第-460-步注册正式永久清理确认路由)
 
-已定义 `GET /api/v1/trash/{id}/purge` 的计划契约。清理目标所属账号可查询状态和剩余项数，完成后返回 `PURGED` 与 `0`。[第 461 步学习记录](docs/开发学习记录.md#第-461-步定义永久清理进度查询接口契约)
+已定义 `GET /api/v1/trash/{id}/purge` 的响应契约。清理目标所属账号可查询状态和剩余项数，完成后返回 `PURGED` 与 `0`。[第 461 步学习记录](docs/开发学习记录.md#第-461-步定义永久清理进度查询接口契约)
 
 已提供 `Store.FindUserPurgeProgressTarget`，按用户读取目录项的状态、父 ID 和可空清理时间，供进度服务判断是否可查。[第 462 步学习记录](docs/开发学习记录.md#第-462-步按用户读取永久清理进度目标)
 
@@ -1017,3 +1017,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.PurgeEntryProgressSuccess`，把进度结果写成带当次请求 ID 和禁止缓存头的 HTTP 200，已通过测试路由验证。[第 467 步学习记录](docs/开发学习记录.md#第-467-步交付永久清理进度响应)
 
 已提供 `handler.PurgeEntryProgress`，在测试路由串联 Bearer 认证、目标 ID 校验、只读进度服务和统一响应，已通过真实 JWT 与 MySQL 验证。[第 468 步学习记录](docs/开发学习记录.md#第-468-步处理永久清理进度查询请求)
+
+已注册正式 `GET /api/v1/trash/{id}/purge`。客户端可使用 202 给出的进度地址查询当前状态和剩余项数。后台分批清理将在后续接入。[第 469 步学习记录](docs/开发学习记录.md#第-469-步注册正式永久清理进度查询路由)

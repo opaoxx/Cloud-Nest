@@ -504,6 +504,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		time.Now,
 	)
 
+	// 5. 将进度服务绑定到已有的 MySQL 只读快照。
+	purgeProgressService := service.NewPurgeProgressService(func(ctx context.Context, read func(context.Context, service.PurgeProgressReader) error) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+			return read(snapshotContext, snapshotStore)
+		})
+	})
+
 	// 22. 绑定当前用户事务，装配收藏核心服务。
 	setStarredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -598,6 +605,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterRestoreEntryRoute(router, authorizationService.Authorize, restoreEntryService.Restore)
 	serverhttp.RegisterPurgePreviewRoute(router, authorizationService.Authorize, purgePreviewService.Preview)
 	serverhttp.RegisterPurgeEntryRoute(router, authorizationService.Authorize, purgeEntryService.Begin)
+	serverhttp.RegisterPurgeEntryProgressRoute(router, authorizationService.Authorize, purgeProgressService.Get)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
 	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
 	serverhttp.RegisterCreateDownloadRoute(router, authorizationService.Authorize, downloads.Create)
