@@ -128,6 +128,7 @@ info:
     访问处理函数组合 Actor、路径、用途 DTO、核心服务及成功交付，目录目标定位 id，用途错误定位 purpose，不可见目标复用 TargetEntryNotFound。
     POST /api/v1/entries/{id}/access 已由启动入口绑定共享授权及用户事务，按 preview/open 记录文件访问，六十秒内合并并返回已存时间。
     POST /api/v1/entries/{id}/download 定义短期下载与预览授权的计划契约，返回绑定具体存储对象的 GET URL。
+    POST /api/v1/entries/{id}/trash 定义单项回收的计划契约，使用预期版本及幂等键，交付回收后的快照。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -411,6 +412,52 @@ paths:
           $ref: '#/components/responses/TargetEntryNotFound'
         '409':
           $ref: '#/components/responses/CreateDirectoryConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/entries/{id}/trash:
+    post:
+      tags: [Entries]
+      operationId: trashEntry
+      summary: 按预期版本回收当前用户的文件或目录
+      description: |
+        计划契约，后端实现后注册路由。
+        1. Bearer 授权通过后，依次校验路径 id、Idempotency-Key、受限 JSON 及 expected_revision。用户事务复查账号、设备与会话。
+        2. 首次执行时检查目标归属及完整祖先链，要求目标和祖先均为 ACTIVE。真实根目录禁止回收，随后比对目标版本。
+        3. 仅将选中的目录项标记为 TRASHED，记录数据库 UTC 回收时间并将版本加一。保留 parent_id、对象引用、配额和文件偏好。
+        原名称键保留，活动名称占用随状态释放。目录的后代保留各自状态，通过祖先检查从正常列表、详情和新的下载授权中隐藏。
+        已签发的存储链接按原有效期处理。回收更新与稳定 data.entry 在同一事务内提交，幂等结果保存八天。
+        同一用户同键同参数重试交付当时的 200 快照，关联当前 request_id。参数摘要绑定目标 id 和 expected_revision。
+        同键不同参数或已到期的记录返回对应 409。使用新键再次回收已隐藏项按不可见目标返回 404。
+        版本无法递增时按内部错误处理，回收事务回滚。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrashEntryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/TrashEntrySucceeded'
+        '400':
+          $ref: '#/components/responses/TrashEntryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          $ref: '#/components/responses/RootEntryOperationForbidden'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/TrashEntryConflict'
         '413':
           $ref: '#/components/responses/RequestBodyTooLarge'
         '415':
@@ -2263,6 +2310,68 @@ components:
       example:
         target_parent_id: '12'
         expected_revision: '3'
+    TrashEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      description: |
+        目标目录项 ID 来自路径，用户身份来自认证上下文。
+        expected_revision 为非零 uint64 标准十进制字符串，上限为 18446744073709551615。
+        解码成功后，缺失、null 或值不符合版本规则时返回 expected_revision 字段错误。
+      properties:
+        expected_revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+      example:
+        expected_revision: '3'
+    TrashEntryData:
+      type: object
+      additionalProperties: false
+      required: [entry]
+      description: 回收提交时的稳定目录项快照，供同键重试恢复。
+      properties:
+        entry:
+          type: object
+          additionalProperties: false
+          required: [id, parent_id, name, entry_type, status, revision, deleted_at]
+          properties:
+            id:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+            parent_id:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/parent_id'
+            name:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/name'
+            entry_type:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/entry_type'
+            status:
+              type: string
+              enum: [TRASHED]
+            revision:
+              $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+            deleted_at:
+              type: string
+              format: date-time
+              pattern: '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z$'
+              description: 本次回收写入的 UTC 时间，最多六位小数，年份为 1000～9999。
+    TrashEntryResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/TrashEntryData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          entry:
+            id: '23'
+            parent_id: '12'
+            name: 学习笔记.md
+            entry_type: FILE
+            status: TRASHED
+            revision: '4'
+            deleted_at: '2026-11-20T04:30:00.123456Z'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateDownloadRequest:
       type: object
       additionalProperties: false
@@ -2830,6 +2939,61 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    TrashEntryRejected:
+      description: |
+        HTTP 400，INVALID_ARGUMENT。字段错误定位 id、Idempotency-Key 或 expected_revision。
+        JSON 读取或绑定错误的 details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TrashEntryConflict:
+      description: |
+        HTTP 409，REVISION_CONFLICT 表示当前可见目录项版本与预期不一致，details.current_revision 为非零 uint64 十进制字符串。
+        IDEMPOTENCY_CONFLICT 表示同键不同参数。IDEMPOTENCY_EXPIRED 表示保存的记录已到期，客户端先核对目录项当前状态。
+        幂等冲突的 details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            revision_conflict:
+              value:
+                error:
+                  code: REVISION_CONFLICT
+                  message: 文件已发生变化，请刷新后重试
+                  details:
+                    current_revision: '4'
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            request_conflict:
+              value:
+                error:
+                  code: IDEMPOTENCY_CONFLICT
+                  message: 幂等键已用于不同请求参数
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     MoveEntryRejected:
       description: |
         HTTP 400，路径、幂等头、正文参数、目的地关系、最终深度和子树规模错误使用 INVALID_ARGUMENT。
@@ -2920,7 +3084,7 @@ components:
                 field: name
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     RootEntryOperationForbidden:
-      description: HTTP 403，根目录禁止重命名或移动使用 ROOT_OPERATION_FORBIDDEN，账号禁用使用 ACCOUNT_DISABLED，来源拒绝使用 CORS_FORBIDDEN。
+      description: HTTP 403，根目录禁止重命名、移动或回收使用 ROOT_OPERATION_FORBIDDEN，账号禁用使用 ACCOUNT_DISABLED，来源拒绝使用 CORS_FORBIDDEN。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -3985,6 +4149,23 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/RenameEntryResponse'
+    TrashEntrySucceeded:
+      description: 回收成功 HTTP 200，返回提交时的 data.entry 快照和本次请求 ID，响应使用 no-store 和 Pragma no-cache。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TrashEntryResponse'
     MoveEntrySucceeded:
       description: |
         移动成功 HTTP 200，使用 data.entry 稳定快照与当前请求 ID。
