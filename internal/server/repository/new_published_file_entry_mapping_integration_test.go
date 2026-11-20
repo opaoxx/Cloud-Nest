@@ -36,6 +36,7 @@ func TestNewPublishedFileEntryMappingIntegration(t *testing.T) {
 			record := publishedFileEntryMappingFixture()
 			if scenario.emptyFile {
 				record.Name, record.NameKey, record.Category, record.Extension = ".env", []byte(".env"), "OTHER", nil
+				record.MIMEType = nil
 				record.ObjectID, record.FileSize = 30, 0
 			}
 			// 1. 用隔离库验证 GORM 映射实际插入，内容时间取同一事务的 MySQL 时钟。
@@ -66,7 +67,7 @@ func TestNewPublishedFileEntryMappingIntegration(t *testing.T) {
 				display.SourceDeviceID == nil || *display.SourceDeviceID != record.SourceDeviceID ||
 				display.SourceDeviceName == nil || *display.SourceDeviceName != record.SourceDeviceName ||
 				display.ContentModifiedAt == nil || !display.ContentModifiedAt.Equal(record.ContentModifiedAt) ||
-				display.MIMEType != nil || display.ColorKey != nil {
+				!reflect.DeepEqual(display.MIMEType, record.MIMEType) || display.ColorKey != nil {
 				t.Fatal("发布文件展示字段、扩展名空值或内容时间错误", display, err)
 			}
 			var objectID uint64

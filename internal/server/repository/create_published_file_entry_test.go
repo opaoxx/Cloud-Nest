@@ -60,7 +60,8 @@ func TestCreatePublishedFileEntryReadbackTime(t *testing.T) {
 				}}, nil
 			}
 			script.insert = func(_ context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
-				if !strings.HasPrefix(statement, "INSERT INTO `file_entries` ") || len(arguments) != 13 || arguments[12].Value != now {
+				if !strings.HasPrefix(statement, "INSERT INTO `file_entries` ") || len(arguments) != 14 ||
+					arguments[8].Value != nil || arguments[13].Value != now {
 					t.Fatal("预期使用映射和数据库时间插入文件", statement, arguments)
 				}
 				return driver.RowsAffected(1), nil

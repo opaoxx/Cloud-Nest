@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-// NewPublishedFileEntry 映射创建发布文件目录项所需的十三列。
+// NewPublishedFileEntry 映射创建发布文件目录项所需的十四列。
 // 自增 ID、活动名称键、版本和其他初始字段由数据库生成或填充。
 type NewPublishedFileEntry struct {
 	// 1. 映射用户、父目录、展示名和名称键。
@@ -24,6 +24,8 @@ type NewPublishedFileEntry struct {
 	Category string `gorm:"column:category;<-:create"`
 	// Extension 是可空的小写末级扩展名。
 	Extension *string `gorm:"column:extension;<-:create"`
+	// MIMEType 保存根据文件内容识别的基础媒体类型，未知时写入 NULL。
+	MIMEType *string `gorm:"column:mime_type;<-:create"`
 	// ObjectID 引用同一用户已选定的 READY 对象。
 	ObjectID uint64 `gorm:"column:object_id;<-:create"`
 	// FileSize 保存对象大小快照，零字节有效。

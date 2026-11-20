@@ -39,9 +39,14 @@ func (store *Store) CreatePublishedFileEntry(ctx context.Context, task *domain.U
 	if input.Name == "" || !utf8.ValidString(input.Name) || len(input.NameKey) == 0 || len(input.NameKey) > 768 || !utf8.Valid(input.NameKey) {
 		return nil, domain.ErrInvalidEntryName
 	}
+	// 可选 MIME 使用与下载响应相同的基础类型格式。
+	if input.MIMEType != nil && !domain.ValidDownloadMediaType(*input.MIMEType) {
+		return nil, domain.ErrInvalidFileEntryData
+	}
 	record := models.NewPublishedFileEntry{
 		UserID: userID, ParentID: input.ParentID, Name: input.Name, NameKey: bytes.Clone(input.NameKey),
 		EntryType: "FILE", Status: "ACTIVE", Category: input.Category, Extension: copyUploadTaskValue(input.Extension),
+		MIMEType: copyUploadTaskValue(input.MIMEType),
 		ObjectID: input.ObjectID, FileSize: input.SizeBytes, SourceDeviceID: input.SourceDeviceID, SourceDeviceName: input.SourceDeviceName,
 	}
 

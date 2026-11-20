@@ -101,7 +101,10 @@ func (publication *UploadPublicationService) Publish(
 			return err
 		}
 
-		// 3. 创建文件、结算配额并写入任务完成结果。
+		// 3. 将校验得到的可选 MIME 随文件目录项写入，再结算配额并记录完成。
+		if digest.DetectedMIMEType != "" {
+			input.MIMEType = &digest.DetectedMIMEType
+		}
 		entry, err := txn.CreatePublishedFileEntry(txContext, task, *input)
 		if err != nil {
 			return err

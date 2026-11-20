@@ -13,6 +13,8 @@ type CreatePublishedFileEntryInput struct {
 	Category string
 	// Extension 是小写末级扩展名，无可用扩展名时为 nil。
 	Extension *string
+	// MIMEType 来自对对象字节的校验，无法识别时为 nil。
+	MIMEType *string
 	// ObjectID 是选定的 READY 对象 ID，可以复用已有对象。
 	ObjectID uint64
 	// SizeBytes 是已校验对象的字节数，保存为文件大小快照。

@@ -137,15 +137,20 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 		t.Fatal(err)
 	}
 	binary := []byte{0, 0xff, 0xfe, 1, 0x80}
-	var received []*domain.UploadTask
+	type receivedUpload struct {
+		task     *domain.UploadTask
+		mimeType string
+	}
+	var received []receivedUpload
 	for _, fixture := range []struct {
-		name, key string
-		data      []byte
-		wrongHash bool
+		name, key, mimeType string
+		data                []byte
+		wrongHash           bool
 	}{
-		{"binary", "server-upload-receive-binary", binary, false},
-		{"empty", "server-upload-receive-empty", nil, false},
-		{"checksum mismatch", "server-upload-receive-checksum", binary, true},
+		{name: "binary", key: "server-upload-receive-binary", data: binary},
+		{name: "empty", key: "server-upload-receive-empty"},
+		{name: "UTF-8 text with binary extension", key: "server-upload-receive-text", mimeType: "text/plain", data: []byte("CloudNest 学习记录\n")},
+		{name: "checksum mismatch", key: "server-upload-receive-checksum", data: binary, wrongHash: true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 通过正式创建接口取得已有任务和对象位置。
@@ -210,21 +215,22 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 				info.ETag != *object.StorageETag || !bytes.Equal(actual, fixture.data) {
 				t.Fatal("MinIO 读回内容或确认信息不符", statError, readError)
 			}
-			received = append(received, pending)
+			received = append(received, receivedUpload{task: pending, mimeType: fixture.mimeType})
 		})
 	}
 
 	t.Run("background verification", func(t *testing.T) {
 		// 1. 只等待生产 worker，校验轮次由服务调度。
-		if len(received) != 2 {
-			t.Fatal("未准备好两条待校验记录", len(received))
+		if len(received) != 3 {
+			t.Fatal("未准备好三条待校验记录", len(received))
 		}
 		waitContext, stopWaiting := context.WithTimeout(ctx, 12*time.Second)
 		defer stopWaiting()
 
 		// 2. 从查询接口和数据库核对已发布结果、实测摘要及配额结算。
 		var publishedBytes uint64
-		for _, original := range received {
+		for _, upload := range received {
+			original := upload.task
 			task := awaitServerUploadPublication(t, waitContext, store, userID, original.ID)
 			if task.ResultEntryID == nil ||
 				task.PublishedObjectID == nil || *task.PublishedObjectID != original.StagedObjectID ||
@@ -246,7 +252,7 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 				task.CompletedAt == nil || !confirmed.Data.CompletedAt.Equal(*task.CompletedAt) {
 				t.Fatal("正式完成确认未返回后台实际发布结果", confirmed.Data)
 			}
-			verifyServerPublishedDownload(t, ctx, pool, httpClient, userID, task, baseURL, token, otherToken)
+			verifyServerPublishedDownload(t, ctx, pool, httpClient, userID, task, baseURL, token, otherToken, upload.mimeType)
 			publishedBytes += original.ReservedBytes
 		}
 		var usedAfter uint64
@@ -255,16 +261,27 @@ func verifyServerUploadContent(t *testing.T, ctx context.Context, pool *sql.DB, 
 		}
 		settled := readServerUploadCreationState(t, ctx, pool)
 		if usedAfter != usedBefore+publishedBytes || settled.reserved != before.reserved+uint64(len(binary)) || settled.taskReserved != settled.reserved ||
-			settled.tasks != before.tasks+3 || settled.objects != before.objects+3 {
+			settled.tasks != before.tasks+4 || settled.objects != before.objects+4 {
 			t.Fatal("从预占转为已用的配额不符", usedBefore, usedAfter, settled)
 		}
 	})
 }
 
 // verifyServerPublishedDownload 用实际发布结果验证正式下载授权和真实 MinIO GET。
-func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.DB, httpClient *http.Client, userID uint64, task *domain.UploadTask, baseURL, token, otherToken string) {
+func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.DB, httpClient *http.Client, userID uint64, task *domain.UploadTask, baseURL, token, otherToken, detectedMIME string) {
 	t.Helper()
 	entryID := *task.ResultEntryID
+	// 1. 核对已提交目录项的 MIME 和未知类型的 SQL NULL。
+	var storedMIME sql.NullString
+	err := pool.QueryRowContext(ctx, "SELECT mime_type FROM file_entries WHERE user_id=? AND id=?", userID, entryID).Scan(&storedMIME)
+	if err != nil || storedMIME.Valid != (detectedMIME != "") || storedMIME.String != detectedMIME {
+		t.Fatal("发布目录项未保存预期的可空媒体类型", err)
+	}
+	downloadMIME := detectedMIME
+	if downloadMIME == "" {
+		downloadMIME = "application/octet-stream"
+	}
+
 	requestDownload := func(targetID, revision uint64, accessToken, purpose string, status int, code string) dto.CreateDownloadData {
 		t.Helper()
 		body := fmt.Sprintf(`{"expected_revision":"%d","purpose":%q}`, revision, purpose)
@@ -306,7 +323,7 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 		if json.Unmarshal(data, &result) != nil || result.RequestID != requestID ||
 			result.Data.ObjectID != strconv.FormatUint(*task.PublishedObjectID, 10) || result.Data.Revision != "1" ||
 			result.Data.SizeBytes != task.FileSize || result.Data.SHA256 != fmt.Sprintf("%x", *task.ExpectedSHA256) ||
-			result.Data.MIMEType != "application/octet-stream" || !result.Data.ExpiresAt.After(time.Now()) {
+			result.Data.MIMEType != downloadMIME || !result.Data.ExpiresAt.After(time.Now()) {
 			t.Fatal("正式下载 JSON 未保留公开标识或已验证内容信息")
 		}
 		return result.Data
@@ -320,16 +337,18 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 		}
 		return openedAt.Time
 	}
-	// 1. 通过正式入口验证认证、归属、版本及预览拒绝，都不产生访问记录。
+	// 2. 通过正式入口验证认证、归属、版本及未知 MIME 的预览拒绝。
 	requestDownload(0, 1, "", domain.DownloadPurposeDownload, http.StatusUnauthorized, "AUTH_REQUIRED")
 	requestDownload(entryID, 1, otherToken, domain.DownloadPurposeDownload, http.StatusNotFound, "ENTRY_NOT_FOUND")
 	requestDownload(entryID, 2, token, domain.DownloadPurposeDownload, http.StatusConflict, "REVISION_CONFLICT")
-	requestDownload(entryID, 1, token, domain.DownloadPurposePreview, http.StatusUnprocessableEntity, "UNSUPPORTED_PREVIEW")
+	if detectedMIME == "" {
+		requestDownload(entryID, 1, token, domain.DownloadPurposePreview, http.StatusUnprocessableEntity, "UNSUPPORTED_PREVIEW")
+	}
 	if !readOpenedAt().IsZero() {
 		t.Fatal("下载授权被拒绝后产生了访问记录")
 	}
 
-	// 2. 确认下载授权写入真实时间，并验证六十秒合并规则。
+	// 3. 确认下载授权写入真实时间，并验证六十秒合并规则。
 	requestDownload(entryID, 1, token, domain.DownloadPurposeDownload, http.StatusOK, "")
 	firstOpenedAt := readOpenedAt()
 	if firstOpenedAt.IsZero() {
@@ -349,21 +368,29 @@ func verifyServerPublishedDownload(t *testing.T, ctx context.Context, pool *sql.
 		t.Fatal("窗口外授权未更新访问时间")
 	}
 
-	// 3. 使用正式授权响应中的签名 URL，从 MinIO 读取实际文件。
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, renewed.URL, nil)
-	if err != nil {
-		t.Fatal("无法构造联测签名请求")
+	// 4. 分别从已签名的下载和预览地址读回，核对字节与交付方式。
+	verifySignedRead := func(grant dto.CreateDownloadData, dispositionType string) {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, grant.URL, nil)
+		if err != nil {
+			t.Fatal("无法构造联测签名请求")
+		}
+		response, err := httpClient.Do(request)
+		if err != nil {
+			t.Fatal("实际发布文件的签名链接访问失败")
+		}
+		data, readError := io.ReadAll(io.LimitReader(response.Body, int64(task.FileSize)+1))
+		closeError := response.Body.Close()
+		if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != grant.SizeBytes ||
+			fmt.Sprintf("%x", sha256.Sum256(data)) != grant.SHA256 || response.Header.Get("Content-Type") != grant.MIMEType ||
+			response.Header.Get("Content-Disposition") != grant.Disposition || !strings.HasPrefix(grant.Disposition, dispositionType+";") {
+			t.Fatal("实际发布文件的远程字节或交付头不符", response.StatusCode)
+		}
 	}
-	response, err := httpClient.Do(request)
-	if err != nil {
-		t.Fatal("实际发布文件的签名链接访问失败")
-	}
-	data, readError := io.ReadAll(io.LimitReader(response.Body, int64(task.FileSize)+1))
-	closeError := response.Body.Close()
-	if readError != nil || closeError != nil || response.StatusCode != http.StatusOK || uint64(len(data)) != renewed.SizeBytes ||
-		fmt.Sprintf("%x", sha256.Sum256(data)) != renewed.SHA256 || response.Header.Get("Content-Type") != renewed.MIMEType ||
-		response.Header.Get("Content-Disposition") != renewed.Disposition {
-		t.Fatal("实际发布文件的远程字节或交付头不符", response.StatusCode)
+	verifySignedRead(renewed, "attachment")
+	if detectedMIME != "" {
+		preview := requestDownload(entryID, 1, token, domain.DownloadPurposePreview, http.StatusOK, "")
+		verifySignedRead(preview, "inline")
 	}
 }
 

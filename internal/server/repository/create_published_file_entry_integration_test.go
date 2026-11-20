@@ -48,11 +48,13 @@ func TestCreatePublishedFileEntryIntegration(t *testing.T) {
 		name      string
 		parent    uint64
 		changeSQL string
+		mimeType  *string
 		duplicate bool
 		zeroBytes bool
 		wantError error
 	}{
-		{name: "publish with reused object", parent: 13},
+		{name: "publish with reused object", parent: 13, mimeType: new("image/png")},
+		{name: "reject parameterized MIME", parent: 13, mimeType: new("text/plain; charset=utf-8"), wantError: domain.ErrInvalidFileEntryData},
 		{name: "duplicate entry name", parent: 13, duplicate: true, wantError: domain.ErrEntryNameConflict},
 		{name: "trashed destination", parent: 15, wantError: domain.ErrFileEntryNotFound},
 		{name: "file destination", parent: 31, wantError: domain.ErrFileEntryNotDirectory},
@@ -61,7 +63,7 @@ func TestCreatePublishedFileEntryIntegration(t *testing.T) {
 		{name: "task expires after initial verification", parent: 13, changeSQL: "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskNotReady},
 		{name: "selected object stops being ready", parent: 13, changeSQL: "UPDATE stored_objects SET status='DELETING' WHERE id=29", wantError: domain.ErrInvalidStoredObjectData},
 		{name: "source name changes", parent: 13, changeSQL: "UPDATE user_devices SET name='renamed fixture' WHERE id=11", wantError: domain.ErrInvalidDeviceData},
-		{name: "rollback new object and file", parent: 13, wantError: rollbackFixture},
+		{name: "rollback new object and file", parent: 13, mimeType: new("image/jpeg"), wantError: rollbackFixture},
 		{name: "publish zero-byte file", parent: 13, zeroBytes: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -112,6 +114,7 @@ func TestCreatePublishedFileEntryIntegration(t *testing.T) {
 				if err != nil {
 					return err
 				}
+				input.MIMEType = scenario.mimeType
 				if scenario.changeSQL != "" {
 					changed := txStore.database.WithContext(txContext).Exec(scenario.changeSQL)
 					if changed.Error != nil || changed.RowsAffected != 1 {
@@ -148,7 +151,8 @@ func TestCreatePublishedFileEntryIntegration(t *testing.T) {
 			}
 			display, err := store.FindUserFileEntryDisplay(ctx, 7, saved.ID)
 			if err != nil || display == nil || display.Category == nil || *display.Category != input.Category ||
-				!reflect.DeepEqual(display.Extension, input.Extension) || display.SourceDeviceID == nil || *display.SourceDeviceID != task.DeviceID ||
+				!reflect.DeepEqual(display.Extension, input.Extension) || !reflect.DeepEqual(display.MIMEType, scenario.mimeType) ||
+				display.SourceDeviceID == nil || *display.SourceDeviceID != task.DeviceID ||
 				display.SourceDeviceName == nil || *display.SourceDeviceName != "fixture" ||
 				display.ContentModifiedAt == nil || display.ContentModifiedAt.After(saved.CreatedAt) {
 				t.Fatal("文件展示字段或来源设备读回不一致", display, err)
