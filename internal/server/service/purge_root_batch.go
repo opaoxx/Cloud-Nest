@@ -8,7 +8,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// PurgeRootCandidateError 记录单个清理根项的结算失败原因。
+// PurgeRootCandidateError 记录单个清理根项的处理失败原因。
 type PurgeRootCandidateError struct {
 	UserID uint64
 	RootID uint64

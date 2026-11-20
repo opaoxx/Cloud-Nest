@@ -1083,3 +1083,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 `Store.WithExpiredTrashRootTransaction` 已支持在所属用户事务中锁定并复核单条到期候选，检查回收状态、保留期、版本和当前祖先链。[第 500 步学习记录](docs/开发学习记录.md#第-500-步加锁复核到期回收站根项)
 
 `Store.MarkExpiredTrashRootPurging` 已支持在锁内复核后提交单条到期根项的 `PURGING` 状态和清理开始时间。[第 501 步学习记录](docs/开发学习记录.md#第-501-步将到期回收站根项标记为清理中)
+
+`ExpiredTrashRootBatch.RunOnce` 已支持一次限量扫描和逐项标记，返回已标记、已失效和逐项失败结果。[第 502 步学习记录](docs/开发学习记录.md#第-502-步批量标记到期回收站根项)
