@@ -1019,3 +1019,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.PurgeEntryProgress`，在测试路由串联 Bearer 认证、目标 ID 校验、只读进度服务和统一响应，已通过真实 JWT 与 MySQL 验证。[第 468 步学习记录](docs/开发学习记录.md#第-468-步处理永久清理进度查询请求)
 
 已注册正式 `GET /api/v1/trash/{id}/purge`。客户端可使用 202 给出的进度地址查询当前状态和剩余项数。后台分批清理将在后续接入。[第 469 步学习记录](docs/开发学习记录.md#第-469-步注册正式永久清理进度查询路由)
+
+已提供 `Store.ListPurgeRootCandidates`，为后台任务按清理开始时间和 ID 限量读取待处理根项。[第 470 步学习记录](docs/开发学习记录.md#第-470-步读取待处理的永久清理根项)
