@@ -1,19 +1,21 @@
 import { useState } from 'react'
 import { Button } from 'antd'
-import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer } from './api/drive'
+import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
+import TrashEntryDialog from './TrashEntryDialog'
 import { useDirectoryListing } from './useDirectoryListing'
 
-type EntryAction = { kind: 'create' } | { kind: 'rename' | 'move'; entry: DirectoryEntry }
+type EntryAction = { kind: 'create' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
 
-export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry, moveEntry }: {
+export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry, moveEntry, trashEntry }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
   createDirectory: DirectoryCreator
   renameEntry: EntryRenamer
   moveEntry: EntryMover
+  trashEntry: EntryTrasher
 }) {
   const { request, listing, requestPage, openDirectory } = useDirectoryListing(rootEntryId, readDirectoryPage)
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null)
@@ -67,7 +69,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
         <Button className="create-directory-trigger" disabled={!canModify}
           onClick={() => setEntryAction({ kind: 'create' })}>新建文件夹</Button>
       )}
-      {entryAction && entryAction.kind !== 'move' && currentDirectory?.id === request.directoryId && (
+      {(entryAction?.kind === 'create' || entryAction?.kind === 'rename') && currentDirectory?.id === request.directoryId && (
         <EntryNameDialog title={renameTarget ? '重命名' : '新建文件夹'}
           inputLabel={renameTarget ? '新名称' : '文件夹名称'}
           confirmLabel={renameTarget ? '保存名称' : '创建文件夹'}
@@ -81,6 +83,10 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
       {entryAction?.kind === 'move' && (
         <MoveEntryDialog entry={entryAction.entry} rootEntryId={rootEntryId}
           readDirectoryPage={readDirectoryPage} moveEntry={moveEntry}
+          onClose={() => setEntryAction(null)} onSaved={refreshAfterChange} />
+      )}
+      {entryAction?.kind === 'trash' && (
+        <TrashEntryDialog entry={entryAction.entry} trashEntry={trashEntry}
           onClose={() => setEntryAction(null)} onSaved={refreshAfterChange} />
       )}
       {listing.items.length > 0 && (
@@ -102,6 +108,8 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
                       disabled={!canModify} onClick={() => setEntryAction({ kind: 'rename', entry: item })}>重命名</button>
                     <button type="button" className="directory-link" aria-label={`移动 ${item.name}`}
                       disabled={!canModify} onClick={() => setEntryAction({ kind: 'move', entry: item })}>移动</button>
+                    <button type="button" className="directory-link" aria-label={`将 ${item.name} 移入回收站`}
+                      disabled={!canModify} onClick={() => setEntryAction({ kind: 'trash', entry: item })}>移入回收站</button>
                   </div>
                 </td>
               </tr>

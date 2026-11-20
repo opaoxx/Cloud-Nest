@@ -47,6 +47,34 @@ interface EntryMove {
 
 export type EntryMover = (move: EntryMove) => Promise<void>
 
+interface EntryTrash {
+  entryId: string
+  expectedRevision: string
+  idempotencyKey: string
+}
+
+export type EntryTrasher = (trash: EntryTrash) => Promise<void>
+
+export async function trashEntry(accessToken: string, trash: EntryTrash): Promise<void> {
+  // 1. 提交条目 ID、原版本和幂等键。
+  const data = await requestData(`/api/v1/entries/${encodeURIComponent(trash.entryId)}/trash`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': trash.idempotencyKey,
+    },
+    body: JSON.stringify({ expected_revision: trash.expectedRevision }),
+    redirect: 'error',
+  })
+
+  // 2. 核对回收站快照。
+  if (!isRecord(data.entry) || data.entry.id !== trash.entryId || data.entry.status !== 'TRASHED' ||
+      typeof data.entry.revision !== 'string' || typeof data.entry.deleted_at !== 'string') {
+    throw new ApiError(200, '服务返回的回收结果格式有误。')
+  }
+}
+
 export async function moveEntry(accessToken: string, move: EntryMove): Promise<void> {
   // 1. 使用现有移动接口提交目标父目录及预期版本。
   const data = await requestData(`/api/v1/entries/${encodeURIComponent(move.entryId)}/move`, {

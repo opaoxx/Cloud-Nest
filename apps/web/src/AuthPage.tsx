@@ -3,8 +3,8 @@ import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
-import { createDirectory, moveEntry, readDirectoryPageWithRefresh, renameEntry } from './api/drive'
-import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer } from './api/drive'
+import { createDirectory, moveEntry, readDirectoryPageWithRefresh, renameEntry, trashEntry } from './api/drive'
+import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
 import { formatSize } from './demo'
@@ -76,6 +76,13 @@ export default function AuthPage() {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
     await moveEntry(session.accessToken, move)
+  }
+
+  const submitEntryTrash: EntryTrasher = async trash => {
+    // 使用当前内存令牌直接提交一次经用户确认的软删除。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    await trashEntry(session.accessToken, trash)
   }
 
   useEffect(() => {
@@ -172,7 +179,7 @@ export default function AuthPage() {
             <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
             <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
               readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation}
-              renameEntry={submitEntryRename} moveEntry={submitEntryMove} />
+              renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>

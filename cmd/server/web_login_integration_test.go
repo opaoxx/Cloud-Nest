@@ -441,6 +441,63 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("移动后重读源与目标目录的结果不符")
 	}
 	t.Log("Web 单项移动联测通过：同名和过期版本返回 409，跨账号返回 404，移动后仅目标有原 ID 与新版本")
+
+	// 17. 提交过期版本和其他账号的回收请求，确认文件仍在原位置。
+	trash := func(accessToken, revision, key string) *http.Request {
+		t.Helper()
+		body, err := json.Marshal(dto.TrashEntryRequest{ExpectedRevision: &revision})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/entries/"+movedEntry.ID+"/trash", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", key)
+		request.Header.Set("Origin", baseURL)
+		return request
+	}
+	var staleTrash, foreignTrash dto.ErrorResponse
+	read(trash(renewed.Data.AccessToken, entry.Revision, "web-trash-stale"), http.StatusConflict, &staleTrash)
+	if staleTrash.Error.Code != "REVISION_CONFLICT" || staleTrash.Error.Details["current_revision"] != movedEntry.Revision {
+		t.Fatal("回收版本冲突响应不符", staleTrash.Error)
+	}
+	read(trash(emptyUser.Data.AccessToken, movedEntry.Revision, "web-trash-foreign"), http.StatusNotFound, &foreignTrash)
+	if foreignTrash.Error.Code != "ENTRY_NOT_FOUND" {
+		t.Fatal("回收其他账号条目的响应不符", foreignTrash.Error)
+	}
+	var beforeTrash dto.DirectoryPageResponse
+	read(getDirectory(renewed.Data.AccessToken, nestedFolder.ID, nil), http.StatusOK, &beforeTrash)
+	if !slices.Equal(beforeTrash.Data.Items, targetAfterMove.Data.Items) {
+		t.Fatal("被拒绝的回收请求改变了原条目")
+	}
+
+	// 18. 用当前版本回收，核对原目录、回收站和已用空间。
+	const trashKey = "77097013-ddbb-44f3-a82e-9b68aa63239a"
+	var trashed, trashReplay dto.TrashEntryResponse
+	read(trash(renewed.Data.AccessToken, movedEntry.Revision, trashKey), http.StatusOK, &trashed)
+	read(trash(renewed.Data.AccessToken, movedEntry.Revision, trashKey), http.StatusOK, &trashReplay)
+	trashSnapshot := trashed.Data.Entry
+	if trashSnapshot.ID != movedEntry.ID || trashSnapshot.ParentID != nestedFolder.ID ||
+		trashSnapshot.Status != "TRASHED" || trashSnapshot.Revision != "4" || trashSnapshot.DeletedAt.IsZero() ||
+		trashReplay.Data != trashed.Data || trashReplay.RequestID == trashed.RequestID {
+		t.Fatal("回收或同键重试未返回预期的软删除快照")
+	}
+	var afterTrash dto.DirectoryPageResponse
+	var trashPage dto.TrashPageResponse
+	var profileAfterTrash dto.UserProfileResponse
+	read(getDirectory(renewed.Data.AccessToken, nestedFolder.ID, nil), http.StatusOK, &afterTrash)
+	read(get("/api/v1/trash", renewed.Data.AccessToken), http.StatusOK, &trashPage)
+	read(get("/api/v1/me", renewed.Data.AccessToken), http.StatusOK, &profileAfterTrash)
+	if len(afterTrash.Data.Items) != 0 ||
+		!slices.ContainsFunc(trashPage.Data.Items, func(item dto.TrashListItem) bool {
+			return item.TrashedEntrySummary == trashSnapshot && item.SizeBytes == target.SizeBytes
+		}) || profileAfterTrash.Data.UsedBytes != restoredProfile.Data.UsedBytes {
+		t.Fatal("回收后的目录、回收站或已用空间不符")
+	}
+	t.Log("Web 单项回收联测通过：旧版本 409 不改动，跨账号 404，成功后同一条目出现在回收站且已用空间不变")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {
