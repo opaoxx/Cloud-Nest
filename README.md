@@ -1023,3 +1023,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `Store.ListPurgeRootCandidates`，为后台任务按清理开始时间和 ID 限量读取待处理根项。[第 470 步学习记录](docs/开发学习记录.md#第-470-步读取待处理的永久清理根项)
 
 已提供 `Store.WithPurgeRootTransaction`，在所属用户事务内锁定并复核清理根项，为后续分批处理提供事务入口。[第 471 步学习记录](docs/开发学习记录.md#第-471-步在用户事务内锁定并复核永久清理根项)
+
+已提供 `Store.ListPurgeLeafCandidates`，在根项事务内按 ID 限量读取没有待清理子项的项目。[第 472 步学习记录](docs/开发学习记录.md#第-472-步读取永久清理叶子候选)

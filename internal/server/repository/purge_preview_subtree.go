@@ -12,6 +12,25 @@ import (
 // ListUserPurgePreviewSubtree 读取目标和全部保留后代，按 ID 升序返回。
 // 调用方应复用检查目标时的同一只读快照或用户事务。
 func (store *Store) ListUserPurgePreviewSubtree(ctx context.Context, userID, entryID uint64) ([]domain.PurgePreviewSubtreeEntry, error) {
+	// 1. 读取并验证完整子树。
+	rows, err := store.readUserPurgeSubtreeRows(ctx, userID, entryID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 保持 ID 升序，转换为预检和进度使用的目录项事实。
+	entries := make([]domain.PurgePreviewSubtreeEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, purgePreviewSubtreeEntry(row))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// readUserPurgeSubtreeRows 共享递归读取和父子结构检查，同时保留父 ID。
+func (store *Store) readUserPurgeSubtreeRows(ctx context.Context, userID, entryID uint64) ([]models.PurgePreviewSubtreeRow, error) {
 	// 1. 校验用户、目标 ID 和查询期限。
 	if ctx == nil || userID == 0 || entryID == 0 {
 		return nil, fmt.Errorf("读取清理子树需要上下文、非零用户 ID 和目标 ID")
@@ -59,21 +78,16 @@ ORDER BY id`
 		return nil, domain.ErrFileEntrySubtreeTooLarge
 	}
 	byID := make(map[uint64]*models.PurgePreviewSubtreeRow, len(rows))
-	entries := make([]domain.PurgePreviewSubtreeEntry, 0, len(rows))
 	for index := range rows {
 		row := &rows[index]
-		entry := domain.PurgePreviewSubtreeEntry{
-			ID: row.ID, EntryType: row.EntryType, Status: row.Status, Revision: row.Revision, FileSize: row.FileSize,
-		}
 		if row.UserID != userID || row.RelativeDepth > domain.MaxFileEntryDepth ||
-			(row.RelativeDepth == 0) != (row.ID == entryID) || !entry.IsValid() {
+			(row.RelativeDepth == 0) != (row.ID == entryID) || !purgePreviewSubtreeEntry(*row).IsValid() {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		if _, duplicate := byID[row.ID]; duplicate {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		byID[row.ID] = row
-		entries = append(entries, entry)
 	}
 	root := byID[entryID]
 	if root == nil || (root.ParentID != nil && (*root.ParentID == 0 || byID[*root.ParentID] != nil)) {
@@ -94,5 +108,11 @@ ORDER BY id`
 	if err := queryContext.Err(); err != nil {
 		return nil, err
 	}
-	return entries, nil
+	return rows, nil
+}
+
+func purgePreviewSubtreeEntry(row models.PurgePreviewSubtreeRow) domain.PurgePreviewSubtreeEntry {
+	return domain.PurgePreviewSubtreeEntry{
+		ID: row.ID, EntryType: row.EntryType, Status: row.Status, Revision: row.Revision, FileSize: row.FileSize,
+	}
 }

@@ -57,6 +57,8 @@ func (store *Store) WithPurgeRootTransaction(ctx context.Context, candidate doma
 			!lockedCandidate.PurgeStartedAt.Equal(candidate.PurgeStartedAt) {
 			return domain.ErrPurgeRootCandidateStale
 		}
-		return action(txContext, txStore)
+		purgeStore := *txStore
+		purgeStore.purgeRoot = &lockedCandidate
+		return action(txContext, &purgeStore)
 	})
 }

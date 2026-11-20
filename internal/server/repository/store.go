@@ -20,6 +20,8 @@ type Store struct {
 	refreshSession *domain.VerifiedRefreshSession
 	// authenticatedActor 由已认证用户事务入口绑定，限定设备及会话写入的归属与当前身份。
 	authenticatedActor *domain.Actor
+	// purgeRoot 仅在后台清理事务确认并锁定根项后绑定。
+	purgeRoot *domain.PurgeRootCandidate
 }
 
 // NewStore 用现有连接池装配 GORM，不创建连接池、不执行探测或迁移，也不接管关闭操作。
