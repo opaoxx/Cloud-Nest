@@ -6,18 +6,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
+	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
@@ -58,54 +62,94 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		}
 		return record
 	}
-	expectError := func(t *testing.T, entryID, revision uint64, key string, want error) {
-		t.Helper()
-		body, err := trash.Trash(ctx, actor, entryID, revision, key)
-		if body != nil || !errors.Is(err, want) {
-			t.Fatal("幂等失败语义不符", err)
-		}
-	}
 
-	// 2. 首次提交回收与快照。同键重试时即使文件已恢复且改名，仍返回历史结果。
+	// 2. 通过实际 JWT 和测试 POST 串联请求处理、回收事务和快照交付。
 	t.Run("first commit and historical replay", func(t *testing.T) {
 		const key = "trash-first"
-		const path = "/test-trash-success-committed"
-		var stableBody json.RawMessage
-		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
-		router.POST(path, func(requestContext *gin.Context) {
-			handler.TrashEntrySuccess(requestContext, stableBody)
-		})
-		deliver := func(body json.RawMessage, requestID string, expected *dto.TrashEntryData) {
-			t.Helper()
-			stableBody = body
-			request := httptest.NewRequest(http.MethodPost, path, nil)
-			request.Header.Set("X-Request-ID", requestID)
-			response := httptest.NewRecorder()
-			router.ServeHTTP(response, request)
-			var delivered dto.TrashEntryResponse
-			if response.Code != http.StatusOK || response.Header().Get("X-Request-ID") != requestID ||
-				response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" ||
-				json.Unmarshal(response.Body.Bytes(), &delivered) != nil || delivered.RequestID != requestID ||
-				!reflect.DeepEqual(&delivered.Data, expected) {
-				t.Fatal("已提交的回收响应不符", response.Code, delivered)
-			}
+		const path = "/test-trash-entry/"
+		configuration := config.JWTConfig{
+			SigningKey: bytes.Repeat([]byte{9}, 32), Issuer: "cloudnest-test", Audience: "cloudnest-api-test",
+			AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour,
 		}
-		first, err := trash.Trash(ctx, actor, 13, 3, key)
+		signer, err := service.NewAccessTokenSigner(configuration)
 		if err != nil {
 			t.Fatal(err)
 		}
-		snapshot, err := dto.RestoreTrashEntryData(first)
+		verifier, err := service.NewAccessTokenVerifier(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		access, err := signer.Issue(domain.LoginSession{
+			ID: actor.SessionID, UserID: actor.UserID, DeviceID: actor.DeviceID, ExpiresAt: time.Now().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorization := service.NewAuthorizationService(verifier.Verify, store.FindSessionAuthorization)
+		router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+		router.POST(path+":id", middleware.RequireAuthorization(authorization.Authorize, handler.AuthorizationFailure), handler.TrashEntry(trash.Trash))
+		server := httptest.NewServer(router)
+		defer server.Close()
+		client := server.Client()
+		client.Timeout = 3 * time.Second
+		send := func(entryID, revision uint64, key string, authenticated bool, status int, code string) dto.TrashEntryResponse {
+			t.Helper()
+			requestID := uuid.NewString()
+			body := fmt.Sprintf(`{"expected_revision":"%d"}`, revision)
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s%s%d", server.URL, path, entryID), strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("X-Request-ID", requestID)
+			request.Header.Set("Content-Type", "application/json")
+			if key != "" {
+				request.Header.Set("Idempotency-Key", key)
+			}
+			if authenticated {
+				request.Header.Set("Authorization", "Bearer "+access.Token)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal("真实回收 HTTP 请求失败", err)
+			}
+			content, readError := io.ReadAll(response.Body)
+			closeError := response.Body.Close()
+			if readError != nil || closeError != nil || response.StatusCode != status ||
+				response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Cache-Control") != "no-store" ||
+				(authenticated && response.Header.Get("Pragma") != "no-cache") {
+				t.Fatal("真实回收响应状态或头错误", response.StatusCode, status, readError, closeError)
+			}
+			var delivered dto.TrashEntryResponse
+			if status == http.StatusOK {
+				if json.Unmarshal(content, &delivered) != nil || delivered.RequestID != requestID {
+					t.Fatal("已提交的回收响应不符")
+				}
+				return delivered
+			}
+			var failure dto.ErrorResponse
+			if json.Unmarshal(content, &failure) != nil || failure.RequestID != requestID || failure.Error.Code != code ||
+				(code == "REVISION_CONFLICT" && failure.Error.Details["current_revision"] != "3") {
+				t.Fatal("真实回收错误未按契约交付", failure.Error)
+			}
+			return delivered
+		}
+		send(0, 3, "", false, 401, "AUTH_REQUIRED")
+		send(11, 1, key, true, 403, "ROOT_OPERATION_FORBIDDEN")
+		send(21, 1, key, true, 404, "ENTRY_NOT_FOUND")
+		send(13, 2, key, true, 409, "REVISION_CONFLICT")
+
+		first := send(13, 3, key, true, 200, "")
 		record := readRecord(t, key)
+		snapshot, err := dto.RestoreTrashEntryData(record.ResponseBody)
 		entry := read(t, 13)
 		if err != nil || snapshot == nil || snapshot.Entry.ID != "13" || snapshot.Entry.Revision != "4" ||
 			snapshot.Entry.Status != "TRASHED" || entry.Status != "TRASHED" || entry.Revision != 4 ||
-			!entry.ModifiedAt.Equal(snapshot.Entry.DeletedAt) || !bytes.Equal(first, record.ResponseBody) ||
+			!entry.ModifiedAt.Equal(snapshot.Entry.DeletedAt) || !reflect.DeepEqual(&first.Data, snapshot) ||
 			record.ExpiresAt.Sub(record.CreatedAt) < 7*24*time.Hour {
 			t.Fatal("首次回收和稳定结果未一并提交", snapshot, err)
 		}
-		deliver(first, "28ee758a-0727-42de-ae7d-3bb33155e148", snapshot)
-		expectError(t, 13, 4, key, domain.ErrIdempotencyRequestConflict)
-		expectError(t, 13, 4, "trash-new-key", domain.ErrFileEntryNotFound)
+		send(13, 4, key, true, 409, "IDEMPOTENCY_CONFLICT")
+		send(13, 4, "trash-new-key", true, 404, "ENTRY_NOT_FOUND")
 
 		// 直接布置后续状态，模拟该项已经从回收站恢复并改名。
 		if _, err := pool.ExecContext(ctx, `UPDATE file_entries SET status='ACTIVE',deleted_at=NULL,revision=5,
@@ -113,17 +157,16 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := read(t, 13)
-		replay, err := trash.Trash(ctx, actor, 13, 3, key)
-		if err != nil || !bytes.Equal(first, replay) || !reflect.DeepEqual(before, read(t, 13)) {
-			t.Fatal("同键重试未保留原快照或改动了后续状态", err)
+		replay := send(13, 3, key, true, 200, "")
+		if replay.RequestID == first.RequestID || !reflect.DeepEqual(replay.Data, first.Data) || !reflect.DeepEqual(before, read(t, 13)) {
+			t.Fatal("同键重试未保留原快照或改动了后续状态")
 		}
-		deliver(replay, "28ee758a-0727-42de-ae7d-3bb33155e149", snapshot)
 		if _, err := pool.ExecContext(ctx, `UPDATE idempotency_records
 			SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 DAY,created_at=UTC_TIMESTAMP(6)-INTERVAL 2 DAY
 			WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.TrashEntryOperation, key); err != nil {
 			t.Fatal(err)
 		}
-		expectError(t, 13, 3, key, domain.ErrIdempotencyRecordExpired)
+		send(13, 3, key, true, 409, "IDEMPOTENCY_EXPIRED")
 	})
 
 	// 3. 事务回调写入后返回失败时，状态、时间和幂等记录一起回滚。
