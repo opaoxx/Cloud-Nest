@@ -379,7 +379,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 	)
 
-	// 21. 绑定用户事务和各自的快照编解码，装配幂等移动与回收服务。
+	// 21. 绑定用户事务和各自的快照编解码，装配幂等移动、回收与恢复服务。
 	moveEntryService := service.NewIdempotentMoveEntryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentMoveEntryTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -414,6 +414,25 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		},
 		func(body json.RawMessage) error {
 			_, err := dto.RestoreTrashEntryData(body)
+			return err
+		},
+	)
+
+	restoreEntryService := service.NewIdempotentRestoreEntryService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentRestoreEntryTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+		func(entry *domain.FileEntry) (json.RawMessage, error) {
+			data, err := dto.NewRestoreEntryData(entry)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(data)
+		},
+		func(body json.RawMessage) error {
+			_, err := dto.DecodeRestoreEntryData(body)
 			return err
 		},
 	)
@@ -530,6 +549,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)
 	serverhttp.RegisterTrashEntryRoute(router, authorizationService.Authorize, trashEntryService.Trash)
 	serverhttp.RegisterTrashPageRoute(router, authorizationService.Authorize, trashPageService.List)
+	serverhttp.RegisterRestoreEntryRoute(router, authorizationService.Authorize, restoreEntryService.Restore)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
 	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
 	serverhttp.RegisterCreateDownloadRoute(router, authorizationService.Authorize, downloads.Create)

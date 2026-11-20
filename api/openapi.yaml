@@ -130,6 +130,7 @@ info:
     POST /api/v1/entries/{id}/download 定义短期下载与预览授权的计划契约，返回绑定具体存储对象的 GET URL。
     POST /api/v1/entries/{id}/trash 已接入启动入口，使用预期版本及幂等键，交付回收后的快照。
     GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
+    POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -462,7 +463,7 @@ paths:
       operationId: restoreEntry
       summary: 按预期版本恢复当前用户的单个回收项
       description: |
-        计划契约，后端实现后注册路由。
+        服务启动时注册，供已登录用户恢复回收项。
         1. Bearer 授权通过后，依次校验路径 id、Idempotency-Key、受限 JSON 及 expected_revision。在用户锁内复查账号、设备与会话。
         2. 首次执行时检查归属和状态，真实根目录禁止恢复。目标须为 TRASHED，且原父链中没有 PURGING 或 PURGED 项。仍处于 TRASHED 的到期项可恢复，直到清理开始。
         3. 持锁比对版本。优先选择完整活动路径上的原父目录。原父链含 TRASHED 目录时，可按目标 ID 恢复到用户真实根目录。

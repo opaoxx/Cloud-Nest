@@ -947,3 +947,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.RestoreEntrySuccess`，交付带当次请求 ID 和禁止缓存头的恢复成功响应。[第 432 步学习记录](docs/开发学习记录.md#第-432-步交付单项恢复成功响应)
 
 已提供 `handler.RestoreEntry`，在测试入口连接认证、请求解析、幂等恢复服务和响应交付。[第 433 步学习记录](docs/开发学习记录.md#第-433-步处理单项恢复请求)
+
+已注册 `POST /api/v1/trash/{id}/restore`，正式入口支持原位恢复、回退根目录、同名编号和同键重试。[第 434 步学习记录](docs/开发学习记录.md#第-434-步注册正式单项恢复路由)
