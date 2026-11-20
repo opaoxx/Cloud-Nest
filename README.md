@@ -931,3 +931,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.BuildRestoreConflictName`，为回收的文件或目录生成符合长度限制的编号候选名。[第 424 步学习记录](docs/开发学习记录.md#第-424-步生成单项恢复的编号候选名)
 
 已提供 `service.ResolveRestoreEntryName`，在实际恢复目录中选择原名或最小可用编号名称。[第 425 步学习记录](docs/开发学习记录.md#第-425-步选择单项恢复的可用名称)
+
+已提供 `Store.RestoreUserFileEntry`，在已认证用户事务中按预期版本恢复单个目录项。[第 426 步学习记录](docs/开发学习记录.md#第-426-步按预期版本写入单项恢复)
