@@ -104,23 +104,30 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 		}
 	})
 
-	// 3. 复查和写入使用同一事务，核对数据库时间与保留的文件数据。
+	// 3. 接入真实预检、首次受理和用户事务。
+	masterKey := make([]byte, sha256.Size)
+	signer, err := service.NewPurgePreviewSigner(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := service.NewPurgePreviewVerifier(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuedAt := time.Date(2026, 11, 20, 4, 30, 0, 123456000, time.UTC)
+	checkClock := func() time.Time { return issuedAt.Add(time.Minute) }
+	previewService := service.NewPurgePreviewService(func(ctx context.Context, action func(context.Context, service.PurgePreviewReader) error) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *Store) error {
+			return action(snapshotContext, snapshotStore)
+		})
+	}, signer, func() time.Time { return issuedAt })
+	purgeService := service.NewPurgeEntryService(func(ctx context.Context, identity domain.Actor, action func(context.Context, service.PurgeEntryTransaction) error) error {
+		return store.WithUserTransaction(ctx, identity, func(txContext context.Context, txStore *Store) error {
+			return action(txContext, txStore)
+		})
+	}, verifier, checkClock)
+
 	t.Run("file accepted after preview recheck", func(t *testing.T) {
-		masterKey := make([]byte, sha256.Size)
-		signer, err := service.NewPurgePreviewSigner(masterKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		verifier, err := service.NewPurgePreviewVerifier(masterKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		issuedAt := time.Date(2026, 11, 20, 4, 30, 0, 123456000, time.UTC)
-		previewService := service.NewPurgePreviewService(func(ctx context.Context, action func(context.Context, service.PurgePreviewReader) error) error {
-			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *Store) error {
-				return action(snapshotContext, snapshotStore)
-			})
-		}, signer, func() time.Time { return issuedAt })
 		preview, err := previewService.Preview(ctx, actor, 13)
 		if err != nil || preview == nil {
 			t.Fatal("未取得可复查的文件凭证", err)
@@ -130,16 +137,11 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 		if err := pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&beforeWrite); err != nil {
 			t.Fatal(err)
 		}
-		var saved *domain.FileEntry
-		err = store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
-			target, err := service.RecheckPurgePreview(txContext, actor, preview.EntryID, preview.Credential.PreviewDigest, txStore, verifier,
-				func() time.Time { return issuedAt.Add(time.Minute) })
-			if err != nil {
-				return err
-			}
-			saved, err = txStore.BeginUserEntryPurge(txContext, target.ID, preview.Revision)
-			return err
-		})
+		if result, err := purgeService.Begin(ctx, actor, preview.EntryID, preview.Revision+1, preview.Credential.PreviewDigest); result != nil ||
+			!errors.Is(err, domain.ErrEntryRevisionConflict) || !reflect.DeepEqual(read(t, 13), before) {
+			t.Fatal("范围匹配时的版本冲突应保留原记录", result, err)
+		}
+		saved, err := purgeService.Begin(ctx, actor, preview.EntryID, preview.Revision, preview.Credential.PreviewDigest)
 		if err != nil || saved == nil || saved.Status != "PURGING" || saved.Revision != 4 ||
 			saved.ParentID == nil || *saved.ParentID != *before.ParentID || saved.Name != before.Name ||
 			!saved.CreatedAt.Equal(before.CreatedAt) || !reflect.DeepEqual(saved, read(t, 13)) {
@@ -164,23 +166,48 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 		}
 	})
 
-	// 4. 同一事务失败时回滚，目录受理只更新目录本身。
-	t.Run("rollback and subtree visibility", func(t *testing.T) {
-		before, childBefore := read(t, 14), read(t, 15)
-		rollback := errors.New("回滚永久清理夹具")
-		err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
-			result, err := txStore.BeginUserEntryPurge(txContext, 14, 1)
-			if err != nil || result == nil || result.Status != "PURGING" {
-				t.Fatal("回滚前未写入清理开始状态", result, err)
-			}
-			return rollback
+	// 4. 子树变化应拒绝受理，写入后的事务失败应回滚。
+	t.Run("stale range rollback and subtree visibility", func(t *testing.T) {
+		before := read(t, 14)
+		original, err := previewService.Preview(ctx, actor, before.ID)
+		if err != nil || original == nil {
+			t.Fatal("未取得原子树凭证", err)
+		}
+		err = store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			return txStore.database.WithContext(txContext).Exec("UPDATE file_entries SET revision=revision+1 WHERE user_id=1 AND id=15").Error
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		childBefore := read(t, 15)
+		if result, err := purgeService.Begin(ctx, actor, before.ID, original.Revision, original.Credential.PreviewDigest); result != nil ||
+			!errors.Is(err, domain.ErrPurgePreviewChanged) || !reflect.DeepEqual(read(t, 14), before) {
+			t.Fatal("目录目标版本相同也应拒绝变化的子树", result, err)
+		}
+		current, err := previewService.Preview(ctx, actor, before.ID)
+		if err != nil || current == nil || current.Revision != original.Revision {
+			t.Fatal("新凭证应对应相同的目标版本", err)
+		}
+		rollback := errors.New("回滚永久清理夹具")
+		rollbackService := service.NewPurgeEntryService(func(ctx context.Context, identity domain.Actor, action func(context.Context, service.PurgeEntryTransaction) error) error {
+			return store.WithUserTransaction(ctx, identity, func(txContext context.Context, txStore *Store) error {
+				if err := action(txContext, txStore); err != nil {
+					return err
+				}
+				inside, err := txStore.FindUserFileEntry(txContext, identity.UserID, before.ID)
+				if err != nil || inside == nil || inside.Status != "PURGING" {
+					t.Fatal("回滚前未写入清理开始状态", inside, err)
+				}
+				return rollback
+			})
+		}, verifier, checkClock)
+		result, err := rollbackService.Begin(ctx, actor, before.ID, current.Revision, current.Credential.PreviewDigest)
 		var startedAt sql.NullTime
 		if queryError := pool.QueryRowContext(ctx, "SELECT purge_started_at FROM file_entries WHERE user_id=1 AND id=14").Scan(&startedAt); queryError != nil ||
-			!errors.Is(err, rollback) || startedAt.Valid || !reflect.DeepEqual(read(t, 14), before) {
+			result != nil || !errors.Is(err, rollback) || startedAt.Valid || !reflect.DeepEqual(read(t, 14), before) {
 			t.Fatal("外层回滚没有恢复状态、版本和时间", err, queryError)
 		}
-		if result, err := begin(14, 1); err != nil || result == nil || result.Status != "PURGING" ||
+		if result, err := purgeService.Begin(ctx, actor, before.ID, current.Revision, current.Credential.PreviewDigest); err != nil || result == nil || result.Status != "PURGING" ||
 			result.Revision != 2 || !reflect.DeepEqual(read(t, 15), childBefore) {
 			t.Fatal("目录清理受理或后代记录不符", result, err)
 		}
