@@ -19,9 +19,14 @@ type RestoreEntryAncestors struct {
 // ReadRestoreEntryAncestors 检查原父目录到真实根目录的链路。
 // target 来自同一已认证用户事务内的 ReadRestoreEntryTarget。
 func ReadRestoreEntryAncestors(ctx context.Context, actor domain.Actor, target *domain.FileEntry, reader FileEntryPathReader) (*RestoreEntryAncestors, error) {
+	return readTrashedEntryAncestors(ctx, actor, target, reader)
+}
+
+// readTrashedEntryAncestors 核对回收项的完整父链并识别回收或清理中的祖先。
+func readTrashedEntryAncestors(ctx context.Context, actor domain.Actor, target *domain.FileEntry, reader FileEntryPathReader) (*RestoreEntryAncestors, error) {
 	// 1. 核对目标归属，读出当前用户的真实根目录。
 	if ctx == nil || reader == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
-		return nil, fmt.Errorf("检查恢复原父链需要事务上下文、读取能力和完整认证身份")
+		return nil, fmt.Errorf("检查回收项原父链需要事务上下文、读取能力和完整认证身份")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -60,7 +65,7 @@ func ReadRestoreEntryAncestors(ctx context.Context, actor domain.Actor, target *
 			return nil, domain.ErrInvalidFileEntryData // 外键关联的父项应存在。
 		}
 		if queryError != nil {
-			return nil, fmt.Errorf("读取恢复原父链失败: %w", queryError)
+			return nil, fmt.Errorf("读取回收项原父链失败: %w", queryError)
 		}
 		if parent == nil || parent.ID != parentID || parent.UserID != actor.UserID || parent.Revision == 0 ||
 			parent.EntryType != "DIR" || parent.FileSize != 0 {

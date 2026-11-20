@@ -951,3 +951,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已注册 `POST /api/v1/trash/{id}/restore`，正式入口支持原位恢复、回退根目录、同名编号和同键重试。[第 434 步学习记录](docs/开发学习记录.md#第-434-步注册正式单项恢复路由)
 
 已定义 `GET /api/v1/trash/{id}/purge-preview` 的计划契约，约定待清理数量、预计释放的逻辑字节及五分钟有效的预检摘要。[第 435 步学习记录](docs/开发学习记录.md#第-435-步定义永久清理预检接口契约)
+
+已提供 `service.ValidatePurgePreviewTarget`，在同一只读快照中核对预检目标的归属、状态及完整活动父链。[第 436 步学习记录](docs/开发学习记录.md#第-436-步校验永久清理预检目标)
