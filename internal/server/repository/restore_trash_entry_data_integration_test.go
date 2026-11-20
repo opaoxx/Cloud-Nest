@@ -69,17 +69,53 @@ func TestRestoreTrashEntryDataIntegration(t *testing.T) {
 				t.Fatal("回收快照夹具事务失败", err)
 			}
 
-			// 3. 恢复从 MySQL JSON 列读回的快照。
+			// 3. 核对真实幂等记录与当前请求的关联，再恢复快照。
 			committed, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.TrashEntryOperation, fixture.key)
 			if err != nil {
 				t.Fatal("无法读回已保存的回收快照", err)
+			}
+			digest, err := service.BuildTrashEntryRequestHash(fixture.entryID, fixture.revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			if err := service.ValidateTrashEntryReplay(committed, actor.UserID, fixture.entryID, fixture.revision, fixture.key, digest, now); err != nil {
+				t.Fatal("已提交回收记录未通过复用校验", err)
 			}
 			restored, err := dto.RestoreTrashEntryData(committed.ResponseBody)
 			if err != nil || !reflect.DeepEqual(restored, expected) {
 				t.Fatal("MySQL JSON 列读回内容未恢复为原快照", restored, err)
 			}
+			differentDigest, err := service.BuildTrashEntryRequestHash(fixture.entryID, fixture.revision+1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.ValidateTrashEntryReplay(committed, actor.UserID, fixture.entryID, fixture.revision+1, fixture.key, differentDigest, now); !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+				t.Fatal("已保存记录应拒绝同键异参", err)
+			}
+			if err := service.ValidateTrashEntryReplay(committed, actor.UserID, fixture.entryID, fixture.revision+1, fixture.key, differentDigest, committed.ExpiresAt); !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+				t.Fatal("保留期限到点应先返回过期", err)
+			}
 
-			// 4. 修改独占库中的回收时间，确认数据库合法 JSON 仍需业务校验。
+			// 4. 在独占库改动保存版本，拒绝无法对应本次请求的成功快照。
+			update, err := pool.ExecContext(ctx, `UPDATE idempotency_records
+				SET response_body=JSON_SET(response_body,'$.entry.revision','99')
+				WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.TrashEntryOperation, fixture.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count, err := update.RowsAffected(); err != nil || count != 1 {
+				t.Fatal("未更新本轮创建的回收快照", count, err)
+			}
+			wrongRevision, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.TrashEntryOperation, fixture.key)
+			if err != nil {
+				t.Fatal("无法读回版本异常的回收快照", err)
+			}
+			if err := service.ValidateTrashEntryReplay(wrongRevision, actor.UserID, fixture.entryID, fixture.revision, fixture.key, digest, now); !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+				t.Fatal("已保存版本异常未阻止复用", err)
+			}
+
+			// 5. 去掉回收时间，确认完整快照仍需恢复器检查。
 			changed, err := pool.ExecContext(ctx, `UPDATE idempotency_records
 				SET response_body=JSON_REMOVE(response_body,'$.entry.deleted_at')
 				WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.TrashEntryOperation, fixture.key)
