@@ -22,7 +22,7 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 	// 1. 准备回收项、极限版本、内容引用和目录项偏好。
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	pool, store, actor := trashEntryTestDatabase(t, ctx)
+	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
 	preferencesStart := strings.Index(migrations.InitialSQL, "CREATE TABLE user_entry_preferences (")
 	preferencesEnd := strings.Index(migrations.InitialSQL, "CREATE TABLE upload_tasks (")
 	if preferencesStart < 0 || preferencesEnd <= preferencesStart {
@@ -174,6 +174,48 @@ func TestBeginUserEntryPurgeIntegration(t *testing.T) {
 			startedAt.Before(beforeWrite) || startedAt.After(afterWrite) || startedAt.Location() != time.UTC ||
 			startedAt.Nanosecond()%1000 != 0 || !startedAt.Equal(saved.ModifiedAt) || !startedAt.Equal(saved.UpdatedAt) {
 			t.Fatal("清理开始时间、回收时间、引用、用量或偏好不符", err)
+		}
+
+		// 从正式 MySQL JSON 列读回受理快照，并确认错误路径被拒绝。
+		const key = "purge-accepted-snapshot"
+		requestHash, err := service.BuildPurgeEntryRequestHash(preview.EntryID, preview.Revision, preview.Credential.PreviewDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			_, err := txStore.CreateUserIdempotencyRecord(txContext, domain.IdempotencyResultInput{
+				Operation: domain.PurgeEntryOperation, IdempotencyKey: key, RequestHash: requestHash,
+				ResourceType: "ENTRY", ResourceID: &saved.ID, ResponseStatus: 202, ResponseBody: body,
+				ExpiresAt: time.Now().Add(8 * 24 * time.Hour),
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatal("保存受理快照夹具失败", err)
+		}
+		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.PurgeEntryOperation, key)
+		if err != nil || record == nil || record.ResponseStatus != 202 {
+			t.Fatal("读取受理快照夹具失败", err)
+		}
+		decoded, err := dto.DecodePurgeEntryAcceptedData(record.ResponseBody)
+		if err != nil || decoded == nil || *decoded != *accepted {
+			t.Fatal("MySQL 返回的快照未解码成原受理结果", decoded, err)
+		}
+		update, err := pool.ExecContext(ctx, `UPDATE idempotency_records
+		  SET response_body=JSON_SET(response_body, '$.progress_url', '/api/v1/trash/14/purge')
+		  WHERE user_id=? AND operation=? AND idempotency_key=?`, actor.UserID, domain.PurgeEntryOperation, key)
+		if err != nil {
+			t.Fatal("准备错误进度地址夹具失败", err)
+		}
+		if count, err := update.RowsAffected(); err != nil || count != 1 {
+			t.Fatal("未更新对应的受理快照", count, err)
+		}
+		record, err = store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.PurgeEntryOperation, key)
+		if err != nil {
+			t.Fatal("无法读取修改后的 JSON 夹具", err)
+		}
+		if decoded, err := dto.DecodePurgeEntryAcceptedData(record.ResponseBody); decoded != nil || !errors.Is(err, domain.ErrInvalidIdempotencyRecordData) {
+			t.Fatal("能存入 MySQL 的错误进度地址也应被拒绝", decoded, err)
 		}
 	})
 

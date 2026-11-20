@@ -37,6 +37,11 @@ func NewPurgeEntryAcceptedData(result *domain.FileEntry) (*PurgeEntryAcceptedDat
 	return &PurgeEntryAcceptedData{
 		EntryID:     entryID,
 		Status:      result.Status,
-		ProgressURL: "/api/v1/trash/" + entryID + "/purge",
+		ProgressURL: purgeEntryProgressURL(entryID),
 	}, nil
+}
+
+// purgeEntryProgressURL 为已校验的十进制 ID 生成规范进度路径。
+func purgeEntryProgressURL(entryID string) string {
+	return "/api/v1/trash/" + entryID + "/purge"
 }
