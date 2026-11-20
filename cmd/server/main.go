@@ -458,6 +458,20 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 3. 组合游标校验、快照列表和下一页签发。
 	trashPageService := service.NewTrashEntryPageService(trashCursorVerifier.Verify, trashListService.List, trashCursorSigner.Sign)
 
+	// 1. 用现有签名配置创建预检签发器。
+	purgePreviewSigner, err := service.NewPurgePreviewSigner(jwtConfig.SigningKey)
+	if err != nil {
+		logger.Error("装配永久清理预检签发器失败", "stage", "application", "error", err)
+		return err
+	}
+
+	// 2. 绑定 MySQL 只读快照和应用时钟，组装预检服务。
+	purgePreviewService := service.NewPurgePreviewService(func(ctx context.Context, read func(context.Context, service.PurgePreviewReader) error) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
+			return read(snapshotContext, snapshotStore)
+		})
+	}, purgePreviewSigner, time.Now)
+
 	// 22. 绑定当前用户事务，装配收藏核心服务。
 	setStarredService := service.NewSetStarredService(func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SetStarredTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -550,6 +564,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	serverhttp.RegisterTrashEntryRoute(router, authorizationService.Authorize, trashEntryService.Trash)
 	serverhttp.RegisterTrashPageRoute(router, authorizationService.Authorize, trashPageService.List)
 	serverhttp.RegisterRestoreEntryRoute(router, authorizationService.Authorize, restoreEntryService.Restore)
+	serverhttp.RegisterPurgePreviewRoute(router, authorizationService.Authorize, purgePreviewService.Preview)
 	serverhttp.RegisterSetStarredRoute(router, authorizationService.Authorize, setStarredService.Set)
 	serverhttp.RegisterRecordAccessRoute(router, authorizationService.Authorize, recordAccessService.Record)
 	serverhttp.RegisterCreateDownloadRoute(router, authorizationService.Authorize, downloads.Create)

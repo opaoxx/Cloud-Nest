@@ -1438,6 +1438,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	trashFirstBeforeRestart, trashNextBeforeRestart, trashNextQuery := verifyServerTrashPage(
 		t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token, trashedBeforeRestart.Data.Entry,
 	)
+	purgePreviewBeforeRestart := verifyServerPurgePreview(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
+	loginSecrets = append(loginSecrets, purgePreviewBeforeRestart.Data.PreviewDigest)
 	// 正式恢复覆盖原位恢复和回退根目录，并用详情核对后代重新可见。
 	restoredBeforeRestart := verifyServerRestoreEntry(t, ctx, pool, "http://"+address, webRefreshed.Data.AccessToken, foreignToken.Token)
 	restoredChild := getEntryDetail(t, serverRestoreChildID, webRefreshed.Data.AccessToken, 200, "", "")
@@ -1645,6 +1647,8 @@ func TestServerCurrentUserIntegration(t *testing.T) {
 	if restoredAfterRestart.Data != restoredBeforeRestart.Data || restoredAfterRestart.RequestID == restoredBeforeRestart.RequestID {
 		t.Fatal("重启后正式恢复的原快照或本次请求 ID 错误")
 	}
+	purgePreviewAfterRestart := verifyServerPurgePreviewAfterRestart(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, purgePreviewBeforeRestart)
+	loginSecrets = append(loginSecrets, purgePreviewAfterRestart.Data.PreviewDigest)
 	trashFirstAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, serverTrashFirstQuery, 200, "", "")
 	trashNextAfterRestart := requestServerTrashPage(t, ctx, "http://"+address, webRefreshed.Data.AccessToken, trashNextQuery, 200, "", "")
 	if !reflect.DeepEqual(trashFirstBeforeRestart.Data, trashFirstAfterRestart.Data) ||

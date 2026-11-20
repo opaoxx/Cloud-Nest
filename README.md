@@ -971,3 +971,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `handler.PurgePreviewSuccess`，将预检结果写为带当次请求 ID 和禁止缓存响应头的 HTTP 200。[第 444 步学习记录](docs/开发学习记录.md#第-444-步交付永久清理预检成功响应)
 
 已提供 `handler.PurgePreview`，在测试路由上连接共享认证、路径校验、预检服务与成功响应，并按契约交付错误。[第 445 步学习记录](docs/开发学习记录.md#第-445-步处理永久清理预检请求)
+
+已注册 `GET /api/v1/trash/{id}/purge-preview`。启动时绑定共享 Bearer 认证、MySQL 只读快照和预检签发器，返回清理范围与五分钟凭证。[第 446 步学习记录](docs/开发学习记录.md#第-446-步注册正式永久清理预检路由)

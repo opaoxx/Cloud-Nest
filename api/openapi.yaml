@@ -131,7 +131,7 @@ info:
     POST /api/v1/entries/{id}/trash 已接入启动入口，使用预期版本及幂等键，交付回收后的快照。
     GET /api/v1/trash 定义回收站列表的计划契约，分页返回顶层回收项、原路径和保留截止时间。
     POST /api/v1/trash/{id}/restore 已接入启动入口，以预期版本执行单项恢复，同键同参可复用已保存的快照。
-    GET /api/v1/trash/{id}/purge-preview 定义永久清理预检的计划契约，返回受影响范围与短时确认凭证。
+    GET /api/v1/trash/{id}/purge-preview 已接入启动入口，使用只读快照返回受影响范围与短时确认凭证。
 servers:
   - url: http://127.0.0.1:18081
 tags:
@@ -522,7 +522,7 @@ paths:
       operationId: previewEntryPurge
       summary: 预检当前用户的单项永久清理范围
       description: |
-        计划契约，后端实现后注册路由。本操作只读。
+        服务启动时绑定此路由，装配共享授权、MySQL 只读快照及预检签发器。
         1. Bearer 授权通过后校验路径 id。预检目标须是当前用户的顶层回收项，即自身为 TRASHED 且原父目录至真实根目录均为活动目录。仍为 TRASHED 的到期目标可以预检。真实根目录禁止预检。
         2. 在同一只读快照读取目标、祖先和完整子树。范围包含目标自身以及按同用户 parent_id 关系到达的全部后代，包括已独立回收的后代。
            单次范围最多 10000 个保留目录项，含目标和 PURGED 墓碑。超出时返回 400，details.field 为 id。父链或子树结构异常时返回 500。
