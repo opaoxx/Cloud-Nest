@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -12,7 +13,7 @@ import (
 // 调用方完成认证与预检，请求 ID 由公共中间件提供。
 func PurgePreviewSuccess(requestContext *gin.Context, result *domain.PurgePreview) {
 	// 1. 复用公共写出逻辑，检查请求状态并设置禁止缓存头。
-	writeEntrySnapshotSuccess(requestContext, func(requestID string) ([]byte, error) {
+	writeEntrySnapshotSuccess(requestContext, http.StatusOK, func(requestID string) ([]byte, error) {
 		// 2. 转换预检数据，加入当次请求 ID 并编码完整 JSON。
 		data, err := dto.NewPurgePreviewData(result)
 		if err != nil {

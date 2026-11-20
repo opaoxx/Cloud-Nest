@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
@@ -11,7 +12,7 @@ import (
 // 调用方负责认证、事务和复用条件检查，请求 ID 由公共中间件提供。
 func TrashEntrySuccess(requestContext *gin.Context, stableBody []byte) {
 	// 2. 恢复快照，关联本次请求 ID 并预先编码。
-	writeEntrySnapshotSuccess(requestContext, func(requestID string) ([]byte, error) {
+	writeEntrySnapshotSuccess(requestContext, http.StatusOK, func(requestID string) ([]byte, error) {
 		data, err := dto.RestoreTrashEntryData(stableBody)
 		if err != nil {
 			return nil, err
