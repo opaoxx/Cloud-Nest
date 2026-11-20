@@ -14,23 +14,31 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
+func purgeLeafSettlementTestDatabase(t *testing.T, ctx context.Context) (*sql.DB, *Store) {
+	t.Helper()
+	pool, store, _ := trashEntryTestDatabase(t, ctx)
+	preferencesStart := strings.Index(migrations.InitialSQL, "CREATE TABLE user_entry_preferences (")
+	preferencesEnd := strings.Index(migrations.InitialSQL, "CREATE TABLE upload_tasks (")
+	if preferencesStart < 0 || preferencesEnd <= preferencesStart {
+		t.Fatal("目录项偏好表迁移未找到")
+	}
+	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[preferencesStart:preferencesEnd]); err != nil {
+		t.Fatal("安装结算夹具的偏好表失败", err)
+	}
+	return pool, store
+}
+
 func TestCompletePurgeLeafIntegration(t *testing.T) {
 	// 1. 准备共享对象的两个文件、账户账目和正式偏好表。
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
-	pool, store, _ := trashEntryTestDatabase(t, ctx)
+	pool, store := purgeLeafSettlementTestDatabase(t, ctx)
 	execute := func(statement string, args ...any) {
 		t.Helper()
 		if _, err := pool.ExecContext(ctx, statement, args...); err != nil {
 			t.Fatal("执行单项清理夹具语句失败", err)
 		}
 	}
-	preferencesStart := strings.Index(migrations.InitialSQL, "CREATE TABLE user_entry_preferences (")
-	preferencesEnd := strings.Index(migrations.InitialSQL, "CREATE TABLE upload_tasks (")
-	if preferencesStart < 0 || preferencesEnd <= preferencesStart {
-		t.Fatal("目录项偏好表迁移未找到")
-	}
-	execute(migrations.InitialSQL[preferencesStart:preferencesEnd])
 	execute("UPDATE file_entries SET status='PURGING',purge_started_at=UTC_TIMESTAMP(6),revision=revision+1 WHERE id=14")
 	execute("UPDATE users SET storage_quota=10000,used_storage=4096,reserved_storage=512 WHERE id=1")
 	execute(`INSERT INTO user_entry_preferences(user_id,entry_id,starred_at,last_opened_at)
