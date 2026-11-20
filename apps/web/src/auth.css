@@ -48,6 +48,7 @@
 .auth-profile dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 
 .auth-card--signed-in { width: min(100%, 640px); }
+.drive-view-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .directory-browser { margin-top: 28px; }
 .directory-browser h2 { margin: 0 0 12px; font-size: 18px; }
 .directory-browser p { margin: 12px 0; }
@@ -83,6 +84,8 @@
 }
 .directory-items th:first-child { width: 46%; }
 .directory-items th:last-child { width: 22%; }
+.trash-items th:first-child { width: 34%; }
+.trash-items th:last-child { width: 28%; }
 .directory-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .directory-items + button { margin-top: 12px; }
 .create-directory-trigger { margin-bottom: 10px; }

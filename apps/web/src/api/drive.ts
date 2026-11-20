@@ -21,6 +21,49 @@ interface DirectoryPage {
 
 export type DirectoryPageReader = (parentId: string, cursor: string | null, signal: AbortSignal) => Promise<DirectoryPage>
 
+export interface TrashEntrySummary {
+  id: string
+  name: string
+  originalPath: DirectoryBreadcrumb[]
+  deletedAt: string
+}
+
+interface TrashPage {
+  items: TrashEntrySummary[]
+  nextCursor: string | null
+}
+
+export type TrashPageReader = (cursor: string | null, signal: AbortSignal) => Promise<TrashPage>
+
+export async function listTrashPage(accessToken: string, cursor: string | null, signal: AbortSignal): Promise<TrashPage> {
+  // 1. 使用当前访问令牌和可选游标读取回收站。
+  const query = cursor === null ? '' : `?${new URLSearchParams({ cursor })}`
+  const data = await requestData(`/api/v1/trash${query}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal,
+  })
+
+  // 2. 核对条目、原位置及回收时间。
+  const nextCursor = data.next_cursor
+  if (!Array.isArray(data.items) ||
+      (nextCursor !== null && (typeof nextCursor !== 'string' || !nextCursor))) {
+    throw new ApiError(200, '服务返回的回收站列表格式有误。')
+  }
+  const items = data.items.map((item: unknown): TrashEntrySummary => {
+    if (!isRecord(item) || typeof item.id !== 'string' || !item.id ||
+        typeof item.name !== 'string' || item.status !== 'TRASHED' ||
+        typeof item.deleted_at !== 'string' || !Number.isFinite(Date.parse(item.deleted_at))) {
+      throw new ApiError(200, '服务返回的回收站条目格式有误。')
+    }
+    const originalPath = parseDirectoryBreadcrumbs(item.original_path)
+    if (originalPath.at(-1)?.id !== item.parent_id) {
+      throw new ApiError(200, '服务返回的回收站原位置有误。')
+    }
+    return { id: item.id, name: item.name, originalPath, deletedAt: item.deleted_at }
+  })
+  return { items, nextCursor }
+}
+
 export interface DirectoryCreation {
   parentId: string
   name: string
@@ -190,18 +233,22 @@ async function listDirectoryPage(
     return { id: item.id, name: item.name, type: item.entry_type, sizeBytes: item.size_bytes, revision: item.revision }
   })
   // 3. 解析后端返回的根到当前目录路径，保留每一级的 ID 和名称。
-  if (!Array.isArray(data.breadcrumbs) || data.breadcrumbs.length === 0) {
+  const breadcrumbs = parseDirectoryBreadcrumbs(data.breadcrumbs)
+  if (breadcrumbs.at(-1)?.id !== parentId) {
+    throw new ApiError(200, '服务返回的目录路径与请求不符。')
+  }
+  return { items, breadcrumbs, nextCursor }
+}
+
+function parseDirectoryBreadcrumbs(value: unknown): DirectoryBreadcrumb[] {
+  if (!Array.isArray(value) || value.length === 0) {
     throw new ApiError(200, '服务返回的目录路径格式有误。')
   }
-  const breadcrumbs = data.breadcrumbs.map((crumb: unknown, index): DirectoryBreadcrumb => {
+  return value.map((crumb: unknown, index): DirectoryBreadcrumb => {
     if (!isRecord(crumb) || typeof crumb.id !== 'string' || !crumb.id ||
         typeof crumb.name !== 'string' || (index === 0 ? crumb.name !== '' : crumb.name === '')) {
       throw new ApiError(200, '服务返回的目录路径格式有误。')
     }
     return { id: crumb.id, name: crumb.name }
   })
-  if (breadcrumbs.at(-1)?.id !== parentId) {
-    throw new ApiError(200, '服务返回的目录路径与请求不符。')
-  }
-  return { items, breadcrumbs, nextCursor }
 }

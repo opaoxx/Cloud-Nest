@@ -498,6 +498,39 @@ func TestServerWebLoginIntegration(t *testing.T) {
 		t.Fatal("回收后的目录、回收站或已用空间不符")
 	}
 	t.Log("Web 单项回收联测通过：旧版本 409 不改动，跨账号 404，成功后同一条目出现在回收站且已用空间不变")
+
+	// 19. 从正式接口读取含原父路径的第一页，原样传回游标续读。
+	wantOriginalPath := []dto.DirectoryBreadcrumb{
+		{ID: parentID, Name: ""},
+		{ID: rootFolder.ID, Name: rootFolder.Name},
+		{ID: nestedFolder.ID, Name: nestedFolder.Name},
+	}
+	if len(trashPage.Data.Items) != 50 || trashPage.Data.NextCursor == nil ||
+		trashPage.Data.Items[0].TrashedEntrySummary != trashSnapshot ||
+		!slices.Equal(trashPage.Data.Items[0].OriginalPath, wantOriginalPath) {
+		t.Fatal("回收站首页未返回预期原位置或游标")
+	}
+	continuation := "/api/v1/trash?" + url.Values{"cursor": {*trashPage.Data.NextCursor}}.Encode()
+	var trashContinuation dto.TrashPageResponse
+	read(get(continuation, renewed.Data.AccessToken), http.StatusOK, &trashContinuation)
+	if len(trashContinuation.Data.Items) != 2 || trashContinuation.Data.NextCursor != nil ||
+		trashContinuation.Data.Items[1].Name != "隔离回收续页 01" {
+		t.Fatal("回收站续页条目或末页游标不符")
+	}
+
+	// 20. 空回收站来自第二账号，同一游标跨账号和未授权读取都被拒绝。
+	var emptyTrash dto.TrashPageResponse
+	read(get("/api/v1/trash", emptyUser.Data.AccessToken), http.StatusOK, &emptyTrash)
+	if emptyTrash.Data.Items == nil || len(emptyTrash.Data.Items) != 0 || emptyTrash.Data.NextCursor != nil {
+		t.Fatal("空回收站应返回空数组和末页游标")
+	}
+	var foreignCursor, anonymousTrash dto.ErrorResponse
+	read(get(continuation, emptyUser.Data.AccessToken), http.StatusBadRequest, &foreignCursor)
+	read(get("/api/v1/trash", ""), http.StatusUnauthorized, &anonymousTrash)
+	if foreignCursor.Error.Code != "INVALID_CURSOR" || anonymousTrash.Error.Code != "AUTH_REQUIRED" {
+		t.Fatal("回收站游标绑定或认证拒绝响应不符")
+	}
+	t.Log("Web 回收站列表联测通过：含原位置的 50 项首页、2 项续页、独立账号空列表，跨账号游标及匿名请求被拒")
 }
 
 func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {
@@ -535,6 +568,13 @@ func prepareServerWebLoginFixture(t *testing.T, ctx context.Context) string {
 		name := fmt.Sprintf("续页目录 %02d", number)
 		if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,modified_at) VALUES(?,7,33,?,?,'DIR','2026-01-01 00:00:00')",
 			100+number, name, []byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for number := 1; number <= 50; number++ {
+		name := fmt.Sprintf("隔离回收续页 %02d", number)
+		if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at) VALUES(?,7,54,?,?,'DIR','TRASHED',UTC_TIMESTAMP(6)-INTERVAL 1 DAY)",
+			200+number, name, []byte(name)); err != nil {
 			t.Fatal(err)
 		}
 	}

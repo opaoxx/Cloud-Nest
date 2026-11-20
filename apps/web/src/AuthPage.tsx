@@ -3,10 +3,11 @@ import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
-import { createDirectory, moveEntry, readDirectoryPageWithRefresh, renameEntry, trashEntry } from './api/drive'
-import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
+import { createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, renameEntry, trashEntry } from './api/drive'
+import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
+import TrashBrowser from './TrashBrowser'
 import { formatSize } from './demo'
 import './auth.css'
 
@@ -15,6 +16,7 @@ export default function AuthPage() {
   const [password, setPassword] = useState('')
   const activeSession = useRef<{ accessToken: string } | null>(null)
   const [profile, setProfile] = useState<CurrentUserProfile | null>(null)
+  const [view, setView] = useState<'files' | 'trash'>('files')
   const [restoring, setRestoring] = useState(true)
   const [busy, setBusy] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
@@ -22,6 +24,7 @@ export default function AuthPage() {
   const clearSession = useCallback((error: unknown) => {
     activeSession.current = null
     setProfile(null)
+    setView('files')
     setErrorMessage(apiErrorMessage(error))
   }, [])
 
@@ -56,6 +59,13 @@ export default function AuthPage() {
       throw error
     }
   }, [clearSession])
+
+  const readTrashPage = useCallback<TrashPageReader>(async (cursor, signal) => {
+    // 使用当前内存令牌执行回收站 GET，读取失败交给列表提示。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return listTrashPage(session.accessToken, cursor, signal)
+  }, [])
 
   const submitDirectoryCreation: DirectoryCreator = async creation => {
     // 从当前内存会话取令牌，写请求直接提交一次。
@@ -177,9 +187,18 @@ export default function AuthPage() {
               <div><dt>预占空间</dt><dd>{formatSize(profile.reserved_bytes)}</dd></div>
             </dl>
             <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
-            <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
-              readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation}
-              renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
+            <nav className="drive-view-nav" aria-label="文件视图">
+              <Button type={view === 'files' ? 'primary' : 'default'} aria-pressed={view === 'files'}
+                onClick={() => setView('files')}>我的文件</Button>
+              <Button type={view === 'trash' ? 'primary' : 'default'} aria-pressed={view === 'trash'}
+                onClick={() => setView('trash')}>回收站</Button>
+            </nav>
+            <div hidden={view !== 'files'}>
+              <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
+                readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation}
+                renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
+            </div>
+            {view === 'trash' && <TrashBrowser readTrashPage={readTrashPage} />}
           </>
         ) : (
           <form className="auth-form" onSubmit={submitLogin}>
