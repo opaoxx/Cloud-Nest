@@ -1013,3 +1013,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.PurgeProgressService`，在同一只读快照判断目标资格并返回状态和剩余项数，已完成目标直接得到 `PURGED` 和 `0`。[第 465 步学习记录](docs/开发学习记录.md#第-465-步组合永久清理只读进度服务)
 
 已提供 `dto.NewPurgeEntryProgressData`，将进度结果转换为完整十进制 ID、状态与剩余项数，并校验状态和计数的组合。[第 466 步学习记录](docs/开发学习记录.md#第-466-步转换永久清理进度响应数据)
+
+已提供 `handler.PurgeEntryProgressSuccess`，把进度结果写成带当次请求 ID 和禁止缓存头的 HTTP 200，已通过测试路由验证。[第 467 步学习记录](docs/开发学习记录.md#第-467-步交付永久清理进度响应)
