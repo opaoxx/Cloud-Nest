@@ -14,13 +14,14 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
+const trashCursorFixture = "eyJ2ZXJzaW9uIjoxLCJ1c2VyX2lkIjoiNyIsImRlbGV0ZWRfYXQiOiIyMDI2LTExLTIwVDAxOjMwOjAwLjEyMzQ1NloiLCJlbnRyeV9pZCI6IjQyIn0.k0Jcw22xb_sj51k84pGDsVqMZMVg_v-1MhwXc4-Z5oQ"
+
 func TestTrashEntryCursorSignerPayload(t *testing.T) {
 	stamp := time.Date(2026, 11, 20, 1, 30, 0, 123456000, time.UTC)
 	signer, err := NewTrashEntryCursorSigner(bytes.Repeat([]byte{9}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	const canonical = "eyJ2ZXJzaW9uIjoxLCJ1c2VyX2lkIjoiNyIsImRlbGV0ZWRfYXQiOiIyMDI2LTExLTIwVDAxOjMwOjAwLjEyMzQ1NloiLCJlbnRyeV9pZCI6IjQyIn0.k0Jcw22xb_sj51k84pGDsVqMZMVg_v-1MhwXc4-Z5oQ"
 	const canonicalPayload = `{"version":1,"user_id":"7","deleted_at":"2026-11-20T01:30:00.123456Z","entry_id":"42"}`
 	for _, testCase := range []struct {
 		name        string
@@ -29,8 +30,8 @@ func TestTrashEntryCursorSignerPayload(t *testing.T) {
 		wantPayload string
 		wantCursor  string
 	}{
-		{"canonical", 7, domain.TrashEntryPosition{ID: 42, DeletedAt: stamp}, canonicalPayload, canonical},
-		{"same instant with offset", 7, domain.TrashEntryPosition{ID: 42, DeletedAt: stamp.In(time.FixedZone("UTC+08", 8*60*60))}, canonicalPayload, canonical},
+		{"canonical", 7, domain.TrashEntryPosition{ID: 42, DeletedAt: stamp}, canonicalPayload, trashCursorFixture},
+		{"same instant with offset", 7, domain.TrashEntryPosition{ID: 42, DeletedAt: stamp.In(time.FixedZone("UTC+08", 8*60*60))}, canonicalPayload, trashCursorFixture},
 		{"whole second", 7, domain.TrashEntryPosition{ID: 42, DeletedAt: stamp.Truncate(time.Second)},
 			`{"version":1,"user_id":"7","deleted_at":"2026-11-20T01:30:00.000000Z","entry_id":"42"}`, ""},
 		{"minimum time and identifiers", 1, domain.TrashEntryPosition{ID: 1, DeletedAt: time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC)},

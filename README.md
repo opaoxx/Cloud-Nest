@@ -903,3 +903,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.TrashEntryListService`，在同一只读快照内收集可见回收项及原父路径，扫描达到上限时可以从空页继续读取。[第 410 步学习记录](docs/开发学习记录.md#第-410-步组合回收站内部列表读取)
 
 已提供 `service.TrashEntryCursorSigner`，把用户和最后消费的候选位置签发为回收站续页游标。[第 411 步学习记录](docs/开发学习记录.md#第-411-步签发回收站续页游标)
+
+已提供 `service.TrashEntryCursorVerifier`，校验回收站游标的签名、用户和编码，并还原续读位置。[第 412 步学习记录](docs/开发学习记录.md#第-412-步校验回收站游标并还原位置)

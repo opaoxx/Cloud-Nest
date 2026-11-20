@@ -181,6 +181,15 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 			})
 		})
 		actor := domain.Actor{UserID: 3, SessionID: 17, DeviceID: 19}
+		fixtureKey := bytes.Repeat([]byte{9}, 32)
+		signer, err := service.NewTrashEntryCursorSigner(fixtureKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := service.NewTrashEntryCursorVerifier(fixtureKey)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var before *domain.TrashEntryPosition
 		for index, expected := range [][]uint64{{}, {31, 45}, {44}} {
 			page, err := list.List(ctx, actor, 2, before)
@@ -201,20 +210,19 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 			if index == 0 && (page.NextPosition.ID != 2000 || !page.NextPosition.DeletedAt.Equal(hiddenTime)) {
 				t.Fatalf("空页续读点为 %+v，期望最后消费的隐藏候选 2000", page.NextPosition)
 			}
+			if page.NextPosition == nil {
+				break
+			}
+			// 将客户端原样提交的游标还原为下一轮实际查询使用的位置。
+			cursor, err := signer.Sign(actor.UserID, *page.NextPosition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query, fieldError := dto.ParseTrashPageQuery(url.Values{"cursor": {cursor}, "limit": {"2"}}.Encode())
+			if fieldError != nil || query == nil || query.Cursor != cursor || query.PageSize != 2 {
+				t.Fatalf("回收站游标无法经 URL 查询原样传递，字段错误为 %v", fieldError)
+			}
 			if index == 0 {
-				// 用本页返回的位置签发游标，再从客户端查询参数读回原文。
-				signer, err := service.NewTrashEntryCursorSigner(bytes.Repeat([]byte{9}, 32))
-				if err != nil {
-					t.Fatal(err)
-				}
-				cursor, err := signer.Sign(actor.UserID, *page.NextPosition)
-				if err != nil {
-					t.Fatal(err)
-				}
-				query, fieldError := dto.ParseTrashPageQuery(url.Values{"cursor": {cursor}, "limit": {"2"}}.Encode())
-				if fieldError != nil || query == nil || query.Cursor != cursor || query.PageSize != 2 {
-					t.Fatalf("空页游标无法经 URL 查询原样传递，字段错误为 %v", fieldError)
-				}
 				payload, _, _ := strings.Cut(query.Cursor, ".")
 				decoded, err := base64.RawURLEncoding.Strict().DecodeString(payload)
 				want := `{"version":1,"user_id":"3","deleted_at":"2026-11-20T01:31:00.123456Z","entry_id":"2000"}`
@@ -222,7 +230,10 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 					t.Fatalf("空页游标载荷为 %s，错误为 %v", decoded, err)
 				}
 			}
-			before = page.NextPosition
+			before, err = verifier.Verify(actor.UserID, query.Cursor)
+			if err != nil || before == nil || *before != *page.NextPosition {
+				t.Fatalf("第 %d 页还原的续读位置为 %+v，错误为 %v", index+1, before, err)
+			}
 		}
 	})
 }
