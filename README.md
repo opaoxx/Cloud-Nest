@@ -959,3 +959,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `service.SummarizePurgePreviewSubtree`，汇总待清理文件数、目录数和预计释放的逻辑字节。[第 438 步学习记录](docs/开发学习记录.md#第-438-步汇总永久清理预检范围)
 
 已提供 `service.BuildPurgePreviewSubtreeFingerprint`，按保留目录项的标识、版本和状态生成子树指纹。[第 439 步学习记录](docs/开发学习记录.md#第-439-步生成永久清理子树指纹)
+
+已提供 `service.PurgePreviewSigner`，绑定用户、目标和子树指纹，签发五分钟有效的清理预检凭证。[第 440 步学习记录](docs/开发学习记录.md#第-440-步签发永久清理预检凭证)

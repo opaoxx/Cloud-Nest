@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -64,6 +65,15 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			fingerprint, err := service.BuildPurgePreviewSubtreeFingerprint(actual)
 			if err != nil || fmt.Sprintf("%x", fingerprint) != "bc153a0f7df0fe9c078dab05127989f8c445b325f611c4989b3a506c2e5e921e" {
 				return fmt.Errorf("实际子树指纹为 %x，错误 %v", fingerprint, err)
+			}
+			signer, err := service.NewPurgePreviewSigner(bytes.Repeat([]byte{9}, sha256.Size))
+			if err != nil {
+				return err
+			}
+			issuedAt := time.Date(2026, 11, 20, 4, 30, 0, 123456000, time.UTC)
+			credential, err := signer.Sign(target.UserID, target.ID, fingerprint, issuedAt)
+			if err != nil || credential.PreviewDigest == "" || !credential.ExpiresAt.Equal(issuedAt.Add(5*time.Minute)) {
+				return fmt.Errorf("为实际清理范围签发预检凭证失败: %v", err)
 			}
 			return nil
 		}); err != nil {

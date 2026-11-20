@@ -1,5 +1,27 @@
 package domain
 
+import (
+	"errors"
+	"time"
+)
+
+// PurgePreviewLifetime 是预检凭证从签发起的有效期。
+const PurgePreviewLifetime = 5 * time.Minute
+
+// MaxPurgePreviewDigestLength 是确认请求中签名凭证的文本上限。
+const MaxPurgePreviewDigestLength = 1024
+
+// ErrInvalidPurgePreviewDigest 表示预检凭证无效。
+var ErrInvalidPurgePreviewDigest = errors.New("永久清理预检凭证无效")
+
+// PurgePreviewCredential 保存签发得到的凭证与对应截止时间。
+type PurgePreviewCredential struct {
+	// PreviewDigest 是客户端确认清理时原样传回的签名文本。
+	PreviewDigest string
+	// ExpiresAt 是签名载荷中相同的 UTC 微秒截止时间。
+	ExpiresAt time.Time
+}
+
 // PurgePreviewSubtreeEntry 是预检统计与摘要共用的目录项事实。
 type PurgePreviewSubtreeEntry struct {
 	// ID 是目录项的完整无符号标识。
