@@ -911,3 +911,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.NewTrashPageData`，转换公开回收项、原父路径、30 天保留截止时间和可空续页游标。[第 414 步学习记录](docs/开发学习记录.md#第-414-步转换回收站分页响应数据)
 
 已提供 `handler.TrashPageSuccess`，在测试 GET 入口交付带请求 ID 和缓存控制头的回收站分页响应。[第 415 步学习记录](docs/开发学习记录.md#第-415-步交付回收站分页成功响应)
+
+已提供 `handler.TrashPage`，在测试 GET 入口串联共享 Bearer 认证、分页查询参数和回收站响应。[第 416 步学习记录](docs/开发学习记录.md#第-416-步处理回收站列表请求)
