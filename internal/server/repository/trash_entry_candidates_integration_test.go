@@ -2,16 +2,19 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 	// 1. 在独占验证库插入同一微秒的回收项、嵌套项和其他状态及用户的记录。
 	pool := userProfileDatabase(t)
+	pool.SetMaxOpenConns(2)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	stamp := time.Date(2026, 11, 20, 1, 30, 0, 123456000, time.UTC)
@@ -88,6 +91,55 @@ func TestListUserTrashEntryCandidatesIntegration(t *testing.T) {
 					last := batch[len(batch)-1]
 					before = &domain.TrashEntryPosition{ID: last.ID, DeletedAt: last.DeletedAt.In(offset)}
 				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// 4. 模拟父目录恢复并移位，验证旧快照和新读取各自的祖先状态与路径。
+	t.Run("ancestor visibility in snapshot", func(t *testing.T) {
+		actor := domain.Actor{UserID: 1, SessionID: 17, DeviceID: 19}
+		readNestedPath := func(readContext context.Context, reader *Store) (*domain.FileEntryPath, error) {
+			page, err := reader.ListUserTrashEntryCandidates(readContext, actor.UserID, 100, nil)
+			if err != nil {
+				return nil, err
+			}
+			for _, candidate := range page.Entries {
+				if candidate.ID == 14 {
+					return service.CheckTrashEntryVisibility(readContext, actor, candidate, reader)
+				}
+			}
+			return nil, fmt.Errorf("未读取到嵌套回收候选")
+		}
+		err := store.WithFileEntrySnapshot(ctx, func(readContext context.Context, reader *Store) error {
+			before, err := readNestedPath(readContext, reader)
+			if err != nil || before != nil {
+				return fmt.Errorf("父目录被回收时，原父路径为 %+v，错误为 %v", before, err)
+			}
+			_, err = pool.ExecContext(ctx, `UPDATE file_entries
+				SET status='ACTIVE', deleted_at=NULL, parent_id=16,
+				    name='恢复后改名', name_key=CAST('恢复后改名' AS BINARY)
+				WHERE user_id=1 AND id=12`)
+			if err != nil {
+				return err
+			}
+			again, err := readNestedPath(readContext, reader)
+			if err != nil || again != nil {
+				return fmt.Errorf("旧快照中的原父路径为 %+v，错误为 %v", again, err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = store.WithFileEntrySnapshot(ctx, func(readContext context.Context, reader *Store) error {
+			path, err := readNestedPath(readContext, reader)
+			if err != nil || path == nil || len(path.Entries) != 3 || path.Entries[0].ID != 11 ||
+				path.Entries[1].ID != 16 || path.Entries[2].ID != 12 || path.Entries[2].Name != "恢复后改名" {
+				return fmt.Errorf("新快照中的原父路径为 %+v，错误为 %v", path, err)
 			}
 			return nil
 		})

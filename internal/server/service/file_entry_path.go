@@ -72,6 +72,12 @@ func (pathService *FileEntryPathService) Get(ctx context.Context, actor domain.A
 
 // readFileEntryPath 在调用方提供的读取范围内检查活动路径，用户归属由调用方确认。
 func readFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, entryID uint64) (*domain.FileEntryPath, error) {
+	return readActiveFileEntryPath(ctx, reader, userID, entryID, 0)
+}
+
+// readActiveFileEntryPath 从 entryID 向上检查活动路径。
+// childID 非零表示调用方已持有子项，因此 entryID 必须是存在的父目录。
+func readActiveFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, entryID, childID uint64) (*domain.FileEntryPath, error) {
 	// 1. 读取当前用户的有效资料与真实根目录。
 	profile, err := NewUserProfileService(reader.FindUserProfile).Get(ctx, userID)
 	if err != nil {
@@ -81,20 +87,28 @@ func readFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, 
 	// 2. 从目标沿父目录向上读取，校验状态、类型、循环和深度。
 	entries := make([]domain.FileEntry, 0)
 	visited := make(map[uint64]bool)
+	// 已知子项计入深度和循环检查，返回路径从父目录开始读取。
+	if childID != 0 {
+		if childID == profile.RootEntryID {
+			return nil, domain.ErrInvalidFileEntryData
+		}
+		visited[childID] = true
+	}
 	currentID := entryID
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if len(entries) > domain.MaxFileEntryDepth || visited[currentID] {
+		if len(visited) > domain.MaxFileEntryDepth || visited[currentID] {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		visited[currentID] = true
+		isAncestor := childID != 0 || len(entries) > 0
 		entry, queryError := reader.FindUserFileEntry(ctx, userID, currentID)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if errors.Is(queryError, domain.ErrFileEntryNotFound) && len(entries) > 0 {
+		if errors.Is(queryError, domain.ErrFileEntryNotFound) && isAncestor {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		if queryError != nil {
@@ -106,6 +120,9 @@ func readFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, 
 		switch entry.Status {
 		case "ACTIVE":
 		case "TRASHED", "PURGING", "PURGED":
+			if childID != 0 && (entry.EntryType != "DIR" || entry.FileSize != 0 || entry.ID == profile.RootEntryID) {
+				return nil, domain.ErrInvalidFileEntryData
+			}
 			return nil, domain.ErrFileEntryNotFound
 		default:
 			return nil, domain.ErrInvalidFileEntryData
@@ -113,7 +130,7 @@ func readFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, 
 		if entry.EntryType != "FILE" && entry.EntryType != "DIR" {
 			return nil, domain.ErrInvalidFileEntryData
 		}
-		if len(entries) > 0 && entry.EntryType != "DIR" {
+		if isAncestor && entry.EntryType != "DIR" {
 			return nil, domain.ErrInvalidFileEntryData
 		}
 		if entry.EntryType == "DIR" && entry.FileSize != 0 {
