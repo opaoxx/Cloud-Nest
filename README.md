@@ -835,3 +835,5 @@ UploadContentFileService 已接入共享临时区最多三个在途接收名额�
 已提供 `dto.ParseCreateDownloadRequest`，将下载授权正文的版本转换为完整 uint64，并校验 `download` 或 `preview` 用途。[第 376 步学习记录](docs/开发学习记录.md#第-376-步校验短期下载授权请求字段)
 
 已提供 `Store.FindUserFileEntryContent`，按用户和目录项 ID 读取当前物理对象引用及已存 MIME，供后续下载授权使用。[第 377 步学习记录](docs/开发学习记录.md#第-377-步按用户归属读取目录项内容引用)
+
+已提供 `EntryDownloadTargetService.Get`，在同一只读快照中验证文件及祖先可见性、比对版本并读取内容引用。[第 378 步学习记录](docs/开发学习记录.md#第-378-步在同一快照中检查下载目标)

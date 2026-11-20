@@ -7,7 +7,7 @@ import (
 )
 
 // ValidateEntryRevision 核对客户端预期版本与当前目录项版本。
-// 调用方先检查身份、目标归属与可见性，并在持锁事务中比对及后续更新。
+// 调用方先检查身份、目标归属与可见性。只读比对使用同一快照，写入时在持锁事务中比对及更新。
 func ValidateEntryRevision(currentRevision, expectedRevision uint64) error {
 	// 1. 检查客户端预期版本是否非零。
 	if expectedRevision == 0 {
