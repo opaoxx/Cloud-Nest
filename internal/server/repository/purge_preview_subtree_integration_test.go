@@ -38,7 +38,24 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		}
 	}
 
-	// 2. 用单连接验证资格检查和子树读取共用一笔快照。
+	// 2. 装配真实快照和签发器，验证预检返回的数据及凭证。
+	masterKey := bytes.Repeat([]byte{9}, sha256.Size)
+	signer, err := service.NewPurgePreviewSigner(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := service.NewPurgePreviewVerifier(masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuedAt := time.Date(2026, 11, 20, 4, 30, 0, 123456000, time.UTC)
+	clock := func() time.Time { return issuedAt }
+	previewService := service.NewPurgePreviewService(func(ctx context.Context, action func(context.Context, service.PurgePreviewReader) error) error {
+		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *Store) error {
+			return action(snapshotContext, snapshotStore)
+		})
+	}, signer, clock)
+	const originalFingerprint = "bc153a0f7df0fe9c078dab05127989f8c445b325f611c4989b3a506c2e5e921e"
 	t.Run("all states ordered by ID", func(t *testing.T) {
 		want := []domain.PurgePreviewSubtreeEntry{
 			{ID: 8, EntryType: "FILE", Status: "PURGED", Revision: 7, FileSize: 1024},
@@ -48,45 +65,20 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 			{ID: 15, EntryType: "FILE", Status: "ACTIVE", Revision: 5, FileSize: 2048},
 			{ID: 17, EntryType: "DIR", Status: "PURGING", Revision: 1},
 		}
-		if err := store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, txStore *Store) error {
-			target, err := service.ValidatePurgePreviewTarget(snapshotContext, actor, 14, txStore)
-			if err != nil {
-				return err
-			}
-			actual, err := txStore.ListUserPurgePreviewSubtree(snapshotContext, target.UserID, target.ID)
-			if err != nil || !reflect.DeepEqual(actual, want) {
-				return fmt.Errorf("子树记录为 %+v，错误 %v", actual, err)
-			}
-			// 两个文件引用对象 41，各计一次逻辑大小。已结算墓碑保留在范围中。
-			summary, err := service.SummarizePurgePreviewSubtree(actual)
-			if err != nil || summary != (domain.PurgePreviewSummary{FileCount: 2, DirectoryCount: 3, LogicalBytes: 4096}) {
-				return fmt.Errorf("子树汇总为 %+v，错误 %v", summary, err)
-			}
-			fingerprint, err := service.BuildPurgePreviewSubtreeFingerprint(actual)
-			if err != nil || fmt.Sprintf("%x", fingerprint) != "bc153a0f7df0fe9c078dab05127989f8c445b325f611c4989b3a506c2e5e921e" {
-				return fmt.Errorf("实际子树指纹为 %x，错误 %v", fingerprint, err)
-			}
-			masterKey := bytes.Repeat([]byte{9}, sha256.Size)
-			signer, err := service.NewPurgePreviewSigner(masterKey)
-			if err != nil {
-				return err
-			}
-			issuedAt := time.Date(2026, 11, 20, 4, 30, 0, 123456000, time.UTC)
-			credential, err := signer.Sign(target.UserID, target.ID, fingerprint, issuedAt)
-			if err != nil || credential.PreviewDigest == "" || !credential.ExpiresAt.Equal(issuedAt.Add(5*time.Minute)) {
-				return fmt.Errorf("为实际清理范围签发预检凭证失败: %v", err)
-			}
-			verifier, err := service.NewPurgePreviewVerifier(masterKey)
-			if err != nil {
-				return err
-			}
-			verified, err := verifier.Verify(actor.UserID, target.ID, credential.PreviewDigest, issuedAt.Add(time.Minute))
-			if err != nil || verified != fingerprint {
-				return fmt.Errorf("签发和校验得到的实际子树指纹不一致: %x，错误 %v", verified, err)
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
+		actual, err := store.ListUserPurgePreviewSubtree(ctx, actor.UserID, 14)
+		if err != nil || !reflect.DeepEqual(actual, want) {
+			t.Fatalf("子树记录为 %+v，错误 %v", actual, err)
+		}
+		// 两个文件引用对象 41，各计一次逻辑大小。已结算墓碑只参与指纹。
+		preview, err := previewService.Preview(ctx, actor, 14)
+		if err != nil || preview == nil || preview.EntryID != 14 || preview.Revision != 1 ||
+			preview.Summary != (domain.PurgePreviewSummary{FileCount: 2, DirectoryCount: 3, LogicalBytes: 4096}) ||
+			!preview.Credential.ExpiresAt.Equal(issuedAt.Add(5*time.Minute)) {
+			t.Fatalf("预检结果为 %+v，错误 %v", preview, err)
+		}
+		verified, err := verifier.Verify(actor.UserID, 14, preview.Credential.PreviewDigest, issuedAt.Add(time.Minute))
+		if err != nil || fmt.Sprintf("%x", verified) != originalFingerprint {
+			t.Fatalf("校验得到的实际子树指纹为 %x，错误 %v", verified, err)
 		}
 	})
 
@@ -96,9 +88,17 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(entries, want) {
 			t.Fatal("文件目标应只返回自身", entries, err)
 		}
+		preview, err := previewService.Preview(ctx, actor, 13)
+		if err != nil || preview == nil || preview.Revision != 3 ||
+			preview.Summary != (domain.PurgePreviewSummary{FileCount: 1, LogicalBytes: 2048}) {
+			t.Fatal("单文件预检范围不符", preview, err)
+		}
 		for _, entryID := range []uint64{21, 999} {
 			if entries, err := store.ListUserPurgePreviewSubtree(ctx, actor.UserID, entryID); entries != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
 				t.Fatal("跨用户或缺失目标未被拒绝", entries, err)
+			}
+			if result, err := previewService.Preview(ctx, actor, entryID); result != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
+				t.Fatal("预检跨用户或缺失目标应返回不存在", result, err)
 			}
 		}
 		cancelled, stop := context.WithCancel(ctx)
@@ -111,42 +111,35 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 	t.Run("consistent snapshot across concurrent insert", func(t *testing.T) {
 		pool.SetMaxOpenConns(2)
 		defer pool.SetMaxOpenConns(1)
-		var originalFingerprint [sha256.Size]byte
-		if err := store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, txStore *Store) error {
-			target, err := service.ValidatePurgePreviewTarget(snapshotContext, actor, 14, txStore)
-			if err != nil {
-				return err
-			}
-			beforeInsert, err := txStore.ListUserPurgePreviewSubtree(snapshotContext, target.UserID, target.ID)
-			if err != nil {
-				return err
-			}
-			originalFingerprint, err = service.BuildPurgePreviewSubtreeFingerprint(beforeInsert)
-			if err != nil {
-				return err
-			}
-			if _, err := pool.ExecContext(snapshotContext, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(19,1,14,'并发加入',CAST('并发加入' AS BINARY),'DIR')"); err != nil {
-				return err
-			}
-			entries, err := txStore.ListUserPurgePreviewSubtree(snapshotContext, target.UserID, target.ID)
-			if err != nil || len(entries) != 6 {
-				return fmt.Errorf("同一快照中子树结果为 %+v，错误 %v", entries, err)
-			}
-			current, err := service.BuildPurgePreviewSubtreeFingerprint(entries)
-			if err != nil || current != originalFingerprint {
-				return fmt.Errorf("同一快照内的指纹改变为 %x，错误 %v", current, err)
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
+		concurrentPreview := service.NewPurgePreviewService(func(ctx context.Context, action func(context.Context, service.PurgePreviewReader) error) error {
+			return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *Store) error {
+				reader := &fileEntryPathChangingReader{Store: snapshotStore, afterRead: func(entryID uint64) error {
+					if entryID != 14 {
+						return nil
+					}
+					_, err := pool.ExecContext(snapshotContext, "INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(19,1,14,'并发加入',CAST('并发加入' AS BINARY),'DIR')")
+					return err
+				}}
+				return action(snapshotContext, reader)
+			})
+		}, signer, clock)
+
+		// 已读目标后另一连接新增后代，本次预检仍使用已建立的快照。
+		before, err := concurrentPreview.Preview(ctx, actor, 14)
+		if err != nil || before == nil || before.Summary.DirectoryCount != 3 {
+			t.Fatal("本次预检应使用新增前的范围", before, err)
 		}
-		entries, err := store.ListUserPurgePreviewSubtree(ctx, actor.UserID, 14)
-		if err != nil || len(entries) != 7 || entries[len(entries)-1].ID != 19 {
-			t.Fatal("新快照没有读到并发新增", entries, err)
+		beforeFingerprint, err := verifier.Verify(actor.UserID, 14, before.Credential.PreviewDigest, issuedAt)
+		if err != nil || fmt.Sprintf("%x", beforeFingerprint) != originalFingerprint {
+			t.Fatalf("本次凭证应绑定新增前的指纹，实际 %x，错误 %v", beforeFingerprint, err)
 		}
-		fingerprint, err := service.BuildPurgePreviewSubtreeFingerprint(entries)
-		if err != nil || fingerprint == originalFingerprint {
-			t.Fatal("新快照指纹未反映并发新增", err)
+		after, err := previewService.Preview(ctx, actor, 14)
+		if err != nil || after == nil || after.Revision != before.Revision || after.Summary.DirectoryCount != 4 {
+			t.Fatal("新快照应反映并发新增，目标版本保持相同", after, err)
+		}
+		afterFingerprint, err := verifier.Verify(actor.UserID, 14, after.Credential.PreviewDigest, issuedAt)
+		if err != nil || afterFingerprint == beforeFingerprint {
+			t.Fatal("新快照指纹应反映并发新增", err)
 		}
 	})
 
@@ -187,6 +180,9 @@ func TestListUserPurgePreviewSubtreeIntegration(t *testing.T) {
 		}
 		if entries, err := store.ListUserPurgePreviewSubtree(ctx, actor.UserID, 60); entries != nil || !errors.Is(err, domain.ErrFileEntrySubtreeTooLarge) {
 			t.Fatal("10001 条范围应整体拒绝", len(entries), err)
+		}
+		if result, err := previewService.Preview(ctx, actor, 60); result != nil || !errors.Is(err, domain.ErrFileEntrySubtreeTooLarge) {
+			t.Fatal("超限范围应拒绝预检", result, err)
 		}
 	})
 

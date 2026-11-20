@@ -65,3 +65,15 @@ type PurgePreviewSummary struct {
 	// LogicalBytes 是每个仍待处理文件的逻辑字节数之和。
 	LogicalBytes uint64
 }
+
+// PurgePreview 保存同一快照中的目标版本、清理范围和对应凭证。
+type PurgePreview struct {
+	// EntryID 是已校验的回收目标。
+	EntryID uint64
+	// Revision 是客户端确认清理时使用的预期版本。
+	Revision uint64
+	// Summary 是仍待处理的逻辑数量和用量。
+	Summary PurgePreviewSummary
+	// Credential 绑定快照中的子树范围和确认期限。
+	Credential PurgePreviewCredential
+}
