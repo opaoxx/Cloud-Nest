@@ -2,8 +2,6 @@ package storage
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -33,15 +31,11 @@ func (client *Client) SignUploadPartURL(ctx context.Context, objectKey, uploadID
 	if !validStoredObjectLocation(location) {
 		return nil, domain.ErrInvalidStoredObjectData
 	}
-	if partNumber == 0 || partNumber > 10_000 {
+	if partNumber == 0 || partNumber > domain.MaxUploadPartCount {
 		return nil, domain.ErrInvalidUploadPartNumber
 	}
 	if !domain.ValidMultipartUploadID(uploadID) || sizeBytes == 0 || sizeBytes > maxMinIOUploadPartBytes ||
-		len(checksumSHA256) != base64.StdEncoding.EncodedLen(sha256.Size) {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	digest, err := base64.StdEncoding.Strict().DecodeString(checksumSHA256)
-	if err != nil || len(digest) != sha256.Size {
+		!domain.ValidUploadPartChecksumSHA256(checksumSHA256) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	lifetime := min(uploadPartURLLifetime, time.Until(taskExpiresAt)).Truncate(time.Second)

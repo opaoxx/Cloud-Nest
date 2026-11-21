@@ -9,19 +9,10 @@ import (
 )
 
 // UploadPartURL 保存客户端上传一片所需的签名和校验参数。
-type UploadPartURL struct {
-	PartNumber     uint32
-	SizeBytes      uint64
-	ChecksumSHA256 string
-	URL            string
-	URLExpiresAt   time.Time
-}
+type UploadPartURL = domain.UploadPartURL
 
 // UploadPartURLBatch 保存当前任务的期限和按请求顺序签发的链接。
-type UploadPartURLBatch struct {
-	ExpiresAt time.Time
-	Parts     []UploadPartURL
-}
+type UploadPartURLBatch = domain.UploadPartURLBatch
 
 // UploadPartURLService 组合目标读取、可选续期、逐片签名和交付前复查。
 type UploadPartURLService struct {
