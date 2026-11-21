@@ -48,11 +48,7 @@ func (receiptService *UploadCompletionReceiptService) Verify(
 	if err != nil {
 		return nil, err
 	}
-	if loaded == nil || loaded.TaskID != claimed.ID || loaded.UserID != actor.UserID ||
-		loaded.StagedObjectID != claimed.StagedObjectID || loaded.LeaseVersion != claimed.LeaseVersion ||
-		loaded.ObjectKey == "" || loaded.UploadID != *claimed.StorageUploadID || !domain.ValidMultipartUploadID(loaded.UploadID) ||
-		loaded.FileSizeBytes != claimed.FileSize || loaded.PartSizeBytes != *claimed.PartSize || loaded.PartCount != *claimed.PartCount ||
-		!loaded.ExpiresAt.Equal(claimed.ExpiresAt) || !domain.ValidMultipartUploadLayout(loaded.FileSizeBytes, loaded.PartSizeBytes, loaded.PartCount) {
+	if !matchesClaimedUploadPartTarget(loaded, claimed) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	target := *loaded
@@ -97,4 +93,14 @@ func (receiptService *UploadCompletionReceiptService) Verify(
 		return nil, domain.ErrUploadStorageUnavailable
 	}
 	return matched, matchError
+}
+
+// matchesClaimedUploadPartTarget 检查目标保留本次领取的任务定位及计划。
+// 调用前已复核 claimed 含有会话 ID 和完整计划。
+func matchesClaimedUploadPartTarget(target *UploadPartSigningTarget, claimed *domain.UploadTask) bool {
+	return target != nil && target.TaskID == claimed.ID && target.UserID == claimed.UserID &&
+		target.StagedObjectID == claimed.StagedObjectID && target.LeaseVersion == claimed.LeaseVersion &&
+		target.ObjectKey != "" && target.UploadID == *claimed.StorageUploadID && domain.ValidMultipartUploadID(target.UploadID) &&
+		target.FileSizeBytes == claimed.FileSize && target.PartSizeBytes == *claimed.PartSize && target.PartCount == *claimed.PartCount &&
+		target.ExpiresAt.Equal(claimed.ExpiresAt) && domain.ValidMultipartUploadLayout(target.FileSizeBytes, target.PartSizeBytes, target.PartCount)
 }
