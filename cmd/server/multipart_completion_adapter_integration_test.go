@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +38,21 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Close)
+	verifyMinIO := func(callContext context.Context, endpoint string) (string, error) {
+		// 只检查本测试启动的容器。依次读取容器 ID、镜像 ID、运行状态、启动时间和公布的端口。
+		const fields = `{{.Id}} {{.Image}} {{.State.Running}} {{.State.StartedAt}} {{range index .NetworkSettings.Ports "9000/tcp"}}{{.HostIp}}:{{.HostPort}} {{end}}`
+		const image = "sha256:7c840b89c21e0af0e824cf57310becadbbd45c7fb407c78cd2ada4b74c76f733"
+		output, err := exec.CommandContext(callContext, "docker", "container", "inspect", "--format", fields, containerID).Output()
+		if err != nil {
+			return "", err
+		}
+		instance := strings.Fields(string(output))
+		if len(instance) != 5 || instance[0] != containerID || instance[1] != image || instance[2] != "true" ||
+			!strings.HasPrefix(instance[4], "127.0.0.1:") || endpoint != "http://"+instance[4] {
+			return "", nil
+		}
+		return instance[0] + "/" + instance[3], nil
+	}
 	const key = "b4/synthetic +%.bin"
 	const partSize = 16 << 20
 	const fileSize = partSize + 1
@@ -169,6 +186,9 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 	if err != nil || observed == nil || observed.StorageVersionID == nil || *observed.StorageVersionID != version {
 		t.Fatal("ListParts 确认会话缺失后未找到原对象版本", err)
 	}
+	if missing, err := client.ConfirmMultipartSessionAbsence(ctx, key, uploadID, verifyMinIO); err != nil || missing {
+		t.Fatal("对象已存在时不应确认会话与对象均缺失", missing, err)
+	}
 	replay, replayError := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, receipts)
 	if replay != nil || !errors.Is(replayError, domain.ErrUploadPartSessionMissing) || !errors.Is(replayError, domain.ErrMultipartUploadCompletionUnknown) {
 		t.Fatal("已关闭会话未返回恢复信号", replay, replayError)
@@ -231,6 +251,13 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 	if _, err := client.StatMultipartUploadObject(ctx, missingKey); !errors.Is(err, domain.ErrUploadObjectMissing) {
 		t.Fatal("迟到合并后原键不应出现对象", err)
 	}
+	if missing, err := client.ConfirmMultipartSessionAbsence(ctx, missingKey, missingUploadID, nil); err != nil || missing {
+		t.Fatal("未经实例确认的缺失不能作为依据", missing, err)
+	}
+	if missing, err := client.ConfirmMultipartSessionAbsence(ctx, missingKey, missingUploadID, verifyMinIO); err != nil || !missing {
+		t.Fatal("固定实例上的会话和对象均缺失，未得到同轮确认", missing, err)
+	}
+	t.Log("Docker 实例身份在同轮查询前后相符，仅会话和对象均缺失的任务得到确认")
 	t.Log("ListParts 确认会话缺失后找到原版本，已中止会话的迟到合并未生成对象")
 	t.Logf("专用 MinIO %s，回环地址 %s，合成版本 %s，读回 %d B，SHA-256 %x，版本数 %d",
 		containerID[:12], settings.EndpointURL, version, readSize, actualDigest.Sum(nil), versions)

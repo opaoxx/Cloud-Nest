@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -17,6 +18,12 @@ const (
 // ListUploadPartsPage 只读查询当前桶中指定对象和会话的一页分片回执。
 // marker 为零时从头读取。成功结果保留存储报告的片长，供调用方按任务计划核对。
 func (client *Client) ListUploadPartsPage(ctx context.Context, objectKey, uploadID string, marker uint32, limit int) (*domain.UploadPartReceiptPage, error) {
+	return client.listUploadPartsPage(ctx, objectKey, uploadID, marker, limit, false)
+}
+
+func (client *Client) listUploadPartsPage(
+	ctx context.Context, objectKey, uploadID string, marker uint32, limit int, requireConfirmedMissing bool,
+) (*domain.UploadPartReceiptPage, error) {
 	// 1. 校验请求和存储位置，使用内部客户端只读获取一页。
 	if ctx == nil || client == nil || client.sdkClient == nil || client.bucket == "" {
 		return nil, fmt.Errorf("读取分片回执需要客户端和上下文")
@@ -42,7 +49,9 @@ func (client *Client) ListUploadPartsPage(ctx context.Context, objectKey, upload
 		return nil, contextError
 	}
 	if err != nil {
-		if minio.ToErrorResponse(err).Code == "NoSuchUpload" {
+		response := minio.ToErrorResponse(err)
+		if response.Code == "NoSuchUpload" &&
+			(!requireConfirmedMissing || (response.StatusCode == http.StatusNotFound && response.RequestID != "")) {
 			return nil, domain.ErrUploadPartSessionMissing
 		}
 		return nil, storageObjectError(err, domain.ErrUploadStorageUnavailable)
