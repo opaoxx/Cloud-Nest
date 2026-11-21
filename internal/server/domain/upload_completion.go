@@ -1,5 +1,11 @@
 package domain
 
+// UploadPartCompletionClaim 保存客户端提交的分片回执声明，受理完成前须与存储核对。
+type UploadPartCompletionClaim struct {
+	PartNumber uint32
+	ETag       string
+}
+
 // ResolveSingleUploadCompletionStatus 判定已按归属读取的单文件任务完成状态。
 // 结果为 VERIFYING 或 COMPLETED。租约、重试和到期由后台流程推进。
 func ResolveSingleUploadCompletionStatus(task *UploadTask) (UploadStatus, error) {
