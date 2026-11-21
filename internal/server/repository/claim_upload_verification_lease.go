@@ -14,9 +14,31 @@ import (
 // ClaimUploadVerificationLease 为内部 worker 领取校验租约，提交后返回任务。
 // candidate 来自数据库扫描。持有者由 worker 生成，调用须使用事务外 Store。
 func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate domain.UploadVerificationCandidate, leaseOwner string) (*domain.UploadTask, error) {
+	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, false)
+}
+
+// ClaimMultipartUploadInitializationLease 为尚未绑定存储会话的任务领取初始化租约。
+// 提交后返回任务及新版本，调用方再执行事务外的存储初始化。
+func (store *Store) ClaimMultipartUploadInitializationLease(ctx context.Context, candidate domain.MultipartUploadInitializationCandidate, leaseOwner string) (*domain.UploadTask, error) {
+	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, true)
+}
+
+type uploadLeaseCandidate struct {
+	TaskID, UserID, StagedObjectID, LeaseVersion uint64
+}
+
+func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseCandidate, leaseOwner string, initializingMultipart bool) (*domain.UploadTask, error) {
 	// 1. 校验候选与持有者，开启所属用户的短事务。
+	action, clockAction := "上传校验", "校验"
+	mode, status, objectStatus := "SINGLE", domain.UploadStatusVerifying, domain.StoredObjectStatusVerifying
+	taskCondition := "status = 'VERIFYING' AND upload_mode = 'SINGLE'"
+	if initializingMultipart {
+		action, clockAction = "分片初始化", "分片初始化"
+		mode, status, objectStatus = "MULTIPART", domain.UploadStatusCreating, domain.StoredObjectStatusStaging
+		taskCondition = "status = 'CREATING' AND upload_mode = 'MULTIPART' AND storage_upload_id IS NULL"
+	}
 	if store == nil || store.database == nil || ctx == nil {
-		return nil, fmt.Errorf("领取上传校验租约需要数据入口和上下文")
+		return nil, fmt.Errorf("领取%s租约需要数据入口和上下文", action)
 	}
 	if candidate.UserID == 0 || candidate.TaskID == 0 || candidate.StagedObjectID == 0 || len(leaseOwner) == 0 || len(leaseOwner) > 64 {
 		return nil, domain.ErrInvalidUploadTaskData
@@ -36,10 +58,15 @@ func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate 
 		if err != nil {
 			return err
 		}
-		if task.Status != domain.UploadStatusVerifying || task.UploadMode != "SINGLE" {
+		if task.Status != status || task.UploadMode != mode || (initializingMultipart && task.StorageUploadID != nil) {
 			return domain.ErrUploadTaskNotReady
 		}
-		if task.FileSize > domain.MaxSingleUploadSizeBytes {
+		if initializingMultipart {
+			if task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
+				!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) {
+				return domain.ErrInvalidUploadTaskData
+			}
+		} else if task.FileSize > domain.MaxSingleUploadSizeBytes {
 			return domain.ErrUploadFileTooLarge
 		}
 		if task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil || task.ResolvedName != nil ||
@@ -58,7 +85,7 @@ func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate 
 			return err
 		}
 		if queryError != nil {
-			return fmt.Errorf("读取校验租约数据库时间失败: %w", queryError)
+			return fmt.Errorf("读取%s租约数据库时间失败: %w", clockAction, queryError)
 		}
 		now = now.UTC()
 		if now.Year() < 1000 || now.Add(time.Minute).Year() > 9999 || now.Nanosecond()%1000 != 0 {
@@ -74,8 +101,11 @@ func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate 
 		if err != nil {
 			return err
 		}
-		if object.Status != domain.StoredObjectStatusVerifying || object.FileSize != task.FileSize ||
+		if object.Status != objectStatus || object.FileSize != task.FileSize ||
 			object.VerifiedAt != nil || object.VerifiedSHA256 != nil || object.UnreferencedAt != nil {
+			return domain.ErrInvalidStoredObjectData
+		}
+		if initializingMultipart && (object.StorageVersionID != nil || object.StorageETag != nil || object.GCAfter != nil || object.LastErrorCode != nil) {
 			return domain.ErrInvalidStoredObjectData
 		}
 
@@ -84,7 +114,7 @@ func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate 
 			"UPDATE upload_tasks SET lease_owner = ?, lease_until = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 60 SECOND), "+
 				"lease_version = lease_version + 1, updated_at = UTC_TIMESTAMP(6) "+
 				"WHERE user_id = ? AND id = ? AND staged_object_id = ? AND lease_version = ? AND lease_version < ? "+
-				"AND status = 'VERIFYING' AND upload_mode = 'SINGLE' AND reserved_bytes = file_size AND expires_at > UTC_TIMESTAMP(6) "+
+				"AND "+taskCondition+" AND reserved_bytes = file_size AND expires_at > UTC_TIMESTAMP(6) "+
 				"AND (next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6)) "+
 				"AND (lease_until IS NULL OR lease_until <= UTC_TIMESTAMP(6))",
 			leaseOwner, candidate.UserID, candidate.TaskID, candidate.StagedObjectID, candidate.LeaseVersion, uint64(math.MaxUint64))
@@ -92,7 +122,7 @@ func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate 
 			return err
 		}
 		if result.Error != nil {
-			return fmt.Errorf("领取上传校验租约失败: %w", result.Error)
+			return fmt.Errorf("领取%s租约失败: %w", action, result.Error)
 		}
 		if result.RowsAffected == 0 {
 			return domain.ErrUploadTaskBusy
@@ -114,6 +144,10 @@ func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate 
 			updated.LeaseUntil == nil || !updated.LeaseUntil.Equal(updated.UpdatedAt.Add(time.Minute)) ||
 			updated.UpdatedAt.Before(now) || !updated.UpdatedAt.Before(task.ExpiresAt) ||
 			updated.FileSize != task.FileSize || updated.ReservedBytes != task.ReservedBytes || !updated.ExpiresAt.Equal(task.ExpiresAt) {
+			return domain.ErrInvalidUploadTaskData
+		}
+		if initializingMultipart && (updated.StorageUploadID != nil || updated.ExpectedSHA256 == nil || *updated.ExpectedSHA256 != *task.ExpectedSHA256 ||
+			updated.PartSize == nil || *updated.PartSize != *task.PartSize || updated.PartCount == nil || *updated.PartCount != *task.PartCount) {
 			return domain.ErrInvalidUploadTaskData
 		}
 		claimed = updated
