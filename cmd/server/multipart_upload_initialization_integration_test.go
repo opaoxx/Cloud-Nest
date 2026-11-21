@@ -402,6 +402,44 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	t.Logf("持租约核对实际两页，普通片 %d 字节，尾片 %d 字节，旧 ETag 失配编号 [1]",
 		matched[0].SizeBytes, matched[1].SizeBytes)
 
+	// 10. 通过应用服务检查失败释放、成功提交及无正文复读。
+	completion := service.NewMultipartUploadCompletionService(store.FindUserUploadTaskForPartSigning,
+		store.ClaimUserMultipartCompletionLease, verifier.Verify, store.CommitUserMultipartCompletion, store.ReleaseUserMultipartCompletionLease)
+	readClaims := func() ([]domain.UploadPartCompletionClaim, error) { return claims, nil }
+	readSnapshotCount := func() int {
+		t.Helper()
+		var count int
+		if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM upload_parts WHERE task_id=19").Scan(&count); err != nil {
+			t.Fatal("读取隔离完成快照行数失败", err)
+		}
+		return count
+	}
+	claims[1].ETag = shortETag
+	if result, err := completion.Complete(ctx, actor, leased.ID, readClaims); result != nil || !errors.As(err, &mismatch) ||
+		!slices.Equal(mismatch.PartNumbers, []uint32{1}) {
+		t.Fatal("旧 ETag 未在应用层拒绝", err)
+	}
+	afterMismatch := read(ctx)
+	if afterMismatch.Status != domain.UploadStatusUploading || afterMismatch.LeaseOwner != nil ||
+		afterMismatch.LeaseUntil != nil || afterMismatch.LeaseVersion != leased.LeaseVersion+1 || readSnapshotCount() != 0 {
+		t.Fatal("应用层核对失败后未释放本次租约或写入了快照")
+	}
+	checkQuota(afterMismatch)
+
+	claims[1].ETag = firstETag
+	completing, err := completion.Complete(ctx, actor, leased.ID, readClaims)
+	if err != nil || completing == nil || completing.Status != domain.UploadStatusCompleting ||
+		completing.LeaseOwner != nil || completing.LeaseUntil != nil || completing.LeaseVersion != afterMismatch.LeaseVersion+1 ||
+		readSnapshotCount() != 2 || !reflect.DeepEqual(completing, read(ctx)) {
+		t.Fatal("应用层未提交完整快照并推进完成阶段", err)
+	}
+	checkQuota(completing)
+	replay, err := completion.Complete(ctx, actor, leased.ID, nil)
+	if err != nil || !reflect.DeepEqual(completing, replay) || readSnapshotCount() != 2 {
+		t.Fatal("无正文重试没有复用已受理快照", err)
+	}
+	t.Log("应用流程通过旧回执失败释放、新回执提交两行及无正文重试")
+
 	t.Logf("隔离 MySQL %s %s，MinIO %s %s，签发、续期、尾片 PUT 与只读两页回执核对通过",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }
