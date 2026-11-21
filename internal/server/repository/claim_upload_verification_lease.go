@@ -14,28 +14,44 @@ import (
 // ClaimUploadVerificationLease 为内部 worker 领取校验租约，提交后返回任务。
 // candidate 来自数据库扫描。持有者由 worker 生成，调用须使用事务外 Store。
 func (store *Store) ClaimUploadVerificationLease(ctx context.Context, candidate domain.UploadVerificationCandidate, leaseOwner string) (*domain.UploadTask, error) {
-	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, false)
+	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, domain.UploadStatusVerifying)
 }
 
 // ClaimMultipartUploadInitializationLease 为尚未绑定存储会话的任务领取初始化租约。
 // 提交后返回任务及新版本，调用方再执行事务外的存储初始化。
 func (store *Store) ClaimMultipartUploadInitializationLease(ctx context.Context, candidate domain.MultipartUploadInitializationCandidate, leaseOwner string) (*domain.UploadTask, error) {
-	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, true)
+	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, domain.UploadStatusCreating)
+}
+
+// ClaimMultipartUploadCompletionLease 为已保存完成意图的任务领取后台合并租约。
+// 返回提交后的任务及新版本，后续才能读取冻结回执并执行事务外的存储操作。
+func (store *Store) ClaimMultipartUploadCompletionLease(ctx context.Context, candidate domain.MultipartUploadCompletionCandidate, leaseOwner string) (*domain.UploadTask, error) {
+	return store.claimUploadLease(ctx, uploadLeaseCandidate(candidate), leaseOwner, domain.UploadStatusCompleting)
 }
 
 type uploadLeaseCandidate struct {
 	TaskID, UserID, StagedObjectID, LeaseVersion uint64
 }
 
-func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseCandidate, leaseOwner string, initializingMultipart bool) (*domain.UploadTask, error) {
+func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseCandidate, leaseOwner string, status domain.UploadStatus) (*domain.UploadTask, error) {
 	// 1. 校验候选与持有者，开启所属用户的短事务。
-	action, clockAction := "上传校验", "校验"
-	mode, status, objectStatus := "SINGLE", domain.UploadStatusVerifying, domain.StoredObjectStatusVerifying
-	taskCondition := "status = 'VERIFYING' AND upload_mode = 'SINGLE'"
-	if initializingMultipart {
+	var action, clockAction, mode, taskCondition string
+	var objectStatus domain.StoredObjectStatus
+	switch status {
+	case domain.UploadStatusVerifying:
+		action, clockAction = "上传校验", "校验"
+		mode, objectStatus = "SINGLE", domain.StoredObjectStatusVerifying
+		taskCondition = "status = 'VERIFYING' AND upload_mode = 'SINGLE'"
+	case domain.UploadStatusCreating:
 		action, clockAction = "分片初始化", "分片初始化"
-		mode, status, objectStatus = "MULTIPART", domain.UploadStatusCreating, domain.StoredObjectStatusStaging
+		mode, objectStatus = "MULTIPART", domain.StoredObjectStatusStaging
 		taskCondition = "status = 'CREATING' AND upload_mode = 'MULTIPART' AND storage_upload_id IS NULL"
+	case domain.UploadStatusCompleting:
+		action, clockAction = "分片合并", "分片合并"
+		mode, objectStatus = "MULTIPART", domain.StoredObjectStatusStaging
+		taskCondition = "status = 'COMPLETING' AND upload_mode = 'MULTIPART' AND CAST(storage_upload_id AS BINARY) = ?"
+	default:
+		return nil, domain.ErrInvalidUploadTaskData
 	}
 	if store == nil || store.database == nil || ctx == nil {
 		return nil, fmt.Errorf("领取%s租约需要数据入口和上下文", action)
@@ -51,19 +67,24 @@ func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseC
 
 	var claimed *domain.UploadTask
 	err := store.withActiveUserTransaction(ctx, candidate.UserID, func(txContext context.Context, txStore *Store) error {
-		// 2. 加锁复查任务、暂存对象和可领取时间。
+		// 2. 加锁复查任务、分片会话、暂存对象和可领取时间。
 		lockedStore := *txStore
 		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
 		task, err := lockedStore.FindUserUploadTask(txContext, candidate.UserID, candidate.TaskID)
 		if err != nil {
 			return err
 		}
-		if task.Status != status || task.UploadMode != mode || (initializingMultipart && task.StorageUploadID != nil) {
+		if task.Status != status || task.UploadMode != mode ||
+			(status == domain.UploadStatusCreating && task.StorageUploadID != nil) ||
+			(status == domain.UploadStatusCompleting && task.StorageUploadID == nil) {
 			return domain.ErrUploadTaskNotReady
 		}
-		if initializingMultipart {
+		if mode == "MULTIPART" {
 			if task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
 				!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) {
+				return domain.ErrInvalidUploadTaskData
+			}
+			if status == domain.UploadStatusCompleting && !domain.ValidMultipartUploadID(*task.StorageUploadID) {
 				return domain.ErrInvalidUploadTaskData
 			}
 		} else if task.FileSize > domain.MaxSingleUploadSizeBytes {
@@ -105,11 +126,15 @@ func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseC
 			object.VerifiedAt != nil || object.VerifiedSHA256 != nil || object.UnreferencedAt != nil {
 			return domain.ErrInvalidStoredObjectData
 		}
-		if initializingMultipart && (object.StorageVersionID != nil || object.StorageETag != nil || object.GCAfter != nil || object.LastErrorCode != nil) {
+		if mode == "MULTIPART" && (object.StorageVersionID != nil || object.StorageETag != nil || object.GCAfter != nil || object.LastErrorCode != nil) {
 			return domain.ErrInvalidStoredObjectData
 		}
 
 		// 3. 条件写入 60 秒租约并递增版本。
+		arguments := []any{leaseOwner, candidate.UserID, candidate.TaskID, candidate.StagedObjectID, candidate.LeaseVersion, uint64(math.MaxUint64)}
+		if status == domain.UploadStatusCompleting {
+			arguments = append(arguments, *task.StorageUploadID)
+		}
 		result := txStore.database.WithContext(txContext).Exec(
 			"UPDATE upload_tasks SET lease_owner = ?, lease_until = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 60 SECOND), "+
 				"lease_version = lease_version + 1, updated_at = UTC_TIMESTAMP(6) "+
@@ -117,7 +142,7 @@ func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseC
 				"AND "+taskCondition+" AND reserved_bytes = file_size AND expires_at > UTC_TIMESTAMP(6) "+
 				"AND (next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6)) "+
 				"AND (lease_until IS NULL OR lease_until <= UTC_TIMESTAMP(6))",
-			leaseOwner, candidate.UserID, candidate.TaskID, candidate.StagedObjectID, candidate.LeaseVersion, uint64(math.MaxUint64))
+			arguments...)
 		if err := txContext.Err(); err != nil {
 			return err
 		}
@@ -131,7 +156,7 @@ func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseC
 			return domain.ErrInvalidUploadTaskData
 		}
 
-		// 4. 核对新租约，提交后返回任务。
+		// 4. 回读确认新租约、分片声明和会话原值，提交后返回任务。
 		updated, err := lockedStore.FindUserUploadTask(txContext, candidate.UserID, candidate.TaskID)
 		if errors.Is(err, domain.ErrUploadTaskNotFound) {
 			return domain.ErrInvalidUploadTaskData
@@ -146,8 +171,7 @@ func (store *Store) claimUploadLease(ctx context.Context, candidate uploadLeaseC
 			updated.FileSize != task.FileSize || updated.ReservedBytes != task.ReservedBytes || !updated.ExpiresAt.Equal(task.ExpiresAt) {
 			return domain.ErrInvalidUploadTaskData
 		}
-		if initializingMultipart && (updated.StorageUploadID != nil || updated.ExpectedSHA256 == nil || *updated.ExpectedSHA256 != *task.ExpectedSHA256 ||
-			updated.PartSize == nil || *updated.PartSize != *task.PartSize || updated.PartCount == nil || *updated.PartCount != *task.PartCount) {
+		if mode == "MULTIPART" && (!sameUploadStorageText(updated.StorageUploadID, task.StorageUploadID) || !sameMultipartUploadDeclaration(task, updated)) {
 			return domain.ErrInvalidUploadTaskData
 		}
 		claimed = updated
