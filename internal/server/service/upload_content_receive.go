@@ -101,7 +101,7 @@ func (receiver *UploadContentReceiveService) Receive(ctx context.Context, actor 
 		}
 		objectID, objectKey = object.ID, object.ObjectKey
 		leaseVersion, leaseOwner = task.LeaseVersion, *task.LeaseOwner
-		stopRenewal = startUploadContentLeaseRenewal(receiveContext, cancelReceive, func(renewContext context.Context) error {
+		stopRenewal = startUploadLeaseRenewal(receiveContext, cancelReceive, func(renewContext context.Context) error {
 			return receiver.withTransaction(renewContext, actor, func(txContext context.Context, txn UploadContentReceiveTransaction) error {
 				_, err := txn.RenewUserUploadContentLease(txContext, declared.ID, objectID, leaseVersion, leaseOwner)
 				return err

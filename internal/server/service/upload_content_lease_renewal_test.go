@@ -17,7 +17,7 @@ func TestUploadContentLeaseRenewalSchedule(t *testing.T) {
 		defer cancelReceive(nil)
 		startedAt := time.Now()
 		var renewals []time.Duration
-		stop := startUploadContentLeaseRenewal(receiveContext, cancelReceive, func(ctx context.Context) error {
+		stop := startUploadLeaseRenewal(receiveContext, cancelReceive, func(ctx context.Context) error {
 			if ctx != receiveContext || ctx.Err() != nil {
 				t.Error("续租未使用本次接收的有效上下文")
 			}
@@ -54,7 +54,7 @@ func TestUploadContentLeaseRenewalFailure(t *testing.T) {
 		receiveContext, cancelReceive := context.WithCancelCause(t.Context())
 		defer cancelReceive(nil)
 		calls := 0
-		stop := startUploadContentLeaseRenewal(receiveContext, cancelReceive, func(context.Context) error {
+		stop := startUploadLeaseRenewal(receiveContext, cancelReceive, func(context.Context) error {
 			calls++
 			return domain.ErrUploadTaskBusy
 		})
@@ -86,7 +86,7 @@ func TestUploadContentLeaseRenewalStopWaits(t *testing.T) {
 				defer cancelReceive(nil)
 				releaseRenewal := make(chan struct{})
 				calls := 0
-				stop := startUploadContentLeaseRenewal(receiveContext, cancelReceive, func(ctx context.Context) error {
+				stop := startUploadLeaseRenewal(receiveContext, cancelReceive, func(ctx context.Context) error {
 					calls++
 					select {
 					case <-releaseRenewal:
@@ -148,7 +148,7 @@ func TestUploadContentLeaseRenewalParentCancellation(t *testing.T) {
 					cancelParent(parentError)
 				}
 				calls := 0
-				stop := startUploadContentLeaseRenewal(receiveContext, cancelReceive, func(ctx context.Context) error {
+				stop := startUploadLeaseRenewal(receiveContext, cancelReceive, func(ctx context.Context) error {
 					calls++
 					<-ctx.Done()
 					return ctx.Err()

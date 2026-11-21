@@ -45,13 +45,54 @@ func NewUploadVerificationService(
 func (verification *UploadVerificationService) VerifyAndPublish(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject) (*domain.UploadTask, error) {
 	// 1. 读回暂存对象，取得实测摘要或校验错误。
 	digest, verificationError := VerifyUploadObject(ctx, task, staged, verification.open)
+	return verification.writeVerificationResult(ctx, task, staged, digest, verificationError)
+}
 
-	// 2. 校验通过后发布文件。
+// VerifyMultipartAndPublish 为已领取的分片校验在对象读回期间续租。
+// renew 同步续约同一租约，失败时原样返回其错误。
+func (verification *UploadVerificationService) VerifyMultipartAndPublish(
+	ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject,
+	renew func(context.Context, *domain.UploadTask) error,
+) (*domain.UploadTask, error) {
+	// 1. 为分片读回建立可取消的上下文，启动定时续租。
+	if ctx == nil || renew == nil {
+		return nil, errors.New("校验分片上传需要上下文和续租方法")
+	}
+	if task == nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if task.UploadMode != "MULTIPART" {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	readContext, cancelRead := context.WithCancelCause(ctx)
+	stopRenewal := startUploadLeaseRenewal(readContext, cancelRead, func(renewContext context.Context) error {
+		return renew(renewContext, task)
+	})
+	defer func() {
+		cancelRead(nil)
+		_ = stopRenewal()
+	}()
+
+	// 2. 读回并关闭对象流，停止续租并等待在途事务。
+	digest, verificationError := VerifyUploadObject(readContext, task, staged, verification.open)
+	if err := stopRenewal(); err != nil {
+		return nil, err
+	}
+
+	// 3. 续租正常结束后，用原调用上下文写回校验结果。
+	return verification.writeVerificationResult(ctx, task, staged, digest, verificationError)
+}
+
+func (verification *UploadVerificationService) writeVerificationResult(
+	ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject,
+	digest *domain.UploadContentDigest, verificationError error,
+) (*domain.UploadTask, error) {
+	// 1. 校验通过后发布文件。
 	if verificationError == nil {
 		return verification.publish(ctx, task, staged, *digest)
 	}
 
-	// 3. 临时存储故障按已记录的重试次数安排下次尝试。
+	// 2. 临时存储故障按已记录的重试次数安排下次尝试。
 	if errors.Is(verificationError, domain.ErrUploadStorageUnavailable) || errors.Is(verificationError, context.DeadlineExceeded) {
 		// 存储请求可能先超时。只有外层调用仍有效，才能写入重试记录。
 		if contextError := ctx.Err(); contextError != nil {
@@ -66,7 +107,7 @@ func (verification *UploadVerificationService) VerifyAndPublish(ctx context.Cont
 		return verification.scheduleRetry(ctx, task, uploadRetryDelaySeconds(task.AttemptCount))
 	}
 
-	// 4. 已确认的大小或摘要失配继续交给失败收尾事务。
+	// 3. 已确认的大小或摘要失配继续交给失败收尾事务。
 	// 直接匹配原始类型，带有其他故障的错误不能作为失配收尾的证据。
 	var finalize func(context.Context, *domain.UploadTask, *domain.StoredObject, error) error
 	switch mismatch := verificationError.(type) {

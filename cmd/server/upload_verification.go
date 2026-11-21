@@ -22,7 +22,7 @@ const (
 // newServerUploadVerificationBatch 复用服务持有的 MySQL 仓储和 MinIO 客户端。
 func newServerUploadVerificationBatch(store *repository.Store, storageClient *storage.Client) *service.UploadVerificationBatch {
 	// 1. 绑定 SINGLE 的候选扫描与租约领取。
-	processor := newServerUploadVerificationProcessor(store, store.ClaimUploadVerificationLease, storageClient.OpenUploadVerificationObject)
+	processor := newServerUploadVerificationProcessor(store, store.ClaimUploadVerificationLease, storageClient.OpenUploadVerificationObject, nil)
 	return service.NewUploadVerificationBatch(store.ListUploadVerificationCandidates, processor.Process)
 }
 
@@ -35,14 +35,19 @@ func newServerMultipartUploadVerificationBatch(store *repository.Store, open fun
 
 // newServerMultipartUploadVerificationProcessor 装配一条已合并任务的校验入口。
 func newServerMultipartUploadVerificationProcessor(store *repository.Store, open func(context.Context, *domain.StoredObject) (io.ReadCloser, error)) *service.UploadVerificationCandidateProcessor {
-	// 1. Multipart 使用独立的领取入口，读回及写回复用现有校验流程。
-	return newServerUploadVerificationProcessor(store, store.ClaimMultipartUploadVerificationLease, open)
+	// 1. Multipart 绑定领取与续租，读回及写回复用现有校验流程。
+	renew := func(ctx context.Context, task *domain.UploadTask) error {
+		_, err := store.RenewMultipartUploadVerificationLease(ctx, task)
+		return err
+	}
+	return newServerUploadVerificationProcessor(store, store.ClaimMultipartUploadVerificationLease, open, renew)
 }
 
 func newServerUploadVerificationProcessor(
 	store *repository.Store,
 	claimLease func(context.Context, domain.UploadVerificationCandidate, string) (*domain.UploadTask, error),
 	open func(context.Context, *domain.StoredObject) (io.ReadCloser, error),
+	renew func(context.Context, *domain.UploadTask) error,
 ) *service.UploadVerificationCandidateProcessor {
 	// 1. 将发布服务接到 MySQL 的校验写回事务。
 	publisher := service.NewUploadPublicationService(func(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest,
@@ -62,7 +67,13 @@ func newServerUploadVerificationProcessor(
 	)
 
 	// 3. 领取提交后按账号读取对象，再执行校验与结果写回。
-	return service.NewUploadVerificationCandidateProcessor(claimLease, store.FindUserStoredObject, verification.VerifyAndPublish)
+	verify := verification.VerifyAndPublish
+	if renew != nil {
+		verify = func(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject) (*domain.UploadTask, error) {
+			return verification.VerifyMultipartAndPublish(ctx, task, staged, renew)
+		}
+	}
+	return service.NewUploadVerificationCandidateProcessor(claimLease, store.FindUserStoredObject, verify)
 }
 
 // startServerUploadVerificationWorker 启动一个校验循环，返回取消并等待的方法。
