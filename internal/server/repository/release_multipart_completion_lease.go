@@ -14,11 +14,7 @@ func (store *Store) ReleaseUserMultipartCompletionLease(ctx context.Context, act
 	if store == nil || store.database == nil || ctx == nil {
 		return false, fmt.Errorf("释放分片完成核对租约需要数据入口和上下文")
 	}
-	if claimed == nil || claimed.UserID == 0 || claimed.ID == 0 || claimed.StagedObjectID == 0 ||
-		claimed.UploadMode != "MULTIPART" || claimed.Status != domain.UploadStatusUploading ||
-		claimed.StorageUploadID == nil || !domain.ValidMultipartUploadID(*claimed.StorageUploadID) ||
-		claimed.LeaseVersion == 0 || claimed.LeaseOwner == nil || len(*claimed.LeaseOwner) == 0 ||
-		len(*claimed.LeaseOwner) > 64 || claimed.LeaseUntil == nil || claimed.LeaseUntil.IsZero() {
+	if !validMultipartCompletionLeaseSnapshot(claimed) {
 		return false, domain.ErrInvalidUploadTaskData
 	}
 	if claimed.UserID != actor.UserID {
@@ -54,4 +50,13 @@ func (store *Store) ReleaseUserMultipartCompletionLease(ctx context.Context, act
 		return false, err
 	}
 	return released, nil
+}
+
+// validMultipartCompletionLeaseSnapshot 检查领取结果里用于识别核对租约的字段。
+func validMultipartCompletionLeaseSnapshot(claimed *domain.UploadTask) bool {
+	return claimed != nil && claimed.UserID != 0 && claimed.ID != 0 && claimed.StagedObjectID != 0 &&
+		claimed.UploadMode == "MULTIPART" && claimed.Status == domain.UploadStatusUploading &&
+		claimed.StorageUploadID != nil && domain.ValidMultipartUploadID(*claimed.StorageUploadID) &&
+		claimed.LeaseVersion != 0 && claimed.LeaseOwner != nil && len(*claimed.LeaseOwner) > 0 &&
+		len(*claimed.LeaseOwner) <= 64 && claimed.LeaseUntil != nil && !claimed.LeaseUntil.IsZero()
 }

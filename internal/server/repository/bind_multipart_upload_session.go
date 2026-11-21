@@ -92,7 +92,7 @@ func (store *Store) BindMultipartUploadSession(ctx context.Context, claimed *dom
 			updated.StagedObjectID != objectID || updated.LeaseVersion != leaseVersion ||
 			updated.LeaseOwner != nil || updated.LeaseUntil != nil || updated.NextAttemptAt != nil ||
 			updated.LastErrorCode != nil || updated.LastErrorMessage != nil ||
-			updated.AttemptCount != task.AttemptCount || !sameMultipartInitializationDeclaration(task, updated) ||
+			updated.AttemptCount != task.AttemptCount || !sameMultipartUploadDeclaration(task, updated) ||
 			updated.UpdatedAt.Before(now) || !updated.UpdatedAt.Before(task.ExpiresAt) || !updated.UpdatedAt.Before(*task.LeaseUntil) {
 			return domain.ErrInvalidUploadTaskData
 		}
@@ -136,8 +136,8 @@ func (lockedStore *Store) findCreatingMultipartWithLease(ctx context.Context, cl
 	return task, nil
 }
 
-// sameMultipartInitializationDeclaration 核对初始化写回未改变原声明、预占或发布事实。
-func sameMultipartInitializationDeclaration(before, after *domain.UploadTask) bool {
+// sameMultipartUploadDeclaration 核对已具备分片计划的任务及其写回保留原声明、预占和未发布事实。
+func sameMultipartUploadDeclaration(before, after *domain.UploadTask) bool {
 	return after.FileSize == before.FileSize && after.ReservedBytes == before.ReservedBytes &&
 		after.PartSize != nil && *after.PartSize == *before.PartSize &&
 		after.PartCount != nil && *after.PartCount == *before.PartCount &&

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -13,11 +14,12 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestClaimUserMultipartCompletionLeaseIntegration(t *testing.T) {
-	// 1. 在独占测试库安装正式任务和会话结构，构造一条两片的合成任务。
+func prepareMultipartCompletionDatabase(t *testing.T) (context.Context, *sql.DB, *Store) {
+	t.Helper()
+	// 1. 沿用独占任务库，安装正式会话和回执表及合成账号。
 	pool, _ := uploadTaskDatabase(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +43,18 @@ func TestClaimUserMultipartCompletionLeaseIntegration(t *testing.T) {
 		(17,7,11,UNHEX(REPEAT('11',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY),
 		(18,7,15,UNHEX(REPEAT('22',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY),
 		(22,8,12,UNHEX(REPEAT('33',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY)`)
+	return ctx, pool, store
+}
+
+func TestClaimUserMultipartCompletionLeaseIntegration(t *testing.T) {
+	// 1. 在已准备的独占库中构造一条两片的合成任务。
+	ctx, pool, store := prepareMultipartCompletionDatabase(t)
+	execute := func(t *testing.T, statement string, args ...any) {
+		t.Helper()
+		if _, err := pool.ExecContext(ctx, statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
 	const fileSize, userID, taskID = 16777217, 7, 19
 	execute(t, "UPDATE users SET reserved_storage=? WHERE id=7", fileSize)
 	execute(t, "UPDATE stored_objects SET file_size=? WHERE id=23", fileSize)

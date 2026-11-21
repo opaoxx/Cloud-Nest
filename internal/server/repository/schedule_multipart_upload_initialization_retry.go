@@ -73,7 +73,7 @@ func (store *Store) ScheduleMultipartUploadInitializationRetry(ctx context.Conte
 			updated.LeaseOwner != nil || updated.LeaseUntil != nil || updated.LeaseVersion != current.LeaseVersion ||
 			updated.AttemptCount != current.AttemptCount+1 || updated.Status != current.Status || updated.UploadMode != current.UploadMode ||
 			updated.StagedObjectID != current.StagedObjectID || updated.StorageUploadID != nil ||
-			!sameMultipartInitializationDeclaration(current, updated) ||
+			!sameMultipartUploadDeclaration(current, updated) ||
 			updated.LastErrorCode == nil || *updated.LastErrorCode != retryCode ||
 			updated.LastErrorMessage == nil || *updated.LastErrorMessage != retryMessage {
 			return domain.ErrInvalidUploadTaskData
