@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Button } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
+import type { SingleUploadTaskCreator } from './api/uploadTask'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
@@ -10,10 +11,11 @@ import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
 
-export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry, moveEntry, trashEntry }: {
+export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, createUploadTask, renameEntry, moveEntry, trashEntry }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
   createDirectory: DirectoryCreator
+  createUploadTask: SingleUploadTaskCreator
   renameEntry: EntryRenamer
   moveEntry: EntryMover
   trashEntry: EntryTrasher
@@ -76,7 +78,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
       {entryAction?.kind === 'select-upload' && currentDirectory?.id === request.directoryId && (
         <SingleUploadDialog parentId={currentDirectory.id}
           targetPath={listing.breadcrumbs.map(crumb => crumb.name || '根目录').join(' / ')}
-          onClose={() => setEntryAction(null)} />
+          createUploadTask={createUploadTask} onClose={() => setEntryAction(null)} />
       )}
       {(entryAction?.kind === 'create' || entryAction?.kind === 'rename') && currentDirectory?.id === request.directoryId && (
         <EntryNameDialog title={renameTarget ? '重命名' : '新建文件夹'}

@@ -1,16 +1,20 @@
 export const maxSingleUploadSizeMiB = 16
 const maxSingleUploadSizeBytes = maxSingleUploadSizeMiB * 1024 * 1024
-const maxUploadParentId = 18446744073709551615n
+const maxUploadId = 18446744073709551615n
 const maxEntryNameLength = 120
 const reservedDeviceName = /^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/iu
 
-interface SingleUploadDeclaration {
+export interface SingleUploadDeclaration {
   parent_id: string
   name: string
   size_bytes: number
 }
 
 type SingleUploadPreparation = { declaration: SingleUploadDeclaration } | { error: string }
+
+export function isUploadId(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= maxUploadId
+}
 
 function isValidUploadName(rawName: string): boolean {
   // 按后端顺序先拒绝控制字符，再按 Unicode 空白检查展示名。
@@ -25,7 +29,7 @@ function isValidUploadName(rawName: string): boolean {
 
 export function prepareSingleUpload(parentId: string, file: Pick<File, 'name' | 'size'>): SingleUploadPreparation {
   // 1. 按字符串保留完整目录 ID，避免转换为 JS 数字后丢失精度。
-  if (!/^[1-9][0-9]{0,19}$/.test(parentId) || BigInt(parentId) > maxUploadParentId) {
+  if (!isUploadId(parentId)) {
     return { error: '上传目标目录无效。' }
   }
 

@@ -6,6 +6,8 @@ import type { CurrentUserProfile } from './api/auth'
 import { confirmPurge, createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, readPurgeProgress, renameEntry, restoreEntry, trashEntry } from './api/drive'
 import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgeConfirmer, PurgePreviewReader, PurgeProgressReader, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
+import { createSingleUploadTask } from './api/uploadTask'
+import type { SingleUploadTaskCreator } from './api/uploadTask'
 import DirectoryBrowser from './DirectoryBrowser'
 import TrashBrowser from './TrashBrowser'
 import { formatSize } from './demo'
@@ -85,6 +87,12 @@ export default function AuthPage() {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
     await createDirectory(session.accessToken, creation)
+  }
+
+  const submitUploadTask: SingleUploadTaskCreator = async (declaration, idempotencyKey) => {
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return createSingleUploadTask(session.accessToken, declaration, idempotencyKey)
   }
 
   const submitEntryRename: EntryRenamer = async rename => {
@@ -222,7 +230,7 @@ export default function AuthPage() {
             </nav>
             <div hidden={view !== 'files'}>
               <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
-                readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation}
+                readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation} createUploadTask={submitUploadTask}
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
             {view === 'trash' && <TrashBrowser rootEntryId={profile.root_entry_id} readTrashPage={readTrashPage}
