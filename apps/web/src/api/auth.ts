@@ -64,10 +64,11 @@ export function refreshWebSession(): Promise<string> {
   return pendingRefresh
 }
 
-export async function getCurrentUser(accessToken: string): Promise<CurrentUserProfile> {
+export async function getCurrentUser(accessToken: string, signal?: AbortSignal): Promise<CurrentUserProfile> {
   // 1. 用 Access Token 读取当前会话对应的资料。
   const data = await requestData('/api/v1/me', {
     headers: { Authorization: `Bearer ${accessToken}` },
+    signal,
   })
 
   // 2. 核对资料形状，保留服务端的字符串 ID 和字节计数。

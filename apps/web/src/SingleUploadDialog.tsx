@@ -24,7 +24,7 @@ const cancellableStatuses: UploadTaskSnapshot['status'][] = ['CREATING', 'UPLOAD
 
 export default function SingleUploadDialog({
   parentId, targetPath, createUploadTask, sendUploadContent, readUploadTask, cancelUploadTask, readPublishedEntry,
-  onPublishedEntryRead, onClose,
+  refreshProfile, onPublishedEntryRead, onClose,
 }: {
   parentId: string
   targetPath: string
@@ -33,6 +33,7 @@ export default function SingleUploadDialog({
   readUploadTask: SingleUploadTaskReader
   cancelUploadTask: SingleUploadTaskCanceller
   readPublishedEntry: PublishedUploadEntryReader
+  refreshProfile: (signal: AbortSignal) => Promise<void>
   onPublishedEntryRead: () => void
   onClose: () => void
 }) {
@@ -46,6 +47,7 @@ export default function SingleUploadDialog({
   const [queryError, setQueryError] = useState('')
   const [publishedEntry, setPublishedEntry] = useState<PublishedUploadEntry | null>(null)
   const [publishedError, setPublishedError] = useState('')
+  const [quotaRefreshError, setQuotaRefreshError] = useState('')
   const [confirmingCancel, setConfirmingCancel] = useState(false)
   const [cancelNeedsStatusCheck, setCancelNeedsStatusCheck] = useState(false)
   const inFlight = useRef(false)
@@ -165,6 +167,8 @@ export default function SingleUploadDialog({
       setPublishedError('')
       if (snapshot.status === 'COMPLETED' && snapshot.resultEntryId) {
         await loadPublishedEntry(snapshot.resultEntryId, controller.signal)
+      } else if (snapshot.status === 'CANCELLED') {
+        await refreshCancelledUploadQuota(controller.signal)
       }
     } catch (error) {
       // 3. 读取失败时保留上一次结果，允许再次查询。
@@ -172,6 +176,17 @@ export default function SingleUploadDialog({
     } finally {
       taskQuery.current = null
       if (!controller.signal.aborted) setQuerying(false)
+    }
+  }
+
+  async function refreshCancelledUploadQuota(signal: AbortSignal) {
+    // 1. 按已取消的结果读取服务端当前配额，继续使用本次查询的取消信号。
+    setQuotaRefreshError('')
+    try {
+      await refreshProfile(signal)
+    } catch (error) {
+      // 2. 配额读取失败时保留已取消状态，下次点查询即可重试读取。
+      if (!signal.aborted) setQuotaRefreshError(apiErrorMessage(error))
     }
   }
 
@@ -256,6 +271,7 @@ export default function SingleUploadDialog({
       {taskSnapshot?.status === 'CANCELLING' && <p>取消已受理，后台正在处理。可查询任务状态确认结果。</p>}
       {taskSnapshot?.lastError && <p className="auth-error" role="alert">{taskSnapshot.lastError}</p>}
       {queryError && <p className="auth-error" role="alert">无法查询上传任务。{queryError}</p>}
+      {quotaRefreshError && <p className="auth-error" role="alert">无法刷新配额。{quotaRefreshError} 可再次查询任务状态。</p>}
       {publishedError && <p className="auth-error" role="alert">无法读取发布文件。{publishedError}</p>}
       {publishedEntry && publishedEntry.parentId !== parentId && <p>文件当前位于其他目录。</p>}
       {preparation && 'error' in preparation && <p className="auth-error" role="alert">{preparation.error}</p>}

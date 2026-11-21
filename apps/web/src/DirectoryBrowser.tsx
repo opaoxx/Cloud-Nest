@@ -26,7 +26,7 @@ type FileAccessState = { entry: DirectoryEntry; purpose: FileAccessPurpose } & (
 
 export default function DirectoryBrowser({
   rootEntryId, readDirectoryPage, createDirectory, createUploadTask, sendUploadContent, readUploadTask, readPublishedEntry,
-  cancelUploadTask, authorizeFileAccess, renameEntry, moveEntry, trashEntry,
+  cancelUploadTask, refreshProfile, authorizeFileAccess, renameEntry, moveEntry, trashEntry,
 }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
@@ -35,6 +35,7 @@ export default function DirectoryBrowser({
   sendUploadContent: SingleUploadContentSender
   readUploadTask: SingleUploadTaskReader
   cancelUploadTask: SingleUploadTaskCanceller
+  refreshProfile: (signal: AbortSignal) => Promise<void>
   readPublishedEntry: PublishedUploadEntryReader
   authorizeFileAccess: FileAccessAuthorizer
   renameEntry: EntryRenamer
@@ -152,7 +153,7 @@ export default function DirectoryBrowser({
         <SingleUploadDialog parentId={currentDirectory.id}
           targetPath={listing.breadcrumbs.map(crumb => crumb.name || '根目录').join(' / ')}
           createUploadTask={createUploadTask} sendUploadContent={sendUploadContent} readUploadTask={readUploadTask}
-          cancelUploadTask={cancelUploadTask}
+          cancelUploadTask={cancelUploadTask} refreshProfile={refreshProfile}
           readPublishedEntry={readPublishedEntry} onPublishedEntryRead={() => requestPage(null)}
           onClose={() => setEntryAction(null)} />
       )}

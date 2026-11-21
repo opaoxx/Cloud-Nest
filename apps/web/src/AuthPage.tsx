@@ -21,6 +21,7 @@ export default function AuthPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const activeSession = useRef<{ accessToken: string } | null>(null)
+  const profileReadVersion = useRef(0)
   const [profile, setProfile] = useState<CurrentUserProfile | null>(null)
   const [view, setView] = useState<'files' | 'trash'>('files')
   const [restoring, setRestoring] = useState(true)
@@ -218,6 +219,23 @@ export default function AuthPage() {
     }
   }
 
+  async function refreshProfile(signal?: AbortSignal) {
+    // 1. 从当前会话只读获取最新资料，记录本次读取的顺序。
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    const version = ++profileReadVersion.current
+    const isCurrent = () => !signal?.aborted && activeSession.current === session && profileReadVersion.current === version
+
+    try {
+      const nextProfile = await getCurrentUser(session.accessToken, signal)
+
+      // 2. 防止已关闭窗口或较早发出的请求覆盖当前资料。
+      if (isCurrent()) setProfile(nextProfile)
+    } catch (error) {
+      if (isCurrent()) throw error
+    }
+  }
+
   async function readProfileAgain() {
     // 1. 用当前内存会话重新读取资料。
     const session = activeSession.current
@@ -226,8 +244,7 @@ export default function AuthPage() {
     setBusy(true)
     setErrorMessage('')
     try {
-      const profile = await getCurrentUser(requestedToken)
-      if (activeSession.current === session) setProfile(profile)
+      await refreshProfile()
     } catch (error) {
       // 2. 401 表明需要重新登录，其他失败保留已显示资料。
       if (activeSession.current !== session || session.accessToken !== requestedToken) return
@@ -266,7 +283,7 @@ export default function AuthPage() {
               <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
                 readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation} createUploadTask={submitUploadTask}
                 sendUploadContent={submitUploadContent} readUploadTask={readUploadTask} readPublishedEntry={readPublishedEntry}
-                cancelUploadTask={cancelUploadTask}
+                cancelUploadTask={cancelUploadTask} refreshProfile={refreshProfile}
                 authorizeFileAccess={authorizeFileAccess}
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
