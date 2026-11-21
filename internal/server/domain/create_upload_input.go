@@ -34,10 +34,20 @@ type CreateUploadInput struct {
 // IsValid 检查创建输入的基本声明，保留原始名称和预期哈希。
 // 目标归属、路径、完整命名、配额及文件内容在后续服务流程中核对。
 func (input CreateUploadInput) IsValid() bool {
-	// 1. 检查目标目录 ID 和原始名称编码。
-	if input.ParentID == 0 || input.Name == "" || !utf8.ValidString(input.Name) {
+	// 1. 核对基本目标声明及 SINGLE 的文件大小上限。
+	return input.hasValidTarget() && input.SizeBytes <= MaxSingleUploadSizeBytes
+}
+
+// IsValidMultipart 检查已规划的分片声明。存储及配置限制由规划入口检查。
+func (input CreateUploadInput) IsValidMultipart(plan UploadPlan) bool {
+	// 1. 核对目标、文件大小分界与整文件摘要。
+	if !input.hasValidTarget() || input.SizeBytes <= MaxSingleUploadSizeBytes || input.ExpectedSHA256 == nil {
 		return false
 	}
-	// 2. 按首期 SINGLE 上传能力检查声明大小。
-	return input.SizeBytes <= MaxSingleUploadSizeBytes
+	// 2. 核对计划与声明大小的计算结果，避免写入错误的片数或片长。
+	return plan == planMultipartUpload(input.SizeBytes)
+}
+
+func (input CreateUploadInput) hasValidTarget() bool {
+	return input.ParentID != 0 && input.Name != "" && utf8.ValidString(input.Name)
 }

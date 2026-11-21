@@ -65,6 +65,11 @@ func PlanUpload(sizeBytes uint64, limits UploadPlanLimits) (UploadPlan, error) {
 	}
 
 	// 3. 将满足片数上限的最小片长按 MiB 向上取整，再计算片数和尾片。
+	return planMultipartUpload(sizeBytes), nil
+}
+
+// planMultipartUpload 计算超过 SINGLE 大小的声明所需的固定计划。
+func planMultipartUpload(sizeBytes uint64) UploadPlan {
 	requiredPartMiB := ceilUploadDivision(sizeBytes, maxUploadPartCount*uploadPartSizeUnitBytes)
 	partSize := max(initialUploadPartSize, requiredPartMiB*uploadPartSizeUnitBytes)
 	partCount := ceilUploadDivision(sizeBytes, partSize)
@@ -73,7 +78,7 @@ func PlanUpload(sizeBytes uint64, limits UploadPlanLimits) (UploadPlan, error) {
 		PartSizeBytes:     partSize,
 		PartCount:         uint32(partCount),
 		LastPartSizeBytes: sizeBytes - (partCount-1)*partSize,
-	}, nil
+	}
 }
 
 func ceilUploadDivision(value, divisor uint64) uint64 {

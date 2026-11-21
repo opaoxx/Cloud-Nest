@@ -15,7 +15,7 @@ import (
 )
 
 func TestNewUploadTaskMappingSchema(t *testing.T) {
-	// 1. 解析十一列创建映射，提取正式上传任务的二十八列。
+	// 1. 解析十三列创建映射，提取正式上传任务的二十八列。
 	connector := &accountConnector{}
 	pool := sql.OpenDB(connector)
 	defer pool.Close()
@@ -27,7 +27,7 @@ func TestNewUploadTaskMappingSchema(t *testing.T) {
 	if err := statement.Parse(&models.NewUploadTask{}); err != nil {
 		t.Fatal(err)
 	}
-	if statement.Table != "upload_tasks" || len(statement.Schema.DBNames) != 11 || len(statement.Schema.Fields) != 11 || len(statement.Schema.PrimaryFields) != 0 {
+	if statement.Table != "upload_tasks" || len(statement.Schema.DBNames) != 13 || len(statement.Schema.Fields) != 13 || len(statement.Schema.PrimaryFields) != 0 {
 		t.Fatal("上传任务创建映射的表名、列数或标识约定错误")
 	}
 	_, table, found := strings.Cut(migrations.InitialSQL, "CREATE TABLE upload_tasks (\n")
@@ -58,6 +58,8 @@ func TestNewUploadTaskMappingSchema(t *testing.T) {
 		{"UploadMode", "upload_mode", "VARCHAR(16)", reflect.TypeFor[string](), false},
 		{"ExpectedSHA256", "expected_sha256", "BINARY(32)", reflect.TypeFor[[]byte](), true},
 		{"FileSize", "file_size", "BIGINT UNSIGNED", reflect.TypeFor[uint64](), false},
+		{"PartSize", "part_size", "BIGINT UNSIGNED", reflect.TypeFor[*uint64](), true},
+		{"PartCount", "part_count", "INT UNSIGNED", reflect.TypeFor[*uint32](), true},
 		{"Status", "status", "VARCHAR(16)", reflect.TypeFor[string](), false},
 		{"ReservedBytes", "reserved_bytes", "BIGINT UNSIGNED", reflect.TypeFor[uint64](), false},
 		{"ExpiresAt", "expires_at", "DATETIME(6)", reflect.TypeFor[time.Time](), false},
@@ -88,7 +90,7 @@ func TestNewUploadTaskMappingSchema(t *testing.T) {
 func TestNewUploadTaskMappingInsertSQL(t *testing.T) {
 	for _, mode := range []string{
 		"zero-byte without digest", "ordinary file", "single limit", "above single limit", "declared digest",
-		"zero digest", "maximum unsigned", "Unicode name boundary", "expiry boundaries",
+		"zero digest", "maximum unsigned", "Unicode name boundary", "expiry boundaries", "multipart plan",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 准备创建字段，覆盖可空摘要、完整数值、名称及日期。
@@ -113,6 +115,11 @@ func TestNewUploadTaskMappingInsertSQL(t *testing.T) {
 				record.RequestedName = strings.Repeat("🌱", 60)
 			case "expiry boundaries":
 				record.ExpiresAt = time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC)
+			case "multipart plan":
+				record.UploadMode, record.Status = "MULTIPART", "CREATING"
+				record.FileSize, record.ExpectedSHA256 = 16777217, bytes.Repeat([]byte{0xab}, 32)
+				partSize, partCount := uint64(16777216), uint32(2)
+				record.PartSize, record.PartCount = &partSize, &partCount
 			}
 			record.ReservedBytes = record.FileSize
 			original := record
@@ -124,19 +131,27 @@ func TestNewUploadTaskMappingInsertSQL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// 2. 核对真实 GORM INSERT 列清单和十一个原值参数。
-			result := store.database.Session(&gorm.Session{DryRun: true, SkipDefaultTransaction: true}).Create(&record)
+			// 2. 核对两种模式的真实 GORM INSERT 列清单和原值参数。
+			insert := store.database.Session(&gorm.Session{DryRun: true, SkipDefaultTransaction: true})
 			expectedSQL := "INSERT INTO upload_tasks (user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,expected_sha256,file_size,status,reserved_bytes,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
 			expectedValues := []any{record.UserID, record.DeviceID, record.StagedObjectID, record.TargetParentID, record.RequestedName,
 				record.UploadMode, record.ExpectedSHA256, record.FileSize, record.Status, record.ReservedBytes, record.ExpiresAt}
+			if mode == "multipart plan" {
+				expectedSQL = "INSERT INTO upload_tasks (user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+				expectedValues = []any{record.UserID, record.DeviceID, record.StagedObjectID, record.TargetParentID, record.RequestedName,
+					record.UploadMode, record.ExpectedSHA256, record.FileSize, record.PartSize, record.PartCount, record.Status, record.ReservedBytes, record.ExpiresAt}
+			} else {
+				insert = insert.Omit("part_size", "part_count")
+			}
+			result := insert.Create(&record)
 			if result.Error != nil || strings.ReplaceAll(result.Statement.SQL.String(), "`", "") != expectedSQL ||
 				!reflect.DeepEqual(result.Statement.Vars, expectedValues) || !reflect.DeepEqual(record, original) {
 				t.Fatal("上传任务创建 SQL、完整参数或来源保护错误", result.Error)
 			}
 			// 3. 核对全部字段的更新 SQL 权限以及生成阶段零连接。
 			changes := make(map[string]any)
-			for index, column := range result.Statement.Schema.DBNames {
-				changes[column] = expectedValues[index]
+			for _, column := range result.Statement.Schema.DBNames {
+				changes[column] = nil
 			}
 			update := store.database.Session(&gorm.Session{DryRun: true, SkipDefaultTransaction: true}).Model(&record).
 				Where("user_id = ? AND staged_object_id = ?", record.UserID, record.StagedObjectID).Updates(changes)

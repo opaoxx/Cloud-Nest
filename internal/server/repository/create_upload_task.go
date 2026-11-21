@@ -17,6 +17,19 @@ import (
 // 声明名称须已通过统一校验，祖先可见性、配额预占及幂等结果由上层在同一事务编排。
 // 回调须向外返回本方法错误，结果在外层事务提交成功后确认生效。
 func (store *Store) CreateUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, expiresAt time.Time) (*domain.UploadTask, error) {
+	return store.createUserUploadTask(ctx, stagedObjectID, input, domain.UploadPlan{Mode: "SINGLE"}, expiresAt)
+}
+
+// CreateUserMultipartUploadTask 在 WithUserTransaction 回调中登记当前设备的 CREATING 任务。
+// 调用方须使用已通过限制校验的计划，在同一事务中编排祖先可见性、配额预占及幂等记录。
+func (store *Store) CreateUserMultipartUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error) {
+	if plan.Mode != "MULTIPART" {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	return store.createUserUploadTask(ctx, stagedObjectID, input, plan, expiresAt)
+}
+
+func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error) {
 	// 1. 检查已认证用户事务和上下文。
 	if ctx == nil || store.authenticatedActor == nil || store.loginUserID == 0 {
 		return nil, fmt.Errorf("创建上传任务需要上下文和已认证用户事务")
@@ -34,9 +47,9 @@ func (store *Store) CreateUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, err
 	}
 
-	// 2. 校验声明、对象 ID 及到期时间，复制摘要。
+	// 2. 校验声明、对象 ID 及到期时间，按模式准备初始状态和分片参数。
 	expiry := expiresAt.UTC().Truncate(time.Microsecond)
-	if stagedObjectID == 0 || !input.IsValid() || expiry.Year() < 1000 || expiry.Year() > 9999 || !expiry.After(time.Now()) {
+	if stagedObjectID == 0 || expiry.Year() < 1000 || expiry.Year() > 9999 || !expiry.After(time.Now()) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	record := models.NewUploadTask{
@@ -45,11 +58,20 @@ func (store *Store) CreateUserUploadTask(ctx context.Context, stagedObjectID uin
 		StagedObjectID: stagedObjectID,
 		TargetParentID: input.ParentID,
 		RequestedName:  input.Name,
-		UploadMode:     "SINGLE",
+		UploadMode:     plan.Mode,
 		FileSize:       input.SizeBytes,
 		Status:         string(domain.UploadStatusUploading),
 		ReservedBytes:  input.SizeBytes,
 		ExpiresAt:      expiry,
+	}
+	if plan.Mode == "MULTIPART" {
+		if !input.IsValidMultipart(plan) {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+		record.Status = string(domain.UploadStatusCreating)
+		record.PartSize, record.PartCount = &plan.PartSizeBytes, &plan.PartCount
+	} else if !input.IsValid() {
+		return nil, domain.ErrInvalidUploadTaskData
 	}
 	if input.ExpectedSHA256 != nil {
 		record.ExpectedSHA256 = bytes.Clone(input.ExpectedSHA256[:])
@@ -82,10 +104,13 @@ func (store *Store) CreateUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
-	// 4. 插入 SINGLE 上传任务，处理取消、重复引用和故障。
-	result := store.database.WithContext(writeContext).
-		Select("user_id", "device_id", "staged_object_id", "target_parent_id", "requested_name", "upload_mode",
-			"expected_sha256", "file_size", "status", "reserved_bytes", "expires_at").Create(&record)
+	// 4. 按模式插入任务，分片列只在 Multipart 创建时写入。
+	columns := []string{"user_id", "device_id", "staged_object_id", "target_parent_id", "requested_name", "upload_mode",
+		"expected_sha256", "file_size", "status", "reserved_bytes", "expires_at"}
+	if record.PartSize != nil {
+		columns = append(columns, "part_size", "part_count")
+	}
+	result := store.database.WithContext(writeContext).Select(columns).Create(&record)
 	if err := writeContext.Err(); err != nil {
 		return nil, err
 	}
@@ -126,12 +151,20 @@ func (store *Store) CreateUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, fmt.Errorf("读取新建上传任务失败: %w", err)
 	}
 	if created.DeviceID != actor.DeviceID || created.StagedObjectID != stagedObjectID || created.TargetParentID != input.ParentID ||
-		created.RequestedName != input.Name || created.FileSize != input.SizeBytes || created.UploadMode != "SINGLE" ||
-		created.Status != domain.UploadStatusUploading || created.ReservedBytes != input.SizeBytes || !created.ExpiresAt.Equal(expiry) ||
+		created.RequestedName != input.Name || created.FileSize != input.SizeBytes || created.UploadMode != plan.Mode ||
+		string(created.Status) != record.Status || created.ReservedBytes != input.SizeBytes || !created.ExpiresAt.Equal(expiry) ||
 		(created.ExpectedSHA256 == nil) != (record.ExpectedSHA256 == nil) || created.PublishedObjectID != nil || created.ResolvedName != nil ||
-		created.ResultEntryID != nil || created.StorageUploadID != nil || created.PartSize != nil || created.PartCount != nil ||
+		created.ResultEntryID != nil || created.StorageUploadID != nil ||
 		created.LeaseOwner != nil || created.LeaseUntil != nil || created.LeaseVersion != 0 || created.NextAttemptAt != nil ||
 		created.AttemptCount != 0 || created.LastErrorCode != nil || created.LastErrorMessage != nil || created.CompletedAt != nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if record.PartSize != nil {
+		if created.PartSize == nil || *created.PartSize != *record.PartSize ||
+			created.PartCount == nil || *created.PartCount != *record.PartCount {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	} else if created.PartSize != nil || created.PartCount != nil {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	if created.ExpectedSHA256 != nil && !bytes.Equal(created.ExpectedSHA256[:], record.ExpectedSHA256) {

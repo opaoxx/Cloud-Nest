@@ -270,6 +270,103 @@ func TestCreateUserUploadTaskIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("multipart creation and rollback", func(t *testing.T) {
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(3)
+		digest := sha256.Sum256([]byte("multipart fixture"))
+		size := domain.MaxSingleUploadSizeBytes + 1
+		limits := domain.UploadPlanLimits{
+			MaxFileSizeBytes: domain.DefaultMaxUploadSizeBytes, MaxObjectSizeBytes: domain.DefaultMaxUploadSizeBytes,
+			MaxPartSizeBytes: 64 * 1024 * 1024,
+		}
+		input, plan, err := service.ValidateCreateUploadInputWithPlan(domain.CreateUploadInput{
+			ParentID: 11, Name: "  分片夹具.bin  ", SizeBytes: size, ExpectedSHA256: &digest,
+		}, limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. 用单连接覆盖声明、暂存对象、任务写入及提交后回读。
+		withNewObject := func(key string, declaration domain.CreateUploadInput, callbackError error) (*domain.UploadTask, error) {
+			t.Helper()
+			var task *domain.UploadTask
+			err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+				object, err := txStore.CreateUserStagedObject(txContext, domain.CreateStagedObjectInput{
+					Provider: "local_minio", Bucket: "cloudnest", ObjectKey: key, SizeBytes: size,
+				})
+				if err != nil {
+					return err
+				}
+				task, err = txStore.CreateUserMultipartUploadTask(txContext, object.ID, declaration, plan, expiry)
+				if err != nil {
+					return err
+				}
+				return callbackError
+			})
+			return task, err
+		}
+		task, err := withNewObject("tasks/multipart-commit", *input, nil)
+		if err != nil || task == nil || task.ID == 0 || task.UserID != actor.UserID || task.DeviceID != actor.DeviceID ||
+			task.UploadMode != "MULTIPART" || task.Status != domain.UploadStatusCreating || task.StorageUploadID != nil ||
+			task.TargetParentID != 11 || task.RequestedName != "分片夹具.bin" || task.FileSize != size || task.ReservedBytes != size ||
+			task.PartSize == nil || *task.PartSize != 16777216 || task.PartCount == nil || *task.PartCount != 2 ||
+			task.ExpectedSHA256 == nil || *task.ExpectedSHA256 != digest || !task.ExpiresAt.Equal(expiry) {
+			t.Fatalf("分片初始任务不符: %+v %v", task, err)
+		}
+		reloaded, err := store.FindUserUploadTask(ctx, actor.UserID, task.ID)
+		if err != nil || !reflect.DeepEqual(reloaded, task) {
+			t.Fatal("提交后回读与同事务结果不同", err)
+		}
+		if foreign, err := store.FindUserUploadTask(ctx, 3, task.ID); foreign != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
+			t.Fatal("其他账号读取到了分片任务", err)
+		}
+
+		// 2. 复验目标和暂存对象归属，拒绝伪造或不完整的计划。
+		foreignTarget := *input
+		foreignTarget.ParentID = 33
+		if created, err := withNewObject("tasks/multipart-foreign-target", foreignTarget, nil); created != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
+			t.Fatal("跨账号目标未拒绝", err)
+		}
+		checkMissing(t, "tasks/multipart-foreign-target")
+		invalidPlan := plan
+		invalidPlan.PartCount++
+		missingDigest := *input
+		missingDigest.ExpectedSHA256 = nil
+		for _, fixture := range []struct {
+			objectID uint64
+			input    domain.CreateUploadInput
+			plan     domain.UploadPlan
+			want     error
+		}{
+			{43, *input, plan, domain.ErrStoredObjectNotFound},
+			{task.StagedObjectID, *input, plan, domain.ErrUploadTaskStagedObjectConflict},
+			{task.StagedObjectID, *input, invalidPlan, domain.ErrInvalidUploadTaskData},
+			{task.StagedObjectID, missingDigest, plan, domain.ErrInvalidUploadTaskData},
+		} {
+			err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+				_, err := txStore.CreateUserMultipartUploadTask(txContext, fixture.objectID, fixture.input, fixture.plan, expiry)
+				return err
+			})
+			if !errors.Is(err, fixture.want) {
+				t.Fatalf("分片写入错误为 %v，预期 %v", err, fixture.want)
+			}
+		}
+		if created, err := store.CreateUserMultipartUploadTask(ctx, task.StagedObjectID, *input, plan, expiry); created != nil || err == nil {
+			t.Fatal("未绑定已认证事务的 Store 接受了创建")
+		}
+
+		// 3. 在任务写入之后让外层事务失败，确认两条记录均不生效。
+		failure := errors.New("rollback multipart task")
+		rolledBack, err := withNewObject("tasks/multipart-rollback", *input, failure)
+		if rolledBack == nil || !errors.Is(err, failure) {
+			t.Fatal("未在事务回滚前写入分片任务", err)
+		}
+		checkMissing(t, "tasks/multipart-rollback")
+		if persisted, err := store.FindUserUploadTask(ctx, actor.UserID, rolledBack.ID); persisted != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
+			t.Fatal("失败事务仍保留分片任务", err)
+		}
+	})
+
 	// 4. 高位身份、对象及任务自增值放在普通验证之后。
 	t.Run("unsigned identities and generated references", func(t *testing.T) {
 		maximum := ^uint64(0)
