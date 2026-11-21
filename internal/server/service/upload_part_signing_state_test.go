@@ -101,6 +101,9 @@ func TestValidateUploadPartSigningStateRejectsUnavailableAndInvalidTasks(t *test
 			if err := ValidateUploadPartSigningState(task, 7, 19, now); !errors.Is(err, test.want) {
 				t.Fatalf("得到 %v，预期 %v", err, test.want)
 			}
+			if err := ValidateUploadPartReceiptState(task, 7, 19, now); !errors.Is(err, test.want) {
+				t.Fatalf("只读资格结果为 %v，预期 %v", err, test.want)
+			}
 		})
 	}
 }
@@ -122,5 +125,41 @@ func TestValidateUploadPartSigningStateRejectsMissingInput(t *testing.T) {
 		if err := ValidateUploadPartSigningState(test.task, test.userID, test.taskID, test.now); !errors.Is(err, domain.ErrInvalidUploadTaskData) {
 			t.Fatalf("无效输入未被拒绝，得到 %v", err)
 		}
+		if err := ValidateUploadPartReceiptState(test.task, test.userID, test.taskID, test.now); !errors.Is(err, domain.ErrInvalidUploadTaskData) {
+			t.Fatalf("只读资格未拒绝无效输入，得到 %v", err)
+		}
+	}
+}
+
+func TestValidateUploadPartReceiptStateTimeBoundaries(t *testing.T) {
+	databaseTime := time.Date(2026, 11, 21, 12, 0, 0, 123456000, time.UTC)
+	localZone := time.FixedZone("fixture", 8*3600)
+	for _, test := range []struct {
+		name        string
+		timeToEnd   time.Duration
+		hasLease    bool
+		receiptWant error
+		signingWant error
+	}{
+		{name: "before deadline", timeToEnd: time.Microsecond},
+		{name: "active lease still allows read", timeToEnd: time.Microsecond, hasLease: true, signingWant: domain.ErrUploadTaskBusy},
+		{name: "at deadline in another time zone", hasLease: true,
+			receiptWant: domain.ErrUploadTaskNotReady, signingWant: domain.ErrUploadTaskNotReady},
+		{name: "after deadline", timeToEnd: -time.Microsecond, hasLease: true,
+			receiptWant: domain.ErrUploadTaskNotReady, signingWant: domain.ErrUploadTaskNotReady},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			task := uploadPartSigningTaskFixture(databaseTime.Add(test.timeToEnd).In(localZone))
+			if test.hasLease {
+				task.LeaseOwner = new("fixture-worker")
+				task.LeaseUntil = new(databaseTime.Add(time.Minute))
+			}
+			before := copyUploadTask(task)
+			receiptError := ValidateUploadPartReceiptState(task, 7, 19, databaseTime)
+			signingError := ValidateUploadPartSigningState(task, 7, 19, databaseTime)
+			if !errors.Is(receiptError, test.receiptWant) || !errors.Is(signingError, test.signingWant) || !reflect.DeepEqual(task, before) {
+				t.Fatalf("只读或签发判定不符，得到 %v 和 %v", receiptError, signingError)
+			}
+		})
 	}
 }
