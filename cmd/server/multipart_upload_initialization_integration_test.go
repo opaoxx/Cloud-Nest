@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -239,6 +243,47 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	if err != nil || page.Key != key || page.UploadID != *task.StorageUploadID || len(page.ObjectParts) != 0 || page.ChecksumAlgorithm != "SHA256" {
 		t.Fatal("绑定的会话位置或 SHA256 算法不符", minio.ToErrorResponse(err).Code)
 	}
-	t.Logf("隔离 MySQL %s %s，MinIO %s %s，单轮分别汇总 1 次重试和 1 次会话绑定",
+
+	// 5. 装配正式目标查询和签名方法，复查后使用实际尾片链接。
+	targets := service.NewUploadPartSigningTargetService(settings.Provider, settings.Bucket, store.FindUserUploadTaskForPartSigning, store.FindUserStoredObject)
+	urls := service.NewUploadPartURLService(targets.Get, client.SignUploadPartURL)
+	actor := domain.Actor{UserID: 7, DeviceID: 31, SessionID: 41}
+	tail := []byte{0x33}
+	declarations := []service.UploadPartDeclaration{
+		{PartNumber: 2, SHA256: fmt.Sprintf("%x", sha256.Sum256(tail))},
+		{PartNumber: 1, SHA256: fmt.Sprintf("%x", *task.ExpectedSHA256)},
+	}
+	signedBatch, err := urls.Create(ctx, actor, task.ID, declarations)
+	if err != nil || signedBatch == nil || len(signedBatch.Parts) != 2 || !signedBatch.ExpiresAt.Equal(task.ExpiresAt) ||
+		signedBatch.Parts[0].PartNumber != 2 || signedBatch.Parts[0].SizeBytes != 1 ||
+		signedBatch.Parts[1].PartNumber != 1 || signedBatch.Parts[1].SizeBytes != 16777216 {
+		t.Fatal("未按请求顺序交付已复查的两片签名", err)
+	}
+	tailURL := signedBatch.Parts[0]
+	signed, err := url.Parse(tailURL.URL)
+	if err != nil || signed.Host != settings.PublicEndpointURL.Host || tailURL.ChecksumSHA256 != multipartProbeSHA256(tail) {
+		t.Fatal("尾片签名主机或摘要不符")
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	t.Cleanup(httpClient.CloseIdleConnections)
+	etag := putMultipartProbePart(t, ctx, httpClient, signed, tailURL.ChecksumSHA256, tail, http.StatusOK, "")
+	probe := multipartProbe{core: core, bucket: bucket.name, key: key, uploadID: *task.StorageUploadID}
+	if page := probe.readPartPage(t, ctx, 0, 2, len(tail), etag, tailURL.ChecksumSHA256); page.IsTruncated {
+		t.Fatal("尾片上传后出现其他分片")
+	}
+
+	// 6. 在专用库模拟签发途中租约版本变化，整批结果必须作废。
+	staleURLs := service.NewUploadPartURLService(targets.Get,
+		func(callContext context.Context, objectKey, session string, partNumber uint32, sizeBytes uint64, checksum string, expiresAt time.Time) (*domain.SignedUploadPartURL, error) {
+			link, err := client.SignUploadPartURL(callContext, objectKey, session, partNumber, sizeBytes, checksum, expiresAt)
+			if err == nil && partNumber == 1 {
+				execute("UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19 AND user_id=7")
+			}
+			return link, err
+		})
+	if result, err := staleURLs.Create(ctx, actor, task.ID, declarations); result != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+		t.Fatal("签发途中租约版本变化仍交付了链接", err)
+	}
+	t.Logf("隔离 MySQL %s %s，MinIO %s %s，绑定后按序签发两片、上传尾片，并拒绝旧租约签名",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }

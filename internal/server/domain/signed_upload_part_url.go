@@ -7,3 +7,8 @@ type SignedUploadPartURL struct {
 	URL       string
 	ExpiresAt time.Time
 }
+
+// IsValid 检查公开链接及到期时间的格式，任务期限由签发流程核对。
+func (link SignedUploadPartURL) IsValid() bool {
+	return validSignedStorageURL(link.URL, link.ExpiresAt)
+}
