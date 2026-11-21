@@ -3,7 +3,7 @@ import type { MouseEvent } from 'react'
 import { Button, Input, Modal } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
 import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
-import type { DownloadGrant, DownloadLinkAuthorizer } from './api/download'
+import type { FileAccessAuthorizer, FileAccessGrant, FileAccessPurpose } from './api/download'
 import { ApiError, apiErrorMessage } from './api/http'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
@@ -13,15 +13,15 @@ import SingleUploadDialog from './SingleUploadDialog'
 import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
-type DownloadState = { entry: DirectoryEntry } & (
+type FileAccessState = { entry: DirectoryEntry; purpose: FileAccessPurpose } & (
   | { phase: 'loading' }
-  | { phase: 'ready'; grant: DownloadGrant }
-  | { phase: 'error'; message: string; revisionChanged: boolean }
+  | { phase: 'ready'; grant: FileAccessGrant }
+  | { phase: 'error'; message: string; retryPurpose: FileAccessPurpose | null }
 )
 
 export default function DirectoryBrowser({
   rootEntryId, readDirectoryPage, createDirectory, createUploadTask, sendUploadContent, readUploadTask, readPublishedEntry,
-  authorizeDownload, renameEntry, moveEntry, trashEntry,
+  authorizeFileAccess, renameEntry, moveEntry, trashEntry,
 }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
@@ -30,23 +30,23 @@ export default function DirectoryBrowser({
   sendUploadContent: SingleUploadContentSender
   readUploadTask: SingleUploadTaskReader
   readPublishedEntry: PublishedUploadEntryReader
-  authorizeDownload: DownloadLinkAuthorizer
+  authorizeFileAccess: FileAccessAuthorizer
   renameEntry: EntryRenamer
   moveEntry: EntryMover
   trashEntry: EntryTrasher
 }) {
   const { request, listing, requestPage, openDirectory } = useDirectoryListing(rootEntryId, readDirectoryPage)
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null)
-  const [download, setDownload] = useState<DownloadState | null>(null)
-  const downloadRequest = useRef<AbortController | null>(null)
+  const [fileAccess, setFileAccess] = useState<FileAccessState | null>(null)
+  const accessRequest = useRef<AbortController | null>(null)
 
-  useEffect(() => () => downloadRequest.current?.abort(), [])
+  useEffect(() => () => accessRequest.current?.abort(), [])
 
   // 1. 切换目录时从首页加载，清除上一目录的条目和分页游标。
   function navigateToDirectory(directoryId: string) {
     if (directoryId === request.directoryId) return
     setEntryAction(null)
-    closeDownload()
+    closeFileAccess()
     openDirectory(directoryId)
   }
 
@@ -59,6 +59,8 @@ export default function DirectoryBrowser({
   const renameTarget = entryAction?.kind === 'rename' ? entryAction.entry : null
   const trashTarget = entryAction?.kind === 'trash' ? entryAction.entry : null
   const canModify = currentDirectory?.id === request.directoryId && listing.status === 'ready'
+  const accessLabel = fileAccess?.purpose === 'preview' ? '预览' : '下载'
+  const retryPurpose = fileAccess?.phase === 'error' ? fileAccess.retryPurpose : null
 
   // 2. 确认成功后从当前目录的首页重新读取。
   function refreshAfterChange() {
@@ -66,45 +68,49 @@ export default function DirectoryBrowser({
     requestPage(null)
   }
 
-  async function requestDownload(entry: DirectoryEntry) {
-    // 1. 保留点击时的文件版本，挡住并发申请。
-    if (entry.type !== 'FILE' || downloadRequest.current) return
+  async function requestFileAccess(entry: DirectoryEntry, purpose: FileAccessPurpose) {
+    // 1. 保存本次文件版本和用途，挡住并发申请。
+    if (entry.type !== 'FILE' || accessRequest.current) return
     const controller = new AbortController()
-    downloadRequest.current = controller
-    setDownload({ entry, phase: 'loading' })
+    accessRequest.current = controller
+    setFileAccess({ entry, purpose, phase: 'loading' })
     try {
       // 2. 仅在当前弹窗保存短期链接和有效期。
-      const grant = await authorizeDownload(entry.id, entry.revision, controller.signal)
-      if (!controller.signal.aborted) setDownload({ entry, phase: 'ready', grant })
+      const grant = await authorizeFileAccess(entry.id, entry.revision, purpose, controller.signal)
+      if (!controller.signal.aborted) setFileAccess({ entry, purpose, phase: 'ready', grant })
     } catch (error) {
-      // 3. 版本冲突时刷新列表，等待用户对新版本重新发起授权。
+      // 3. 版本冲突时刷新目录。不支持预览时，等待用户手动改为下载。
       if (controller.signal.aborted) return
       const revisionChanged = error instanceof ApiError && error.code === 'REVISION_CONFLICT'
-      const message = revisionChanged ? '文件版本已变化。请关闭窗口，从更新后的列表重新获取链接。' : apiErrorMessage(error)
-      setDownload({ entry, phase: 'error', message, revisionChanged })
+      const previewUnsupported = purpose === 'preview' && error instanceof ApiError && error.code === 'UNSUPPORTED_PREVIEW'
+      const message = revisionChanged ? '文件版本已变化。请关闭窗口，从更新后的列表重新获取链接。' :
+        previewUnsupported ? '此文件暂不支持预览，可以改为下载。' : apiErrorMessage(error)
+      setFileAccess({ entry, purpose, phase: 'error', message,
+        retryPurpose: revisionChanged ? null : previewUnsupported ? 'download' : purpose })
       if (revisionChanged) requestPage(null)
     } finally {
-      if (downloadRequest.current === controller) downloadRequest.current = null
+      if (accessRequest.current === controller) accessRequest.current = null
     }
   }
 
-  function closeDownload() {
-    downloadRequest.current?.abort()
-    downloadRequest.current = null
-    setDownload(null)
+  function closeFileAccess() {
+    accessRequest.current?.abort()
+    accessRequest.current = null
+    setFileAccess(null)
   }
 
   function followDownloadLink(event: MouseEvent<HTMLElement>) {
     // 1. 下载开始前复查有效期，有效时由浏览器使用原签名链接保存附件。
-    if (download?.phase !== 'ready') {
+    if (fileAccess?.phase !== 'ready' || fileAccess.purpose !== 'download') {
       event.preventDefault()
       return
     }
-    if (download.grant.expiresAt > Date.now()) return
+    if (fileAccess.grant.expiresAt > Date.now()) return
 
     // 2. 过期时取消本次导航，保留文件信息供用户重新申请授权。
     event.preventDefault()
-    setDownload({ entry: download.entry, phase: 'error', message: '下载链接已过期，请重新获取。', revisionChanged: false })
+    setFileAccess({ entry: fileAccess.entry, purpose: 'download', phase: 'error',
+      message: '下载链接已过期，请重新获取。', retryPurpose: 'download' })
   }
 
   return (
@@ -167,29 +173,31 @@ export default function DirectoryBrowser({
             refreshAfterChange()
           }} />
       )}
-      {download && (
-        <Modal title="下载授权" open onCancel={closeDownload} width={480}
+      {fileAccess && (
+        <Modal title={`${accessLabel}授权`} open onCancel={closeFileAccess} width={480}
           footer={(
             <>
-              <Button onClick={closeDownload}>关闭</Button>
-              {download.phase === 'error' && !download.revisionChanged && (
-                <Button onClick={() => void requestDownload(download.entry)}>重新获取链接</Button>
+              <Button onClick={closeFileAccess}>关闭</Button>
+              {retryPurpose && (
+                <Button onClick={() => void requestFileAccess(fileAccess.entry, retryPurpose)}>
+                  {retryPurpose === fileAccess.purpose ? '重新获取链接' : '改为获取下载链接'}
+                </Button>
               )}
-              {download.phase === 'ready' && (
-                <Button type="primary" href={download.grant.url} target="_blank" rel="noopener noreferrer"
+              {fileAccess.phase === 'ready' && fileAccess.purpose === 'download' && (
+                <Button type="primary" href={fileAccess.grant.url} target="_blank" rel="noopener noreferrer"
                   onClick={followDownloadLink}>下载文件</Button>
               )}
             </>
           )}>
-          <p style={{ overflowWrap: 'anywhere' }}>「{download.entry.name}」</p>
-          {download.phase === 'loading' && <p role="status">正在获取短期下载链接…</p>}
-          {download.phase === 'error' && <p className="auth-error" role="alert">{download.message}</p>}
-          {download.phase === 'ready' && (
+          <p style={{ overflowWrap: 'anywhere' }}>「{fileAccess.entry.name}」</p>
+          {fileAccess.phase === 'loading' && <p role="status">正在获取短期{accessLabel}链接…</p>}
+          {fileAccess.phase === 'error' && <p className="auth-error" role="alert">{fileAccess.message}</p>}
+          {fileAccess.phase === 'ready' && (
             <div className="entry-name-form">
-              <label htmlFor="authorized-download-url">短期下载链接</label>
-              <Input.TextArea id="authorized-download-url" readOnly autoSize={{ minRows: 2, maxRows: 4 }} value={download.grant.url} />
-              <small>有效期至 <time dateTime={new Date(download.grant.expiresAt).toISOString()}>
-                {new Date(download.grant.expiresAt).toLocaleString('zh-CN', { hour12: false })}
+              <label htmlFor="authorized-file-url">短期{accessLabel}链接</label>
+              <Input.TextArea id="authorized-file-url" readOnly autoSize={{ minRows: 2, maxRows: 4 }} value={fileAccess.grant.url} />
+              <small>有效期至 <time dateTime={new Date(fileAccess.grant.expiresAt).toISOString()}>
+                {new Date(fileAccess.grant.expiresAt).toLocaleString('zh-CN', { hour12: false })}
               </time></small>
             </div>
           )}
@@ -211,8 +219,12 @@ export default function DirectoryBrowser({
                 <td>
                   <div className="directory-actions">
                     {item.type === 'FILE' && (
-                      <button type="button" className="directory-link" aria-label={`获取下载链接 ${item.name}`}
-                        disabled={!canModify} onClick={() => void requestDownload(item)}>获取下载链接</button>
+                      <>
+                        <button type="button" className="directory-link" aria-label={`获取预览链接 ${item.name}`}
+                          disabled={!canModify} onClick={() => void requestFileAccess(item, 'preview')}>获取预览链接</button>
+                        <button type="button" className="directory-link" aria-label={`获取下载链接 ${item.name}`}
+                          disabled={!canModify} onClick={() => void requestFileAccess(item, 'download')}>获取下载链接</button>
+                      </>
                     )}
                     <button type="button" className="directory-link" aria-label={`重命名 ${item.name}`}
                       disabled={!canModify} onClick={() => setEntryAction({ kind: 'rename', entry: item })}>重命名</button>

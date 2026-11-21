@@ -1,13 +1,17 @@
 import { ApiError, requestData } from './http'
 
-export interface DownloadGrant {
+export type FileAccessPurpose = 'download' | 'preview'
+
+export interface FileAccessGrant {
   url: string
   expiresAt: number
 }
 
-export type DownloadLinkAuthorizer = (entryId: string, expectedRevision: string, signal: AbortSignal) => Promise<DownloadGrant>
+export type FileAccessAuthorizer = (entryId: string, expectedRevision: string, purpose: FileAccessPurpose, signal: AbortSignal) => Promise<FileAccessGrant>
 
-function isDownloadUrl(value: unknown): value is string {
+const previewMimeTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'text/plain']
+
+function isSignedAccessUrl(value: unknown): value is string {
   if (typeof value !== 'string' || !/^https?:\/\/[^#\\\s\u0000-\u001f\u007f]+$/.test(value)) return false
   try {
     const parsed = new URL(value)
@@ -17,22 +21,26 @@ function isDownloadUrl(value: unknown): value is string {
   }
 }
 
-export async function createDownloadGrant(accessToken: string, entryId: string, expectedRevision: string, signal: AbortSignal): Promise<DownloadGrant> {
-  // 1. 按当前文件版本申请下载授权，使用现有同源认证请求。
+export async function createFileAccessGrant(accessToken: string, entryId: string, expectedRevision: string, purpose: FileAccessPurpose, signal: AbortSignal): Promise<FileAccessGrant> {
+  // 1. 按当前文件版本和用户选择的用途，调用现有同源授权入口。
   const data = await requestData(`/api/v1/entries/${encodeURIComponent(entryId)}/download`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ expected_revision: expectedRevision, purpose: 'download' }),
+    body: JSON.stringify({ expected_revision: expectedRevision, purpose }),
     redirect: 'error',
     signal,
   }, 200)
 
-  // 2. 核对授权版本、附件用途、签名地址和有效期，原样保留签名 URL。
+  // 2. 核对授权版本、交付方式和预览 MIME，原样保留签名 URL。
+  const preview = purpose === 'preview'
+  const purposeLabel = preview ? '预览' : '下载'
+  const dispositionPrefix = preview ? 'inline;' : 'attachment;'
   const expiresAt = typeof data.expires_at === 'string' ? Date.parse(data.expires_at) : NaN
-  if (data.revision !== expectedRevision || !isDownloadUrl(data.url) || !Number.isFinite(expiresAt) ||
-      typeof data.disposition !== 'string' || !data.disposition.startsWith('attachment;')) {
-    throw new ApiError(200, '服务返回的下载授权有误。')
+  if (data.revision !== expectedRevision || !isSignedAccessUrl(data.url) || !Number.isFinite(expiresAt) ||
+      typeof data.disposition !== 'string' || !data.disposition.startsWith(dispositionPrefix) ||
+      (preview && (typeof data.mime_type !== 'string' || !previewMimeTypes.includes(data.mime_type)))) {
+    throw new ApiError(200, `服务返回的${purposeLabel}授权有误。`)
   }
-  if (expiresAt <= Date.now()) throw new ApiError(200, '下载链接已过期，请重新获取。')
+  if (expiresAt <= Date.now()) throw new ApiError(200, `${purposeLabel}链接已过期，请重新获取。`)
   return { url: data.url, expiresAt }
 }

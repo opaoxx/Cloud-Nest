@@ -6,8 +6,8 @@ import type { CurrentUserProfile } from './api/auth'
 import { confirmPurge, createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, readPurgeProgress, renameEntry, restoreEntry, trashEntry } from './api/drive'
 import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgeConfirmer, PurgePreviewReader, PurgeProgressReader, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
-import { createDownloadGrant } from './api/download'
-import type { DownloadLinkAuthorizer } from './api/download'
+import { createFileAccessGrant } from './api/download'
+import type { FileAccessAuthorizer } from './api/download'
 import { createSingleUploadTask, readPublishedUploadEntry, readSingleUploadTask, sendSingleUploadContent } from './api/uploadTask'
 import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
 import DirectoryBrowser from './DirectoryBrowser'
@@ -115,10 +115,10 @@ export default function AuthPage() {
     return readPublishedUploadEntry(session.accessToken, entryId, signal)
   }
 
-  const authorizeDownload: DownloadLinkAuthorizer = async (entryId, revision, signal) => {
+  const authorizeFileAccess: FileAccessAuthorizer = async (entryId, revision, purpose, signal) => {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
-    return createDownloadGrant(session.accessToken, entryId, revision, signal)
+    return createFileAccessGrant(session.accessToken, entryId, revision, purpose, signal)
   }
 
   const submitEntryRename: EntryRenamer = async rename => {
@@ -258,7 +258,7 @@ export default function AuthPage() {
               <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
                 readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation} createUploadTask={submitUploadTask}
                 sendUploadContent={submitUploadContent} readUploadTask={readUploadTask} readPublishedEntry={readPublishedEntry}
-                authorizeDownload={authorizeDownload}
+                authorizeFileAccess={authorizeFileAccess}
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
             {view === 'trash' && <TrashBrowser rootEntryId={profile.root_entry_id} readTrashPage={readTrashPage}
