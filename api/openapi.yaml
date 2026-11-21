@@ -396,13 +396,19 @@ paths:
     post:
       tags: [Uploads]
       operationId: cancelUpload
-      summary: 取消当前用户的单文件上传任务
+      summary: 取消当前用户的上传任务
       description: |
-        1. Bearer 授权通过后解析路径 id，按当前用户归属读取任务。同账号的其他设备也可发起取消。MULTIPART 返回 TASK_NOT_READY。
-        2. SINGLE 任务已是 CANCELLING 时返回 202。已是 CANCELLED、COMPLETED、EXPIRED 或 FAILED 时返回 200 和已记录的终态。
-        3. 在所属用户事务中检查其余任务。EXPIRING 或已到期且尚未开始取消的任务返回 TASK_NOT_READY。
+        SINGLE 已接入服务。MULTIPART 为 B4 计划契约，等待接入。
+        1. Bearer 授权通过后解析路径 id，按当前用户归属读取任务。同账号其他设备可发起取消。缺失或跨账号统一返回 UPLOAD_NOT_FOUND。
+        2. 已是 CANCELLING 时返回 202。已是 CANCELLED、COMPLETED、EXPIRED 或 FAILED 时返回 200 和已记录的终态。
+        3. 所属用户事务内复查授权和其余任务。EXPIRING 或以数据库时间判断已到期且尚未开始取消时返回 TASK_NOT_READY。
            CREATING、UPLOADING、COMPLETING、VERIFYING 在期限内且无有效执行租约时进入 CANCELLING。有有效执行租约时返回 UPLOAD_BUSY。
-        首次受理以 CANCELLING 提交为准，进入该阶段时保留预占，取消收尾时再释放。
+           首次受理以 CANCELLING 提交为准，保留任务预占。此后停止签发该任务的分片 URL 或受理新的完成请求。
+        4. MULTIPART 的收尾在后台处理。对已绑定的存储会话执行 AbortMultipartUpload，复查在途分片、原会话及暂存对象的实际完成结果。
+           存储返回 NoSuchUpload 时仍需核对暂存对象的完成事实。尚未绑定会话时按实际存储状态核对，未关联会话按孤儿清理规则处理。
+           已生成但未发布的对象按其版本登记延迟清理。
+           存储状态未确认或收尾暂时失败时保留 CANCELLING，由后台重试。确认收尾条件后，在一个事务内提交 CANCELLED 并只返还一次预占。
+        5. 取消和完成以已提交的状态为准。发布先提交时返回 COMPLETED 及原 result_entry_id。取消先提交时，旧执行者不可再写回发布结果。
         请求无需正文或 Idempotency-Key。重复请求沿用同一任务当前状态，已提交的取消由后续流程接续。
         202 后客户端可使用返回的 data.id 调用 GET /api/v1/uploads/{id} 查询。200 时以 data.status 判断实际终态。
       security:
@@ -5272,8 +5278,8 @@ components:
                 request_id: 38ee758a-0727-42de-ae7d-3bb33155e148
     UploadCancellationAccepted:
       description: |
-        HTTP 202，已提交 CANCELLING 或任务正处于该阶段。客户端可按 data.id 查询进度。
-        当前任务保留预占，取消收尾后才释放。响应关联本次请求 ID，使用 no-store 和 Pragma no-cache。
+        HTTP 202。SINGLE 或 MULTIPART 已提交 CANCELLING，或重复请求读到该阶段。客户端可按 data.id 查询进度。
+        任务预占在后台收尾事务提交 CANCELLED 时释放。响应关联本次请求 ID，使用 no-store 和 Pragma no-cache。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -5297,29 +5303,48 @@ components:
                     properties:
                       upload_mode:
                         type: string
-                        enum: [SINGLE]
+                        enum: [SINGLE, MULTIPART]
                       status:
                         type: string
                         enum: [CANCELLING]
-          example:
-            data:
-              id: '19'
-              parent_id: '13'
-              requested_name: 学习笔记.md
-              resolved_name: null
-              size_bytes: 2048
-              upload_mode: SINGLE
-              status: CANCELLING
-              result_entry_id: null
-              created_at: '2026-11-20T08:00:00.123456Z'
-              updated_at: '2026-11-20T08:01:00.123456Z'
-              expires_at: '2026-11-21T08:00:00.123456Z'
-              completed_at: null
-              last_error: null
-            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+          examples:
+            singleCancelling:
+              value:
+                data:
+                  id: '19'
+                  parent_id: '13'
+                  requested_name: 学习笔记.md
+                  resolved_name: null
+                  size_bytes: 2048
+                  upload_mode: SINGLE
+                  status: CANCELLING
+                  result_entry_id: null
+                  created_at: '2026-11-20T08:00:00.123456Z'
+                  updated_at: '2026-11-20T08:01:00.123456Z'
+                  expires_at: '2026-11-21T08:00:00.123456Z'
+                  completed_at: null
+                  last_error: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            multipartCancelling:
+              value:
+                data:
+                  id: '21'
+                  parent_id: '13'
+                  requested_name: 合成分片.bin
+                  resolved_name: null
+                  size_bytes: 16777217
+                  upload_mode: MULTIPART
+                  status: CANCELLING
+                  result_entry_id: null
+                  created_at: '2026-11-21T08:00:00.123456Z'
+                  updated_at: '2026-11-21T08:01:00.123456Z'
+                  expires_at: '2026-11-22T08:00:00.123456Z'
+                  completed_at: null
+                  last_error: null
+                request_id: 58ee758a-0727-42de-ae7d-3bb33155e148
     UploadCancellationTerminal:
       description: |
-        HTTP 200，返回已有的 CANCELLED、COMPLETED、EXPIRED 或 FAILED。
+        HTTP 200，返回 SINGLE 或 MULTIPART 已有的 CANCELLED、COMPLETED、EXPIRED 或 FAILED。
         data.status 表明实际终态。COMPLETED 保留原发布结果及目录项 ID。
         响应关联本次请求 ID，使用 no-store 和 Pragma no-cache。
       headers:
@@ -5345,7 +5370,7 @@ components:
                     properties:
                       upload_mode:
                         type: string
-                        enum: [SINGLE]
+                        enum: [SINGLE, MULTIPART]
                       status:
                         type: string
                         enum: [CANCELLED, COMPLETED, EXPIRED, FAILED]
@@ -6114,8 +6139,8 @@ components:
                 request_id: 58ee758a-0727-42de-ae7d-3bb33155e148
     UploadCancellationConflict:
       description: |
-        HTTP 409。仍有有效执行租约返回 UPLOAD_BUSY。任务正在过期收尾、未开始取消且已经到期，
-        或上传方式为 MULTIPART 时返回 TASK_NOT_READY。客户端可使用任务查询接口刷新状态。
+        HTTP 409。任务正在过期收尾，或还未开始取消且已经到期时返回 TASK_NOT_READY。
+        可取消且未到期的任务仍有有效执行租约时返回 UPLOAD_BUSY。客户端可查询任务状态，再决定是否重试。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -6130,7 +6155,20 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ErrorResponse'
+            allOf:
+              - $ref: '#/components/schemas/ErrorResponse'
+              - type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      code:
+                        type: string
+                        enum: [TASK_NOT_READY, UPLOAD_BUSY]
+                      details:
+                        type: object
+                        nullable: true
+                        enum: [null]
           examples:
             taskBusy:
               value:
