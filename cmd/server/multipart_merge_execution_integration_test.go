@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -156,21 +157,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			if _, err := store.CommitUserMultipartCompletion(ctx, actor, requestLease, parts); err != nil {
 				t.Fatal(err)
 			}
-			claim := func(owner string) *domain.UploadTask {
-				t.Helper()
-				candidates, err := store.ListMultipartUploadCompletionCandidates(ctx, 1)
-				if err != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
-					t.Fatal("合并候选不符", candidates, err)
-				}
-				lease, err := store.ClaimMultipartUploadCompletionLease(ctx, candidates[0], owner)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return lease
-			}
-			lease := claim("fixture-merge")
-
-			// 2. 在合成任务上制造指定故障，并执行单条合并。
+			// 2. 在合成任务上制造指定故障，再由单轮批次扫描、领取并执行。
 			earlyReplacement, lateReplacement := fixture.fault == "early replacement", fixture.fault == "late replacement"
 			replaceTail := func() {
 				t.Helper()
@@ -227,7 +214,33 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 					confirmations++
 					return client.ConfirmMultipartSessionAbsence(callContext, objectKey, sessionID, verifyInstance)
 				}, store.FailMultipartUploadForMissingSession)
-			result, err := execution.Execute(ctx, lease)
+			var lease, result *domain.UploadTask
+			batch := service.NewUploadMergeBatch(store.ListMultipartUploadCompletionCandidates, store.ClaimMultipartUploadCompletionLease,
+				func(callContext context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
+					lease = claimed
+					result, err = execution.Execute(callContext, claimed)
+					return result, err
+				})
+			runBatch := func(owner string, want service.UploadMergeBatchResult) {
+				t.Helper()
+				lease, result, err = nil, nil, nil
+				summary, scanError := batch.RunOnce(ctx, 1, owner)
+				if scanError != nil || !reflect.DeepEqual(summary, want) || lease == nil || lease.ID != fixture.taskID {
+					t.Fatal("单轮结果未对应本次合成任务", summary, scanError, err)
+				}
+				t.Logf("任务 %d 单轮扫描 %d，校验 %d，补传 %d，失败收尾 %d，重试 %d",
+					lease.ID, summary.Scanned, summary.Verifying, summary.Reopened, summary.Failed, summary.RetriesScheduled)
+			}
+			wantFirst := service.UploadMergeBatchResult{Scanned: 1}
+			switch fixture.fault {
+			case "early replacement", "late replacement":
+				wantFirst.Reopened = 1
+			case "response", "write", "session absent":
+				wantFirst.RetriesScheduled = 1
+			default:
+				wantFirst.Verifying = 1
+			}
+			runBatch("fixture-merge", wantFirst)
 			assertQuota := func(wantReserved uint64) {
 				t.Helper()
 				var reserved, used uint64
@@ -297,12 +310,11 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				// 5. 在独占夹具中使重试到期并领取新租约，再打开受信实例核对。
 				execute(t, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", fixture.taskID)
 				firstVersion := lease.LeaseVersion
-				lease = claim("fixture-trusted-confirmation")
+				verifyInstance = isolatedMinIOVerifier(minioContainer)
+				runBatch("fixture-trusted-confirmation", service.UploadMergeBatchResult{Scanned: 1, Failed: 1})
 				if lease.LeaseVersion != firstVersion+1 {
 					t.Fatal("受信确认夹具未领取新版本")
 				}
-				verifyInstance = isolatedMinIOVerifier(minioContainer)
-				result, err = execution.Execute(ctx, lease)
 				if err != nil || result == nil || result.Status != domain.UploadStatusFailed || result.ReservedBytes != 0 ||
 					result.LeaseVersion != lease.LeaseVersion || result.NextAttemptAt != nil || completeCalls != 0 || missingChecks != 2 || confirmations != 2 {
 					t.Fatal("未从受信缺失结果提交失败终态", result, err)
@@ -354,11 +366,10 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				}
 				execute(t, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", fixture.taskID)
 				firstVersion := lease.LeaseVersion
-				lease = claim("fixture-recovery")
+				runBatch("fixture-recovery", service.UploadMergeBatchResult{Scanned: 1, Verifying: 1})
 				if lease.LeaseVersion != firstVersion+1 {
 					t.Fatal("恢复夹具未领取新版本")
 				}
-				result, err = execution.Execute(ctx, lease)
 			}
 
 			// 7. 核对状态、确认版本和原配额，确认服务对每条任务只发起过一次合并。
