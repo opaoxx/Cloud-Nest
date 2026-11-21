@@ -216,19 +216,77 @@ func TestMigrationAndBootstrapGuards(t *testing.T) {
 	if currentHash != originalHash {
 		t.Fatal("repeated seed changed the existing password")
 	}
-	initialMigration := migrations.Ordered()[0]
-	if err := migrate(ctx, connection, initialMigration); err != nil {
+	expectedMigrations := migrations.Ordered()
+	if err := migrate(ctx, connection, expectedMigrations); err != nil {
 		t.Fatal(err)
 	}
 	var checksum string
 	connection.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE version=1").Scan(&checksum)
 	defer connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false,checksum=? WHERE version=1", checksum)
 	connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=true WHERE version=1")
-	if err := migrate(ctx, connection, initialMigration); err == nil || !strings.Contains(err.Error(), "dirty") {
+	if err := migrate(ctx, connection, expectedMigrations); err == nil || !strings.Contains(err.Error(), "dirty") {
 		t.Fatal("dirty migration not rejected", err)
 	}
 	connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false,checksum=REPEAT('0',64) WHERE version=1")
-	if err := migrate(ctx, connection, initialMigration); err == nil || !strings.Contains(err.Error(), "checksum") {
+	if err := migrate(ctx, connection, expectedMigrations); err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatal("changed migration not rejected", err)
+	}
+}
+
+func TestReadAppliedMigrationCount(t *testing.T) {
+	database := verificationDB(t)
+	ctx := t.Context()
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+
+	// 用连接内的临时表验证未来的多版本规则，合成版本不写入正式迁移表。
+	if _, err := connection.ExecContext(ctx, `CREATE TEMPORARY TABLE schema_migrations (
+		version BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+		checksum CHAR(64) NOT NULL,
+		dirty BOOLEAN NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	expectedMigrations := []migrations.Migration{
+		migrations.Ordered()[0],
+		{Version: 2, SQL: "SELECT 2;"},
+		{Version: 3, SQL: "SELECT 3;"},
+	}
+	cases := []struct {
+		name     string
+		versions []uint64
+		want     int
+		wantErr  string
+	}{
+		{name: "empty"},
+		{name: "valid prefix", versions: []uint64{1}, want: 1},
+		{name: "complete history in shuffled insertion order", versions: []uint64{3, 1, 2}, want: 3},
+		{name: "gap after valid version", versions: []uint64{1, 3}, wantErr: "migration 3 found, expected migration 2"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := connection.ExecContext(ctx, "DELETE FROM schema_migrations"); err != nil {
+				t.Fatal(err)
+			}
+			for _, version := range testCase.versions {
+				migration := expectedMigrations[version-1]
+				if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations VALUES (?, ?, false)", version, migration.Checksum()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			count, err := readAppliedMigrationCount(ctx, connection, expectedMigrations)
+			if testCase.wantErr != "" {
+				if count != 0 || err == nil || err.Error() != testCase.wantErr {
+					t.Fatalf("count = %d, error = %v, want 0 and %q", count, err, testCase.wantErr)
+				}
+				return
+			}
+			if count != testCase.want || err != nil {
+				t.Fatalf("count = %d, error = %v, want %d and no error", count, err, testCase.want)
+			}
+		})
 	}
 }

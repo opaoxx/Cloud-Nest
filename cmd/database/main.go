@@ -73,9 +73,8 @@ func run(databaseName string, seed bool) error {
 		_, _ = connection.ExecContext(releaseContext, "SELECT RELEASE_LOCK(?)", lockName)
 	}()
 
-	// 当前命令执行清单首项，即首期迁移。
-	initialMigration := migrations.Ordered()[0]
-	if err := migrate(ctx, connection, initialMigration); err != nil {
+	expectedMigrations := migrations.Ordered()
+	if err := migrate(ctx, connection, expectedMigrations); err != nil {
 		return err
 	}
 	if seed {
@@ -83,44 +82,25 @@ func run(databaseName string, seed bool) error {
 			return err
 		}
 	}
-	fmt.Printf("Database %s is at schema version %d.\n", databaseName, initialMigration.Version)
+	fmt.Printf("Database %s is at schema version %d.\n", databaseName, expectedMigrations[0].Version)
 	return nil
 }
 
-func migrate(ctx context.Context, connection *sql.Conn, initialMigration migrations.Migration) error {
-	// 1. 准备迁移记录表，按清单中的版本号读取已应用记录。
-	_, err := connection.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
- version BIGINT UNSIGNED NOT NULL PRIMARY KEY COMMENT '迁移版本',
- name VARCHAR(255) NOT NULL COMMENT '迁移文件',
- checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '迁移内容SHA256',
- dirty BOOLEAN NOT NULL COMMENT '部分执行标记',
- started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '开始时间UTC',
- applied_at DATETIME(6) NULL COMMENT '成功时间UTC'
- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据库结构迁移记录'`)
+func migrate(ctx context.Context, connection *sql.Conn, expectedMigrations []migrations.Migration) error {
+	// 1. 在写入或执行 DDL 前，核对已应用记录是否与清单开头连续匹配。
+	appliedCount, err := readAppliedMigrationCount(ctx, connection, expectedMigrations)
 	if err != nil {
 		return err
 	}
-	checksum := initialMigration.Checksum()
-	var existingChecksum string
-	var dirty bool
-	err = connection.QueryRowContext(ctx, "SELECT checksum, dirty FROM schema_migrations WHERE version=?", initialMigration.Version).Scan(&existingChecksum, &dirty)
 
-	// 2. 已有记录时核对 dirty 和摘要，匹配后直接返回。
-	if err == nil {
-		if dirty {
-			return fmt.Errorf("migration %d is dirty; inspect the partial DDL and restore before retrying", initialMigration.Version)
-		}
-		if existingChecksum != checksum {
-			return fmt.Errorf("migration %d checksum differs; add a new migration instead of editing an applied file", initialMigration.Version)
-		}
+	// 2. 当前命令只执行首期迁移。历史已覆盖该版本时直接返回。
+	initialMigration := expectedMigrations[0]
+	if appliedCount > 0 {
 		fmt.Printf("Migration %d already applied; checksum verified.\n", initialMigration.Version)
 		return nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 
-	// 3. 首次执行时确认业务库为空，先写 dirty，再执行 SQL，成功后标记完成。
+	// 3. 业务库为空时才准备迁移表，按 dirty → 执行 SQL → 完成的顺序初始化。
 	var otherTables int
 	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name <> 'schema_migrations'").Scan(&otherTables); err != nil {
 		return err
@@ -128,7 +108,17 @@ func migrate(ctx context.Context, connection *sql.Conn, initialMigration migrati
 	if otherTables != 0 {
 		return errors.New("initial migration requires an empty business schema; existing tables need explicit reconciliation")
 	}
-	if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,checksum,dirty) VALUES(?,?,?,true)", initialMigration.Version, initialMigration.Name, checksum); err != nil {
+	if _, err := connection.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+ version BIGINT UNSIGNED NOT NULL PRIMARY KEY COMMENT '迁移版本',
+ name VARCHAR(255) NOT NULL COMMENT '迁移文件',
+ checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '迁移内容SHA256',
+ dirty BOOLEAN NOT NULL COMMENT '部分执行标记',
+ started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '开始时间UTC',
+ applied_at DATETIME(6) NULL COMMENT '成功时间UTC'
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据库结构迁移记录'`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,checksum,dirty) VALUES(?,?,?,true)", initialMigration.Version, initialMigration.Name, initialMigration.Checksum()); err != nil {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, initialMigration.SQL); err != nil {
@@ -139,6 +129,52 @@ func migrate(ctx context.Context, connection *sql.Conn, initialMigration migrati
 	}
 	fmt.Printf("Migration %d applied successfully.\n", initialMigration.Version)
 	return nil
+}
+
+// readAppliedMigrationCount 返回与清单开头连续匹配的已应用版本数。调用方持有迁移命名锁。
+func readAppliedMigrationCount(ctx context.Context, connection *sql.Conn, expectedMigrations []migrations.Migration) (int, error) {
+	// 1. 按版本读取，额外读取一条即可发现超出清单的记录。
+	rows, err := connection.QueryContext(ctx,
+		"SELECT version, checksum, dirty FROM schema_migrations ORDER BY version LIMIT ?", len(expectedMigrations)+1)
+	if err != nil {
+		var mysqlError *mysql.MySQLError
+		if errors.As(err, &mysqlError) && mysqlError.Number == 1146 {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read migration history: %w", err)
+	}
+	defer rows.Close()
+
+	// 2. 从清单首项逐条核对，发现跳号、未知版本、dirty 或摘要失配时停止。
+	appliedCount := 0
+	for rows.Next() {
+		var version uint64
+		var checksum string
+		var dirty bool
+		if err := rows.Scan(&version, &checksum, &dirty); err != nil {
+			return 0, fmt.Errorf("read migration record: %w", err)
+		}
+		if appliedCount == len(expectedMigrations) {
+			return 0, fmt.Errorf("migration %d is outside the supported migration list", version)
+		}
+		expectedMigration := expectedMigrations[appliedCount]
+		if version != expectedMigration.Version {
+			return 0, fmt.Errorf("migration %d found, expected migration %d", version, expectedMigration.Version)
+		}
+		if dirty {
+			return 0, fmt.Errorf("migration %d is dirty; inspect the partial DDL and restore before retrying", version)
+		}
+		if checksum != expectedMigration.Checksum() {
+			return 0, fmt.Errorf("migration %d checksum differs; add a new migration instead of editing an applied file", version)
+		}
+		appliedCount++
+	}
+
+	// 3. 确认读取完整后返回条数，清单末尾尚未应用的版本允许留空。
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read migration history: %w", err)
+	}
+	return appliedCount, nil
 }
 
 func seedAccount(ctx context.Context, connection *sql.Conn, password string) error {
