@@ -68,6 +68,17 @@ func PlanUpload(sizeBytes uint64, limits UploadPlanLimits) (UploadPlan, error) {
 	return planMultipartUpload(sizeBytes), nil
 }
 
+// ValidMultipartUploadLayout 核对已保存片长和片数与文件大小的关系，不读取当前存储限制。
+func ValidMultipartUploadLayout(sizeBytes, partSizeBytes uint64, partCount uint32) bool {
+	// 1. 检查文件大小分界和整 MiB 的片长约束。
+	if sizeBytes <= MaxSingleUploadSizeBytes || partSizeBytes < initialUploadPartSize || partSizeBytes%uploadPartSizeUnitBytes != 0 {
+		return false
+	}
+	// 2. 按保存的片长核对实际片数和协议上限。
+	count := uint64(partCount)
+	return count <= maxUploadPartCount && count == ceilUploadDivision(sizeBytes, partSizeBytes)
+}
+
 // planMultipartUpload 计算超过 SINGLE 大小的声明所需的固定计划。
 func planMultipartUpload(sizeBytes uint64) UploadPlan {
 	requiredPartMiB := ceilUploadDivision(sizeBytes, maxUploadPartCount*uploadPartSizeUnitBytes)
