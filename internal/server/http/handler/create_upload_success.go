@@ -25,19 +25,28 @@ func CreateUploadSuccess(requestContext *gin.Context, stableBody []byte) {
 		return
 	}
 
-	// 2. 恢复稳定快照，关联当前请求 ID 并预先编码 JSON。
+	// 2. 恢复稳定快照，交给共同的成功响应交付。
 	data, err := dto.RestoreCreateUploadData(stableBody)
 	if err != nil {
 		InternalError(requestContext, nil)
 		return
 	}
-	responseBytes, err := json.Marshal(dto.CreateUploadResponse{Data: *data, RequestID: requestcontext.RequestID(ctx)})
+	writeCreateUploadSuccess(requestContext, data)
+}
+
+func writeCreateUploadSuccess(requestContext *gin.Context, data any) {
+	// 1. 关联当前请求 ID，预先编码公开快照。
+	ctx := requestContext.Request.Context()
+	responseBytes, err := json.Marshal(struct {
+		Data      any    `json:"data"`
+		RequestID string `json:"request_id"`
+	}{Data: data, RequestID: requestcontext.RequestID(ctx)})
 	if err != nil {
 		InternalError(requestContext, nil)
 		return
 	}
 
-	// 3. 复查取消状态，设置响应头并交付 HTTP 201。
+	// 2. 复查取消状态，设置响应头并交付 HTTP 201。
 	if ctx.Err() != nil {
 		InternalError(requestContext, nil)
 		return

@@ -85,22 +85,51 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 		if failEncode.Swap(false) {
 			return nil, errors.New("private-upload-encoding-failure")
 		}
+		if task.UploadMode == "MULTIPART" {
+			data, err := dto.NewCreateMultipartUploadData(task)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(data)
+		}
 		data, err := dto.NewCreateUploadData(task)
 		if err != nil {
 			return nil, err
 		}
 		return json.Marshal(data)
-	}, func(body json.RawMessage) error { _, err := dto.RestoreCreateUploadData(body); return err })
+	}, func(body json.RawMessage) error {
+		var mode struct {
+			UploadMode string `json:"upload_mode"`
+		}
+		if err := json.Unmarshal(body, &mode); err != nil {
+			return err
+		}
+		if mode.UploadMode == "MULTIPART" {
+			_, err := dto.RestoreCreateMultipartUploadData(body)
+			return err
+		}
+		_, err := dto.RestoreCreateUploadData(body)
+		return err
+	})
 	var logs bytes.Buffer
 	const origin = "http://127.0.0.1:5173"
 	router := serverhttp.NewRouter(logging.New(&logs), []string{origin}, func(context.Context) bool { return true })
-	router.POST("/test-create-upload", middleware.RequireAuthorization(func(ctx context.Context, token string) (*domain.Actor, error) {
+	authorize := middleware.RequireAuthorization(func(ctx context.Context, token string) (*domain.Actor, error) {
 		actor, err := authorization.Authorize(ctx, token)
 		if err == nil && disableAfterAuthorization.Swap(false) {
 			_, err = pool.ExecContext(ctx, "UPDATE users SET status='DISABLED' WHERE id=1")
 		}
 		return actor, err
-	}, handler.AuthorizationFailure), handler.CreateUpload(creator.Create))
+	}, handler.AuthorizationFailure)
+	const singlePath, plannedPath = "/test-create-upload", "/test-create-upload-with-plan"
+	router.POST(singlePath, authorize, handler.CreateUpload(creator.Create))
+	const fixtureLimit = 20 * 1024 * 1024
+	limits := domain.UploadPlanLimits{
+		MaxFileSizeBytes: domain.DefaultMaxUploadSizeBytes, MaxObjectSizeBytes: fixtureLimit, MaxPartSizeBytes: 64 * 1024 * 1024,
+	}
+	router.POST(plannedPath, authorize, handler.CreateUploadWithMultipart(func(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, key string) (json.RawMessage, error) {
+		return creator.CreateWithPlan(ctx, actor, input, key, limits)
+	}))
 	server := httptest.NewServer(router)
 	defer server.Close()
 	client := server.Client()
@@ -114,11 +143,13 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 		return state
 	}
 	requestNumber := 0
-	request := func(body, key, token string, status int, code, field string) dto.CreateUploadResponse {
+	var requestPaths []string
+	send := func(path, body, key, token string, status int) ([]byte, string) {
 		t.Helper()
 		requestNumber++
+		requestPaths = append(requestPaths, path)
 		requestID := fmt.Sprintf("28ee758a-0727-42de-ae7d-%012d", requestNumber)
-		message, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/test-create-upload?note=private-query", strings.NewReader(body))
+		message, err := http.NewRequestWithContext(ctx, "POST", server.URL+path+"?note=private-query", strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,9 +173,17 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 		if readError != nil || closeError != nil || response.StatusCode != status || response.ContentLength != int64(len(encoded)) || response.Header.Get("Content-Type") != "application/json; charset=utf-8" || response.Header.Get("Content-Encoding") != "" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Request-ID") != requestID || response.Header.Get("Access-Control-Allow-Origin") != origin || len(response.Cookies()) != 0 {
 			t.Fatal("上传创建 HTTP 状态、头或正文长度错误", response.StatusCode, readError, closeError)
 		}
+		if status == http.StatusCreated && response.Header.Get("Pragma") != "no-cache" {
+			t.Fatal("创建回执缺少 Pragma")
+		}
+		return encoded, requestID
+	}
+	request := func(body, key, token string, status int, code, field string) dto.CreateUploadResponse {
+		t.Helper()
+		encoded, requestID := send(singlePath, body, key, token, status)
 		if status == 201 {
 			var result dto.CreateUploadResponse
-			if json.Unmarshal(encoded, &result) != nil || result.RequestID != requestID || response.Header.Get("Pragma") != "no-cache" {
+			if json.Unmarshal(encoded, &result) != nil || result.RequestID != requestID {
 				t.Fatal("上传创建成功 JSON 错误")
 			}
 			return result
@@ -210,6 +249,63 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 		task, err := store.FindUserUploadTask(ctx, 1, taskID)
 		if err != nil || task.UserID != 1 || task.DeviceID != 13 {
 			t.Fatal("HTTP 头影响了可信用户归属", err)
+		}
+	})
+	t.Run("multipart HTTP snapshot and errors", func(t *testing.T) {
+		const key = "multipart-http"
+		base := `{"parent_id":"11","name":"  分片夹具.bin  ","size_bytes":16777217`
+		digestField := `,"sha256":"` + strings.Repeat("aB", 32) + `"}`
+		body := base + digestField
+		readResult := func(encoded []byte, requestID string) json.RawMessage {
+			t.Helper()
+			var response struct {
+				Data      json.RawMessage `json:"data"`
+				RequestID string          `json:"request_id"`
+			}
+			if json.Unmarshal(encoded, &response) != nil || response.RequestID != requestID {
+				t.Fatal("分片回执缺少当前请求 ID")
+			}
+			data, err := dto.RestoreCreateMultipartUploadData(response.Data)
+			if err != nil || data.Task.RequestedName != "分片夹具.bin" || data.Task.ParentID != "11" ||
+				data.Task.SizeBytes != 16777217 || data.PartCount != 2 || data.PartSizeBytes != 16777216 ||
+				data.Task.Status != "CREATING" || !data.ExpiresAt.Equal(data.Task.ExpiresAt) {
+				t.Fatalf("分片公开快照不符: %+v %v", data, err)
+			}
+			return response.Data
+		}
+
+		// 1. 通过真正认证和幂等事务创建再重试，保留原始快照。
+		before := readState()
+		first, firstID := send(plannedPath, body, key, access.Token, 201)
+		firstData := readResult(first, firstID)
+		state := readState()
+		if state.reserved != before.reserved+16777217 || state.reserved != state.taskReserved ||
+			state.tasks != before.tasks+1 || state.objects != before.objects+1 || state.records != before.records+1 {
+			t.Fatal("分片 HTTP 创建未提交四项事实")
+		}
+		replayed, nextID := send(plannedPath, body, key, access.Token, 201)
+		if firstID == nextID || !bytes.Equal(firstData, readResult(replayed, nextID)) || readState() != state {
+			t.Fatal("重试未保留原快照、使用了旧请求 ID 或重复创建")
+		}
+
+		// 2. 直接验证公开错误及数据库无新增事实。
+		for _, fixture := range []struct {
+			body, key, token, code string
+			status                 int
+			details                map[string]any
+		}{
+			{base + "}", "multipart-missing-hash", access.Token, "INVALID_ARGUMENT", 400, map[string]any{"field": "sha256"}},
+			{base + `,"sha256":null}`, "multipart-null-hash", access.Token, "INVALID_ARGUMENT", 400, map[string]any{"field": "sha256"}},
+			{strings.Replace(body, "16777217", "20971521", 1), "multipart-over-limit", access.Token, "FILE_TOO_LARGE", 413, map[string]any{"field": "size_bytes", "max_size_bytes": float64(fixtureLimit)}},
+			{strings.Replace(body, "16777217", "16777218", 1), key, access.Token, "IDEMPOTENCY_CONFLICT", 409, nil},
+			{body, "multipart-no-auth", "", "AUTH_REQUIRED", 401, nil},
+		} {
+			encoded, requestID := send(plannedPath, fixture.body, fixture.key, fixture.token, fixture.status)
+			var failure dto.ErrorResponse
+			if json.Unmarshal(encoded, &failure) != nil || failure.RequestID != requestID || failure.Error.Code != fixture.code ||
+				!reflect.DeepEqual(failure.Error.Details, fixture.details) || readState() != state {
+				t.Fatalf("公开错误不符或请求改变了数据: %s", encoded)
+			}
 		}
 	})
 	t.Run("rejections preserve database facts", func(t *testing.T) {
@@ -339,7 +435,7 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 			t.Fatal("完整身份、父目录或高位任务标识丢失", err)
 		}
 	})
-	if requestNumber != 30 {
+	if requestNumber != 37 {
 		t.Fatal("实际上传处理请求数量与用例清单不一致", requestNumber)
 	}
 	lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
@@ -348,7 +444,7 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 	}
 	for index, line := range lines {
 		var completed map[string]any
-		if json.Unmarshal(line, &completed) != nil || completed["request_id"] != fmt.Sprintf("28ee758a-0727-42de-ae7d-%012d", index+1) || completed["path"] != "/test-create-upload" {
+		if json.Unmarshal(line, &completed) != nil || completed["request_id"] != fmt.Sprintf("28ee758a-0727-42de-ae7d-%012d", index+1) || completed["path"] != requestPaths[index] {
 			t.Fatal("HTTP 完成日志关联错误")
 		}
 	}

@@ -18,6 +18,15 @@ import (
 // CreateUpload 绑定上传创建幂等服务，路由须先挂载认证中间件。
 // create 绑定 IdempotentCreateUploadService.Create，身份来自可信请求上下文。
 func CreateUpload(create func(context.Context, domain.Actor, domain.CreateUploadInput, string) (json.RawMessage, error)) gin.HandlerFunc {
+	return createUploadHandler(create, false)
+}
+
+// CreateUploadWithMultipart 交付两种模式的创建结果，依赖已装配的分片创建服务。
+func CreateUploadWithMultipart(create func(context.Context, domain.Actor, domain.CreateUploadInput, string) (json.RawMessage, error)) gin.HandlerFunc {
+	return createUploadHandler(create, true)
+}
+
+func createUploadHandler(create func(context.Context, domain.Actor, domain.CreateUploadInput, string) (json.RawMessage, error), supportsMultipart bool) gin.HandlerFunc {
 	// 1. 检查服务依赖，构造每次请求的处理函数。
 	if create == nil {
 		panic("上传创建处理函数需要幂等创建服务方法")
@@ -75,6 +84,7 @@ func CreateUpload(create func(context.Context, domain.Actor, domain.CreateUpload
 		if err != nil {
 			response := dto.ErrorResponse{RequestID: requestcontext.RequestID(ctx)}
 			status := http.StatusConflict
+			var sizeLimit *domain.UploadSizeLimitError
 			switch {
 			case errors.Is(err, domain.ErrInvalidEntryName):
 				status = http.StatusBadRequest
@@ -91,6 +101,12 @@ func CreateUpload(create func(context.Context, domain.Actor, domain.CreateUpload
 			case errors.Is(err, domain.ErrFileEntryNotFound):
 				status = http.StatusNotFound
 				response.Error = dto.ErrorDetail{Code: "ENTRY_NOT_FOUND", Message: "目录项不存在", Details: nil}
+			case supportsMultipart && errors.Is(err, domain.ErrMultipartUploadSHA256Required):
+				InvalidArgument(requestContext, &dto.FieldError{Field: "sha256", Message: domain.ErrMultipartUploadSHA256Required.Error()})
+				return
+			case supportsMultipart && errors.As(err, &sizeLimit) && sizeLimit != nil:
+				status = http.StatusRequestEntityTooLarge
+				response.Error = dto.ErrorDetail{Code: "FILE_TOO_LARGE", Message: "文件大小超过当前上传限制", Details: map[string]any{"field": "size_bytes", "max_size_bytes": sizeLimit.MaxSizeBytes}}
 			case errors.Is(err, domain.ErrUploadFileTooLarge):
 				status = http.StatusRequestEntityTooLarge
 				response.Error = dto.ErrorDetail{Code: "FILE_TOO_LARGE", Message: domain.ErrUploadFileTooLarge.Error(), Details: map[string]any{"field": "size_bytes", "max_size_bytes": domain.MaxSingleUploadSizeBytes}}
@@ -110,12 +126,25 @@ func CreateUpload(create func(context.Context, domain.Actor, domain.CreateUpload
 		}
 
 		// 5. 核对返回快照与请求声明，再交付成功响应。
+		if supportsMultipart && input.SizeBytes > domain.MaxSingleUploadSizeBytes {
+			data, err := dto.RestoreCreateMultipartUploadData(result)
+			if err != nil || !matchesCreateUploadDeclaration(data.Task, *input) {
+				InternalError(requestContext, nil)
+				return
+			}
+			writeCreateUploadSuccess(requestContext, data)
+			return
+		}
 		data, err := dto.RestoreCreateUploadData(result)
-		if err != nil || data.Task.ParentID != strconv.FormatUint(input.ParentID, 10) ||
-			data.Task.RequestedName != strings.TrimSpace(input.Name) || data.Task.SizeBytes != input.SizeBytes {
+		if err != nil || !matchesCreateUploadDeclaration(data.Task, *input) {
 			InternalError(requestContext, nil)
 			return
 		}
 		CreateUploadSuccess(requestContext, result)
 	}
+}
+
+func matchesCreateUploadDeclaration(task dto.UploadTaskData, input domain.CreateUploadInput) bool {
+	return task.ParentID == strconv.FormatUint(input.ParentID, 10) &&
+		task.RequestedName == strings.TrimSpace(input.Name) && task.SizeBytes == input.SizeBytes
 }
