@@ -74,23 +74,33 @@ func (receiptService *UploadMergeReceiptService) readTargetReceipts(ctx context.
 	}
 	frozen = slices.Clone(frozen)
 
-	// 2. 只读获取完整存储清单，分页未读完时保留查询错误。
-	observed, listError := receiptService.listParts(ctx, target.ObjectKey, target.UploadID)
-	if contextError := ctx.Err(); contextError != nil {
-		return nil, nil, contextError
-	}
-	if listError != nil && !errors.Is(listError, domain.ErrUploadPartSessionMissing) {
-		return nil, nil, domain.ErrUploadStorageUnavailable
-	}
-
-	// 3. 再次复核租约和目标，返回完整结果或相应错误。
-	if err := recheckUploadMergeTarget(ctx, claimed, target, receiptService.getTarget); err != nil {
+	// 2. 在同一目标上读取并复核完整存储清单。
+	observed, err := receiptService.listTargetParts(ctx, claimed, target)
+	if err != nil {
 		return nil, nil, err
 	}
-	if listError != nil {
-		return nil, nil, domain.ErrUploadPartSessionMissing
-	}
 	return frozen, observed, nil
+}
+
+// listTargetParts 供回执核对和会话缺失复核读取同一租约绑定的原会话。
+func (receiptService *UploadMergeReceiptService) listTargetParts(ctx context.Context, claimed *domain.UploadTask, target UploadPartSigningTarget) ([]domain.UploadPartReceipt, error) {
+	// 1. 只读获取完整存储清单，分页未读完时保留查询错误。
+	observed, listError := receiptService.listParts(ctx, target.ObjectKey, target.UploadID)
+	if contextError := ctx.Err(); contextError != nil {
+		return nil, contextError
+	}
+	if listError != nil && !errors.Is(listError, domain.ErrUploadPartSessionMissing) {
+		return nil, domain.ErrUploadStorageUnavailable
+	}
+
+	// 2. 再次复核租约和目标，返回完整结果或相应错误。
+	if err := recheckUploadMergeTarget(ctx, claimed, target, receiptService.getTarget); err != nil {
+		return nil, err
+	}
+	if listError != nil {
+		return nil, domain.ErrUploadPartSessionMissing
+	}
+	return observed, nil
 }
 
 // validFrozenMergeReceipts 检查从仓储交付的快照确实覆盖固定计划。

@@ -127,10 +127,15 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal("合并读回的大小、版本、ETag 或 SHA-256 不符", readSize, err)
 	}
 
-	// 3. 显式重发用于模拟重复派发。会话缺失仍可凭返回的原键读回同一对象。
-	if replay, err := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, receipts); replay != nil ||
-		!errors.Is(err, domain.ErrUploadPartSessionMissing) || !errors.Is(err, domain.ErrMultipartUploadCompletionUnknown) {
-		t.Fatal("已关闭会话未返回恢复信号", replay, err)
+	// 3. 显式重发用于模拟重复派发，再用只读复核找回原对象版本。
+	replay, replayError := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, receipts)
+	if replay != nil || !errors.Is(replayError, domain.ErrUploadPartSessionMissing) || !errors.Is(replayError, domain.ErrMultipartUploadCompletionUnknown) {
+		t.Fatal("已关闭会话未返回恢复信号", replay, replayError)
+	}
+	checked, err := preflight.CheckMissingSession(ctx, lease, replayError)
+	if err != nil || checked == nil || checked.Missing != nil || checked.Recovered == nil ||
+		checked.Recovered.Target != target || checked.Recovered.Object.StorageVersionID == nil || *checked.Recovered.Object.StorageVersionID != version {
+		t.Fatal("会话消失后未复核到原对象版本", checked, err)
 	}
 	versions := 0
 	for stored := range bucket.client.ListObjects(ctx, bucket.name, minio.ListObjectsOptions{Prefix: key, Recursive: true, WithVersions: true}) {
@@ -142,6 +147,34 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 	if versions != 1 {
 		t.Fatal("重复派发后版本数量不符", versions)
 	}
+
+	// 4. 在独占测试桶准备一个已中止的会话，验证复核只交付缺失观察。
+	const missingKey = "b4/synthetic-absent.bin"
+	missingUploadID, err := client.CreateMultipartUpload(ctx, missingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.AbortMultipartUpload(ctx, bucket.name, missingKey, missingUploadID); err != nil {
+		t.Fatal("无法中止合成会话", minio.ToErrorResponse(err).Code)
+	}
+	_, sessionError := client.ListUploadParts(ctx, missingKey, missingUploadID, 1)
+	if !errors.Is(sessionError, domain.ErrUploadPartSessionMissing) {
+		t.Fatal("夹具未取得会话缺失信号", sessionError)
+	}
+	missingLease := *lease
+	missingLease.ID++
+	missingLease.StagedObjectID++
+	missingLease.StorageUploadID = &missingUploadID
+	// 目标读取夹具改为返回第二个合成任务的绑定。
+	target.TaskID, target.StagedObjectID, target.ObjectKey, target.UploadID = missingLease.ID, missingLease.StagedObjectID, missingKey, missingUploadID
+	checked, err = preflight.CheckMissingSession(ctx, &missingLease, sessionError)
+	if err != nil || checked == nil || checked.Recovered != nil || checked.Missing == nil ||
+		checked.Missing.ObjectKey != missingKey || checked.Missing.Task.ID != missingLease.ID ||
+		checked.Missing.Task.StorageUploadID == nil || *checked.Missing.Task.StorageUploadID != missingUploadID ||
+		checked.Missing.Task.LeaseVersion != missingLease.LeaseVersion {
+		t.Fatal("原会话和对象均缺失时未交付对应观察", checked, err)
+	}
+	t.Log("原会话消失后找回已完成版本，已中止的另一会话返回原对象及会话均缺失")
 	t.Logf("专用 MinIO %s，回环地址 %s，合成版本 %s，读回 %d B，SHA-256 %x，版本数 %d",
 		containerID[:12], settings.EndpointURL, version, readSize, actualDigest.Sum(nil), versions)
 }
