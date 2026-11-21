@@ -24,7 +24,11 @@ func TestServerBackupSourceDumpIntegration(t *testing.T) {
 	defer cancel()
 	fixture := prepareBackupSource(t, ctx)
 	verifyBackupSourceBaseline(t, ctx, fixture)
+	stopAndExportBackupSourceSQL(t, ctx, fixture)
+}
 
+func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture) []byte {
+	t.Helper()
 	// 1. 等待服务优雅退出，确认后台任务和数据库连接已经结束。
 	startedAt := time.Now().UTC()
 	logs, err := fixture.stop()
@@ -50,6 +54,7 @@ func TestServerBackupSourceDumpIntegration(t *testing.T) {
 	// 3. 核对导出文件中的表、逐行记录和迁移摘要，保留可复验的日志。
 	verifyBackupSourceSQL(t, dump, tableRows, migrationChecksum)
 	t.Logf("SQL 快照 %d B，SHA-256 %x，结构共 %d 张表，数据行数与停写基线逐表一致", len(dump), sha256.Sum256(dump), len(tableRows))
+	return dump
 }
 
 func verifyBackupSourceStopped(t *testing.T, baseURL, logs string) {
