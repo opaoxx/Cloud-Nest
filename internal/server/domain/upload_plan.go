@@ -17,6 +17,9 @@ const (
 // ErrInvalidUploadPlanLimits 表示规划所需的配置或存储限制缺失。
 var ErrInvalidUploadPlanLimits = errors.New("上传规划需要有效的文件、对象和单片大小上限")
 
+// ErrInvalidUploadPartNumber 表示分片编号超出已保存计划的范围。
+var ErrInvalidUploadPartNumber = errors.New("上传分片编号超出任务范围")
+
 // UploadSizeLimitError 表示声明大小超限，并携带实际可接收的字节上限。
 type UploadSizeLimitError struct {
 	MaxSizeBytes uint64
@@ -77,6 +80,22 @@ func ValidMultipartUploadLayout(sizeBytes, partSizeBytes uint64, partCount uint3
 	// 2. 按保存的片长核对实际片数和协议上限。
 	count := uint64(partCount)
 	return count <= maxUploadPartCount && count == ceilUploadDivision(sizeBytes, partSizeBytes)
+}
+
+// ExpectedMultipartUploadPartSize 按已保存的分片计划计算指定编号的预期字节数。
+// 计划异常返回 ErrInvalidUploadTaskData，编号越界返回 ErrInvalidUploadPartNumber。
+func ExpectedMultipartUploadPartSize(sizeBytes, partSizeBytes uint64, partCount, partNumber uint32) (uint64, error) {
+	// 1. 核对已保存的片长和片数，无需读取当前上传限制。
+	if !ValidMultipartUploadLayout(sizeBytes, partSizeBytes, partCount) {
+		return 0, ErrInvalidUploadTaskData
+	}
+	// 2. 拒绝范围以外的编号，再计算从零开始的字节偏移。
+	if partNumber == 0 || partNumber > partCount {
+		return 0, ErrInvalidUploadPartNumber
+	}
+	// 3. 通过核对的编号起点一定小于文件大小，乘法和减法均在范围内。
+	offset := uint64(partNumber-1) * partSizeBytes
+	return min(partSizeBytes, sizeBytes-offset), nil
 }
 
 // planMultipartUpload 计算超过 SINGLE 大小的声明所需的固定计划。

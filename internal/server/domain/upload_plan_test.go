@@ -151,3 +151,38 @@ func TestPlanUploadWithUint64Limits(t *testing.T) {
 		t.Fatalf("got %+v, %v, want %+v", plan, err, want)
 	}
 }
+
+func TestExpectedMultipartUploadPartSize(t *testing.T) {
+	const partSize = 16 * testUploadMiB
+	for _, testCase := range []struct {
+		name                  string
+		sizeBytes, partSize   uint64
+		partCount, partNumber uint32
+		wantSize              uint64
+		wantError             error
+	}{
+		{name: "first full part", sizeBytes: 40*testUploadMiB + 1, partSize: partSize, partCount: 3, partNumber: 1, wantSize: partSize},
+		{name: "middle full part", sizeBytes: 40*testUploadMiB + 1, partSize: partSize, partCount: 3, partNumber: 2, wantSize: partSize},
+		{name: "short last part", sizeBytes: 40*testUploadMiB + 1, partSize: partSize, partCount: 3, partNumber: 3, wantSize: 8*testUploadMiB + 1},
+		{name: "exact multiple", sizeBytes: 2 * partSize, partSize: partSize, partCount: 2, partNumber: 2, wantSize: partSize},
+		{name: "one-byte tail", sizeBytes: partSize + 1, partSize: partSize, partCount: 2, partNumber: 2, wantSize: 1},
+		{name: "use saved part size", sizeBytes: 40 * testUploadMiB, partSize: 24 * testUploadMiB, partCount: 2, partNumber: 1, wantSize: 24 * testUploadMiB},
+		{name: "maximum part count", sizeBytes: partSize * 10_000, partSize: partSize, partCount: 10_000, partNumber: 10_000, wantSize: partSize},
+		{name: "uint64 limit", sizeBytes: math.MaxUint64, partSize: 1 << 63, partCount: 2, partNumber: 2, wantSize: (1 << 63) - 1},
+		{name: "zero number", sizeBytes: 2 * partSize, partSize: partSize, partCount: 2, wantError: ErrInvalidUploadPartNumber},
+		{name: "above count", sizeBytes: 2 * partSize, partSize: partSize, partCount: 2, partNumber: 3, wantError: ErrInvalidUploadPartNumber},
+		{name: "maximum number", sizeBytes: 2 * partSize, partSize: partSize, partCount: 2, partNumber: math.MaxUint32, wantError: ErrInvalidUploadPartNumber},
+		{name: "single-size file", sizeBytes: partSize, partSize: partSize, partCount: 1, partNumber: 1, wantError: ErrInvalidUploadTaskData},
+		{name: "zero part size", sizeBytes: 2 * partSize, partCount: 2, partNumber: 1, wantError: ErrInvalidUploadTaskData},
+		{name: "unaligned part size", sizeBytes: 2 * partSize, partSize: partSize + 1, partCount: 2, partNumber: 1, wantError: ErrInvalidUploadTaskData},
+		{name: "incorrect part count", sizeBytes: 2 * partSize, partSize: partSize, partCount: 3, partNumber: 1, wantError: ErrInvalidUploadTaskData},
+		{name: "too many parts", sizeBytes: partSize * 10_001, partSize: partSize, partCount: 10_001, partNumber: 1, wantError: ErrInvalidUploadTaskData},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := ExpectedMultipartUploadPartSize(testCase.sizeBytes, testCase.partSize, testCase.partCount, testCase.partNumber)
+			if got != testCase.wantSize || !errors.Is(err, testCase.wantError) {
+				t.Fatalf("got %d bytes, %v, want %d bytes, %v", got, err, testCase.wantSize, testCase.wantError)
+			}
+		})
+	}
+}
