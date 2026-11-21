@@ -36,26 +36,10 @@ func NewUploadMergeReceiptService(
 // Verify 只读核对当前合并租约的目标与回执。会话缺失时保留信号，供调用方继续确认对象状态。
 func (receiptService *UploadMergeReceiptService) Verify(ctx context.Context, claimed *domain.UploadTask) (*UploadMergeReceiptSnapshot, error) {
 	// 1. 复核租约和存储目标，读取并检查冻结回执。
-	if ctx == nil || claimed == nil || claimed.ID == 0 || claimed.UserID == 0 || claimed.StagedObjectID == 0 ||
-		claimed.Status != domain.UploadStatusCompleting || claimed.UploadMode != "MULTIPART" ||
-		claimed.LeaseVersion == 0 || claimed.LeaseOwner == nil || claimed.LeaseUntil == nil ||
-		claimed.StorageUploadID == nil || claimed.PartSize == nil || claimed.PartCount == nil {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	loaded, err := receiptService.getTarget(ctx, claimed)
-	if contextError := ctx.Err(); contextError != nil {
-		return nil, contextError
-	}
+	target, err := loadUploadMergeTarget(ctx, claimed, receiptService.getTarget)
 	if err != nil {
 		return nil, err
 	}
-	if !matchesClaimedUploadPartTarget(loaded, claimed) {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	target := *loaded
 	frozen, err := receiptService.readFrozen(ctx, claimed)
 	if contextError := ctx.Err(); contextError != nil {
 		return nil, contextError
@@ -82,27 +66,8 @@ func (receiptService *UploadMergeReceiptService) Verify(ctx context.Context, cla
 	}
 
 	// 3. 再次复核租约和目标，返回完整结果或相应错误。
-	if err := ctx.Err(); err != nil {
+	if err := recheckUploadMergeTarget(ctx, claimed, target, receiptService.getTarget); err != nil {
 		return nil, err
-	}
-	current, err := receiptService.getTarget(ctx, claimed)
-	if contextError := ctx.Err(); contextError != nil {
-		return nil, contextError
-	}
-	if err != nil {
-		return nil, err
-	}
-	if current == nil {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	if current.LeaseVersion != target.LeaseVersion {
-		return nil, domain.ErrUploadTaskBusy
-	}
-	checked := *current
-	checked.ExpiresAt = checked.ExpiresAt.UTC()
-	target.ExpiresAt = target.ExpiresAt.UTC()
-	if checked != target {
-		return nil, domain.ErrUploadTaskNotReady
 	}
 	if listError != nil {
 		return nil, domain.ErrUploadPartSessionMissing

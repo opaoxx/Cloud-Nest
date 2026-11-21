@@ -11,9 +11,9 @@ var ErrUploadObjectMissing = errors.New("待校验的上传对象不存在")
 // ErrUploadStorageUnavailable 表示本次对象存储读写未能完成。
 var ErrUploadStorageUnavailable = errors.New("存储服务暂时不可用")
 
-// UploadObjectResult 保存本次暂存对象写入的确认信息。
+// UploadObjectResult 保存从存储写入确认或元数据查询取得的对象信息。
 type UploadObjectResult struct {
-	// SizeBytes 是已核对临时文件大小后提交的字节数。
+	// SizeBytes 是已提交或从存储查询到的对象字节数。
 	SizeBytes uint64
 	// StorageETag 是存储返回的不透明 ETag，缺失时为 nil。
 	StorageETag *string
