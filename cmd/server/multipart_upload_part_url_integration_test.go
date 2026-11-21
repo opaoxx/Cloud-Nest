@@ -65,16 +65,40 @@ func TestServerMultipartUploadPartURLIntegration(t *testing.T) {
 	other := []byte{0x34}
 	putMultipartProbePart(t, ctx, httpClient, signed, multipartProbeSHA256(other), other, http.StatusForbidden, "SignatureDoesNotMatch")
 	putMultipartProbePart(t, ctx, httpClient, signed, checksum, other, http.StatusBadRequest, "XAmzContentChecksumMismatch")
-	page, err := core.ListObjectParts(ctx, bucket.name, key, uploadID, 0, 1)
-	if err != nil || page.IsTruncated || len(page.ObjectParts) != 0 {
-		t.Fatal("错误请求改变了隔离会话中的分片", minio.ToErrorResponse(err).Code)
+	page, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1)
+	if err != nil || page == nil || page.NextMarker != 0 || len(page.Parts) != 0 {
+		t.Fatal("错误请求改变了隔离会话中的分片", err)
 	}
 
-	// 3. 正确尾片上传后，按会话读回编号、长度、ETag 和 SHA-256。
-	etag := putMultipartProbePart(t, ctx, httpClient, signed, checksum, tail, http.StatusOK, "")
-	probe := multipartProbe{core: core, bucket: bucket.name, key: key, uploadID: uploadID}
-	if result := probe.readPartPage(t, ctx, 0, 2, len(tail), etag, checksum); result.IsTruncated {
-		t.Fatal("本轮上传出现了多余分片")
+	// 3. 先写尾片再写第一片，逐页核对编号、实际长度、ETag 和 SHA-256。
+	tailETag := putMultipartProbePart(t, ctx, httpClient, signed, checksum, tail, http.StatusOK, "")
+	first := []byte{0x42, 0x47}
+	firstChecksum := multipartProbeSHA256(first)
+	firstLink, err := client.SignUploadPartURL(ctx, key, uploadID, 1, uint64(len(first)), firstChecksum, taskDeadline)
+	if err != nil || firstLink == nil {
+		t.Fatal("隔离第一片签发失败", err)
 	}
-	t.Logf("独占 MinIO %s。长度、校验头和正文错误均被拒绝，正确第 2 片的 1 字节回执一致", container[:12])
+	firstURL, err := url.Parse(firstLink.URL)
+	if err != nil || firstURL.Host != settings.PublicEndpointURL.Host || firstURL.Scheme != settings.PublicEndpointURL.Scheme ||
+		firstURL.Path != "/"+bucket.name+"/"+key || firstURL.Query().Get("uploadId") != uploadID {
+		t.Fatal("签名地址不属于本轮隔离会话")
+	}
+	firstETag := putMultipartProbePart(t, ctx, httpClient, firstURL, firstChecksum, first, http.StatusOK, "")
+	firstPage, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1)
+	if err != nil || firstPage == nil || len(firstPage.Parts) != 1 || firstPage.NextMarker != 1 {
+		t.Fatal("第一页没有返回预期续页标记", err)
+	}
+	part := firstPage.Parts[0]
+	if part.PartNumber != 1 || part.SizeBytes != 2 || part.ETag != firstETag || part.ChecksumSHA256 != firstChecksum {
+		t.Fatal("第一页分片回执与写入结果不符")
+	}
+	lastPage, err := client.ListUploadPartsPage(ctx, key, uploadID, firstPage.NextMarker, 1)
+	if err != nil || lastPage == nil || len(lastPage.Parts) != 1 || lastPage.NextMarker != 0 {
+		t.Fatal("第二页没有正常结束", err)
+	}
+	part = lastPage.Parts[0]
+	if part.PartNumber != 2 || part.SizeBytes != 1 || part.ETag != tailETag || part.ChecksumSHA256 != checksum {
+		t.Fatal("尾片回执与写入结果不符")
+	}
+	t.Logf("独占 MinIO %s。空页及两页均通过，标记 0 → 1 → 末页，片长与 ETag、SHA-256 回执一致", container[:12])
 }
