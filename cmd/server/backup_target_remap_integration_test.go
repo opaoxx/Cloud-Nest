@@ -19,6 +19,14 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 )
 
+type backupTargetRemapFixture struct {
+	source       backupSourceFixture
+	database     backupTargetDatabase
+	targetBucket *serverUploadContentBucket
+	manifest     backupSourceManifest
+	mapping      backupTargetObjectMap
+}
+
 func TestServerBackupTargetRemapIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_BACKUP_SOURCE_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_BACKUP_SOURCE_TEST=1 后更新隔离目标库对象定位")
@@ -27,25 +35,11 @@ func TestServerBackupTargetRemapIntegration(t *testing.T) {
 	defer cancel()
 
 	// 1. 在同一轮生成源端备份、导入隔离目标库，恢复并核对目标对象版本。
-	source := prepareBackupSource(t, ctx)
-	root, manifest := prepareBackupSourceBundle(t, ctx, source)
-	saveAndVerifyBackupSourcePayloads(t, ctx, source.bucket, root, manifest.Objects)
-	database := prepareBackupTargetDatabase(t, ctx, source)
-	if err := importBackupTargetSQL(ctx, database.pool, database.containerID, database.name,
-		filepath.Join(root.Name(), "database.sql"), manifest.DatabaseSHA256); err != nil {
-		t.Fatal(err)
-	}
-	targetBucket, writer := prepareBackupTargetBucket(t, ctx, source)
-	objects := restoreAndVerifyBackupTargetObjects(t, ctx, writer, targetBucket, root, manifest.Objects)
-	verifyBackupTargetVersions(t, ctx, targetBucket, objects)
-	writeAndVerifyBackupTargetObjectMap(t, root, objects)
-	loadedManifest, mapping, err := readBackupRemapFiles(root)
-	if err != nil || !reflect.DeepEqual(loadedManifest, manifest) {
-		t.Fatal("读回复制映射或备份清单失败", err)
-	}
+	fixture := prepareBackupTargetRemap(t, ctx)
+	database, targetBucket, loadedManifest, mapping := fixture.database, fixture.targetBucket, fixture.manifest, fixture.mapping
 
 	// 2. 模拟第二条源版本不匹配。前一条即使更新成功，事务结束后也应回滚。
-	userID := backupFixtureID(t, source.login.User.ID)
+	userID := backupFixtureID(t, fixture.source.login.User.ID)
 	before := snapshotBackupTargetObjects(t, ctx, database.pool, userID)
 	staleManifest, staleMapping := loadedManifest, mapping
 	staleManifest.Objects = slices.Clone(loadedManifest.Objects)
@@ -92,6 +86,27 @@ func TestServerBackupTargetRemapIntegration(t *testing.T) {
 	}
 	inspectBackupDatabase(t, ctx, database.pool, userID)
 	t.Log("目标库提交三条对象定位，目录和文件引用保持一致，无正文的暂存对象原样，已用 10 B、预占 3 B")
+}
+
+func prepareBackupTargetRemap(t *testing.T, ctx context.Context) backupTargetRemapFixture {
+	t.Helper()
+	source := prepareBackupSource(t, ctx)
+	root, manifest := prepareBackupSourceBundle(t, ctx, source)
+	saveAndVerifyBackupSourcePayloads(t, ctx, source.bucket, root, manifest.Objects)
+	database := prepareBackupTargetDatabase(t, ctx, source)
+	if err := importBackupTargetSQL(ctx, database.pool, database.containerID, database.name,
+		filepath.Join(root.Name(), "database.sql"), manifest.DatabaseSHA256); err != nil {
+		t.Fatal(err)
+	}
+	targetBucket, writer := prepareBackupTargetBucket(t, ctx, source)
+	objects := restoreAndVerifyBackupTargetObjects(t, ctx, writer, targetBucket, root, manifest.Objects)
+	verifyBackupTargetVersions(t, ctx, targetBucket, objects)
+	writeAndVerifyBackupTargetObjectMap(t, root, objects)
+	loadedManifest, mapping, err := readBackupRemapFiles(root)
+	if err != nil || !reflect.DeepEqual(loadedManifest, manifest) {
+		t.Fatal("读回复制映射或备份清单失败", err)
+	}
+	return backupTargetRemapFixture{source: source, database: database, targetBucket: targetBucket, manifest: loadedManifest, mapping: mapping}
 }
 
 func readBackupRemapFiles(root *os.Root) (backupSourceManifest, backupTargetObjectMap, error) {
