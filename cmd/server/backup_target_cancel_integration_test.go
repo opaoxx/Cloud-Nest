@@ -17,6 +17,13 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 )
 
+type runningBackupTarget struct {
+	fixture backupTargetRemapFixture
+	pending *domain.UploadTask
+	api     backupSourceClient
+	stop    func() (string, error)
+}
+
 func TestServerBackupTargetCancelIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_BACKUP_SOURCE_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_BACKUP_SOURCE_TEST=1 后验证恢复目标的取消收尾")
@@ -24,43 +31,17 @@ func TestServerBackupTargetCancelIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
-	// 1. 对齐恢复后的暂存定位，启动使用隔离目标库和目标桶的真实服务。
-	fixture, pending := prepareBackupTargetPendingUpload(t, ctx)
+	// 1. 启动恢复后的真实服务，记录取消前的对象快照。
+	running := startRestoredBackupTarget(t, ctx)
+	fixture, pending, api := running.fixture, running.pending, running.api
 	pool, target := fixture.database.pool, fixture.targetBucket
-	staged := snapshotBackupTargetObjects(t, ctx, pool, pending.UserID)[pending.StagedObjectID]
-	if err := alignBackupTargetStagingBucket(ctx, pool, target, pending, staged); err != nil {
-		t.Fatal(err)
-	}
 	before := snapshotBackupTargetObjects(t, ctx, pool, pending.UserID)
-	if before[staged.ID].Bucket != target.name || os.Getenv("CLOUDNEST_S3_BUCKET") != target.name {
-		t.Fatal("隔离目标服务未绑定到已对齐的目标桶")
-	}
-	api, stop := startBackupFixtureServer(t, ctx, fixture.database.name)
-	login := loginBackupFixture(t, ctx, &api, os.Getenv("CLOUDNEST_ADMIN_PASSWORD"))
-	if login.User.ID != fixture.source.login.User.ID || login.RootEntryID != fixture.source.login.RootEntryID ||
-		login.Session.ID == fixture.source.login.Session.ID || login.UsedBytes != 10 || login.ReservedBytes != 3 {
-		t.Fatal("恢复后的账号、独立会话或初始配额不符")
-	}
-	t.Logf("恢复后的后端 %s 使用目标库 %s，合成账号重新登录，已用 10 B、预占 3 B", api.baseURL, fixture.database.name)
+	staged := before[pending.StagedObjectID]
 
 	// 2. 调用一次正式取消入口，按任务 ID 等待真实 worker 写入终态。
-	taskID := strconv.FormatUint(pending.ID, 10)
-	path := "/api/v1/uploads/" + taskID
-	var accepted dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodPost, path+"/cancel", "", nil, http.StatusAccepted, &accepted)
-	if accepted.Data.ID != taskID || accepted.Data.Status != "CANCELLING" ||
-		accepted.Data.ResultEntryID != nil || accepted.Data.CompletedAt != nil {
-		t.Fatal("正式取消没有返回该任务的受理状态")
-	}
-	finished := awaitBackupTargetCancellation(t, ctx, pool, pending)
+	finished := cancelRestoredBackupUpload(t, ctx, running)
 
-	// 3. 对比公开结果、数据库与目标桶版本，确认预占已返还且三个发布文件仍在。
-	var status dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodGet, path, "", nil, http.StatusOK, &status)
-	if status.Data.ID != accepted.Data.ID || status.Data.Status != "CANCELLED" || status.Data.ResultEntryID != nil ||
-		status.Data.CompletedAt == nil || !status.Data.CompletedAt.Equal(*finished.CompletedAt) {
-		t.Fatal("公开取消终态与数据库不一致")
-	}
+	// 3. 对比配额和目标桶版本，确认预占已返还且三个发布文件仍在。
 	var profile dto.UserProfileResponse
 	api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
 	var used, reserved, files uint64
@@ -88,13 +69,55 @@ func TestServerBackupTargetCancelIntegration(t *testing.T) {
 	if !reflect.DeepEqual(readBackupUploadTask(t, ctx, fixture.source.pool, pending.UserID, pending.ID), pending) {
 		t.Fatal("目标取消影响了源端任务")
 	}
-	logs, err := stop()
+	logs, err := running.stop()
 	if err != nil {
 		t.Fatal(err)
 	}
 	verifyBackupTargetCancellationRound(t, logs)
 	t.Logf("任务 %d：202 CANCELLING → 200 CANCELLED，完成于 %s，返还 3 B；已用 10 B、预占 0 B，保留三个实际 MinIO 版本",
 		pending.ID, finished.CompletedAt.Format(time.RFC3339Nano))
+}
+
+func startRestoredBackupTarget(t *testing.T, ctx context.Context) runningBackupTarget {
+	t.Helper()
+	fixture, pending := prepareBackupTargetPendingUpload(t, ctx)
+	pool, target := fixture.database.pool, fixture.targetBucket
+	staged := snapshotBackupTargetObjects(t, ctx, pool, pending.UserID)[pending.StagedObjectID]
+	if err := alignBackupTargetStagingBucket(ctx, pool, target, pending, staged); err != nil {
+		t.Fatal(err)
+	}
+	objects := snapshotBackupTargetObjects(t, ctx, pool, pending.UserID)
+	if objects[staged.ID].Bucket != target.name || os.Getenv("CLOUDNEST_S3_BUCKET") != target.name {
+		t.Fatal("隔离目标服务未绑定到已对齐的目标桶")
+	}
+	api, stop := startBackupFixtureServer(t, ctx, fixture.database.name)
+	login := loginBackupFixture(t, ctx, &api, os.Getenv("CLOUDNEST_ADMIN_PASSWORD"))
+	if login.User.ID != fixture.source.login.User.ID || login.RootEntryID != fixture.source.login.RootEntryID ||
+		login.Session.ID == fixture.source.login.Session.ID || login.UsedBytes != 10 || login.ReservedBytes != 3 {
+		t.Fatal("恢复后的账号、独立会话或初始配额不符")
+	}
+	t.Logf("恢复后的后端 %s 使用目标库 %s，合成账号重新登录，已用 10 B、预占 3 B", api.baseURL, fixture.database.name)
+	return runningBackupTarget{fixture: fixture, pending: pending, api: api, stop: stop}
+}
+
+func cancelRestoredBackupUpload(t *testing.T, ctx context.Context, running runningBackupTarget) *domain.UploadTask {
+	t.Helper()
+	taskID := strconv.FormatUint(running.pending.ID, 10)
+	path := "/api/v1/uploads/" + taskID
+	var accepted dto.UploadTaskResponse
+	running.api.request(t, ctx, http.MethodPost, path+"/cancel", "", nil, http.StatusAccepted, &accepted)
+	if accepted.Data.ID != taskID || accepted.Data.Status != "CANCELLING" ||
+		accepted.Data.ResultEntryID != nil || accepted.Data.CompletedAt != nil {
+		t.Fatal("正式取消没有返回该任务的受理状态")
+	}
+	finished := awaitBackupTargetCancellation(t, ctx, running.fixture.database.pool, running.pending)
+	var status dto.UploadTaskResponse
+	running.api.request(t, ctx, http.MethodGet, path, "", nil, http.StatusOK, &status)
+	if status.Data.ID != taskID || status.Data.Status != "CANCELLED" || status.Data.ResultEntryID != nil ||
+		status.Data.CompletedAt == nil || !status.Data.CompletedAt.Equal(*finished.CompletedAt) {
+		t.Fatal("公开取消终态与数据库不一致")
+	}
+	return finished
 }
 
 func awaitBackupTargetCancellation(t *testing.T, ctx context.Context, pool *sql.DB, pending *domain.UploadTask) *domain.UploadTask {
