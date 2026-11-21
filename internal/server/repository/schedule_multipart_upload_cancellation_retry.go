@@ -1,0 +1,105 @@
+package repository
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"gorm.io/gorm/clause"
+)
+
+// ScheduleMultipartUploadCancellationRetry 按当前取消收尾租约登记下次尝试。
+// 接受 1～30 秒的等待，候选最早在原租约截止后重新可见。
+func (store *Store) ScheduleMultipartUploadCancellationRetry(
+	ctx context.Context, claimed *domain.UploadTask, delaySeconds int, reason domain.MultipartUploadCancellationRetryReason,
+) (*domain.UploadTask, error) {
+	// 1. 在账号事务内锁定任务，复核当前取消租约。
+	if store == nil || store.database == nil || ctx == nil || delaySeconds < 1 || delaySeconds > 30 {
+		return nil, fmt.Errorf("安排分片取消重试需要数据入口、上下文和 1～30 秒等待时间")
+	}
+	if !validMultipartUploadCancellationClaim(claimed) {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	var message string
+	switch reason {
+	case domain.MultipartCancellationRetryStorage:
+		message = domain.ErrUploadStorageUnavailable.Error()
+	case domain.MultipartCancellationRetryDatabase:
+		message = uploadCleanupRetryMessage
+	default:
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	var scheduled *domain.UploadTask
+	const allowDisabled = true
+	err := store.withLockedUserTransaction(ctx, claimed.UserID, allowDisabled, func(txContext context.Context, txStore *Store) error {
+		lockedStore := *txStore
+		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
+		current, err := lockedStore.readMultipartUploadCancellationLease(txContext, claimed)
+		if err != nil {
+			return err
+		}
+		if current.AttemptCount != claimed.AttemptCount {
+			return domain.ErrUploadTaskBusy
+		}
+		if current.LeaseVersion == math.MaxUint64 {
+			return domain.ErrUploadLeaseVersionExhausted
+		}
+		if current.AttemptCount == math.MaxUint32 {
+			return domain.ErrInvalidUploadTaskData
+		}
+
+		// 2. 按数据库时间登记下次尝试，递增次数并释放本次租约。
+		// 保留原租约窗口，已受理的取消可在原上传期限后接续。
+		result := txStore.database.WithContext(txContext).Exec(`
+			UPDATE upload_tasks
+			SET next_attempt_at = GREATEST(lease_until, TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP(6))),
+			    attempt_count = attempt_count + 1, last_error_code = ?, last_error_message = ?,
+			    lease_owner = NULL, lease_until = NULL, updated_at = UTC_TIMESTAMP(6)
+			WHERE user_id = ? AND id = ? AND staged_object_id = ? AND status = 'CANCELLING' AND upload_mode = 'MULTIPART'
+			  AND CAST(storage_upload_id AS BINARY) <=> ? AND CAST(lease_owner AS BINARY) = ?
+			  AND lease_version = ? AND lease_until = ? AND lease_until > UTC_TIMESTAMP(6) AND attempt_count = ?
+			  AND (next_attempt_at IS NULL OR next_attempt_at <= UTC_TIMESTAMP(6))
+			  AND reserved_bytes = file_size`,
+			delaySeconds, string(reason), message, current.UserID, current.ID, current.StagedObjectID,
+			current.StorageUploadID, *current.LeaseOwner, current.LeaseVersion, *current.LeaseUntil, current.AttemptCount)
+		if err := txContext.Err(); err != nil {
+			return err
+		}
+		if result.Error != nil {
+			return fmt.Errorf("安排分片取消重试失败: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return domain.ErrUploadTaskBusy
+		}
+		if result.RowsAffected != 1 {
+			return domain.ErrInvalidUploadTaskData
+		}
+
+		// 3. 回读重试安排，确认取消状态、原会话和预占。
+		updated, err := lockedStore.FindUserUploadTask(txContext, current.UserID, current.ID)
+		if err != nil {
+			return err
+		}
+		nextAttempt := updated.UpdatedAt.Add(time.Duration(delaySeconds) * time.Second)
+		if nextAttempt.Before(*current.LeaseUntil) {
+			nextAttempt = *current.LeaseUntil
+		}
+		if updated.NextAttemptAt == nil || !updated.NextAttemptAt.Equal(nextAttempt) ||
+			updated.UpdatedAt.Before(current.UpdatedAt) || !updated.UpdatedAt.Before(*current.LeaseUntil) ||
+			updated.LeaseOwner != nil || updated.LeaseUntil != nil || updated.LeaseVersion != current.LeaseVersion ||
+			updated.AttemptCount != current.AttemptCount+1 || updated.Status != current.Status || updated.UploadMode != current.UploadMode ||
+			updated.StagedObjectID != current.StagedObjectID || !sameUploadStorageText(updated.StorageUploadID, current.StorageUploadID) ||
+			!sameMultipartUploadDeclaration(current, updated) || updated.LastErrorCode == nil || *updated.LastErrorCode != string(reason) ||
+			updated.LastErrorMessage == nil || *updated.LastErrorMessage != message {
+			return domain.ErrInvalidUploadTaskData
+		}
+		scheduled = updated
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return scheduled, nil
+}

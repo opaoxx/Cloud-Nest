@@ -29,3 +29,13 @@ type MultipartUploadCancellationObservation struct {
 	ObjectKey string
 	Object    *UploadObjectResult
 }
+
+// MultipartUploadCancellationRetryReason 指定取消任务再次尝试的原因。
+type MultipartUploadCancellationRetryReason string
+
+const (
+	// MultipartCancellationRetryStorage 表示存储状态暂时无法确认。
+	MultipartCancellationRetryStorage MultipartUploadCancellationRetryReason = "STORAGE_UNAVAILABLE"
+	// MultipartCancellationRetryDatabase 表示收尾事务遇到已确认的临时数据库故障。
+	MultipartCancellationRetryDatabase MultipartUploadCancellationRetryReason = "DATABASE_UNAVAILABLE"
+)
