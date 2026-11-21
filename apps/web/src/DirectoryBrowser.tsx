@@ -1,7 +1,9 @@
-import { useState } from 'react'
-import { Button } from 'antd'
+import { useEffect, useRef, useState } from 'react'
+import { Button, Input, Modal } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
 import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
+import type { DownloadGrant, DownloadLinkAuthorizer } from './api/download'
+import { ApiError, apiErrorMessage } from './api/http'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
@@ -10,10 +12,15 @@ import SingleUploadDialog from './SingleUploadDialog'
 import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
+type DownloadState = { entry: DirectoryEntry } & (
+  | { phase: 'loading' }
+  | { phase: 'ready'; grant: DownloadGrant }
+  | { phase: 'error'; message: string; revisionChanged: boolean }
+)
 
 export default function DirectoryBrowser({
   rootEntryId, readDirectoryPage, createDirectory, createUploadTask, sendUploadContent, readUploadTask, readPublishedEntry,
-  renameEntry, moveEntry, trashEntry,
+  authorizeDownload, renameEntry, moveEntry, trashEntry,
 }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
@@ -22,17 +29,23 @@ export default function DirectoryBrowser({
   sendUploadContent: SingleUploadContentSender
   readUploadTask: SingleUploadTaskReader
   readPublishedEntry: PublishedUploadEntryReader
+  authorizeDownload: DownloadLinkAuthorizer
   renameEntry: EntryRenamer
   moveEntry: EntryMover
   trashEntry: EntryTrasher
 }) {
   const { request, listing, requestPage, openDirectory } = useDirectoryListing(rootEntryId, readDirectoryPage)
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null)
+  const [download, setDownload] = useState<DownloadState | null>(null)
+  const downloadRequest = useRef<AbortController | null>(null)
+
+  useEffect(() => () => downloadRequest.current?.abort(), [])
 
   // 1. 切换目录时从首页加载，清除上一目录的条目和分页游标。
   function navigateToDirectory(directoryId: string) {
     if (directoryId === request.directoryId) return
     setEntryAction(null)
+    closeDownload()
     openDirectory(directoryId)
   }
 
@@ -50,6 +63,34 @@ export default function DirectoryBrowser({
   function refreshAfterChange() {
     setEntryAction(null)
     requestPage(null)
+  }
+
+  async function requestDownload(entry: DirectoryEntry) {
+    // 1. 保留点击时的文件版本，挡住并发申请。
+    if (entry.type !== 'FILE' || downloadRequest.current) return
+    const controller = new AbortController()
+    downloadRequest.current = controller
+    setDownload({ entry, phase: 'loading' })
+    try {
+      // 2. 仅在当前弹窗保存短期链接和有效期。
+      const grant = await authorizeDownload(entry.id, entry.revision, controller.signal)
+      if (!controller.signal.aborted) setDownload({ entry, phase: 'ready', grant })
+    } catch (error) {
+      // 3. 版本冲突时刷新列表，等待用户对新版本重新发起授权。
+      if (controller.signal.aborted) return
+      const revisionChanged = error instanceof ApiError && error.code === 'REVISION_CONFLICT'
+      const message = revisionChanged ? '文件版本已变化。请关闭窗口，从更新后的列表重新获取链接。' : apiErrorMessage(error)
+      setDownload({ entry, phase: 'error', message, revisionChanged })
+      if (revisionChanged) requestPage(null)
+    } finally {
+      if (downloadRequest.current === controller) downloadRequest.current = null
+    }
+  }
+
+  function closeDownload() {
+    downloadRequest.current?.abort()
+    downloadRequest.current = null
+    setDownload(null)
   }
 
   return (
@@ -112,6 +153,30 @@ export default function DirectoryBrowser({
             refreshAfterChange()
           }} />
       )}
+      {download && (
+        <Modal title="下载授权" open onCancel={closeDownload} width={480}
+          footer={(
+            <>
+              <Button onClick={closeDownload}>关闭</Button>
+              {download.phase === 'error' && !download.revisionChanged && (
+                <Button onClick={() => void requestDownload(download.entry)}>重新获取链接</Button>
+              )}
+            </>
+          )}>
+          <p style={{ overflowWrap: 'anywhere' }}>「{download.entry.name}」</p>
+          {download.phase === 'loading' && <p role="status">正在获取短期下载链接…</p>}
+          {download.phase === 'error' && <p className="auth-error" role="alert">{download.message}</p>}
+          {download.phase === 'ready' && (
+            <div className="entry-name-form">
+              <label htmlFor="authorized-download-url">短期下载链接</label>
+              <Input.TextArea id="authorized-download-url" readOnly autoSize={{ minRows: 2, maxRows: 4 }} value={download.grant.url} />
+              <small>有效期至 <time dateTime={new Date(download.grant.expiresAt).toISOString()}>
+                {new Date(download.grant.expiresAt).toLocaleString('zh-CN', { hour12: false })}
+              </time></small>
+            </div>
+          )}
+        </Modal>
+      )}
       {listing.items.length > 0 && (
         <table className="directory-items" aria-label={`${directoryLabel}条目`}>
           <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">大小</th><th scope="col">操作</th></tr></thead>
@@ -127,6 +192,10 @@ export default function DirectoryBrowser({
                 <td>{item.type === 'DIR' ? '—' : formatSize(item.sizeBytes)}</td>
                 <td>
                   <div className="directory-actions">
+                    {item.type === 'FILE' && (
+                      <button type="button" className="directory-link" aria-label={`获取下载链接 ${item.name}`}
+                        disabled={!canModify} onClick={() => void requestDownload(item)}>获取下载链接</button>
+                    )}
                     <button type="button" className="directory-link" aria-label={`重命名 ${item.name}`}
                       disabled={!canModify} onClick={() => setEntryAction({ kind: 'rename', entry: item })}>重命名</button>
                     <button type="button" className="directory-link" aria-label={`移动 ${item.name}`}
