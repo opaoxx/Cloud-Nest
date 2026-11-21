@@ -1,9 +1,7 @@
 package service
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -11,13 +9,10 @@ import (
 )
 
 // MaxUploadPartSigningInputs 是一次分片签发请求允许声明的最大项数。
-const MaxUploadPartSigningInputs = 20
+const MaxUploadPartSigningInputs = domain.MaxUploadPartSigningInputs
 
 // UploadPartDeclaration 保存客户端声明的编号和分片 SHA-256 十六进制文本。
-type UploadPartDeclaration struct {
-	PartNumber uint32
-	SHA256     string
-}
+type UploadPartDeclaration = domain.UploadPartDeclaration
 
 // UploadPartSigningInput 保存核对后的编号、预期长度及签名需要的校验头值。
 type UploadPartSigningInput struct {
@@ -59,11 +54,8 @@ func PrepareUploadPartSigningInputs(fileSizeBytes, partSizeBytes uint64, partCou
 		seen[part.PartNumber] = struct{}{}
 
 		// 3. 解码固定长度的十六进制摘要，供签名和请求头使用同一标准 Base64 值。
-		var digest [sha256.Size]byte
-		if len(part.SHA256) != hex.EncodedLen(len(digest)) {
-			return nil, &UploadPartDeclarationError{Field: fmt.Sprintf("parts.%d.sha256", index), Message: "SHA-256 须为 64 位十六进制文本"}
-		}
-		if _, err := hex.Decode(digest[:], []byte(part.SHA256)); err != nil {
+		digest, valid := domain.DecodeUploadPartSHA256(part.SHA256)
+		if !valid {
 			return nil, &UploadPartDeclarationError{Field: fmt.Sprintf("parts.%d.sha256", index), Message: "SHA-256 须为 64 位十六进制文本"}
 		}
 		signingInputs = append(signingInputs, UploadPartSigningInput{

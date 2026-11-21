@@ -8,7 +8,9 @@ import (
 const (
 	uploadPartSizeUnitBytes uint64 = 1024 * 1024
 	initialUploadPartSize   uint64 = 16 * uploadPartSizeUnitBytes
-	maxUploadPartCount      uint64 = 10_000
+
+	// MaxUploadPartCount 是上传计划允许的最大片数，也是分片编号的绝对上限。
+	MaxUploadPartCount = 10_000
 
 	// DefaultMaxUploadSizeBytes 是 B4 新建上传任务的默认配置上限，50 GiB。
 	DefaultMaxUploadSizeBytes uint64 = 50 * 1024 * uploadPartSizeUnitBytes
@@ -54,9 +56,9 @@ func PlanUpload(sizeBytes uint64, limits UploadPlanLimits) (UploadPlan, error) {
 	maxAlignedPartSize := limits.MaxPartSizeBytes / uploadPartSizeUnitBytes * uploadPartSizeUnitBytes
 	if maxAlignedPartSize < initialUploadPartSize {
 		maxSize = min(maxSize, MaxSingleUploadSizeBytes)
-	} else if maxAlignedPartSize < ceilUploadDivision(maxSize, maxUploadPartCount) {
+	} else if maxAlignedPartSize < ceilUploadDivision(maxSize, MaxUploadPartCount) {
 		// 分片容量小于已知的文件上限时才相乘，乘积不会溢出。
-		maxSize = maxAlignedPartSize * maxUploadPartCount
+		maxSize = maxAlignedPartSize * MaxUploadPartCount
 	}
 	if sizeBytes > maxSize {
 		return UploadPlan{}, &UploadSizeLimitError{MaxSizeBytes: maxSize}
@@ -79,7 +81,7 @@ func ValidMultipartUploadLayout(sizeBytes, partSizeBytes uint64, partCount uint3
 	}
 	// 2. 按保存的片长核对实际片数和协议上限。
 	count := uint64(partCount)
-	return count <= maxUploadPartCount && count == ceilUploadDivision(sizeBytes, partSizeBytes)
+	return count <= MaxUploadPartCount && count == ceilUploadDivision(sizeBytes, partSizeBytes)
 }
 
 // ExpectedMultipartUploadPartSize 按已保存的分片计划计算指定编号的预期字节数。
@@ -100,7 +102,7 @@ func ExpectedMultipartUploadPartSize(sizeBytes, partSizeBytes uint64, partCount,
 
 // planMultipartUpload 计算超过 SINGLE 大小的声明所需的固定计划。
 func planMultipartUpload(sizeBytes uint64) UploadPlan {
-	requiredPartMiB := ceilUploadDivision(sizeBytes, maxUploadPartCount*uploadPartSizeUnitBytes)
+	requiredPartMiB := ceilUploadDivision(sizeBytes, MaxUploadPartCount*uploadPartSizeUnitBytes)
 	partSize := max(initialUploadPartSize, requiredPartMiB*uploadPartSizeUnitBytes)
 	partCount := ceilUploadDivision(sizeBytes, partSize)
 	return UploadPlan{
