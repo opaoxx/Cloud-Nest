@@ -15,6 +15,14 @@ func (store *Store) WithMultipartUploadCancellationObservationTransaction(
 	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 ) error {
+	return store.withMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observation, action, nil)
+}
+
+func (store *Store) withMultipartUploadCancellationObservationTransaction(
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
+	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
+	replay func(*domain.UploadTask, *domain.StoredObject) error,
+) error {
 	// 1. 校验观察，按归属锁定账号、任务和暂存对象。
 	if store == nil || store.database == nil || ctx == nil || action == nil {
 		return fmt.Errorf("复核分片取消观察需要数据入口、上下文和事务回调")
@@ -45,6 +53,13 @@ func (store *Store) WithMultipartUploadCancellationObservationTransaction(
 		if err != nil {
 			return err
 		}
+		matchesLocation := staged.Provider == location.Provider && staged.Bucket == location.Bucket && staged.ObjectKey == location.ObjectKey
+		if current.Status == domain.UploadStatusCancelled && replay != nil {
+			if !matchesLocation {
+				return domain.ErrInvalidStoredObjectData
+			}
+			return replay(current, staged)
+		}
 
 		// 2. 拿齐行锁后读取数据库时间，复核租约、原会话绑定和对象位置。
 		var databaseTime time.Time
@@ -58,8 +73,7 @@ func (store *Store) WithMultipartUploadCancellationObservationTransaction(
 		if err := validateMultipartUploadCancellationLease(current, claimed, databaseTime); err != nil {
 			return err
 		}
-		if !validMultipartUploadCancellationObject(current, staged) ||
-			staged.Provider != location.Provider || staged.Bucket != location.Bucket || staged.ObjectKey != location.ObjectKey {
+		if !validMultipartUploadCancellationObject(current, staged) || !matchesLocation {
 			return domain.ErrInvalidStoredObjectData
 		}
 
