@@ -415,7 +415,20 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 					t.Fatal("未给已合并任务提交新校验租约", err)
 				}
 				t.Logf("任务 %d 正式领取校验租约，版本 %d → %d", claimed.ID, result.LeaseVersion, claimed.LeaseVersion)
-				verifyMergedMultipartVersion(t, ctx, bucket, client, claimed, object, expectedDigest)
+				digest := verifyMergedMultipartVersion(t, ctx, bucket, client, claimed, object, expectedDigest)
+				reviewed := false
+				err = store.WithUploadVerificationTransaction(ctx, claimed, object, digest,
+					func(_ context.Context, _ *repository.Store, current *domain.UploadTask, staged *domain.StoredObject) error {
+						reviewed = true
+						if !reflect.DeepEqual(current, claimed) || !reflect.DeepEqual(staged, object) {
+							t.Fatal("事务复核没有交付合并版本的当前任务及对象")
+						}
+						return nil
+					})
+				if err != nil || !reviewed {
+					t.Fatal("已读回的实际摘要没有通过发布前复核", err)
+				}
+				t.Logf("任务 %d 的实测摘要通过发布前事务复核，租约版本 %d", claimed.ID, claimed.LeaseVersion)
 				currentObject, err := store.FindUserStoredObject(ctx, actor.UserID, fixture.objectID)
 				if err != nil || !reflect.DeepEqual(currentObject, object) || !reflect.DeepEqual(readTask(), claimed) {
 					t.Fatal("只读校验改变了任务或对象记录", err)
@@ -433,7 +446,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 func verifyMergedMultipartVersion(
 	t *testing.T, ctx context.Context, bucket *serverUploadContentBucket, client *storage.Client,
 	claimed *domain.UploadTask, object *domain.StoredObject, expectedDigest []byte,
-) {
+) domain.UploadContentDigest {
 	t.Helper()
 	// 1. 写入同键的新合成版本，校验继续使用已提交的定位和校验租约。
 	key := object.ObjectKey
@@ -484,4 +497,5 @@ func verifyMergedMultipartVersion(
 	if result != nil || !errors.Is(err, domain.ErrInvalidStoredObjectData) {
 		t.Fatal("版本与 ETag 不匹配仍返回了内容结果", result, err)
 	}
+	return *digest
 }

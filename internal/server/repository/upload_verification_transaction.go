@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -45,14 +46,32 @@ func (store *Store) withUploadVerificationResultTransaction(
 		verifiedTask.LeaseUntil == nil || !verifiedTask.LeaseUntil.After(verifiedTask.UpdatedAt) {
 		return domain.ErrInvalidUploadTaskData
 	}
-	if verifiedTask.Status != domain.UploadStatusVerifying || verifiedTask.UploadMode != "SINGLE" {
+	uploadMode := verifiedTask.UploadMode
+	// Multipart 先接入成功结果复核，失败收尾继续使用原入口约束。
+	multipart := uploadMode == "MULTIPART" && checksum != nil && !expectChecksumMismatch
+	if verifiedTask.Status != domain.UploadStatusVerifying || (uploadMode != "SINGLE" && !multipart) {
 		return domain.ErrUploadTaskNotReady
 	}
-	if verifiedTask.FileSize > domain.MaxSingleUploadSizeBytes {
+	maxSize := domain.MaxSingleUploadSizeBytes
+	if multipart {
+		maxSize = math.MaxInt64
+		if verifiedTask.StorageUploadID == nil || !domain.ValidMultipartUploadID(*verifiedTask.StorageUploadID) ||
+			verifiedTask.ExpectedSHA256 == nil || verifiedTask.PartSize == nil || verifiedTask.PartCount == nil ||
+			!domain.ValidMultipartUploadLayout(verifiedTask.FileSize, *verifiedTask.PartSize, *verifiedTask.PartCount) ||
+			verifiedTask.ReservedBytes != verifiedTask.FileSize {
+			return domain.ErrInvalidUploadTaskData
+		}
+	}
+	if verifiedTask.FileSize > maxSize {
 		return domain.ErrUploadFileTooLarge
 	}
 	if verifiedObject == nil || verifiedObject.ID != verifiedTask.StagedObjectID || verifiedObject.OwnerUserID != verifiedTask.UserID ||
 		verifiedObject.Status != domain.StoredObjectStatusVerifying || verifiedObject.FileSize != verifiedTask.FileSize {
+		return domain.ErrInvalidStoredObjectData
+	}
+	if multipart && (!validMultipartMergeObjectText(verifiedObject.ObjectKey) || verifiedObject.StorageETag == nil ||
+		!validMultipartMergeObjectText(*verifiedObject.StorageETag) ||
+		(verifiedObject.StorageVersionID != nil && !validMultipartMergeObjectText(*verifiedObject.StorageVersionID))) {
 		return domain.ErrInvalidStoredObjectData
 	}
 	declaredSize := verifiedTask.FileSize
@@ -76,6 +95,13 @@ func (store *Store) withUploadVerificationResultTransaction(
 	}
 	userID, taskID, objectID := verifiedTask.UserID, verifiedTask.ID, verifiedTask.StagedObjectID
 	leaseOwner, leaseVersion := *verifiedTask.LeaseOwner, verifiedTask.LeaseVersion
+	taskSnapshot := *verifiedTask
+	if multipart {
+		taskSnapshot.StorageUploadID = copyUploadTaskValue(verifiedTask.StorageUploadID)
+		taskSnapshot.PartSize = copyUploadTaskValue(verifiedTask.PartSize)
+		taskSnapshot.PartCount = copyUploadTaskValue(verifiedTask.PartCount)
+		taskSnapshot.ExpectedSHA256 = expected
+	}
 	objectSnapshot := *verifiedObject
 	objectSnapshot.StorageVersionID = copyUploadTaskValue(verifiedObject.StorageVersionID)
 	objectSnapshot.StorageETag = copyUploadTaskValue(verifiedObject.StorageETag)
@@ -88,11 +114,12 @@ func (store *Store) withUploadVerificationResultTransaction(
 		if err != nil {
 			return err
 		}
-		if task.Status != domain.UploadStatusVerifying || task.UploadMode != "SINGLE" {
+		if task.Status != domain.UploadStatusVerifying || task.UploadMode != uploadMode {
 			return domain.ErrUploadTaskNotReady
 		}
 		if task.StagedObjectID != objectID || task.LeaseVersion != leaseVersion || task.LeaseOwner == nil ||
-			*task.LeaseOwner != leaseOwner || task.LeaseUntil == nil {
+			*task.LeaseOwner != leaseOwner || task.LeaseUntil == nil ||
+			(multipart && !sameUploadStorageText(task.StorageUploadID, taskSnapshot.StorageUploadID)) {
 			return domain.ErrUploadTaskBusy
 		}
 		if task.FileSize != declaredSize || task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil ||
@@ -105,10 +132,10 @@ func (store *Store) withUploadVerificationResultTransaction(
 			return err
 		}
 		if object.Status != domain.StoredObjectStatusVerifying || object.FileSize != task.FileSize ||
-			object.Provider != objectSnapshot.Provider || object.Bucket != objectSnapshot.Bucket || object.ObjectKey != objectSnapshot.ObjectKey ||
-			!sameUploadStorageText(object.StorageVersionID, objectSnapshot.StorageVersionID) ||
+			!sameStoredObjectLocation(&objectSnapshot, object) ||
 			!sameUploadStorageText(object.StorageETag, objectSnapshot.StorageETag) ||
-			object.VerifiedAt != nil || object.VerifiedSHA256 != nil || object.UnreferencedAt != nil {
+			object.VerifiedAt != nil || object.VerifiedSHA256 != nil || object.UnreferencedAt != nil ||
+			(multipart && (object.GCAfter != nil || object.LastErrorCode != nil)) {
 			return domain.ErrInvalidStoredObjectData
 		}
 
@@ -130,6 +157,9 @@ func (store *Store) withUploadVerificationResultTransaction(
 		}
 		if !now.Before(*task.LeaseUntil) {
 			return domain.ErrUploadTaskBusy
+		}
+		if multipart && !sameMultipartUploadDeclaration(&taskSnapshot, task) {
+			return domain.ErrInvalidUploadTaskData
 		}
 		return action(txContext, txStore, task, object)
 	})
