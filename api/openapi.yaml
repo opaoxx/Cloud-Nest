@@ -537,7 +537,7 @@ paths:
       operationId: listUploadParts
       summary: 核对当前用户的分片上传回执
       description: |
-        B4 计划契约，等待服务接入。本接口只读，不续期、不签发 URL，也不写入任务或完成快照。
+        本接口已接入服务，只读核对分片，不续期、不签发 URL，也不写入任务或完成快照。
         1. Bearer 授权后解析路径 id，按认证账号查找任务。同账号其他设备可读取。
            任务须为未到期且已绑定存储会话的 MULTIPART/UPLOADING。缺失或跨账号返回 UPLOAD_NOT_FOUND。
         2. 使用任务关联的桶、对象键和存储会话读取 ListParts。服务端处理全部存储分页，截断页必须提供严格递进的续页标记。

@@ -587,6 +587,14 @@ func runWithPurgeRootWorker(
 		store.FindUserUploadTaskForPartSigning, store.FindUserStoredObject)
 	uploadPartURLs := service.NewUploadPartURLService(uploadPartTargets.Get, storageClient.SignUploadPartURL, store.RenewUserUploadPartExpiry)
 
+	// 1. 复用任务与对象查询，按固定页大小完整读取 MinIO 回执。
+	const uploadReceiptPageSize = 1000
+	uploadPartReceipts := service.NewUploadPartReceiptService(uploadPartTargets.GetForReceipts,
+		func(ctx context.Context, objectKey, uploadID string) ([]domain.UploadPartReceipt, error) {
+			return storageClient.ListUploadParts(ctx, objectKey, uploadID, uploadReceiptPageSize)
+		},
+	)
+
 	// 下载目标在只读快照内检查，签发后通过当前用户事务复查并记录访问。
 	downloadTargets := service.NewEntryDownloadTargetService(func(ctx context.Context, read func(context.Context, service.EntryDownloadTargetReader) error) error {
 		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
@@ -609,6 +617,8 @@ func runWithPurgeRootWorker(
 	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)
 	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize, createUploadService.Create)
 	serverhttp.RegisterUploadPartURLsRoute(router, authorizationService.Authorize, uploadPartURLs.Create)
+	// 2. 将只读回执服务挂到受 Bearer 保护的正式路由。
+	serverhttp.RegisterUploadPartsRoute(router, authorizationService.Authorize, uploadPartReceipts.List)
 	serverhttp.RegisterUploadContentRoute(router, authorizationService.Authorize, uploadTaskService.Get, receiveUploadContent.Receive)
 	serverhttp.RegisterUploadCompletionRoute(router, authorizationService.Authorize, uploadTaskService.ConfirmCompletion)
 	serverhttp.RegisterUploadCancellationRoute(router, authorizationService.Authorize, store.BeginUserUploadCancellation)

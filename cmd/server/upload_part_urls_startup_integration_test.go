@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,25 +117,59 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		return task
 	}
 	const taskPath = "/api/v1/uploads/19/part-urls"
+	const receiptsPath = "/api/v1/uploads/19/parts"
 	tail := []byte{0x33}
 	bodyStart := fmt.Sprintf(`{"parts":[{"part_number":2,"sha256":"%x"},{"part_number":1,"sha256":"%s"}]`,
 		sha256.Sum256(tail), strings.Repeat("ab", 32))
-	assertRejected := func(client backupSourceClient, path, body string, status int, code string) {
+	assertRejected := func(client backupSourceClient, method, path, body string, status int, code string) {
 		t.Helper()
 		var result struct {
 			dto.ErrorResponse
 			Data json.RawMessage `json:"data"`
 		}
-		client.request(t, ctx, http.MethodPost, path, "", strings.NewReader(body), status, &result)
+		client.request(t, ctx, method, path, "", strings.NewReader(body), status, &result)
 		if result.Error.Code != code || result.RequestID == "" || len(result.Data) != 0 {
-			t.Fatal("签发拒绝码、请求 ID 或结果边界不符", result.Error.Code)
+			t.Fatal("分片接口拒绝码、请求 ID 或结果边界不符", result.Error.Code)
 		}
 	}
-	assertRejected(api, taskPath, bodyStart+"}", http.StatusUnauthorized, "AUTH_REQUIRED")
-	assertRejected(other, taskPath, bodyStart+"}", http.StatusNotFound, "UPLOAD_NOT_FOUND")
-	assertRejected(owner, "/api/v1/uploads/99999/part-urls", bodyStart+"}", http.StatusNotFound, "UPLOAD_NOT_FOUND")
+	assertRejected(api, http.MethodPost, taskPath, bodyStart+"}", http.StatusUnauthorized, "AUTH_REQUIRED")
+	assertRejected(other, http.MethodPost, taskPath, bodyStart+"}", http.StatusNotFound, "UPLOAD_NOT_FOUND")
+	assertRejected(owner, http.MethodPost, "/api/v1/uploads/99999/part-urls", bodyStart+"}", http.StatusNotFound, "UPLOAD_NOT_FOUND")
+	assertRejected(api, http.MethodGet, receiptsPath, "", http.StatusUnauthorized, "AUTH_REQUIRED")
+	assertRejected(other, http.MethodGet, receiptsPath, "", http.StatusNotFound, "UPLOAD_NOT_FOUND")
+	assertRejected(owner, http.MethodGet, "/api/v1/uploads/99999/parts", "", http.StatusNotFound, "UPLOAD_NOT_FOUND")
 
-	// 3. 普通签发保留截止时间，显式续期后使用正式接口返回的链接上传尾片。
+	// 3. 查询真实回执，逐次对照任务、配额和完成快照。上传前应返回空数组。
+	readAccounting := func() (used, reserved, completedParts uint64) {
+		t.Helper()
+		err := pool.QueryRowContext(ctx, `SELECT used_storage, reserved_storage,
+			(SELECT COUNT(*) FROM upload_parts WHERE task_id=19) FROM users WHERE id=7`).Scan(&used, &reserved, &completedParts)
+		if err != nil {
+			t.Fatal("读取合成任务配额或完成快照失败", err)
+		}
+		return used, reserved, completedParts
+	}
+	assertReceipts := func(want ...dto.UploadPartReceiptData) {
+		t.Helper()
+		before := readTask()
+		usedBefore, reservedBefore, completedPartsBefore := readAccounting()
+		var result dto.UploadPartsResponse
+		owner.request(t, ctx, http.MethodGet, receiptsPath, "", nil, http.StatusOK, &result)
+		if result.RequestID == "" || result.Data.PartSizeBytes != partSize || result.Data.PartCount != 2 ||
+			result.Data.Parts == nil || !slices.Equal(result.Data.Parts, want) {
+			t.Fatal("正式回执响应与计划或存储回执不符", result.Data)
+		}
+		usedAfter, reservedAfter, completedPartsAfter := readAccounting()
+		if before.Status != domain.UploadStatusUploading || before.ReservedBytes != fileSize ||
+			usedBefore != 0 || reservedBefore != fileSize || completedPartsBefore != 0 ||
+			!reflect.DeepEqual(before, readTask()) || usedAfter != usedBefore ||
+			reservedAfter != reservedBefore || completedPartsAfter != completedPartsBefore {
+			t.Fatal("只读回执请求前后的任务、配额或完成快照不符")
+		}
+	}
+	assertReceipts()
+
+	// 4. 普通签发保留截止时间，显式续期后上传尾片并通过正式路由确认回执。
 	before := readTask()
 	var ordinary, renewed dto.UploadPartURLsResponse
 	owner.request(t, ctx, http.MethodPost, taskPath, "", strings.NewReader(bodyStart+"}"), http.StatusOK, &ordinary)
@@ -149,7 +185,7 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		renewed.RequestID == "" || len(renewed.Data.Parts) != 2 || renewed.Data.Parts[1].PartNumber != 1 || renewed.Data.Parts[1].SizeBytes != partSize {
 		t.Fatal("续期响应未按请求顺序交付提交后的期限及两片")
 	}
-	assertRejected(owner, taskPath, renewBody, http.StatusConflict, "TASK_NOT_READY")
+	assertRejected(owner, http.MethodPost, taskPath, renewBody, http.StatusConflict, "TASK_NOT_READY")
 	tailPart := renewed.Data.Parts[0]
 	signed, err := url.Parse(tailPart.URL)
 	if err != nil || signed.Host != settings.PublicEndpointURL.Host || signed.Scheme != settings.PublicEndpointURL.Scheme ||
@@ -163,8 +199,12 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 	if page := probe.readPartPage(t, ctx, 0, 2, len(tail), etag, tailPart.RequiredHeaders.ChecksumSHA256); page.IsTruncated {
 		t.Fatal("本轮只应写入一个尾片")
 	}
+	assertReceipts(dto.UploadPartReceiptData{
+		PartNumber: 2, SizeBytes: uint64(len(tail)), ETag: etag,
+		ChecksumSHA256: tailPart.RequiredHeaders.ChecksumSHA256,
+	})
 
-	// 4. 单文件任务拒绝分片签发，继续使用原上传入口并核对发布结算。
+	// 5. 单文件任务拒绝分片签发和回执查询，原上传入口与发布结算照常完成。
 	single := []byte{0x41, 0x42, 0x43}
 	var created dto.CreateUploadResponse
 	owner.request(t, ctx, http.MethodPost, "/api/v1/uploads", "part-urls-single-compatibility",
@@ -174,7 +214,8 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		t.Fatal("单文件创建响应或正文路径变化")
 	}
 	singleTaskID := backupFixtureID(t, created.Data.Task.ID)
-	assertRejected(owner, "/api/v1/uploads/"+created.Data.Task.ID+"/part-urls", bodyStart+"}", http.StatusConflict, "TASK_NOT_READY")
+	assertRejected(owner, http.MethodPost, "/api/v1/uploads/"+created.Data.Task.ID+"/part-urls", bodyStart+"}", http.StatusConflict, "TASK_NOT_READY")
+	assertRejected(owner, http.MethodGet, "/api/v1/uploads/"+created.Data.Task.ID+"/parts", "", http.StatusConflict, "TASK_NOT_READY")
 	var accepted dto.UploadContentAcceptedResponse
 	owner.request(t, ctx, http.MethodPut, created.Data.ContentPath, "", bytes.NewReader(single), http.StatusAccepted, &accepted)
 	if accepted.Data.TaskID != created.Data.Task.ID || accepted.Data.Status != "VERIFYING" {
@@ -191,6 +232,6 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		strings.Contains(logs, owner.accessToken) || strings.Contains(logs, other.accessToken) {
 		t.Fatal("隔离服务关停或签名日志保护失败", err)
 	}
-	t.Logf("独占 MySQL %s，MinIO %s，HTTP %s。正式接口通过同账号续传、显式续期、尾片 PUT、跨账号拒绝和 SINGLE 发布",
-		mysqlContainer[:12], minioContainer[:12], api.baseURL)
+	t.Logf("独占 MySQL %s 库 %s，MinIO %s 桶 %s，HTTP %s。前后回执分别为 [] 和 1 字节尾片，已用 0、预占 %d、完成快照 0，认证边界和 SINGLE 发布通过",
+		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name, api.baseURL, fileSize)
 }
