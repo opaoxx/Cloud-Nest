@@ -45,6 +45,9 @@ func (client *Client) ListUploadPartsPage(ctx context.Context, objectKey, upload
 		return nil, contextError
 	}
 	if err != nil {
+		if minio.ToErrorResponse(err).Code == "NoSuchUpload" {
+			return nil, domain.ErrUploadPartSessionMissing
+		}
 		return nil, storageObjectError(err, domain.ErrUploadStorageUnavailable)
 	}
 

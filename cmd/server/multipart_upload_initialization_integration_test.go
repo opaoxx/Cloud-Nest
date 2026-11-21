@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -290,7 +291,37 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		t.Fatal("尾片上传后出现其他分片")
 	}
 
-	// 6. 在专用库模拟签发途中租约版本变化，整批结果必须作废。
+	// 6. 写入一个长度不符的合成分片，验证只读服务完整跨页并仅保留尾片。
+	shortFirst := []byte{0x42}
+	shortChecksum := multipartProbeSHA256(shortFirst)
+	shortLink, err := client.SignUploadPartURL(ctx, key, *task.StorageUploadID, 1, uint64(len(shortFirst)), shortChecksum, renewed.ExpiresAt)
+	if err != nil || shortLink == nil {
+		t.Fatal("合成短分片签发失败", err)
+	}
+	shortURL, err := url.Parse(shortLink.URL)
+	if err != nil || shortURL.Host != settings.PublicEndpointURL.Host || shortURL.Scheme != settings.PublicEndpointURL.Scheme ||
+		shortURL.Path != "/"+bucket.name+"/"+key || shortURL.Query().Get("uploadId") != *task.StorageUploadID {
+		t.Fatal("短分片签名未限定在本轮独占会话")
+	}
+	putMultipartProbePart(t, ctx, httpClient, shortURL, shortChecksum, shortFirst, http.StatusOK, "")
+	receiptService := service.NewUploadPartReceiptService(targets.GetForReceipts,
+		func(callContext context.Context, objectKey, session string) ([]domain.UploadPartReceipt, error) {
+			return client.ListUploadParts(callContext, objectKey, session, 1)
+		})
+	beforeReceipts := read(ctx)
+	received, err := receiptService.List(ctx, actor, task.ID)
+	wantReceipt := domain.UploadPartReceipt{PartNumber: 2, SizeBytes: 1, ETag: etag, ChecksumSHA256: tailURL.ChecksumSHA256}
+	if err != nil || received == nil || received.PartSizeBytes != 16777216 || received.PartCount != 2 ||
+		len(received.Parts) != 1 || received.Parts[0] != wantReceipt {
+		t.Fatal("只读服务未按已保存的计划筛选真实两页回执", err)
+	}
+	afterReceipts := read(ctx)
+	checkQuota(afterReceipts)
+	if !reflect.DeepEqual(beforeReceipts, afterReceipts) {
+		t.Fatal("只读核对改变了上传任务")
+	}
+
+	// 7. 在专用库模拟签发途中租约版本变化，整批结果必须作废。
 	staleURLs := service.NewUploadPartURLService(targets.Get,
 		func(callContext context.Context, objectKey, session string, partNumber uint32, sizeBytes uint64, checksum string, expiresAt time.Time) (*domain.SignedUploadPartURL, error) {
 			link, err := client.SignUploadPartURL(callContext, objectKey, session, partNumber, sizeBytes, checksum, expiresAt)
@@ -303,7 +334,7 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		t.Fatal("签发途中租约版本变化仍交付了链接", err)
 	}
 
-	// 7. 在提交续期后模拟第二片签名失败，检查首片未交付且已提交期限仍在。
+	// 8. 在提交续期后模拟第二片签名失败，检查首片未交付且已提交期限仍在。
 	execute("UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19 AND user_id=7")
 	oldExpiry = read(ctx).ExpiresAt
 	failingURLs := service.NewUploadPartURLService(targets.Get,
@@ -325,6 +356,6 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		t.Fatal("第二片签名失败后已提交的期限丢失")
 	}
 	checkQuota(afterFailure)
-	t.Logf("隔离 MySQL %s %s，MinIO %s %s，普通签发、显式续期、尾片 PUT、过期请求与签名失败验收通过",
+	t.Logf("隔离 MySQL %s %s，MinIO %s %s，签发、续期、尾片 PUT 与只读两页回执核对通过",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }

@@ -144,16 +144,18 @@ func TestListUploadPartsPageStorageErrors(t *testing.T) {
 	for _, test := range []struct {
 		status int
 		body   string
+		want   error
 	}{
-		{http.StatusOK, "<ListPartsResult><Private>private-body</"},
-		{http.StatusNotFound, "<Error><Code>NoSuchUpload</Code><Message>private-body</Message></Error>"},
-		{http.StatusServiceUnavailable, "<Error><Code>ServiceUnavailable</Code><Message>private-body</Message></Error>"},
+		{http.StatusOK, "<ListPartsResult><Private>private-body</", domain.ErrUploadStorageUnavailable},
+		{http.StatusNotFound, "<Error><Code>NoSuchUpload</Code><Message>private-body</Message></Error>", domain.ErrUploadPartSessionMissing},
+		{http.StatusServiceUnavailable, "<Error><Code>ServiceUnavailable</Code><Message>private-body</Message></Error>", domain.ErrUploadStorageUnavailable},
 	} {
 		client := listPartsTestClient(t, func(response http.ResponseWriter, _ *http.Request) {
 			response.WriteHeader(test.status)
 			_, _ = io.WriteString(response, test.body)
 		})
-		if page, err := client.ListUploadPartsPage(t.Context(), listPartsFixtureKey, listPartsFixtureID, 0, 10); page != nil || err != domain.ErrUploadStorageUnavailable {
+		if page, err := client.ListUploadPartsPage(t.Context(), listPartsFixtureKey, listPartsFixtureID, 0, 10); page != nil ||
+			err != test.want || !errors.Is(err, domain.ErrUploadStorageUnavailable) {
 			t.Fatal("底层存储响应未按固定错误处理", test.status)
 		}
 	}
