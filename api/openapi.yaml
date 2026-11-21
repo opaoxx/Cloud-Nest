@@ -471,6 +471,74 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/uploads/{id}/parts:
+    get:
+      tags: [Uploads]
+      operationId: listUploadParts
+      summary: 核对当前用户的分片上传回执
+      description: |
+        B4 计划契约，等待服务接入。本接口只读，不续期、不签发 URL，也不写入任务或完成快照。
+        1. Bearer 授权后解析路径 id，按认证账号查找任务。同账号其他设备可读取。
+           任务须为未到期且已绑定存储会话的 MULTIPART/UPLOADING。缺失或跨账号返回 UPLOAD_NOT_FOUND。
+        2. 使用任务关联的桶、对象键和存储会话读取 ListParts。服务端处理全部存储分页，截断页必须提供严格递进的续页标记。
+           遇到读取失败、无法继续分页、重复或越界编号，或 ETag、SHA-256 缺失或无效时，整轮返回 STORAGE_UNAVAILABLE。
+        3. 按计划核对每片实际长度。编号有效但长度不符的分片从结果省略，供客户端补传。
+           返回前再次按归属复查阶段、有效期、暂存对象、会话和分片计划。任务失去可读条件或定位发生变化时返回 TASK_NOT_READY。
+        4. 成功返回固定分片计划和核对当次的全部可用回执，按编号升序，每个编号最多一条。没有可用分片时 parts 为 []。
+           客户端先复核源文件，再将存储回执与本地回执及实际分片内容比较，补传缺失或不匹配的分片。
+        返回的是当次分页观察结果，完成请求仍需重新核对。公开结果仅包含分片计划和回执字段。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/UploadTaskID'
+      responses:
+        '200':
+          description: 存储分页完整核对成功，返回分片计划与可用回执。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadPartsResponse'
+        '400':
+          $ref: '#/components/responses/UploadTaskQueryRejected'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/UploadTaskNotFound'
+        '409':
+          description: TASK_NOT_READY。任务的模式、阶段、期限、暂存对象、存储会话或分片计划不满足核对条件。查询任务后再决定是否重试。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: |
+            STORAGE_UNAVAILABLE。存储端读取失败或分页及回执无法完整核对时，返回统一错误和请求 ID。
+            存储端 NoSuchUpload 时先复查业务任务。仍为同一可读任务时返回本错误，任务阶段或定位已变化时按复查结果处理。
+            失败响应只交付统一错误，屏蔽已读分片、存储标识和原始异常。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/directories:
     post:
       tags: [Entries]
@@ -2681,6 +2749,78 @@ components:
               required_headers:
                 x-amz-checksum-sha256: TgdAhWK+24tgzgXB3s/jrRa3IjCWfeAfZAt+Rym0n84=
               url_expires_at: '2026-11-21T12:05:00.000000Z'
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    UploadPartReceipt:
+      type: object
+      additionalProperties: false
+      required: [part_number, size_bytes, etag, checksum_sha256]
+      properties:
+        part_number:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: 当前任务计划内的分片编号，须小于或等于 part_count。
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+          description: 存储端实际报告的分片长度，已与该编号的计划长度核对。
+        etag:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9._:-]{1,64}(?![\s\S])'
+          description: 存储端报告的 ETag，去除一对外层引号并保留大小写，用于回执比对。
+        checksum_sha256:
+          type: string
+          format: byte
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=(?![\s\S])'
+          description: 存储端报告的 32 字节分片 SHA-256 的标准 Base64 表示。
+    UploadPartsResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [part_size_bytes, part_count, parts]
+          properties:
+            part_size_bytes:
+              type: integer
+              format: int64
+              minimum: 5242880
+              maximum: 9007199254740991
+              description: 创建任务时固定的标准分片大小。尾片实际长度可更短。
+            part_count:
+              type: integer
+              minimum: 1
+              maximum: 10000
+              description: 创建任务时固定的分片总数，包括尚待补传的分片。
+            parts:
+              type: array
+              maxItems: 10000
+              description: 按编号升序排列的完整可用回执，允许编号间隙；没有可用分片时为 []。
+              items:
+                $ref: '#/components/schemas/UploadPartReceipt'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          part_size_bytes: 16777216
+          part_count: 3
+          parts:
+            - part_number: 1
+              size_bytes: 16777216
+              etag: 51fa3c51150bf68adeb04359200eb699
+              checksum_sha256: vd9WpkYFXYvax+BblS0+6dTbaQEgfvBzEwScEicdDtk=
+            - part_number: 3
+              size_bytes: 1
+              etag: eccbc87e4b5ce2fe28308fd9f2a7baf3
+              checksum_sha256: TgdAhWK+24tgzgXB3s/jrRa3IjCWfeAfZAt+Rym0n84=
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateDirectoryRequest:
       type: object
