@@ -24,10 +24,10 @@ func TestServerBackupSourceDumpIntegration(t *testing.T) {
 	defer cancel()
 	fixture := prepareBackupSource(t, ctx)
 	verifyBackupSourceBaseline(t, ctx, fixture)
-	stopAndExportBackupSourceSQL(t, ctx, fixture)
+	stopAndExportBackupSourceSQL(t, ctx, fixture, t.TempDir())
 }
 
-func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture) []byte {
+func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string) []byte {
 	t.Helper()
 	// 1. 等待服务优雅退出，确认后台任务和数据库连接已经结束。
 	startedAt := time.Now().UTC()
@@ -49,7 +49,7 @@ func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture bac
 		}
 		t.Logf("%s 容器 %s，镜像 %s", container.name, container.id, strings.TrimSpace(string(image)))
 	}
-	dump := exportBackupSourceSQL(t, ctx, fixture)
+	dump := exportBackupSourceSQL(t, ctx, fixture, backupDir)
 
 	// 3. 核对导出文件中的表、逐行记录和迁移摘要，保留可复验的日志。
 	verifyBackupSourceSQL(t, dump, tableRows, migrationChecksum)
@@ -126,7 +126,7 @@ func inspectBackupSourceForDump(t *testing.T, ctx context.Context, fixture backu
 	return counts, checksum
 }
 
-func exportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture) []byte {
+func exportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string) []byte {
 	t.Helper()
 	const containerPath = "/tmp/cloudnest-backup.sql"
 	export := exec.CommandContext(ctx, "docker", "exec", "--env", "MYSQL_PWD", fixture.mysqlContainer,
@@ -136,7 +136,7 @@ func exportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSour
 	if output, err := export.CombinedOutput(); err != nil {
 		t.Fatalf("隔离源端导出失败，%v\n%s", err, output)
 	}
-	localPath := filepath.Join(t.TempDir(), "database.sql")
+	localPath := filepath.Join(backupDir, "database.sql")
 	if output, err := exec.CommandContext(ctx, "docker", "cp", fixture.mysqlContainer+":"+containerPath, localPath).CombinedOutput(); err != nil {
 		t.Fatalf("复制隔离 SQL 快照失败，%v\n%s", err, output)
 	}
