@@ -406,10 +406,18 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				}
 			})
 			if fixture.fault == "" {
-				committed := readTask()
-				verifyMergedMultipartVersion(t, ctx, bucket, client, committed, object, expectedDigest)
+				candidates, err := store.ListMultipartUploadVerificationCandidates(ctx, 1)
+				if err != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID || candidates[0].LeaseVersion != result.LeaseVersion {
+					t.Fatal("已合并任务未进入校验候选", candidates, err)
+				}
+				claimed, err := store.ClaimMultipartUploadVerificationLease(ctx, candidates[0], "fixture-verification-worker")
+				if err != nil || claimed == nil || claimed.LeaseVersion != result.LeaseVersion+1 {
+					t.Fatal("未给已合并任务提交新校验租约", err)
+				}
+				t.Logf("任务 %d 正式领取校验租约，版本 %d → %d", claimed.ID, result.LeaseVersion, claimed.LeaseVersion)
+				verifyMergedMultipartVersion(t, ctx, bucket, client, claimed, object, expectedDigest)
 				currentObject, err := store.FindUserStoredObject(ctx, actor.UserID, fixture.objectID)
-				if err != nil || !reflect.DeepEqual(currentObject, object) || !reflect.DeepEqual(readTask(), committed) {
+				if err != nil || !reflect.DeepEqual(currentObject, object) || !reflect.DeepEqual(readTask(), claimed) {
 					t.Fatal("只读校验改变了任务或对象记录", err)
 				}
 			}
@@ -424,10 +432,10 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 
 func verifyMergedMultipartVersion(
 	t *testing.T, ctx context.Context, bucket *serverUploadContentBucket, client *storage.Client,
-	committed *domain.UploadTask, object *domain.StoredObject, expectedDigest []byte,
+	claimed *domain.UploadTask, object *domain.StoredObject, expectedDigest []byte,
 ) {
 	t.Helper()
-	// 1. 写入同键的新合成版本，校验继续使用已提交的定位和内存租约快照。
+	// 1. 写入同键的新合成版本，校验继续使用已提交的定位和校验租约。
 	key := object.ObjectKey
 	newContent := []byte("new synthetic version")
 	latest, err := bucket.client.PutObject(ctx, bucket.name, key, bytes.NewReader(newContent), int64(len(newContent)), minio.PutObjectOptions{DisableMultipart: true})
@@ -445,20 +453,15 @@ func verifyMergedMultipartVersion(
 	if err != nil || current.VersionID != latest.VersionID {
 		t.Fatal("测试的新版本未成为当前版本", minio.ToErrorResponse(err).Code)
 	}
-	claimed := *committed
-	claimed.LeaseVersion++
-	claimed.LeaseOwner = new("fixture-only-verification")
-	claimed.LeaseUntil = new(claimed.UpdatedAt.Add(time.Minute))
-
 	// 2. 实际读取已合并的版本，核对声明大小和独立计算的整文件摘要。
-	digest, err := service.VerifyUploadObject(ctx, &claimed, object, client.OpenUploadVerificationObject)
+	digest, err := service.VerifyUploadObject(ctx, claimed, object, client.OpenUploadVerificationObject)
 	if err != nil || digest == nil || digest.SizeBytes != claimed.FileSize || !bytes.Equal(digest.SHA256[:], expectedDigest) {
 		t.Fatal("没有取得已保存版本的实际字节数与摘要", digest, err)
 	}
 	t.Logf("只读校验版本 %s（当前版本 %s），%d 字节，SHA-256 %x", *object.StorageVersionID, latest.VersionID, digest.SizeBytes, digest.SHA256)
 
 	// 3. 按同一个存储版本复验摘要错误、长度错误和定位错误。
-	wrongChecksum := claimed
+	wrongChecksum := *claimed
 	wrongChecksum.ExpectedSHA256 = new(sha256.Sum256(newContent))
 	result, err := service.VerifyUploadObject(ctx, &wrongChecksum, object, client.OpenUploadVerificationObject)
 	checksumMismatch, ok := err.(*domain.UploadVerificationChecksumMismatch)
@@ -466,7 +469,7 @@ func verifyMergedMultipartVersion(
 		checksumMismatch.ExpectedSHA256 != *wrongChecksum.ExpectedSHA256 || checksumMismatch.Actual.SHA256 != digest.SHA256 {
 		t.Fatal("同版本的摘要失配证据不符", result, err)
 	}
-	wrongSize, recordedObject := claimed, *object
+	wrongSize, recordedObject := *claimed, *object
 	wrongSize.FileSize++
 	recordedObject.FileSize = wrongSize.FileSize
 	result, err = service.VerifyUploadObject(ctx, &wrongSize, &recordedObject, client.OpenUploadVerificationObject)
@@ -477,7 +480,7 @@ func verifyMergedMultipartVersion(
 	}
 	recordedObject = *object
 	recordedObject.StorageVersionID = &latest.VersionID
-	result, err = service.VerifyUploadObject(ctx, &claimed, &recordedObject, client.OpenUploadVerificationObject)
+	result, err = service.VerifyUploadObject(ctx, claimed, &recordedObject, client.OpenUploadVerificationObject)
 	if result != nil || !errors.Is(err, domain.ErrInvalidStoredObjectData) {
 		t.Fatal("版本与 ETag 不匹配仍返回了内容结果", result, err)
 	}
