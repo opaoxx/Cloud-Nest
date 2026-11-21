@@ -32,18 +32,12 @@ func ResolveMultipartUploadCompletionStatus(task *domain.UploadTask, userID, tas
 	}
 
 	// 3. 对已受理阶段核对已保存的进度或结果，其余阶段拒绝。
-	switch task.Status {
-	case domain.UploadStatusCompleting, domain.UploadStatusVerifying:
-		if task.PublishedObjectID != nil || task.ResultEntryID != nil || task.CompletedAt != nil {
-			return "", domain.ErrInvalidUploadTaskData
-		}
-	case domain.UploadStatusCompleted:
-		if task.PublishedObjectID == nil || *task.PublishedObjectID == 0 || task.ResultEntryID == nil || *task.ResultEntryID == 0 ||
-			task.CompletedAt == nil || !validUploadDatabaseTime(*task.CompletedAt) || task.ReservedBytes != 0 {
-			return "", domain.ErrInvalidUploadTaskData
-		}
-	default:
-		return "", domain.ErrUploadTaskNotReady
+	status, err := domain.ResolveUploadCompletionResultStatus(task)
+	if err != nil {
+		return "", err
 	}
-	return task.Status, nil
+	if status == domain.UploadStatusCompleted && !validUploadDatabaseTime(*task.CompletedAt) {
+		return "", domain.ErrInvalidUploadTaskData
+	}
+	return status, nil
 }

@@ -26,17 +26,26 @@ func TestUploadCompletionSuccessRealHTTP(t *testing.T) {
 	const origin = "http://127.0.0.1:5173"
 	const suppliedID = "28EE758A-0727-42DE-AE7D-3BB33155E148"
 	for _, scenario := range []struct {
+		mode   string
 		status domain.UploadStatus
 		code   int
 	}{
-		{domain.UploadStatusVerifying, http.StatusAccepted},
-		{domain.UploadStatusCompleted, http.StatusOK},
+		{"SINGLE", domain.UploadStatusVerifying, http.StatusAccepted},
+		{"SINGLE", domain.UploadStatusCompleted, http.StatusOK},
+		{"MULTIPART", domain.UploadStatusCompleting, http.StatusAccepted},
+		{"MULTIPART", domain.UploadStatusVerifying, http.StatusAccepted},
+		{"MULTIPART", domain.UploadStatusCompleted, http.StatusOK},
 	} {
-		t.Run(string(scenario.status), func(t *testing.T) {
+		t.Run(scenario.mode+"/"+string(scenario.status), func(t *testing.T) {
 			// 1. 通过真实 POST 交付一次已确认的任务快照。
 			task := uploadTaskSuccessFixture()
-			task.ID, task.Status = math.MaxUint64, scenario.status
+			task.ID, task.Status, task.UploadMode = math.MaxUint64, scenario.status, scenario.mode
 			task.LeaseOwner, task.LeaseUntil = nil, nil
+			if scenario.mode == "MULTIPART" {
+				task.FileSize, task.ReservedBytes = (16<<20)+1, (16<<20)+1
+				task.PartSize, task.PartCount = new(uint64(16<<20)), new(uint32(2))
+				task.StorageUploadID = new("private-upload-session")
+			}
 			if scenario.status == domain.UploadStatusCompleted {
 				objectID, entryID, name := uint64(23), uint64(math.MaxUint64), "发布笔记.MD"
 				task.ReservedBytes = 0
@@ -93,12 +102,26 @@ func TestUploadCompletionSuccessRealHTTP(t *testing.T) {
 			if err != nil || !bytes.Equal(body, want) || bytes.Contains(body, []byte("private-upload")) {
 				t.Fatal("完成响应未保留公开任务快照或泄露内部信息", string(body), err)
 			}
+			var decoded dto.UploadTaskResponse
+			if err := json.Unmarshal(body, &decoded); err != nil ||
+				decoded.Data.UploadMode != scenario.mode || decoded.Data.Status != string(scenario.status) {
+				t.Fatal("响应未保留原上传模式和当前阶段", err)
+			}
+			if scenario.code == http.StatusOK {
+				if decoded.Data.ResultEntryID == nil || *decoded.Data.ResultEntryID != "18446744073709551615" ||
+					decoded.Data.CompletedAt == nil || !decoded.Data.CompletedAt.Equal(task.UpdatedAt.UTC().Truncate(time.Microsecond)) {
+					t.Fatal("200 未交付原发布条目 ID 和 UTC 微秒完成时间")
+				}
+			} else if decoded.Data.ResultEntryID != nil || decoded.Data.CompletedAt != nil {
+				t.Fatal("202 包含尚未发布的结果")
+			}
 		})
 	}
 }
 
 func TestUploadCompletionSuccessFailures(t *testing.T) {
-	for _, scenario := range []string{"nil result", "multipart", "uploading", "canceled task", "invalid published result",
+	for _, scenario := range []string{"nil result", "single completing", "multipart uploading", "multipart completing with result",
+		"multipart completed with reservation", "uploading", "canceled task", "invalid published result",
 		"verifying with result entry", "verifying with completion time", "invalid public ID", "request canceled", "deadline exceeded", "cancel before response"} {
 		t.Run(scenario, func(t *testing.T) {
 			// 1. 注入相互矛盾的任务字段或到期的请求上下文。
@@ -112,8 +135,15 @@ func TestUploadCompletionSuccessFailures(t *testing.T) {
 				switch scenario {
 				case "nil result":
 					task = nil
-				case "multipart":
-					task.UploadMode = "MULTIPART"
+				case "single completing":
+					task.Status = domain.UploadStatusCompleting
+				case "multipart uploading":
+					task.UploadMode, task.Status = "MULTIPART", domain.UploadStatusUploading
+				case "multipart completing with result":
+					task.UploadMode, task.Status, task.ResultEntryID = "MULTIPART", domain.UploadStatusCompleting, new(uint64(31))
+				case "multipart completed with reservation":
+					task.UploadMode, task.Status = "MULTIPART", domain.UploadStatusCompleted
+					task.PublishedObjectID, task.ResultEntryID, task.CompletedAt = new(uint64(23)), new(uint64(31)), &task.UpdatedAt
 				case "uploading":
 					task.Status = domain.UploadStatusUploading
 				case "canceled task":

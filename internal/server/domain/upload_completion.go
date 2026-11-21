@@ -29,27 +29,37 @@ func ResolveSingleUploadCompletionStatus(task *UploadTask) (UploadStatus, error)
 	}
 	switch task.UploadMode {
 	case "SINGLE":
+		return ResolveUploadCompletionResultStatus(task)
 	case "MULTIPART":
 		return "", ErrUploadTaskNotReady
 	default:
 		return "", ErrInvalidUploadTaskData
 	}
+}
 
-	// 2. 核对当前阶段的发布事实，再交付校验中或已完成状态。
+// ResolveUploadCompletionResultStatus 只判定已受理的任务进度或发布结果。
+func ResolveUploadCompletionResultStatus(task *UploadTask) (UploadStatus, error) {
+	// 1. 核对上传模式与阶段是否允许交付成功结果。
+	if task == nil || !task.Status.IsValid() || (task.UploadMode != "SINGLE" && task.UploadMode != "MULTIPART") {
+		return "", ErrInvalidUploadTaskData
+	}
+	if task.Status == UploadStatusCompleting && task.UploadMode != "MULTIPART" {
+		return "", ErrUploadTaskNotReady
+	}
+
+	// 2. 按当前阶段核对是否已有发布事实。
 	switch task.Status {
-	case UploadStatusVerifying:
+	case UploadStatusCompleting, UploadStatusVerifying:
 		if task.PublishedObjectID != nil || task.ResultEntryID != nil || task.CompletedAt != nil {
 			return "", ErrInvalidUploadTaskData
 		}
-		return UploadStatusVerifying, nil
 	case UploadStatusCompleted:
 		if task.PublishedObjectID == nil || *task.PublishedObjectID == 0 || task.ResultEntryID == nil || *task.ResultEntryID == 0 ||
 			task.CompletedAt == nil || task.CompletedAt.IsZero() || task.ReservedBytes != 0 {
 			return "", ErrInvalidUploadTaskData
 		}
-		return UploadStatusCompleted, nil
 	default:
-		// 3. 其他已知阶段由任务查询交付实际状态。
 		return "", ErrUploadTaskNotReady
 	}
+	return task.Status, nil
 }
