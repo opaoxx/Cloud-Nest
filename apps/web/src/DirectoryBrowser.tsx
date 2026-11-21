@@ -4,12 +4,14 @@ import { Button, Input, Modal } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
 import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
 import type { FileAccessAuthorizer, FileAccessGrant, FileAccessPurpose } from './api/download'
+import { isRasterPreviewMimeType } from './api/download'
 import { ApiError, apiErrorMessage } from './api/http'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
 import EntryConfirmationDialog from './EntryConfirmationDialog'
 import SingleUploadDialog from './SingleUploadDialog'
+import RasterImagePreview from './RasterImagePreview'
 import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
@@ -199,6 +201,10 @@ export default function DirectoryBrowser({
               <small>有效期至 <time dateTime={new Date(fileAccess.grant.expiresAt).toISOString()}>
                 {new Date(fileAccess.grant.expiresAt).toLocaleString('zh-CN', { hour12: false })}
               </time></small>
+              {fileAccess.purpose === 'preview' && isRasterPreviewMimeType(fileAccess.grant.previewMimeType) && (
+                <RasterImagePreview filename={fileAccess.entry.name} grant={fileAccess.grant}
+                  onRefresh={() => void requestFileAccess(fileAccess.entry, 'preview')} />
+              )}
             </div>
           )}
         </Modal>

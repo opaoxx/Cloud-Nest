@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"image"
 	"image/png"
@@ -20,6 +21,27 @@ func TestServerWebPreviewGrantIntegration(t *testing.T) {
 	defer cancel()
 
 	// 1. 在独占存储准备实际 PNG、纯文本及没有已确认 MIME 的文件。
+	pool, webURL := prepareWebPreviewFixture(t, ctx)
+	before := readWebPurgePreviewSnapshot(t, ctx, pool)
+
+	// 2. 通过实际签名入口验收预览用途、响应检查和手动切换下载。
+	runWebBrowserProbe(t, ctx, cli, webURL, "web_preview_grant.js", "CN529 browser checks passed")
+	t.Log("Edge 验收通过：PNG 与纯文本 200 inline，无效媒体类型被拒，不支持格式 422 后手动申请附件链接，零正文请求")
+
+	// 3. 核对授权成功产生的访问记录和文件数据边界。
+	var recordCount int
+	if err := pool.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_entry_preferences
+		WHERE user_id=7 AND entry_id IN (64,65,66) AND last_opened_at IS NOT NULL`).Scan(&recordCount); err != nil {
+		t.Fatal(err)
+	}
+	if recordCount != 3 || !slices.Equal(before, readWebPurgePreviewSnapshot(t, ctx, pool)) {
+		t.Fatal("隔离预览授权后的访问记录或文件数据不符")
+	}
+	t.Log("数据库核对通过：三个授权文件均有最近访问记录，目录、对象和配额保持原样")
+}
+
+func prepareWebPreviewFixture(t *testing.T, ctx context.Context) (*sql.DB, string) {
+	t.Helper()
 	pool, bucket, webURL := prepareWebSingleUploadFixture(t, ctx)
 	var raster bytes.Buffer
 	if err := png.Encode(&raster, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
@@ -59,20 +81,5 @@ func TestServerWebPreviewGrantIntegration(t *testing.T) {
 	if _, err := pool.ExecContext(ctx, "UPDATE users SET used_storage=? WHERE id=7", usedBytes); err != nil {
 		t.Fatal(err)
 	}
-	before := readWebPurgePreviewSnapshot(t, ctx, pool)
-
-	// 2. 通过实际签名入口验收预览用途、响应检查和手动切换下载。
-	runWebBrowserProbe(t, ctx, cli, webURL, "web_preview_grant.js", "CN529 browser checks passed")
-	t.Log("Edge 验收通过：PNG 与纯文本 200 inline，无效媒体类型被拒，不支持格式 422 后手动申请附件链接，零正文请求")
-
-	// 3. 核对授权成功产生的访问记录和文件数据边界。
-	var recordCount int
-	if err := pool.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_entry_preferences
-		WHERE user_id=7 AND entry_id IN (64,65,66) AND last_opened_at IS NOT NULL`).Scan(&recordCount); err != nil {
-		t.Fatal(err)
-	}
-	if recordCount != 3 || !slices.Equal(before, readWebPurgePreviewSnapshot(t, ctx, pool)) {
-		t.Fatal("隔离预览授权后的访问记录或文件数据不符")
-	}
-	t.Log("数据库核对通过：三个授权文件均有最近访问记录，目录、对象和配额保持原样")
+	return pool, webURL
 }

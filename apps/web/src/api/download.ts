@@ -2,14 +2,21 @@ import { ApiError, requestData } from './http'
 
 export type FileAccessPurpose = 'download' | 'preview'
 
+const rasterPreviewMimeTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
+type RasterPreviewMimeType = typeof rasterPreviewMimeTypes[number]
+type PreviewMimeType = RasterPreviewMimeType | 'text/plain'
+
 export interface FileAccessGrant {
   url: string
   expiresAt: number
+  previewMimeType: PreviewMimeType | null
 }
 
 export type FileAccessAuthorizer = (entryId: string, expectedRevision: string, purpose: FileAccessPurpose, signal: AbortSignal) => Promise<FileAccessGrant>
 
-const previewMimeTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'text/plain']
+export function isRasterPreviewMimeType(value: unknown): value is RasterPreviewMimeType {
+  return rasterPreviewMimeTypes.some(mimeType => mimeType === value)
+}
 
 function isSignedAccessUrl(value: unknown): value is string {
   if (typeof value !== 'string' || !/^https?:\/\/[^#\\\s\u0000-\u001f\u007f]+$/.test(value)) return false
@@ -36,11 +43,13 @@ export async function createFileAccessGrant(accessToken: string, entryId: string
   const purposeLabel = preview ? '预览' : '下载'
   const dispositionPrefix = preview ? 'inline;' : 'attachment;'
   const expiresAt = typeof data.expires_at === 'string' ? Date.parse(data.expires_at) : NaN
+  const mimeType = data.mime_type
+  const previewMimeType = preview && (isRasterPreviewMimeType(mimeType) || mimeType === 'text/plain') ? mimeType : null
   if (data.revision !== expectedRevision || !isSignedAccessUrl(data.url) || !Number.isFinite(expiresAt) ||
       typeof data.disposition !== 'string' || !data.disposition.startsWith(dispositionPrefix) ||
-      (preview && (typeof data.mime_type !== 'string' || !previewMimeTypes.includes(data.mime_type)))) {
+      (preview && !previewMimeType)) {
     throw new ApiError(200, `服务返回的${purposeLabel}授权有误。`)
   }
   if (expiresAt <= Date.now()) throw new ApiError(200, `${purposeLabel}链接已过期，请重新获取。`)
-  return { url: data.url, expiresAt }
+  return { url: data.url, expiresAt, previewMimeType }
 }
