@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -303,7 +304,7 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		shortURL.Path != "/"+bucket.name+"/"+key || shortURL.Query().Get("uploadId") != *task.StorageUploadID {
 		t.Fatal("短分片签名未限定在本轮独占会话")
 	}
-	putMultipartProbePart(t, ctx, httpClient, shortURL, shortChecksum, shortFirst, http.StatusOK, "")
+	shortETag := putMultipartProbePart(t, ctx, httpClient, shortURL, shortChecksum, shortFirst, http.StatusOK, "")
 	receiptService := service.NewUploadPartReceiptService(targets.GetForReceipts,
 		func(callContext context.Context, objectKey, session string) ([]domain.UploadPartReceipt, error) {
 			return client.ListUploadParts(callContext, objectKey, session, 1)
@@ -356,6 +357,51 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		t.Fatal("第二片签名失败后已提交的期限丢失")
 	}
 	checkQuota(afterFailure)
+
+	// 9. 补齐真实的普通片，在完成核对租约下读完两页并拒绝覆盖前的 ETag。
+	fullFirst := make([]byte, size-1)
+	firstChecksum := multipartProbeSHA256(fullFirst)
+	firstLink, err := client.SignUploadPartURL(ctx, key, *afterFailure.StorageUploadID, 1, uint64(len(fullFirst)), firstChecksum, afterFailure.ExpiresAt)
+	if err != nil || firstLink == nil {
+		t.Fatal("签发合成完整分片失败", err)
+	}
+	firstURL, err := url.Parse(firstLink.URL)
+	if err != nil || firstURL.Host != settings.PublicEndpointURL.Host || firstURL.Scheme != settings.PublicEndpointURL.Scheme ||
+		firstURL.User != nil || firstURL.Path != "/"+bucket.name+"/"+key || firstURL.Query().Get("uploadId") != *afterFailure.StorageUploadID ||
+		firstURL.Query().Get("partNumber") != "1" {
+		t.Fatal("完整分片地址未限制在本轮独占会话")
+	}
+	firstETag := putMultipartProbePart(t, ctx, httpClient, firstURL, firstChecksum, fullFirst, http.StatusOK, "")
+	leased, err := store.ClaimUserMultipartCompletionLease(ctx, actor, afterFailure, "fixture-completion-verifier", service.ResolveMultipartUploadCompletionStatus)
+	if err != nil || leased == nil {
+		t.Fatal("独占任务领取完成核对租约失败", err)
+	}
+	verifier := service.NewUploadCompletionReceiptService(targets.GetForCompletion,
+		func(callContext context.Context, objectKey, session string) ([]domain.UploadPartReceipt, error) {
+			return client.ListUploadParts(callContext, objectKey, session, 1)
+		})
+	claims := []domain.UploadPartCompletionClaim{{PartNumber: 2, ETag: etag}, {PartNumber: 1, ETag: shortETag}}
+	var mismatch *domain.UploadPartsMismatchError
+	if result, err := verifier.Verify(ctx, actor, leased, claims); result != nil || !errors.As(err, &mismatch) ||
+		!slices.Equal(mismatch.PartNumbers, []uint32{1}) {
+		t.Fatal("未拒绝覆盖前的普通片 ETag", err)
+	}
+	claims[1].ETag = firstETag
+	want := []domain.UploadPartReceipt{
+		{PartNumber: 1, SizeBytes: size - 1, ETag: firstETag, ChecksumSHA256: firstChecksum},
+		wantReceipt,
+	}
+	matched, err := verifier.Verify(ctx, actor, leased, claims)
+	if err != nil || !slices.Equal(matched, want) || !reflect.DeepEqual(leased, read(ctx)) {
+		t.Fatal("持租约核对未交付两页真实回执，或修改了任务", err)
+	}
+	checkQuota(leased)
+	if released, err := store.ReleaseUserMultipartCompletionLease(ctx, actor, leased); err != nil || !released {
+		t.Fatal("释放本轮独占任务的测试租约失败", err)
+	}
+	t.Logf("持租约核对实际两页，普通片 %d 字节，尾片 %d 字节，旧 ETag 失配编号 [1]",
+		matched[0].SizeBytes, matched[1].SizeBytes)
+
 	t.Logf("隔离 MySQL %s %s，MinIO %s %s，签发、续期、尾片 PUT 与只读两页回执核对通过",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }
