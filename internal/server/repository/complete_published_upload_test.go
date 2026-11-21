@@ -16,12 +16,15 @@ func TestCompletePublishedUploadResults(t *testing.T) {
 	writeFailure := errors.New("fixture completion failed")
 	for _, scenario := range []struct {
 		name       string
+		multipart  bool
 		rows       int64
 		writeError error
 		readback   string
 		wantError  error
 	}{
 		{name: "completed", rows: 1, readback: "normal"},
+		{name: "multipart completed with original session", multipart: true, rows: 1, readback: "normal"},
+		{name: "multipart completion changed session on write", multipart: true, rows: 1, readback: "wrong session", wantError: domain.ErrInvalidUploadTaskData},
 		{name: "no matching current records", wantError: domain.ErrUploadTaskBusy},
 		{name: "unexpected rows", rows: 2, wantError: domain.ErrInvalidUploadTaskData},
 		{name: "write failure", writeError: writeFailure, wantError: writeFailure},
@@ -31,6 +34,17 @@ func TestCompletePublishedUploadResults(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			task, currentValues, _, _, now := uploadObjectReplacementFixture()
 			task.Status, currentValues[14], currentValues[16] = domain.UploadStatusVerifying, "VERIFYING", "0"
+			var sessionArgument any
+			if scenario.multipart {
+				const session = "fixture-session "
+				task.UploadMode, task.StorageUploadID = "MULTIPART", new(session)
+				task.FileSize = domain.MaxSingleUploadSizeBytes + 1
+				task.ReservedBytes = task.FileSize
+				task.PartSize, task.PartCount = new(domain.MaxSingleUploadSizeBytes), new(uint32(2))
+				currentValues[8], currentValues[9], currentValues[11] = task.UploadMode, session, task.FileSize
+				currentValues[12], currentValues[13] = *task.PartSize, int64(*task.PartCount)
+				sessionArgument = session
+			}
 			entry := &domain.FileEntry{ID: 31, UserID: task.UserID, ParentID: &task.TargetParentID, Name: "笔记 (1).PDF",
 				FileSize: task.FileSize, EntryType: "FILE", Status: "ACTIVE", Revision: 1}
 			const objectID uint64 = 29
@@ -40,6 +54,9 @@ func TestCompletePublishedUploadResults(t *testing.T) {
 			doneValues[17], doneValues[18], doneValues[26], doneValues[27] = nil, nil, completedAt, completedAt
 			if scenario.readback == "wrong name" {
 				doneValues[7] = "other.pdf"
+			}
+			if scenario.readback == "wrong session" {
+				doneValues[9] = "fixture-session"
 			}
 			if scenario.readback == "missing" {
 				doneValues = nil
@@ -56,7 +73,8 @@ func TestCompletePublishedUploadResults(t *testing.T) {
 			}
 			script.completePublishedUpload = func(_ context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
 				for _, condition := range []string{"upload_task.reserved_bytes = 0", "upload_task.lease_until > UTC_TIMESTAMP(6)",
-					"upload_task.expires_at > UTC_TIMESTAMP(6)", "published_object.status = 'READY'", "result_entry.source_device_id = upload_task.device_id"} {
+					"upload_task.expires_at > UTC_TIMESTAMP(6)", "published_object.status = 'READY'", "result_entry.source_device_id = upload_task.device_id",
+					"upload_task.upload_mode = ?", "CAST(upload_task.storage_upload_id AS BINARY) <=> ?"} {
 					if !strings.Contains(statement, condition) {
 						t.Fatal("完成写入缺少保护条件", condition)
 					}
@@ -65,7 +83,8 @@ func TestCompletePublishedUploadResults(t *testing.T) {
 				for _, argument := range arguments {
 					actual = append(actual, argument.Value)
 				}
-				want := []any{entry.ID, task.UserID, task.ID, task.StagedObjectID, *task.LeaseOwner, task.LeaseVersion, entry.Name, task.FileSize, objectID}
+				want := []any{entry.ID, task.UserID, task.ID, task.StagedObjectID, *task.LeaseOwner, task.LeaseVersion,
+					task.UploadMode, sessionArgument, entry.Name, task.FileSize, objectID}
 				if !reflect.DeepEqual(actual, want) {
 					t.Fatal("完成写入绑定值不符", actual)
 				}

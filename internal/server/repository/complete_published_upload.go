@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"unicode/utf8"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -14,7 +15,7 @@ import (
 // CompletePublishedUpload 保存新建文件的发布结果，完成已结算配额的上传任务。
 // 调用方在同一写回复核事务中创建文件、结算配额，并负责传播错误和确认提交。
 func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error) {
-	// 1. 核对当前事务、租约和已结算的任务。
+	// 1. 核对当前事务、租约、原分片会话和已结算的任务。
 	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
 		return nil, fmt.Errorf("完成上传发布需要上下文和已锁定用户的事务")
 	}
@@ -43,18 +44,29 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 	if err != nil {
 		return nil, err
 	}
-	if current.Status != domain.UploadStatusVerifying || current.UploadMode != "SINGLE" {
+	multipart := task.UploadMode == "MULTIPART"
+	if current.Status != domain.UploadStatusVerifying || current.UploadMode != task.UploadMode || (task.UploadMode != "SINGLE" && !multipart) {
 		return nil, domain.ErrUploadTaskNotReady
 	}
 	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
-		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil {
+		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil ||
+		(multipart && (!sameUploadStorageText(current.StorageUploadID, task.StorageUploadID) || !current.ExpiresAt.Equal(task.ExpiresAt))) {
 		return nil, domain.ErrUploadTaskBusy
 	}
 	if current.FileSize != task.FileSize || current.ReservedBytes != 0 || current.PublishedObjectID != nil ||
 		current.ResultEntryID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if current.FileSize > domain.MaxSingleUploadSizeBytes {
+	maxSize := domain.MaxSingleUploadSizeBytes
+	if multipart {
+		maxSize = math.MaxInt64
+		if task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) ||
+			task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
+			!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) || !sameMultipartUploadPlan(task, current) {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	}
+	if current.FileSize > maxSize {
 		return nil, domain.ErrUploadFileTooLarge
 	}
 	if *entry.ParentID != current.TargetParentID || entry.FileSize != current.FileSize {
@@ -74,7 +86,8 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 			"WHERE upload_task.user_id = ? AND upload_task.id = ? AND upload_task.staged_object_id = ? "+
 			"AND CAST(upload_task.lease_owner AS BINARY) = ? AND upload_task.lease_version = ? "+
 			"AND upload_task.lease_until > UTC_TIMESTAMP(6) AND upload_task.expires_at > UTC_TIMESTAMP(6) "+
-			"AND upload_task.status = 'VERIFYING' AND upload_task.upload_mode = 'SINGLE' AND upload_task.reserved_bytes = 0 "+
+			"AND upload_task.status = 'VERIFYING' AND upload_task.upload_mode = ? AND upload_task.reserved_bytes = 0 "+
+			"AND CAST(upload_task.storage_upload_id AS BINARY) <=> ? "+
 			"AND upload_task.published_object_id IS NULL AND upload_task.result_entry_id IS NULL "+
 			"AND upload_task.resolved_name IS NULL AND upload_task.completed_at IS NULL "+
 			"AND result_entry.parent_id = upload_task.target_parent_id AND result_entry.source_device_id = upload_task.device_id "+
@@ -82,8 +95,9 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 			"AND result_entry.content_modified_at IS NOT NULL AND CAST(result_entry.name AS BINARY) = ? "+
 			"AND result_entry.file_size = upload_task.file_size AND upload_task.file_size = ? "+
 			"AND published_object.id = ? AND published_object.status = 'READY' AND published_object.file_size = upload_task.file_size "+
-			"AND (upload_task.expected_sha256 IS NULL OR upload_task.expected_sha256 = published_object.verified_sha256)",
-		entry.ID, userID, current.ID, current.StagedObjectID, *current.LeaseOwner, current.LeaseVersion, entry.Name, current.FileSize, objectID)
+			"AND (upload_task.expected_sha256 = published_object.verified_sha256 OR (upload_task.upload_mode = 'SINGLE' AND upload_task.expected_sha256 IS NULL))",
+		entry.ID, userID, current.ID, current.StagedObjectID, *current.LeaseOwner, current.LeaseVersion,
+		current.UploadMode, current.StorageUploadID, entry.Name, current.FileSize, objectID)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -105,7 +119,8 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 	if err != nil {
 		return nil, err
 	}
-	if completed.Status != domain.UploadStatusCompleted || completed.PublishedObjectID == nil || *completed.PublishedObjectID != objectID ||
+	if completed.Status != domain.UploadStatusCompleted || completed.UploadMode != current.UploadMode ||
+		completed.PublishedObjectID == nil || *completed.PublishedObjectID != objectID ||
 		completed.ResultEntryID == nil || *completed.ResultEntryID != entry.ID ||
 		completed.ResolvedName == nil || *completed.ResolvedName != entry.Name ||
 		completed.CompletedAt == nil || !completed.CompletedAt.Equal(completed.UpdatedAt) ||
@@ -116,6 +131,9 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 		completed.ReservedBytes != 0 || completed.LastErrorCode != nil || completed.LastErrorMessage != nil || completed.NextAttemptAt != nil ||
 		completed.StagedObjectID != current.StagedObjectID || completed.TargetParentID != current.TargetParentID ||
 		completed.DeviceID != current.DeviceID || completed.FileSize != current.FileSize || completed.AttemptCount != current.AttemptCount {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if multipart && (!sameUploadStorageText(completed.StorageUploadID, current.StorageUploadID) || !sameMultipartUploadPlan(current, completed)) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	return completed, nil

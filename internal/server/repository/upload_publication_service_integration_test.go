@@ -28,6 +28,7 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 		wantError          error
 	}{
 		{name: "publish newly verified object"},
+		{name: "multipart publish newly verified object", multipart: true},
 		{name: "reuse object and numbered name", reuse: true},
 		{name: "publish zero bytes", zeroBytes: true},
 		{name: "ancestor in trash", blockedTarget: true, wantError: domain.ErrUploadTargetUnavailable},

@@ -5,16 +5,25 @@ import (
 	"crypto/sha256"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestCompletePublishedUploadIntegration(t *testing.T) {
+	for _, mode := range []string{"SINGLE", "MULTIPART"} {
+		t.Run(mode, func(t *testing.T) { verifyCompletePublishedUpload(t, mode) })
+	}
+}
+
+func verifyCompletePublishedUpload(t *testing.T, mode string) {
+	t.Helper()
 	pool, originalTask := uploadTaskDatabase(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 35*time.Second)
 	defer cancel()
 	store, err := NewStore(pool)
 	if err != nil {
@@ -40,8 +49,17 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 		return used, reserved
 	}
 	rollbackFixture := errors.New("fixture interrupts completed publication")
+	fileSize := domain.MaxSingleUploadSizeBytes
+	var session, partSize, partCount, objectVersion, etag any
+	if mode == "MULTIPART" {
+		fileSize++
+		session, partSize, partCount = "fixture-complete-session ", domain.MaxSingleUploadSizeBytes, 2
+		objectVersion, etag = "merged-version", "merged-etag"
+		execute(t, "UPDATE stored_objects SET file_size=? WHERE id=29", fileSize)
+		execute(t, "UPDATE file_entries SET file_size=? WHERE id=31", fileSize)
+	}
 
-	for _, scenario := range []struct {
+	type completionScenario struct {
 		name           string
 		chooseName     bool
 		skipSettlement bool
@@ -49,8 +67,10 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 		changeSQL      string
 		changeFile     string
 		zero           bool
+		newObject      bool
 		wantError      error
-	}{
+	}
+	scenarios := []completionScenario{
 		{name: "reuse object and save numbered name", chooseName: true},
 		{name: "unsettled reservation", skipSettlement: true, wantError: domain.ErrInvalidUploadTaskData},
 		{name: "file references different object", wrongObject: true, wantError: domain.ErrUploadTaskBusy},
@@ -60,26 +80,47 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 		{name: "verification lease expired", changeSQL: "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
 		{name: "task expired", changeSQL: "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
 		{name: "new verification lease version", changeSQL: "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19", wantError: domain.ErrUploadTaskBusy},
-		{name: "rollback after completion", wantError: rollbackFixture},
+		{name: "rollback after completion", newObject: true, wantError: rollbackFixture},
 		{name: "complete zero-byte file with new object", zero: true},
-	} {
+	}
+	if mode == "MULTIPART" {
+		scenarios = append(scenarios,
+			completionScenario{name: "session changed after settlement", changeSQL: "UPDATE upload_tasks SET storage_upload_id=RTRIM(storage_upload_id) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+			completionScenario{name: "published digest changed after settlement", changeSQL: "UPDATE stored_objects SET verified_sha256=UNHEX(REPEAT('ff',32)) WHERE id=29", wantError: domain.ErrUploadTaskBusy},
+			completionScenario{name: "complete with its original object", newObject: true})
+	}
+	for _, scenario := range scenarios {
+		if mode == "MULTIPART" && scenario.zero {
+			continue
+		}
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 准备真实可校验任务、预占和旧错误，保留已有 READY 对象 29。
-			digest := domain.UploadContentDigest{SizeBytes: domain.MaxSingleUploadSizeBytes}
-			if scenario.wantError == rollbackFixture {
+			digest := domain.UploadContentDigest{SizeBytes: fileSize}
+			if scenario.newObject {
 				digest.SHA256[0] = 0xff
 			}
 			if scenario.zero {
 				digest = domain.UploadContentDigest{SHA256: sha256.Sum256(nil)}
 			}
-			execute(t, "UPDATE users SET used_storage=?,reserved_storage=? WHERE id=7", domain.MaxSingleUploadSizeBytes, digest.SizeBytes)
-			execute(t, "UPDATE stored_objects SET status='VERIFYING',file_size=?,verified_sha256=NULL,verified_at=NULL,unreferenced_at=NULL,gc_after=NULL WHERE id=23", digest.SizeBytes)
-			execute(t, `UPDATE upload_tasks SET status='VERIFYING',upload_mode='SINGLE',storage_upload_id=NULL,part_size=NULL,part_count=NULL,
+			execute(t, "UPDATE users SET used_storage=?,reserved_storage=? WHERE id=7", fileSize, digest.SizeBytes)
+			execute(t, `UPDATE stored_objects SET status='VERIFYING',file_size=?,verified_sha256=NULL,verified_at=NULL,
+				unreferenced_at=NULL,gc_after=NULL,storage_version_id=?,storage_etag=? WHERE id=23`, digest.SizeBytes, objectVersion, etag)
+			execute(t, `UPDATE upload_tasks SET status='VERIFYING',upload_mode=?,storage_upload_id=?,part_size=?,part_count=?,
 				published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
 				file_size=?,reserved_bytes=?,expected_sha256=?,lease_owner='verify-worker',lease_version=3,
 				lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY,updated_at=UTC_TIMESTAMP(6),
 				next_attempt_at=UTC_TIMESTAMP(6)-INTERVAL 1 MINUTE,last_error_code='VERIFY_RETRY',last_error_message='retry fixture'
-				WHERE id=19`, digest.SizeBytes, digest.SizeBytes, digest.SHA256[:])
+				WHERE id=19`, mode, session, partSize, partCount, digest.SizeBytes, digest.SizeBytes, digest.SHA256[:])
+			if mode == "MULTIPART" {
+				execute(t, "UPDATE upload_tasks SET lease_owner=NULL,lease_until=NULL WHERE id=19")
+				candidates, err := store.ListMultipartUploadVerificationCandidates(ctx, 1)
+				if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
+					t.Fatal("未找到待校验分片任务", candidates, err)
+				}
+				if claimed, err := store.ClaimMultipartUploadVerificationLease(ctx, candidates[0], "verify-worker"); err != nil || claimed == nil {
+					t.Fatal("未取得分片校验租约", err)
+				}
+			}
 			task, err := store.FindUserUploadTask(ctx, 7, 19)
 			if err != nil {
 				t.Fatal(err)
@@ -93,6 +134,9 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 			var result *domain.UploadTask
 			var input *domain.CreatePublishedFileEntryInput
 			err = store.WithUploadVerificationTransaction(ctx, task, staged, digest, func(txContext context.Context, txStore *Store, current *domain.UploadTask, currentObject *domain.StoredObject) error {
+				if _, err := service.ValidateUploadPublicationTarget(txContext, current, txStore); err != nil {
+					return err
+				}
 				selected, err := txStore.SelectUploadPublicationObject(txContext, current, currentObject, digest)
 				if err != nil {
 					return err
@@ -143,6 +187,21 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 				if err != nil {
 					return err
 				}
+				if mode == "MULTIPART" {
+					// 使用事务外 Store 验证未提交的结果对其他连接不可见。
+					visible, err := store.FindUserUploadTask(txContext, task.UserID, task.ID)
+					if err != nil || !reflect.DeepEqual(visible, task) {
+						t.Fatal("完成结果提交前已可见", visible, err)
+					}
+					visibleFile, err := store.FindUserActiveFileEntryByName(txContext, task.UserID, task.TargetParentID, input.NameKey)
+					if visibleFile != nil || !errors.Is(err, domain.ErrFileEntryNotFound) {
+						t.Fatal("新文件提交前已可见", visibleFile, err)
+					}
+					used, reserved := readQuota(t)
+					if used != fileSize || reserved != digest.SizeBytes {
+						t.Fatal("配额提交前已可见", used, reserved)
+					}
+				}
 				if scenario.wantError == rollbackFixture {
 					return rollbackFixture
 				}
@@ -175,7 +234,7 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 			used, reserved := readQuota(t)
 			if scenario.wantError != nil {
 				if (scenario.wantError != rollbackFixture && result != nil) || !reflect.DeepEqual(after, task) || entry != nil ||
-					!errors.Is(entryError, domain.ErrFileEntryNotFound) || used != domain.MaxSingleUploadSizeBytes || reserved != digest.SizeBytes {
+					!errors.Is(entryError, domain.ErrFileEntryNotFound) || used != fileSize || reserved != digest.SizeBytes {
 					t.Fatal("失败后的文件、任务或配额未完整回滚", entry, entryError, after)
 				}
 				afterObject, err := store.FindUserStoredObject(ctx, task.UserID, task.StagedObjectID)
@@ -191,8 +250,23 @@ func TestCompletePublishedUploadIntegration(t *testing.T) {
 				after.CompletedAt == nil || !after.CompletedAt.Equal(after.UpdatedAt) || after.CompletedAt.Before(entry.CreatedAt) ||
 				after.ReservedBytes != 0 || after.LeaseOwner != nil || after.LeaseUntil != nil ||
 				after.LeaseVersion != task.LeaseVersion || after.NextAttemptAt != nil || after.LastErrorCode != nil || after.LastErrorMessage != nil ||
-				used != domain.MaxSingleUploadSizeBytes+digest.SizeBytes || reserved != 0 {
+				used != fileSize+digest.SizeBytes || reserved != 0 {
 				t.Fatal("完成任务、文件结果或配额未正确提交", after, entry, entryError)
+			}
+			if mode == "MULTIPART" {
+				if !sameMultipartUploadPlan(task, after) || !sameUploadStorageText(task.StorageUploadID, after.StorageUploadID) {
+					t.Fatal("发布结果没有保留分片计划和原会话")
+				}
+				status, err := service.ResolveMultipartUploadCompletionStatus(after, after.UserID, after.ID, after.ExpiresAt.Add(time.Second))
+				if err != nil || status != domain.UploadStatusCompleted {
+					t.Fatal("完成后的再次判定未复用持久结果", status, err)
+				}
+				view, err := dto.NewUploadTaskData(after)
+				if err != nil || view == nil || view.Status != string(domain.UploadStatusCompleted) || view.ResultEntryID == nil ||
+					*view.ResultEntryID != strconv.FormatUint(entry.ID, 10) || view.ResolvedName == nil || *view.ResolvedName != entry.Name || view.CompletedAt == nil {
+					t.Fatal("任务查询未交付同一个发布结果", view, err)
+				}
+				t.Logf("Multipart 任务 %d 提交后交付文件 %s、名称 %s、对象 %d，已用 %d 字节", task.ID, *view.ResultEntryID, entry.Name, *after.PublishedObjectID, used)
 			}
 		})
 	}
