@@ -90,10 +90,16 @@ func TestFindUserUploadTaskForPartSigningIntegration(t *testing.T) {
 	if target, err := targets.Get(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrInvalidStoredObjectData) {
 		t.Fatal("应用层接受了与签名客户端不匹配的桶", err)
 	}
+	if target, err := targets.GetForReceipts(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+		t.Fatal("只读目标接受了不匹配的存储桶", err)
+	}
 	execute("UPDATE stored_objects SET bucket='fixture-bucket' WHERE id=23")
 	actor.UserID = 8
 	if target, err := targets.Get(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
 		t.Fatal("应用层读取了其他账号的签名目标", err)
+	}
+	if target, err := targets.GetForReceipts(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
+		t.Fatal("只读目标读取了其他账号的上传任务", err)
 	}
 	for _, query := range [][2]uint64{{8, taskID}, {userID, 999}} {
 		task, clock, err := store.FindUserUploadTaskForPartSigning(ctx, query[0], query[1])
@@ -105,9 +111,20 @@ func TestFindUserUploadTaskForPartSigningIntegration(t *testing.T) {
 	// 4. 调整隔离夹具时钟，验证租约和任务截止由数据库时间决定。
 	leaseEnds := now.Add(time.Minute)
 	execute("UPDATE upload_tasks SET lease_owner='fixture-completer',lease_until=? WHERE id=?", leaseEnds, taskID)
-	check(now, domain.ErrUploadTaskBusy)
+	before := check(now, domain.ErrUploadTaskBusy)
+	actor.UserID = userID
+	receiptTarget, err := targets.GetForReceipts(ctx, actor, taskID)
+	if err != nil || receiptTarget == nil || *receiptTarget != wantTarget {
+		t.Fatal("有效租约中的同账号只读目标不符", err)
+	}
+	if after := check(now, domain.ErrUploadTaskBusy); !reflect.DeepEqual(after, before) {
+		t.Fatal("只读目标查询改变了任务、租约或预占")
+	}
 	execute("SET timestamp = ?", leaseEnds.Unix())
 	check(leaseEnds, nil)
 	execute("SET timestamp = ?", taskExpiry.Unix())
 	check(taskExpiry, domain.ErrUploadTaskNotReady)
+	if target, err := targets.GetForReceipts(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+		t.Fatal("只读目标使用了数据库时间已经到期的任务", err)
+	}
 }

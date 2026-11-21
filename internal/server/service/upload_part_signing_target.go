@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// UploadPartSigningTarget 保存当前任务的分片计划和已核对的存储位置。
+// UploadPartSigningTarget 保存签发和只读核对共用的分片计划及存储位置。
 type UploadPartSigningTarget struct {
 	TaskID         uint64
 	UserID         uint64
@@ -24,14 +25,14 @@ type UploadPartSigningTarget struct {
 	ExpiresAt      time.Time
 }
 
-// UploadPartSigningTargetService 读取并校验分片签发所用的任务和暂存对象。
+// UploadPartSigningTargetService 读取分片签发和只读核对所用的任务和暂存对象。
 type UploadPartSigningTargetService struct {
 	provider, bucket string
 	findTask         func(context.Context, uint64, uint64) (*domain.UploadTask, time.Time, error)
 	findObject       func(context.Context, uint64, uint64) (*domain.StoredObject, error)
 }
 
-// NewUploadPartSigningTargetService 装配任务和对象的归属读取及签名客户端的存储位置。
+// NewUploadPartSigningTargetService 装配任务和对象的归属读取及存储客户端配置。
 func NewUploadPartSigningTargetService(
 	provider, bucket string,
 	findTask func(context.Context, uint64, uint64) (*domain.UploadTask, time.Time, error),
@@ -46,9 +47,27 @@ func NewUploadPartSigningTargetService(
 
 // Get 按可信 Actor 的账号获取分片签发目标。调用方交付签名之前仍需复查任务状态。
 func (targetService *UploadPartSigningTargetService) Get(ctx context.Context, actor domain.Actor, taskID uint64) (*UploadPartSigningTarget, error) {
-	// 1. 按认证账号读取当前任务和数据库时间，检查签发资格。
+	return targetService.readTarget(ctx, actor, taskID, ValidateUploadPartSigningState)
+}
+
+// GetForReceipts 按可信 Actor 的账号获取只读回执核对目标。
+// 调用方在分页前和交付前读取目标，用同一组字段复查当前任务及存储位置。
+func (targetService *UploadPartSigningTargetService) GetForReceipts(ctx context.Context, actor domain.Actor, taskID uint64) (*UploadPartSigningTarget, error) {
+	// 1. 采用只读资格检查，暂存对象不可用时统一判定任务尚不可核对。
+	target, err := targetService.readTarget(ctx, actor, taskID, ValidateUploadPartReceiptState)
+	if errors.Is(err, domain.ErrStoredObjectNotFound) || errors.Is(err, domain.ErrInvalidStoredObjectData) {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	return target, err
+}
+
+func (targetService *UploadPartSigningTargetService) readTarget(
+	ctx context.Context, actor domain.Actor, taskID uint64,
+	validateState func(*domain.UploadTask, uint64, uint64, time.Time) error,
+) (*UploadPartSigningTarget, error) {
+	// 1. 按认证账号读取当前任务和数据库时间，检查当前操作的资格。
 	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 || taskID == 0 {
-		return nil, fmt.Errorf("读取分片签发目标需要上下文、完整认证身份和非零任务 ID")
+		return nil, fmt.Errorf("读取分片目标需要上下文、完整认证身份和非零任务 ID")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -58,9 +77,9 @@ func (targetService *UploadPartSigningTargetService) Get(ctx context.Context, ac
 		return nil, err
 	}
 	if queryError != nil {
-		return nil, fmt.Errorf("读取分片签发任务失败: %w", queryError)
+		return nil, fmt.Errorf("读取分片任务失败: %w", queryError)
 	}
-	if err := ValidateUploadPartSigningState(task, actor.UserID, taskID, databaseTime); err != nil {
+	if err := validateState(task, actor.UserID, taskID, databaseTime); err != nil {
 		return nil, err
 	}
 
@@ -70,7 +89,7 @@ func (targetService *UploadPartSigningTargetService) Get(ctx context.Context, ac
 		return nil, err
 	}
 	if queryError != nil {
-		return nil, fmt.Errorf("读取分片签发的暂存对象失败: %w", queryError)
+		return nil, fmt.Errorf("读取分片任务的暂存对象失败: %w", queryError)
 	}
 	if object == nil || object.ID != task.StagedObjectID || object.OwnerUserID != actor.UserID ||
 		object.Status != domain.StoredObjectStatusStaging || object.FileSize != task.FileSize ||
@@ -84,7 +103,7 @@ func (targetService *UploadPartSigningTargetService) Get(ctx context.Context, ac
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 
-	// 3. 用已确认的值构造目标，保留本次租约版本供签名交付前复查。
+	// 3. 用已确认的值构造独立目标，保留期限和租约版本供调用方复查。
 	return &UploadPartSigningTarget{
 		TaskID: task.ID, UserID: task.UserID, StagedObjectID: object.ID, LeaseVersion: task.LeaseVersion,
 		ObjectKey: object.ObjectKey, UploadID: *task.StorageUploadID,

@@ -115,3 +115,80 @@ func TestUploadPartSigningTargetGet(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadPartReceiptTargetGet(t *testing.T) {
+	const provider, bucket = "local_minio", "fixture-bucket"
+	const key = "users/7/objects/receipt-fixture"
+	now := time.Date(2026, 11, 21, 12, 0, 0, 123456000, time.UTC)
+	actor := domain.Actor{UserID: 7, DeviceID: 31, SessionID: 41}
+	queryFault := errors.New("fixture object lookup failure")
+	for _, test := range []struct {
+		name         string
+		taskError    error
+		objectError  error
+		changeObject func(*domain.StoredObject)
+		cancel       bool
+		want         error
+	}{
+		{name: "active lease and same account different device"},
+		{name: "task outside scope", taskError: domain.ErrUploadTaskNotFound, want: domain.ErrUploadTaskNotFound},
+		{name: "missing stored object", objectError: domain.ErrStoredObjectNotFound, want: domain.ErrUploadTaskNotReady},
+		{name: "other account object", changeObject: func(object *domain.StoredObject) { object.OwnerUserID++ }, want: domain.ErrUploadTaskNotReady},
+		{name: "location changed", changeObject: func(object *domain.StoredObject) { object.Bucket = "other-bucket" }, want: domain.ErrUploadTaskNotReady},
+		{name: "no longer staging", changeObject: func(object *domain.StoredObject) { object.Status = domain.StoredObjectStatusVerifying }, want: domain.ErrUploadTaskNotReady},
+		{name: "database failure", objectError: queryFault, want: queryFault},
+		{name: "cancel overrides object error", objectError: domain.ErrStoredObjectNotFound, cancel: true, want: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			task := uploadPartSigningTaskFixture(now.Add(time.Hour))
+			task.LeaseOwner, task.LeaseUntil = new("fixture-completer"), new(now.Add(time.Minute))
+			object := &domain.StoredObject{ID: task.StagedObjectID, OwnerUserID: actor.UserID, Provider: provider,
+				Bucket: bucket, ObjectKey: key, FileSize: task.FileSize, Status: domain.StoredObjectStatusStaging}
+			if test.changeObject != nil {
+				test.changeObject(object)
+			}
+			var reads []string
+			targets := NewUploadPartSigningTargetService(provider, bucket,
+				func(queryContext context.Context, userID, taskID uint64) (*domain.UploadTask, time.Time, error) {
+					reads = append(reads, "task")
+					if queryContext != ctx || userID != actor.UserID || taskID != task.ID {
+						t.Fatal("任务读取没有使用认证账号和请求任务")
+					}
+					return task, now, test.taskError
+				},
+				func(queryContext context.Context, userID, objectID uint64) (*domain.StoredObject, error) {
+					reads = append(reads, "object")
+					if queryContext != ctx || userID != actor.UserID || objectID != task.StagedObjectID {
+						t.Fatal("对象读取没有使用同一账号和任务的对象 ID")
+					}
+					if test.cancel {
+						cancel()
+					}
+					return object, test.objectError
+				},
+			)
+			target, err := targets.GetForReceipts(ctx, actor, task.ID)
+			wantReads := []string{"task", "object"}
+			if test.taskError != nil {
+				wantReads = wantReads[:1]
+			}
+			if !errors.Is(err, test.want) || !reflect.DeepEqual(reads, wantReads) {
+				t.Fatal("只读目标查询顺序或错误类别不符", reads, err)
+			}
+			if test.want != nil {
+				if target != nil {
+					t.Fatal("读取失败后仍交付了目标")
+				}
+				return
+			}
+			want := UploadPartSigningTarget{TaskID: 19, UserID: 7, StagedObjectID: 23, LeaseVersion: 2,
+				ObjectKey: key, UploadID: "opaque+A/=", FileSizeBytes: 16777217, PartSizeBytes: 16777216, PartCount: 2, ExpiresAt: now.Add(time.Hour)}
+			*task.StorageUploadID, *task.PartSize, object.ObjectKey = "new-session", 0, "new-key"
+			if target == nil || *target != want {
+				t.Fatal("回执目标未独立保存已核对的会话、位置和计划")
+			}
+		})
+	}
+}
