@@ -18,36 +18,14 @@ func uploadTaskAction(
 	reject func(*gin.Context, error),
 ) gin.HandlerFunc {
 	return func(requestContext *gin.Context) {
-		// 1. 检查响应和请求状态，读取认证身份。
-		if requestContext.Writer.Written() || requestContext.IsAborted() {
-			requestContext.Abort()
+		// 1. 统一检查认证身份和路径，用同一上下文调用当前操作。
+		ctx, actor, taskID, ready := prepareUploadTaskAction(requestContext)
+		if !ready {
 			return
 		}
-		requestContext.Writer.Header().Del("Content-Length")
-		requestContext.Writer.Header().Del("Content-Encoding")
-		requestContext.Header("Content-Type", "application/json; charset=utf-8")
-		requestContext.Header("Cache-Control", "no-store")
-		requestContext.Header("Pragma", "no-cache")
-		ctx := requestContext.Request.Context()
-		actor, exists := requestcontext.Actor(ctx)
-		if ctx.Err() != nil || !exists {
-			InternalError(requestContext, nil)
-			return
-		}
+		result, err := execute(ctx, actor, taskID)
 
-		// 2. 解析路径任务 ID，用同一上下文调用当前操作。
-		input, fieldError := dto.ParseUploadTaskPath(requestContext.Param("id"))
-		if fieldError != nil {
-			InvalidArgument(requestContext, fieldError)
-			return
-		}
-		if ctx.Err() != nil {
-			InternalError(requestContext, nil)
-			return
-		}
-		result, err := execute(ctx, actor, input.TaskID)
-
-		// 3. 复查请求取消，再交付固定错误或通过归属核对的任务。
+		// 2. 复查请求取消，再交付固定错误或通过归属核对的任务。
 		if ctx.Err() != nil {
 			InternalError(requestContext, nil)
 			return
@@ -60,12 +38,44 @@ func uploadTaskAction(
 			reject(requestContext, err)
 			return
 		}
-		if result == nil || result.ID != input.TaskID || result.UserID != actor.UserID {
+		if result == nil || result.ID != taskID || result.UserID != actor.UserID {
 			InternalError(requestContext, nil)
 			return
 		}
 		succeed(requestContext, result)
 	}
+}
+
+// prepareUploadTaskAction 确认请求可继续，并提取可信身份和任务 ID。
+func prepareUploadTaskAction(requestContext *gin.Context) (context.Context, domain.Actor, uint64, bool) {
+	// 1. 检查是否已结束，清理暂存正文头并读取认证身份。
+	if requestContext.Writer.Written() || requestContext.IsAborted() {
+		requestContext.Abort()
+		return nil, domain.Actor{}, 0, false
+	}
+	requestContext.Writer.Header().Del("Content-Length")
+	requestContext.Writer.Header().Del("Content-Encoding")
+	requestContext.Header("Content-Type", "application/json; charset=utf-8")
+	requestContext.Header("Cache-Control", "no-store")
+	requestContext.Header("Pragma", "no-cache")
+	ctx := requestContext.Request.Context()
+	actor, exists := requestcontext.Actor(ctx)
+	if ctx.Err() != nil || !exists {
+		InternalError(requestContext, nil)
+		return nil, domain.Actor{}, 0, false
+	}
+
+	// 2. 只从当前路由解析任务 ID，并复查请求取消。
+	input, fieldError := dto.ParseUploadTaskPath(requestContext.Param("id"))
+	if fieldError != nil {
+		InvalidArgument(requestContext, fieldError)
+		return nil, domain.Actor{}, 0, false
+	}
+	if ctx.Err() != nil {
+		InternalError(requestContext, nil)
+		return nil, domain.Actor{}, 0, false
+	}
+	return ctx, actor, input.TaskID, true
 }
 
 func writeUploadTaskActionError(requestContext *gin.Context, status int, code, message string) {
