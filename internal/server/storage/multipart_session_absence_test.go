@@ -14,8 +14,18 @@ import (
 )
 
 func TestConfirmMultipartSessionAbsence(t *testing.T) {
+	testMultipartSessionObservation(t, false)
+}
+
+func TestCheckMultipartUploadAfterAbort(t *testing.T) {
+	testMultipartSessionObservation(t, true)
+}
+
+func testMultipartSessionObservation(t *testing.T, includeObject bool) {
+	t.Helper()
 	const sameInstance, otherInstance = "fixture-instance", "replacement-instance"
 	const privateDetail = "private-verifier-output"
+	const versionID = "Version+A/="
 	verifierFailure := errors.New(privateDetail)
 	for _, fixture := range []struct {
 		name, before, after, headCode  string
@@ -23,6 +33,7 @@ func TestConfirmMultipartSessionAbsence(t *testing.T) {
 		listStatus, headStatus         int
 		omitListRequestID, cancelAfter bool
 		wantMissing                    bool
+		wantObject, onlyAfterAbort     bool
 		wantChecks, wantReads          int32
 	}{
 		{name: "same verified instance", before: sameInstance, after: sameInstance, wantMissing: true, wantChecks: 2, wantReads: 2},
@@ -32,13 +43,18 @@ func TestConfirmMultipartSessionAbsence(t *testing.T) {
 		{name: "instance replaced after reads", before: sameInstance, after: otherInstance, wantChecks: 2, wantReads: 2},
 		{name: "endpoint lost verification", before: sameInstance, wantChecks: 2, wantReads: 2},
 		{name: "final inspection failed", before: sameInstance, afterErr: verifierFailure, wantError: domain.ErrUploadStorageUnavailable, wantChecks: 2, wantReads: 2},
-		{name: "session readable", before: sameInstance, listStatus: http.StatusOK, wantChecks: 1, wantReads: 1},
+		{name: "empty session remains readable", before: sameInstance, listStatus: http.StatusOK, wantChecks: 1, wantReads: 1},
 		{name: "NoSuchUpload with wrong HTTP status", before: sameInstance, listStatus: http.StatusForbidden, wantError: domain.ErrUploadStorageUnavailable, wantChecks: 1, wantReads: 1},
 		{name: "NoSuchUpload without request ID", before: sameInstance, omitListRequestID: true, wantError: domain.ErrUploadStorageUnavailable, wantChecks: 1, wantReads: 1},
-		{name: "object exists", before: sameInstance, headStatus: http.StatusOK, wantChecks: 1, wantReads: 2},
+		{name: "object exists", before: sameInstance, after: sameInstance, headStatus: http.StatusOK, wantObject: true, wantChecks: 1, wantReads: 2},
+		{name: "discard object after instance change", before: sameInstance, after: otherInstance, headStatus: http.StatusOK, onlyAfterAbort: true, wantChecks: 2, wantReads: 2},
+		{name: "discard object after cancellation", before: sameInstance, after: sameInstance, headStatus: http.StatusOK, cancelAfter: true, onlyAfterAbort: true, wantError: context.Canceled, wantChecks: 2, wantReads: 2},
 		{name: "bucket missing", before: sameInstance, headCode: "NoSuchBucket", wantError: domain.ErrUploadStorageUnavailable, wantChecks: 1, wantReads: 2},
 		{name: "canceled before confirming result", before: sameInstance, after: sameInstance, cancelAfter: true, wantError: context.Canceled, wantChecks: 2, wantReads: 2},
 	} {
+		if fixture.onlyAfterAbort && !includeObject {
+			continue
+		}
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 模拟同一内部端点的签名 GET 和 HEAD，记录实际读取顺序。
 			ctx, cancel := context.WithCancel(t.Context())
@@ -84,6 +100,7 @@ func TestConfirmMultipartSessionAbsence(t *testing.T) {
 							writer.Header().Set("Last-Modified", "Tue, 17 Nov 2026 08:00:00 GMT")
 							writer.Header().Set("Content-Length", "16777217")
 							writer.Header().Set("ETag", `"existing"`)
+							writer.Header().Set("X-Amz-Version-Id", versionID)
 						} else {
 							status = http.StatusNotFound
 							writer.Header().Set("X-Minio-Error-Code", fixture.headCode)
@@ -127,10 +144,32 @@ func TestConfirmMultipartSessionAbsence(t *testing.T) {
 			if fixture.name == "no verifier" {
 				verify = nil
 			}
-			missing, err := client.ConfirmMultipartSessionAbsence(ctx, listPartsFixtureKey, listPartsFixtureID, verify)
+			wantChecks := fixture.wantChecks
+			var missing bool
+			if includeObject {
+				var observation *MultipartUploadAbortObservation
+				observation, err = client.CheckMultipartUploadAfterAbort(ctx, listPartsFixtureKey, listPartsFixtureID, verify)
+				missing = observation != nil && observation.Object == nil
+				if fixture.wantObject {
+					wantChecks++
+					if observation == nil || observation.Object == nil {
+						t.Fatal("缺少已确认的对象观察", err)
+					}
+					object := observation.Object
+					if object.StorageVersionID == nil || *object.StorageVersionID != versionID ||
+						object.StorageETag == nil || *object.StorageETag != "existing" || object.SizeBytes != 16777217 {
+						t.Fatal("未保留原对象的版本、ETag 和大小")
+					}
+				}
+				if (observation != nil) != (fixture.wantMissing || fixture.wantObject) {
+					t.Fatal("在未确认时返回了观察，或遗漏了已确认的结果", err)
+				}
+			} else {
+				missing, err = client.ConfirmMultipartSessionAbsence(ctx, listPartsFixtureKey, listPartsFixtureID, verify)
+			}
 			if missing != fixture.wantMissing || !errors.Is(err, fixture.wantError) || (err != nil && strings.Contains(err.Error(), privateDetail)) ||
-				checks.Load() != fixture.wantChecks || reads.Load() != fixture.wantReads {
-				t.Fatal("会话缺失确认、读取次数或检查顺序不符", missing, err, checks.Load(), reads.Load())
+				checks.Load() != wantChecks || reads.Load() != fixture.wantReads {
+				t.Fatal("会话确认、读取次数或检查顺序不符", missing, err, checks.Load(), reads.Load())
 			}
 		})
 	}
