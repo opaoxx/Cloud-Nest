@@ -52,7 +52,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 	t.Cleanup(client.Close)
 	const partSize = 16 << 20
 	const fileSize = partSize + 1
-	const reservedStorage = 5 * fileSize
+	const reservedStorage = 7 * fileSize
 	actor := domain.Actor{UserID: 7, DeviceID: 11, SessionID: 41}
 	execute := func(t *testing.T, statement string, arguments ...any) {
 		t.Helper()
@@ -110,6 +110,8 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 		{"recover confirmed version after write fault", "b4/execution-write-fault.bin", "write", 21, 25},
 		{"repair a part replaced before preflight", "b4/execution-preflight-repair.bin", "early replacement", 22, 26},
 		{"repair a part rejected by storage", "b4/execution-complete-repair.bin", "late replacement", 23, 27},
+		{"recover exact version after completion returns NoSuchUpload", "b4/execution-session-recovery.bin", "session completed", 24, 28},
+		{"retry when session and object are both missing", "b4/execution-session-missing.bin", "session absent", 25, 29},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 合成分片走正式回执冻结，再领取本轮合并租约。
@@ -183,14 +185,31 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				execute(t, `CREATE TRIGGER fixture_merge_lock BEFORE UPDATE ON stored_objects FOR EACH ROW
 					SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'`)
 			}
-			completeCalls := 0
+			if fixture.fault == "session absent" {
+				if err := core.AbortMultipartUpload(ctx, bucket.name, fixture.key, uploadID); err != nil {
+					t.Fatal("中止合成会话失败", minio.ToErrorResponse(err).Code)
+				}
+			}
+			completeCalls, missingChecks := 0, 0
+			var priorVersion string
 			execution := service.NewUploadMergeExecutionService(settings.Provider, settings.Bucket, preflight.Check,
 				func(callContext context.Context, key, uploadID string, size, partSize uint64, count uint32, receipts []domain.UploadPartReceipt) (*domain.UploadObjectResult, error) {
 					completeCalls++
 					if lateReplacement {
 						replaceTail()
 					}
+					if fixture.fault == "session completed" {
+						// 在正式预检之后，由夹具先完成原会话，模拟先前的合并恰好落实。
+						prior, err := client.CompleteMultipartUpload(callContext, key, uploadID, size, partSize, count, receipts)
+						if err != nil || prior == nil || prior.StorageVersionID == nil {
+							t.Fatal("夹具未取得此前合并的确切版本", err)
+						}
+						priorVersion = *prior.StorageVersionID
+					}
 					confirmation, err := client.CompleteMultipartUpload(callContext, key, uploadID, size, partSize, count, receipts)
+					if fixture.fault == "session completed" && !errors.Is(err, domain.ErrUploadPartSessionMissing) {
+						t.Fatal("已完成会话的合并未返回 NoSuchUpload", err)
+					}
 					if lateReplacement && !errors.Is(err, domain.ErrMultipartUploadPartRejected) {
 						t.Fatal("存储未明确拒绝已替换的分片回执", err)
 					}
@@ -198,7 +217,11 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 						return nil, domain.ErrMultipartUploadCompletionUnknown
 					}
 					return confirmation, err
-				}, store.BeginMultipartUploadVerification, store.ScheduleMultipartUploadMergeRetry, preflight.CheckRepair, store.ReopenMultipartUploadForRepair)
+				}, store.BeginMultipartUploadVerification, store.ScheduleMultipartUploadMergeRetry, preflight.CheckRepair, store.ReopenMultipartUploadForRepair,
+				func(callContext context.Context, claimed *domain.UploadTask, cause error) (*service.UploadMergeMissingSessionResult, error) {
+					missingChecks++
+					return preflight.CheckMissingSession(callContext, claimed, cause)
+				})
 			result, err := execution.Execute(ctx, lease)
 			assertQuotaUnchanged := func() {
 				t.Helper()
@@ -249,8 +272,27 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				return
 			}
 
-			// 4. 对未知结果登记重试的场景，重新领取租约并从原位置确认版本。
-			if fixture.fault != "" {
+			// 4. 仅观察到两者均缺失时，验证仍保留任务和预占并登记重试。
+			if fixture.fault == "session absent" {
+				var retry *service.UploadMergeRetryScheduledError
+				persisted := readTask()
+				if result != nil || !errors.Is(err, domain.ErrUploadPartSessionMissing) || !errors.As(err, &retry) ||
+					missingChecks != 1 || completeCalls != 0 || persisted.Status != domain.UploadStatusCompleting ||
+					persisted.ReservedBytes != fileSize || persisted.LeaseOwner != nil || persisted.LeaseUntil != nil ||
+					persisted.NextAttemptAt == nil || !persisted.NextAttemptAt.Equal(retry.NextAttemptAt) || retry.NextAttemptAt.Before(*lease.LeaseUntil) {
+					t.Fatal("会话与对象均缺失后未保留任务并登记重试", result, err, missingChecks, completeCalls)
+				}
+				object, readError := store.FindUserStoredObject(ctx, actor.UserID, fixture.objectID)
+				if readError != nil || object.Status != domain.StoredObjectStatusStaging || object.StorageVersionID != nil || object.GCAfter != nil {
+					t.Fatal("结果未确认时暂存对象被推进或登记回收", readError)
+				}
+				assertQuotaUnchanged()
+				t.Logf("任务 %d 原会话与对象均缺失，保留 %s，复核 %d 次，合并 %d 次，预占 %d 字节", fixture.taskID, persisted.Status, missingChecks, completeCalls, persisted.ReservedBytes)
+				return
+			}
+
+			// 5. 对未知结果登记重试的场景，重新领取租约并从原位置确认版本。
+			if fixture.fault == "response" || fixture.fault == "write" {
 				var retry *service.UploadMergeRetryScheduledError
 				scheduled := readTask()
 				if result != nil || !errors.As(err, &retry) || scheduled.Status != domain.UploadStatusCompleting || completeCalls != 1 ||
@@ -284,7 +326,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				result, err = execution.Execute(ctx, lease)
 			}
 
-			// 5. 核对状态、确认版本和原配额，确认每条任务只执行过一次存储合并。
+			// 6. 核对状态、确认版本和原配额，确认服务对每条任务只发起过一次合并。
 			if err != nil || result == nil || result.Status != domain.UploadStatusVerifying || readTask().Status != domain.UploadStatusVerifying || completeCalls != 1 {
 				t.Fatal("单条执行未得到已提交的校验任务", result, err, completeCalls)
 			}
@@ -292,11 +334,26 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			if err != nil || object.Status != domain.StoredObjectStatusVerifying || object.StorageETag == nil || object.StorageVersionID == nil || object.VerifiedAt != nil {
 				t.Fatal("未保存确认版本，或过早标记已校验", err)
 			}
+			if fixture.fault == "session completed" {
+				if missingChecks != 1 || *object.StorageVersionID != priorVersion || result.LeaseVersion != lease.LeaseVersion || result.NextAttemptAt != nil {
+					t.Fatal("会话缺失复核未用当前租约保存原对象版本", missingChecks, result)
+				}
+				t.Logf("任务 %d 收到 NoSuchUpload 后复核原版本 %s，本轮进入 %s", fixture.taskID, priorVersion, result.Status)
+			}
 			metadata, err := client.StatMultipartUploadObject(ctx, fixture.key)
 			if err != nil || metadata.SizeBytes != fileSize || metadata.StorageETag == nil || *metadata.StorageETag != *object.StorageETag ||
 				metadata.StorageVersionID == nil || *metadata.StorageVersionID != *object.StorageVersionID {
 				t.Fatal("写回元数据与存储版本不一致", err)
 			}
+			// 用例结束时释放已验证的合成版本，避免独占 MinIO 的内存数据目录积满。
+			versionID := *metadata.StorageVersionID
+			t.Cleanup(func() {
+				cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+				defer stop()
+				if err := bucket.client.RemoveObject(cleanup, bucket.name, fixture.key, minio.RemoveObjectOptions{VersionID: versionID}); err != nil {
+					t.Error("清理本用例的合成版本失败", minio.ToErrorResponse(err).Code)
+				}
+			})
 			assertQuotaUnchanged()
 			if publicTask := readPublicTask(t, fixture.taskID); publicTask.Status != string(domain.UploadStatusVerifying) || publicTask.LastError != nil {
 				t.Fatal("已进入校验的任务查询保留了过时错误", publicTask.LastError)

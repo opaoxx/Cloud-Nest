@@ -3,9 +3,13 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
+
+// errUploadMergeSessionPresent 表示本次复核仍能读取原会话，可安排后续重试。
+var errUploadMergeSessionPresent = fmt.Errorf("原分片会话仍可读取: %w", domain.ErrUploadTaskNotReady)
 
 // UploadMergeMissingSessionResult 只读结果中恰有一项，原对象已完成或本轮观察到两者均缺失。
 type UploadMergeMissingSessionResult struct {
@@ -37,7 +41,7 @@ func (preflight *UploadMergePreflightService) CheckMissingSession(ctx context.Co
 	}
 	_, err = preflight.receipts.listTargetParts(ctx, claimed, target)
 	if err == nil {
-		return nil, domain.ErrUploadTaskNotReady
+		return nil, errUploadMergeSessionPresent
 	}
 	if !errors.Is(err, domain.ErrUploadPartSessionMissing) {
 		return nil, err

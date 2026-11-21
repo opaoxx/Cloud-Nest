@@ -23,11 +23,16 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 	retryableWrite := errors.Join(domain.ErrUploadMergeWriteRetryable, failure)
 	mismatch := &domain.UploadPartsMismatchError{PartNumbers: []uint32{2}}
 	rejected := domain.ErrMultipartUploadPartRejected
+	missing := domain.ErrUploadPartSessionMissing
+	missingOnComplete := errors.Join(domain.ErrMultipartUploadCompletionUnknown, missing)
+	preflightRecheck := []string{"preflight", "check missing"}
+	completionRecheck := []string{"preflight", "complete", "check missing"}
 	for _, fixture := range []struct {
 		name, mode, cancelAt                string
 		preflightErr, completeErr, writeErr error
 		retryErr                            error
 		checkRepairErr, reopenErr           error
+		missingCheckErr                     error
 		wantRepair                          bool
 		attemptCount                        uint32
 		wantDelay                           int
@@ -45,8 +50,26 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 			want: domain.ErrMultipartUploadCompletionUnknown, wantCalls: completionRetry, wantDelay: 1},
 		{name: "temporary storage error backs off", preflightErr: domain.ErrUploadStorageUnavailable,
 			want: domain.ErrUploadStorageUnavailable, wantCalls: []string{"preflight", "retry"}, attemptCount: 4, wantDelay: 16},
-		{name: "missing session needs recheck", preflightErr: domain.ErrUploadPartSessionMissing,
-			want: domain.ErrUploadPartSessionMissing, wantCalls: []string{"preflight", "retry"}, wantDelay: 1},
+		{name: "preflight session loss recovers object", preflightErr: missing,
+			wantCalls: []string{"preflight", "check missing", "write"}},
+		{name: "completion session loss recovers object", completeErr: missingOnComplete,
+			wantCalls: []string{"preflight", "complete", "check missing", "write"}},
+		{name: "both missing schedules retry", preflightErr: missing, mode: "both missing",
+			want: missing, wantCalls: []string{"preflight", "check missing", "retry"}, wantDelay: 1},
+		{name: "session remains readable schedules retry", completeErr: missingOnComplete, missingCheckErr: errUploadMergeSessionPresent,
+			want: missing, wantCalls: []string{"preflight", "complete", "check missing", "retry"}, wantDelay: 1},
+		{name: "missing session check outage schedules retry", completeErr: missingOnComplete, missingCheckErr: domain.ErrUploadStorageUnavailable,
+			want: missing, wantCalls: []string{"preflight", "complete", "check missing", "retry"}, wantDelay: 1},
+		{name: "missing session check loses lease", preflightErr: missing, missingCheckErr: domain.ErrUploadTaskBusy,
+			want: missing, wantCalls: preflightRecheck},
+		{name: "missing session check target changed", preflightErr: missing, missingCheckErr: domain.ErrUploadTaskNotReady,
+			want: missing, wantCalls: preflightRecheck},
+		{name: "missing session check canceled", completeErr: missingOnComplete, cancelAt: "check missing",
+			want: context.Canceled, wantCalls: completionRecheck},
+		{name: "missing session check returns neither result", preflightErr: missing, mode: "no missing result",
+			want: domain.ErrInvalidUploadTaskData, wantCalls: preflightRecheck},
+		{name: "missing session check recovers different key", completeErr: missingOnComplete, mode: "wrong recovery key",
+			want: domain.ErrInvalidUploadTaskData, wantCalls: completionRecheck},
 		{name: "storage deadline caps backoff", completeErr: context.DeadlineExceeded,
 			want: context.DeadlineExceeded, wantCalls: completionRetry, attemptCount: 10, wantDelay: 30},
 		{name: "known lock failure schedules retry", writeErr: retryableWrite, want: failure, wantCalls: writeRetry, wantDelay: 1},
@@ -58,8 +81,8 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 		{name: "explicit rejection reopens for repair", completeErr: rejected, wantRepair: true, wantCalls: completionRepair},
 		{name: "object appeared after mismatch", preflightErr: mismatch, checkRepairErr: domain.ErrUploadObjectExists,
 			want: domain.ErrUploadObjectExists, wantCalls: preflightRepair[:2]},
-		{name: "session vanished after rejection", completeErr: rejected, checkRepairErr: domain.ErrUploadPartSessionMissing,
-			want: domain.ErrUploadPartSessionMissing, wantCalls: completionRepair[:3]},
+		{name: "session vanished after rejection", completeErr: rejected, checkRepairErr: missing, mode: "both missing",
+			want: missing, wantCalls: []string{"preflight", "complete", "check repair", "check missing", "retry"}, wantDelay: 1},
 		{name: "repair check is inconclusive", preflightErr: mismatch, checkRepairErr: domain.ErrUploadStorageUnavailable,
 			want: domain.ErrUploadStorageUnavailable, wantCalls: preflightRepair[:2]},
 		{name: "parts match again", preflightErr: mismatch, checkRepairErr: domain.ErrUploadTaskNotReady,
@@ -117,6 +140,7 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 			parts := []domain.UploadPartReceipt{uploadPartReceiptFixture(1, *claimed.PartSize, "First"), uploadPartReceiptFixture(2, 1, "Tail")}
 			metadata := &domain.UploadObjectResult{SizeBytes: claimed.FileSize, StorageETag: new("object-etag"), StorageVersionID: new("Version+A/=")}
 			plan := &UploadMergePreflightResult{Ready: &UploadMergeReceiptSnapshot{Target: target, Parts: parts}}
+			missingResult := &UploadMergeMissingSessionResult{Recovered: &UploadMergeRecoveryObservation{Target: target, Object: *metadata}}
 			switch fixture.mode {
 			case "recovered":
 				plan = &UploadMergePreflightResult{Recovered: &UploadMergeRecoveryObservation{Target: target, Object: *metadata}}
@@ -148,6 +172,12 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 				evidence.ObjectKey += ".other"
 			case "wrong reopened task":
 				reopened.ID++
+			case "both missing":
+				missingResult = &UploadMergeMissingSessionResult{Missing: &domain.UploadMergeMissingSessionObservation{Task: *copyUploadTask(claimed), ObjectKey: key}}
+			case "no missing result":
+				missingResult.Recovered = nil
+			case "wrong recovery key":
+				missingResult.Recovered.Target.ObjectKey += ".other"
 			}
 			repairCause := fixture.preflightErr
 			if repairCause == nil {
@@ -212,6 +242,16 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 						t.Fatal("修复写回未使用原配置和本轮核对证据")
 					}
 					return reopened, fixture.reopenErr
+				},
+				func(callContext context.Context, lease *domain.UploadTask, cause error) (*UploadMergeMissingSessionResult, error) {
+					calls = append(calls, "check missing")
+					if callContext != ctx || lease != claimed || !errors.Is(cause, missing) || !errors.Is(cause, repairCause) {
+						t.Fatal("会话复核未使用原租约和会话缺失原因")
+					}
+					if fixture.cancelAt == "check missing" {
+						cancel()
+					}
+					return missingResult, fixture.missingCheckErr
 				})
 
 			// 3. 核对成功状态和失败边界，包括原始失配及后续错误。
@@ -235,6 +275,9 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 			}
 			if fixture.want != nil && (repairCause == mismatch || repairCause == rejected) && !errors.Is(err, repairCause) {
 				t.Fatal("修复未成功时丢失了原失配原因", err)
+			}
+			if fixture.missingCheckErr != nil && !errors.Is(err, fixture.missingCheckErr) {
+				t.Fatal("会话复核失败时丢失了本轮错误", err)
 			}
 			if fixture.name == "canceled with unknown result" && !errors.Is(err, context.Canceled) {
 				t.Fatal("结果不明时丢失了取消原因", err)
