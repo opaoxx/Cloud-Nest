@@ -8,8 +8,10 @@ import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, E
 import { ApiError, apiErrorMessage } from './api/http'
 import { createFileAccessGrant } from './api/download'
 import type { FileAccessAuthorizer } from './api/download'
-import { createSingleUploadTask, readPublishedUploadEntry, readSingleUploadTask, sendSingleUploadContent } from './api/uploadTask'
-import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
+import { cancelSingleUploadTask, createSingleUploadTask, readPublishedUploadEntry, readSingleUploadTask, sendSingleUploadContent } from './api/uploadTask'
+import type {
+  PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCanceller, SingleUploadTaskCreator, SingleUploadTaskReader,
+} from './api/uploadTask'
 import DirectoryBrowser from './DirectoryBrowser'
 import TrashBrowser from './TrashBrowser'
 import { formatSize } from './demo'
@@ -107,6 +109,12 @@ export default function AuthPage() {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
     return readSingleUploadTask(session.accessToken, taskId, signal)
+  }
+
+  const cancelUploadTask: SingleUploadTaskCanceller = async taskId => {
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return cancelSingleUploadTask(session.accessToken, taskId)
   }
 
   const readPublishedEntry: PublishedUploadEntryReader = async (entryId, signal) => {
@@ -258,6 +266,7 @@ export default function AuthPage() {
               <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
                 readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation} createUploadTask={submitUploadTask}
                 sendUploadContent={submitUploadContent} readUploadTask={readUploadTask} readPublishedEntry={readPublishedEntry}
+                cancelUploadTask={cancelUploadTask}
                 authorizeFileAccess={authorizeFileAccess}
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>

@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import type { MouseEvent } from 'react'
 import { Button, Input, Modal } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
-import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
+import type {
+  PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCanceller, SingleUploadTaskCreator, SingleUploadTaskReader,
+} from './api/uploadTask'
 import type { FileAccessAuthorizer, FileAccessGrant, FileAccessPurpose } from './api/download'
 import { isRasterPreviewMimeType } from './api/download'
 import { ApiError, apiErrorMessage } from './api/http'
@@ -24,7 +26,7 @@ type FileAccessState = { entry: DirectoryEntry; purpose: FileAccessPurpose } & (
 
 export default function DirectoryBrowser({
   rootEntryId, readDirectoryPage, createDirectory, createUploadTask, sendUploadContent, readUploadTask, readPublishedEntry,
-  authorizeFileAccess, renameEntry, moveEntry, trashEntry,
+  cancelUploadTask, authorizeFileAccess, renameEntry, moveEntry, trashEntry,
 }: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
@@ -32,6 +34,7 @@ export default function DirectoryBrowser({
   createUploadTask: SingleUploadTaskCreator
   sendUploadContent: SingleUploadContentSender
   readUploadTask: SingleUploadTaskReader
+  cancelUploadTask: SingleUploadTaskCanceller
   readPublishedEntry: PublishedUploadEntryReader
   authorizeFileAccess: FileAccessAuthorizer
   renameEntry: EntryRenamer
@@ -149,6 +152,7 @@ export default function DirectoryBrowser({
         <SingleUploadDialog parentId={currentDirectory.id}
           targetPath={listing.breadcrumbs.map(crumb => crumb.name || '根目录').join(' / ')}
           createUploadTask={createUploadTask} sendUploadContent={sendUploadContent} readUploadTask={readUploadTask}
+          cancelUploadTask={cancelUploadTask}
           readPublishedEntry={readPublishedEntry} onPublishedEntryRead={() => requestPage(null)}
           onClose={() => setEntryAction(null)} />
       )}

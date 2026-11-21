@@ -1,4 +1,4 @@
-import { ApiError, isRecord, requestData } from './http'
+import { ApiError, isRecord, requestData, requestDataResponse } from './http'
 import { isUploadId } from './upload'
 import type { SingleUploadDeclaration } from './upload'
 
@@ -24,6 +24,7 @@ export interface UploadTaskSnapshot {
 }
 
 export type SingleUploadTaskReader = (taskId: string, signal: AbortSignal) => Promise<UploadTaskSnapshot>
+export type SingleUploadTaskCanceller = (taskId: string) => Promise<UploadTaskSnapshot>
 
 export interface PublishedUploadEntry {
   name: string
@@ -96,13 +97,35 @@ export async function readSingleUploadTask(accessToken: string, taskId: string, 
   }, 200)
 
   // 2. 核对任务及展示字段，已完成时必须有发布结果 ID。
+  return parseSingleUploadTask(data, taskId, 200)
+}
+
+export async function cancelSingleUploadTask(accessToken: string, taskId: string): Promise<UploadTaskSnapshot> {
+  // 1. 向同源的当前任务提交一次取消请求。任务 ID 就是后端处理重复操作的依据。
+  if (!isUploadId(taskId)) throw new ApiError(0, '上传任务 ID 有误。')
+  const { data, status } = await requestDataResponse(`/api/v1/uploads/${taskId}/cancel`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    redirect: 'error',
+  }, [200, 202])
+
+  // 2. 核对同一任务，区分 202 正在取消和 200 已有终态。
+  const snapshot = parseSingleUploadTask(data, taskId, status)
+  const terminalStatuses = ['CANCELLED', 'COMPLETED', 'EXPIRED', 'FAILED']
+  if (status === 202 ? snapshot.status !== 'CANCELLING' : !terminalStatuses.includes(snapshot.status)) {
+    throw new ApiError(status, '服务返回的取消状态有误。')
+  }
+  return snapshot
+}
+
+function parseSingleUploadTask(data: Record<string, unknown>, taskId: string, httpStatus: number): UploadTaskSnapshot {
   const { status, result_entry_id: resultEntryId, resolved_name: resolvedName, last_error: lastError } = data
   const lastErrorMessage = isRecord(lastError) && typeof lastError.message === 'string' ? lastError.message : null
   if (data.id !== taskId || data.upload_mode !== 'SINGLE' || !isUploadTaskStatus(status) ||
       (resultEntryId !== null && !isUploadId(resultEntryId)) || (status === 'COMPLETED' && resultEntryId === null) ||
       (resolvedName !== null && (typeof resolvedName !== 'string' || !resolvedName)) ||
       (lastError !== null && !lastErrorMessage)) {
-    throw new ApiError(200, '服务返回的上传任务状态有误。')
+    throw new ApiError(httpStatus, '服务返回的上传任务状态有误。')
   }
   return { status, resultEntryId, resolvedName, lastError: lastErrorMessage }
 }
