@@ -45,6 +45,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 	t.Cleanup(client.Close)
 	const partSize = 16 << 20
 	const fileSize = partSize + 1
+	const reservedStorage = 5 * fileSize
 	actor := domain.Actor{UserID: 7, DeviceID: 11, SessionID: 41}
 	execute := func(t *testing.T, statement string, arguments ...any) {
 		t.Helper()
@@ -52,7 +53,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execute(t, "INSERT INTO users(id,username,display_name,password_hash,reserved_storage) VALUES(7,'multipart_merge_fixture','分片合并','fixture_hash',?)", 3*fileSize)
+	execute(t, "INSERT INTO users(id,username,display_name,password_hash,reserved_storage) VALUES(7,'multipart_merge_fixture','分片合并','fixture_hash',?)", reservedStorage)
 	execute(t, "INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB')")
 	execute(t, "INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(41,7,11,UNHEX(REPEAT('41',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY)")
 	execute(t, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
@@ -79,6 +80,8 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 		{"new completion", "b4/execution-normal.bin", "", 19, 23},
 		{"recover confirmed version after lost response", "b4/execution-recovered.bin", "response", 20, 24},
 		{"recover confirmed version after write fault", "b4/execution-write-fault.bin", "write", 21, 25},
+		{"repair a part replaced before preflight", "b4/execution-preflight-repair.bin", "early replacement", 22, 26},
+		{"repair a part rejected by storage", "b4/execution-complete-repair.bin", "late replacement", 23, 27},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 合成分片走正式回执冻结，再领取本轮合并租约。
@@ -137,7 +140,17 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			}
 			lease := claim("fixture-merge")
 
-			// 2. 模拟响应丢失或数据库锁等待，使用已登记的重试重新读取原版本。
+			// 2. 在合成任务上制造指定故障，并执行单条合并。
+			earlyReplacement, lateReplacement := fixture.fault == "early replacement", fixture.fault == "late replacement"
+			replaceTail := func() {
+				t.Helper()
+				replacement := []byte{0x44}
+				checksum := multipartProbeSHA256(replacement)
+				putMultipartProbePart(t, ctx, transport, probe.sign(t, ctx, 2, len(replacement), checksum), checksum, replacement, http.StatusOK, "")
+			}
+			if earlyReplacement {
+				replaceTail()
+			}
 			if fixture.fault == "write" {
 				execute(t, `CREATE TRIGGER fixture_merge_lock BEFORE UPDATE ON stored_objects FOR EACH ROW
 					SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'`)
@@ -146,13 +159,63 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			execution := service.NewUploadMergeExecutionService(settings.Provider, settings.Bucket, preflight.Check,
 				func(callContext context.Context, key, uploadID string, size, partSize uint64, count uint32, receipts []domain.UploadPartReceipt) (*domain.UploadObjectResult, error) {
 					completeCalls++
+					if lateReplacement {
+						replaceTail()
+					}
 					confirmation, err := client.CompleteMultipartUpload(callContext, key, uploadID, size, partSize, count, receipts)
+					if lateReplacement && !errors.Is(err, domain.ErrMultipartUploadPartRejected) {
+						t.Fatal("存储未明确拒绝已替换的分片回执", err)
+					}
 					if err == nil && fixture.fault == "response" {
 						return nil, domain.ErrMultipartUploadCompletionUnknown
 					}
 					return confirmation, err
-				}, store.BeginMultipartUploadVerification, store.ScheduleMultipartUploadMergeRetry)
+				}, store.BeginMultipartUploadVerification, store.ScheduleMultipartUploadMergeRetry, preflight.CheckRepair, store.ReopenMultipartUploadForRepair)
 			result, err := execution.Execute(ctx, lease)
+			assertQuotaUnchanged := func() {
+				t.Helper()
+				var reserved, used uint64
+				if err := pool.QueryRowContext(ctx, "SELECT reserved_storage,used_storage FROM users WHERE id=7").Scan(&reserved, &used); err != nil || reserved != reservedStorage || used != 0 {
+					t.Fatal("单条合并改变了账户配额", reserved, used, err)
+				}
+			}
+
+			// 3. 核对失配修复的持久状态、原会话及旧租约无法重放。
+			if earlyReplacement || lateReplacement {
+				wantCompleteCalls := 0
+				if lateReplacement {
+					wantCompleteCalls = 1
+				}
+				if err != nil || result == nil || result.Status != domain.UploadStatusUploading || completeCalls != wantCompleteCalls {
+					t.Fatal("失配后未恢复补传，或额外调用了合并", result, err, completeCalls)
+				}
+				persisted := readTask()
+				if persisted.Status != domain.UploadStatusUploading || persisted.StorageUploadID == nil || *persisted.StorageUploadID != uploadID ||
+					persisted.StagedObjectID != fixture.objectID || persisted.LeaseVersion != lease.LeaseVersion || persisted.LeaseOwner != nil ||
+					persisted.LeaseUntil != nil || persisted.NextAttemptAt != nil || persisted.ReservedBytes != fileSize {
+					t.Fatal("补传任务未保留原会话、原预占和绑定", persisted)
+				}
+				if replayed, replayError := execution.Execute(ctx, lease); replayed != nil || !errors.Is(replayError, domain.ErrUploadTaskNotReady) ||
+					completeCalls != wantCompleteCalls {
+					t.Fatal("原租约仍可执行", replayed, replayError, completeCalls)
+				}
+				var receiptCount int
+				if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM upload_parts WHERE task_id=?", fixture.taskID).Scan(&receiptCount); err != nil || receiptCount != 0 {
+					t.Fatal("旧冻结回执未清空", receiptCount, err)
+				}
+				updatedParts, err := client.ListUploadParts(ctx, fixture.key, uploadID, 1)
+				if err != nil || len(updatedParts) != 2 || updatedParts[0] != parts[0] || updatedParts[1].ETag == parts[1].ETag {
+					t.Fatal("原会话未保留已上传分片及最新回执", err)
+				}
+				if _, err := client.StatMultipartUploadObject(ctx, fixture.key); !errors.Is(err, domain.ErrUploadObjectMissing) {
+					t.Fatal("补传过程中不应生成对象", err)
+				}
+				assertQuotaUnchanged()
+				t.Logf("任务 %d 恢复 %s，旧回执 %d 条，原会话可读取，合并调用 %d 次", fixture.taskID, persisted.Status, receiptCount, completeCalls)
+				return
+			}
+
+			// 4. 对未知结果登记重试的场景，重新领取租约并从原位置确认版本。
 			if fixture.fault != "" {
 				var retry *service.UploadMergeRetryScheduledError
 				scheduled := readTask()
@@ -187,7 +250,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				result, err = execution.Execute(ctx, lease)
 			}
 
-			// 3. 核对状态、确认版本和原配额，确认每条任务只执行过一次存储合并。
+			// 5. 核对状态、确认版本和原配额，确认每条任务只执行过一次存储合并。
 			if err != nil || result == nil || result.Status != domain.UploadStatusVerifying || readTask().Status != domain.UploadStatusVerifying || completeCalls != 1 {
 				t.Fatal("单条执行未得到已提交的校验任务", result, err, completeCalls)
 			}
@@ -200,10 +263,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				metadata.StorageVersionID == nil || *metadata.StorageVersionID != *object.StorageVersionID {
 				t.Fatal("写回元数据与存储版本不一致", err)
 			}
-			var reserved, used uint64
-			if err := pool.QueryRowContext(ctx, "SELECT reserved_storage,used_storage FROM users WHERE id=7").Scan(&reserved, &used); err != nil || reserved != 3*fileSize || used != 0 {
-				t.Fatal("单条合并改变了账户配额", reserved, used, err)
-			}
+			assertQuotaUnchanged()
 			t.Logf("任务 %d 进入 %s，确认版本 %s，合并调用 %d 次", fixture.taskID, result.Status, *object.StorageVersionID, completeCalls)
 		})
 	}
