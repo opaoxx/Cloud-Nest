@@ -10,7 +10,10 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-const maxUploadPartsPageSize = 1000
+const (
+	maxUploadPartsPageSize = 1000
+	uploadPartsReadTimeout = 5 * time.Second
+)
 
 var uploadPartETagPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
@@ -34,7 +37,7 @@ func (client *Client) ListUploadPartsPage(ctx context.Context, objectKey, upload
 	if marker > domain.MaxUploadPartCount || limit < 1 || limit > maxUploadPartsPageSize {
 		return nil, fmt.Errorf("分片回执标记或每页数量超出范围")
 	}
-	readContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	readContext, cancel := context.WithTimeout(ctx, uploadPartsReadTimeout)
 	defer cancel()
 	core := minio.Core{Client: client.sdkClient}
 	page, err := core.ListObjectParts(readContext, client.bucket, objectKey, uploadID, int(marker), limit)

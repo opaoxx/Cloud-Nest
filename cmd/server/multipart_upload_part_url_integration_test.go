@@ -65,8 +65,8 @@ func TestServerMultipartUploadPartURLIntegration(t *testing.T) {
 	other := []byte{0x34}
 	putMultipartProbePart(t, ctx, httpClient, signed, multipartProbeSHA256(other), other, http.StatusForbidden, "SignatureDoesNotMatch")
 	putMultipartProbePart(t, ctx, httpClient, signed, checksum, other, http.StatusBadRequest, "XAmzContentChecksumMismatch")
-	page, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1)
-	if err != nil || page == nil || page.NextMarker != 0 || len(page.Parts) != 0 {
+	receiptList, err := client.ListUploadParts(ctx, key, uploadID, 1)
+	if err != nil || receiptList == nil || len(receiptList) != 0 {
 		t.Fatal("错误请求改变了隔离会话中的分片", err)
 	}
 
@@ -100,5 +100,9 @@ func TestServerMultipartUploadPartURLIntegration(t *testing.T) {
 	if part.PartNumber != 2 || part.SizeBytes != 1 || part.ETag != tailETag || part.ChecksumSHA256 != checksum {
 		t.Fatal("尾片回执与写入结果不符")
 	}
-	t.Logf("独占 MinIO %s。空页及两页均通过，标记 0 → 1 → 末页，片长与 ETag、SHA-256 回执一致", container[:12])
+	receiptList, err = client.ListUploadParts(ctx, key, uploadID, 1)
+	if err != nil || len(receiptList) != 2 || receiptList[0] != firstPage.Parts[0] || receiptList[1] != lastPage.Parts[0] {
+		t.Fatal("整轮分页未依次交付两页的实际回执", err)
+	}
+	t.Logf("独占 MinIO %s。空会话及完整分页均通过，标记 0 → 1 → 末页，两片回执一致", container[:12])
 }
