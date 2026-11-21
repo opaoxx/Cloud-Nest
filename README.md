@@ -14,6 +14,8 @@ go run ./cmd/database -database cloudnest -seed
 
 重复执行会核对迁移摘要并复用已有账号与根目录。配置、隔离验证和异常处理参见 [迁移说明](migrations/README.md)。
 
+阶段 1 的 MySQL 与 MinIO 停写、导出和新环境核对步骤见 [隔离备份恢复手册](docs/隔离备份恢复手册.md)。
+
 ## Web 页面 Demo
 
 已提供可操作的前端假数据页面，直接访问 [CloudNest Demo](http://127.0.0.1:5173)。支持文件浏览、上传进度模拟、预览、搜索、收藏、移动与回收站，刷新后重置。
