@@ -18,7 +18,7 @@ func (store *Store) CommitUserMultipartCompletion(
 	if store == nil || store.database == nil || ctx == nil {
 		return nil, fmt.Errorf("保存分片完成快照需要数据入口和上下文")
 	}
-	if !validMultipartCompletionLeaseSnapshot(claimed) || claimed.PartSize == nil || claimed.PartCount == nil ||
+	if !validMultipartCompletionLeaseSnapshot(claimed, domain.UploadStatusUploading) || claimed.PartSize == nil || claimed.PartCount == nil ||
 		claimed.ExpectedSHA256 == nil || claimed.ReservedBytes != claimed.FileSize {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
