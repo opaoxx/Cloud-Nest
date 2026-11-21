@@ -20,20 +20,33 @@ func (store *Store) CompleteMissingMultipartUploadCancellation(
 	if observation.Object != nil {
 		return nil, domain.ErrUploadTaskNotReady
 	}
+	return store.completeMultipartUploadCancellation(ctx, provider, bucket, observation)
+}
+
+func (store *Store) completeMultipartUploadCancellation(
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
+) (*domain.UploadTask, error) {
+	// 1. 锁内复核对象观察，识别同一次取消的重复交付。
+	observed := observation.Object
 	var completed *domain.UploadTask
 	err := store.withMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observation,
 		func(txContext context.Context, txStore *Store, current *domain.UploadTask, staged *domain.StoredObject) error {
-			// 2. 按有效租约写入 CANCELLED，返还该任务的预占。
+			// 2. 写入 CANCELLED，返还预占，并补齐尚未登记的对象定位。
 			finished, err := txStore.writeMultipartUploadCancelled(txContext, current)
 			if err != nil {
 				return err
 			}
-			// 3. 复用无引用检查，为暂存对象登记延迟回收，统一提交。
+			if observed != nil && staged.StorageETag == nil {
+				if err := txStore.saveMultipartCancellationObjectLocation(txContext, staged, observed); err != nil {
+					return err
+				}
+			}
+			// 3. 检查有效引用，登记七天回收宽限并统一提交。
 			orphaned, err := txStore.markUnreferencedUploadObjectOrphaned(txContext, staged)
 			if err != nil {
 				return err
 			}
-			if !hasMissingMultipartCancellationObject(orphaned, finished) {
+			if !hasCompletedMultipartCancellationObject(orphaned, finished, observed) {
 				return domain.ErrInvalidStoredObjectData
 			}
 			completed = finished
@@ -43,7 +56,7 @@ func (store *Store) CompleteMissingMultipartUploadCancellation(
 			if err := validateCompletedMultipartCancellationTask(current, &observation.Task); err != nil {
 				return err
 			}
-			if !hasMissingMultipartCancellationObject(staged, current) {
+			if !hasCompletedMultipartCancellationObject(staged, current, observed) {
 				return domain.ErrInvalidStoredObjectData
 			}
 			completed = current
@@ -133,11 +146,21 @@ func validateCompletedMultipartCancellationTask(finished, claimed *domain.Upload
 	return nil
 }
 
-func hasMissingMultipartCancellationObject(staged *domain.StoredObject, finished *domain.UploadTask) bool {
-	// 复用终态时兼容原记录已经进入回收流程。
-	return (staged.Status == domain.StoredObjectStatusOrphaned || staged.Status == domain.StoredObjectStatusDeleting ||
+func hasCompletedMultipartCancellationObject(
+	staged *domain.StoredObject, finished *domain.UploadTask, observed *domain.UploadObjectResult,
+) bool {
+	// 复用终态时兼容已进入回收流程的记录，保留原声明大小及未校验事实。
+	registered := (staged.Status == domain.StoredObjectStatusOrphaned || staged.Status == domain.StoredObjectStatusDeleting ||
 		staged.Status == domain.StoredObjectStatusDeleted) &&
-		staged.FileSize == finished.FileSize && staged.StorageETag == nil && staged.StorageVersionID == nil &&
+		staged.FileSize == finished.FileSize &&
 		staged.VerifiedSHA256 == nil && staged.VerifiedAt == nil && staged.UnreferencedAt != nil && staged.GCAfter != nil &&
 		!staged.UnreferencedAt.Before(*finished.CompletedAt) && !staged.GCAfter.Before(staged.UnreferencedAt.Add(7*24*time.Hour))
+	if !registered {
+		return false
+	}
+	if observed == nil {
+		return staged.StorageETag == nil && staged.StorageVersionID == nil
+	}
+	return sameUploadStorageText(staged.StorageETag, observed.StorageETag) &&
+		sameUploadStorageText(staged.StorageVersionID, observed.StorageVersionID)
 }
