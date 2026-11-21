@@ -93,6 +93,7 @@ func prepareBackupTargetRemap(t *testing.T, ctx context.Context) backupTargetRem
 	source := prepareBackupSource(t, ctx)
 	root, manifest := prepareBackupSourceBundle(t, ctx, source)
 	saveAndVerifyBackupSourcePayloads(t, ctx, source.bucket, root, manifest.Objects)
+	t.Logf("备份包就绪，开始恢复到隔离目标：UTC %s", time.Now().UTC().Format(time.RFC3339Nano))
 	database := prepareBackupTargetDatabase(t, ctx, source)
 	if err := importBackupTargetSQL(ctx, database.pool, database.containerID, database.name,
 		filepath.Join(root.Name(), "database.sql"), manifest.DatabaseSHA256); err != nil {

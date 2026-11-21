@@ -200,7 +200,8 @@ func prepareBackupSource(t *testing.T, ctx context.Context) backupSourceFixture 
 	if login.UsedBytes != 0 || login.ReservedBytes != 0 {
 		t.Fatal("合成账号未从空配额开始")
 	}
-	t.Logf("隔离源端 MySQL 库 %s，MinIO 桶 %s，后端 %s，迁移 SHA-256 %s", databaseName, bucket.name, strings.TrimPrefix(source.baseURL, "http://"), checksum)
+	t.Logf("隔离源端 MySQL 地址 %s、库 %s，MinIO 地址 %s、桶 %s，后端 %s，迁移 SHA-256 %s",
+		os.Getenv("CLOUDNEST_DB_ADDRESS"), databaseName, os.Getenv("CLOUDNEST_S3_ENDPOINT"), bucket.name, source.baseURL, checksum)
 	return backupSourceFixture{api: source, pool: pool, bucket: bucket, login: login, databaseName: databaseName,
 		mysqlContainer: mysqlContainer, minioContainer: minioContainer, stop: stop}
 }

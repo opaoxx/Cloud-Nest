@@ -24,9 +24,14 @@ func TestServerBackupTargetDownloadIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
-	// 1. 恢复隔离目标，完成未发送任务的收尾，再从正式根目录读取待下载文件。
 	running := startRestoredBackupTarget(t, ctx)
 	cancelRestoredBackupUpload(t, ctx, running)
+	verifyRestoredBackupActiveDownloads(t, ctx, running)
+}
+
+func verifyRestoredBackupActiveDownloads(t *testing.T, ctx context.Context, running runningBackupTarget) {
+	t.Helper()
+	// 1. 从恢复后的正式根目录读取活动文件和空文件。
 	fixture, api := running.fixture, running.api
 	rootID := backupFixtureID(t, fixture.source.login.RootEntryID)
 	var directory dto.DirectoryPageResponse

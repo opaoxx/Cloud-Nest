@@ -23,6 +23,11 @@ func TestServerBackupTargetRestoreIntegration(t *testing.T) {
 	defer cancel()
 	running := startRestoredBackupTarget(t, ctx)
 	cancelRestoredBackupUpload(t, ctx, running)
+	verifyRestoredBackupTrashDownload(t, ctx, running)
+}
+
+func verifyRestoredBackupTrashDownload(t *testing.T, ctx context.Context, running runningBackupTarget) {
+	t.Helper()
 	fixture, api := running.fixture, running.api
 	rootID := fixture.source.login.RootEntryID
 	rootBreadcrumb := dto.DirectoryBreadcrumb{ID: rootID}
