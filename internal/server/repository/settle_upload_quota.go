@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -26,7 +27,7 @@ func (store *Store) SettlePublishedUploadQuota(ctx context.Context, task *domain
 	userID := store.loginUserID
 	lockedStore := *store
 	lockedStore.database = store.database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"})
-	current, err := lockedStore.findVerifyingUploadWithFullReservation(ctx, task)
+	current, err := lockedStore.findVerifyingUploadWithFullReservation(ctx, task, "SINGLE")
 	if err != nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func (store *Store) SettlePublishedUploadQuota(ctx context.Context, task *domain
 }
 
 // findVerifyingUploadWithFullReservation 复核待发布任务及其完整预占，调用方提供加锁读取的 Store。
-func (lockedStore *Store) findVerifyingUploadWithFullReservation(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
+func (lockedStore *Store) findVerifyingUploadWithFullReservation(ctx context.Context, task *domain.UploadTask, uploadMode string) (*domain.UploadTask, error) {
 	// 1. 校验事务账号和传入的租约标识。
 	userID := lockedStore.loginUserID
 	if task == nil || task.ID == 0 || task.UserID != userID || task.StagedObjectID == 0 ||
@@ -112,18 +113,29 @@ func (lockedStore *Store) findVerifyingUploadWithFullReservation(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
-	if current.Status != domain.UploadStatusVerifying || current.UploadMode != "SINGLE" {
+	if current.Status != domain.UploadStatusVerifying || current.UploadMode != uploadMode || task.UploadMode != uploadMode {
 		return nil, domain.ErrUploadTaskNotReady
 	}
 	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
-		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil {
+		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil ||
+		(uploadMode == "MULTIPART" && !sameUploadStorageText(current.StorageUploadID, task.StorageUploadID)) {
 		return nil, domain.ErrUploadTaskBusy
 	}
 	if current.FileSize != task.FileSize || current.ReservedBytes != current.FileSize ||
 		current.PublishedObjectID != nil || current.ResultEntryID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if current.FileSize > domain.MaxSingleUploadSizeBytes {
+	maxSize := domain.MaxSingleUploadSizeBytes
+	if uploadMode == "MULTIPART" {
+		maxSize = math.MaxInt64
+		if task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) ||
+			task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
+			!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) ||
+			!sameMultipartUploadPlan(task, current) {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	}
+	if current.FileSize > maxSize {
 		return nil, domain.ErrUploadFileTooLarge
 	}
 	return current, nil

@@ -28,7 +28,7 @@ func (store *Store) ScheduleUploadVerificationRetry(ctx context.Context, task *d
 		// 2. 锁定当前任务，复核租约版本和预占。
 		lockedStore := *txStore
 		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
-		current, err := lockedStore.findVerifyingUploadWithFullReservation(txContext, task)
+		current, err := lockedStore.findVerifyingUploadWithFullReservation(txContext, task, "SINGLE")
 		if err != nil {
 			return err
 		}

@@ -29,9 +29,14 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 		return err
 	}
 	userID := store.loginUserID
+	// Multipart 当前接入的是发布目标不可用这一条失败入口。
+	uploadMode := "SINGLE"
+	if task != nil && task.UploadMode == "MULTIPART" && errorCode == domain.UploadTargetUnavailableCode {
+		uploadMode = "MULTIPART"
+	}
 	lockedStore := *store
 	lockedStore.database = store.database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"})
-	current, err := lockedStore.findVerifyingUploadWithFullReservation(ctx, task)
+	current, err := lockedStore.findVerifyingUploadWithFullReservation(ctx, task, uploadMode)
 	if err != nil {
 		return err
 	}
@@ -53,6 +58,11 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 		staged.UnreferencedAt != nil || staged.VerifiedSHA256 != nil || staged.VerifiedAt != nil {
 		return domain.ErrInvalidStoredObjectData
 	}
+	if uploadMode == "MULTIPART" && (!validMultipartMergeObjectText(staged.ObjectKey) || staged.StorageETag == nil ||
+		!validMultipartMergeObjectText(*staged.StorageETag) ||
+		(staged.StorageVersionID != nil && !validMultipartMergeObjectText(*staged.StorageVersionID))) {
+		return domain.ErrInvalidStoredObjectData
+	}
 
 	// 2. 等额释放预占，条件写入失败状态和原因。
 	result := store.database.WithContext(ctx).Exec(
@@ -68,13 +78,15 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 			"AND upload_task.id = ? AND upload_task.staged_object_id = ? AND upload_task.target_parent_id = ? "+
 			"AND CAST(upload_task.lease_owner AS BINARY) = ? AND upload_task.lease_version = ? "+
 			"AND upload_task.lease_until > UTC_TIMESTAMP(6) AND upload_task.expires_at > UTC_TIMESTAMP(6) "+
-			"AND upload_task.status = 'VERIFYING' AND upload_task.upload_mode = 'SINGLE' "+
+			"AND upload_task.status = 'VERIFYING' AND upload_task.upload_mode = ? "+
+			"AND CAST(upload_task.storage_upload_id AS BINARY) <=> ? "+
 			"AND upload_task.file_size = ? AND upload_task.reserved_bytes = upload_task.file_size "+
 			"AND upload_task.published_object_id IS NULL AND upload_task.result_entry_id IS NULL "+
 			"AND upload_task.resolved_name IS NULL AND upload_task.completed_at IS NULL",
 		account.ReservedBytes-current.ReservedBytes, current.ReservedBytes, errorCode, errorMessage,
 		userID, account.QuotaBytes, account.UsedBytes, account.ReservedBytes,
-		current.ID, current.StagedObjectID, current.TargetParentID, *current.LeaseOwner, current.LeaseVersion, current.FileSize)
+		current.ID, current.StagedObjectID, current.TargetParentID, *current.LeaseOwner, current.LeaseVersion,
+		current.UploadMode, current.StorageUploadID, current.FileSize)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -97,7 +109,7 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 	if err != nil {
 		return err
 	}
-	if failed.Status != domain.UploadStatusFailed || failed.ReservedBytes != 0 ||
+	if failed.Status != domain.UploadStatusFailed || failed.UploadMode != current.UploadMode || failed.ReservedBytes != 0 ||
 		failed.LeaseOwner != nil || failed.LeaseUntil != nil || failed.LeaseVersion != current.LeaseVersion ||
 		failed.StagedObjectID != staged.ID || failed.NextAttemptAt != nil ||
 		failed.PublishedObjectID != nil || failed.ResultEntryID != nil || failed.ResolvedName != nil ||
@@ -107,6 +119,15 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 		failed.LastErrorMessage == nil || *failed.LastErrorMessage != errorMessage {
 		return domain.ErrInvalidUploadTaskData
 	}
-	_, err = lockedStore.markUnreferencedUploadObjectOrphaned(ctx, staged)
-	return err
+	if uploadMode == "MULTIPART" && (!sameMultipartUploadPlan(current, failed) || !sameUploadStorageText(failed.StorageUploadID, current.StorageUploadID)) {
+		return domain.ErrInvalidUploadTaskData
+	}
+	orphaned, err := lockedStore.markUnreferencedUploadObjectOrphaned(ctx, staged)
+	if err != nil {
+		return err
+	}
+	if uploadMode == "MULTIPART" && (!sameStoredObjectLocation(orphaned, staged) || !sameUploadStorageText(orphaned.StorageETag, staged.StorageETag)) {
+		return domain.ErrInvalidStoredObjectData
+	}
+	return nil
 }

@@ -17,11 +17,13 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 	outerFailure := errors.New("fixture abort after publication callback")
 	for _, scenario := range []struct {
 		name               string
+		multipart          bool
 		reuse              bool
 		zeroBytes          bool
 		blockedTarget      bool
 		shortReserve       bool
 		protectedCopy      bool
+		changedOrphan      bool
 		verificationChange string
 		wantError          error
 	}{
@@ -39,6 +41,17 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			verificationChange: "UPDATE upload_tasks SET target_parent_id=13 WHERE id=19", wantError: domain.ErrUploadTaskBusy},
 		{name: "target unavailable and orphaning fails", blockedTarget: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
 		{name: "target failure finalization rolls back", blockedTarget: true, wantError: outerFailure},
+		{name: "multipart ancestor in trash", multipart: true, blockedTarget: true, wantError: domain.ErrUploadTargetUnavailable},
+		{name: "multipart insufficient reservation", multipart: true, blockedTarget: true, shortReserve: true, wantError: domain.ErrInvalidAccountData},
+		{name: "multipart stale lease", multipart: true, blockedTarget: true,
+			verificationChange: "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "multipart elapsed lease", multipart: true, blockedTarget: true,
+			verificationChange: "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "multipart session changed", multipart: true, blockedTarget: true,
+			verificationChange: "UPDATE upload_tasks SET storage_upload_id=RTRIM(storage_upload_id) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "multipart protected object", multipart: true, blockedTarget: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
+		{name: "multipart orphan version changed", multipart: true, blockedTarget: true, changedOrphan: true, wantError: domain.ErrInvalidStoredObjectData},
+		{name: "multipart outer rollback", multipart: true, blockedTarget: true, wantError: outerFailure},
 		{name: "corrupt target chain preserves upload", verificationChange: "UPDATE file_entries SET parent_id=16 WHERE id=15", wantError: domain.ErrInvalidFileEntryData},
 		{name: "quota mismatch after file creation", shortReserve: true, wantError: domain.ErrInvalidAccountData},
 		{name: "orphaning fails after task completion", reuse: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
@@ -64,6 +77,13 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			execute("UPDATE file_entries SET status='PURGED',object_id=NULL,purged_at=UTC_TIMESTAMP(6) WHERE id=31")
 			execute("UPDATE stored_objects SET unreferenced_at=UTC_TIMESTAMP(6)-INTERVAL 1 DAY,gc_after=UTC_TIMESTAMP(6)+INTERVAL 6 DAY WHERE id=29")
 			digest := domain.UploadContentDigest{SizeBytes: domain.MaxSingleUploadSizeBytes, SHA256: sha256.Sum256([]byte("new upload fixture"))}
+			uploadMode := "SINGLE"
+			var uploadSession, partSize, partCount, storageVersion, etag any
+			if scenario.multipart {
+				digest.SizeBytes++
+				uploadMode, uploadSession, partSize, partCount = "MULTIPART", "fixture-session ", domain.MaxSingleUploadSizeBytes, 2
+				storageVersion, etag = "merged-version", "merged-etag"
+			}
 			if scenario.reuse {
 				digest.SHA256 = [32]byte{}
 				nameKey, err := service.BuildEntryNameKey(original.RequestedName)
@@ -90,18 +110,31 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			if err := pool.QueryRowContext(ctx, "SELECT updated_at FROM users WHERE id=7").Scan(&quotaUpdatedAt); err != nil {
 				t.Fatal(err)
 			}
-			execute("UPDATE stored_objects SET status='VERIFYING',file_size=? WHERE id=23", digest.SizeBytes)
-			execute(`UPDATE upload_tasks SET target_parent_id=16,status='VERIFYING',upload_mode='SINGLE',
-				storage_upload_id=NULL,part_size=NULL,part_count=NULL,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,
+			execute("UPDATE stored_objects SET status='VERIFYING',file_size=?,storage_version_id=?,storage_etag=? WHERE id=23", digest.SizeBytes, storageVersion, etag)
+			execute(`UPDATE upload_tasks SET target_parent_id=16,status='VERIFYING',upload_mode=?,
+				storage_upload_id=?,part_size=?,part_count=?,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,
 				completed_at=NULL,file_size=?,reserved_bytes=?,expected_sha256=?,lease_owner='verify-worker',lease_version=3,
 				lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE,expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY,updated_at=UTC_TIMESTAMP(6) WHERE id=19`,
-				digest.SizeBytes, digest.SizeBytes, digest.SHA256[:])
+				uploadMode, uploadSession, partSize, partCount, digest.SizeBytes, digest.SizeBytes, digest.SHA256[:])
+			if scenario.multipart {
+				execute("UPDATE upload_tasks SET lease_owner=NULL,lease_until=NULL,next_attempt_at=NULL WHERE id=19")
+				candidates, err := store.ListMultipartUploadVerificationCandidates(ctx, 1)
+				if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
+					t.Fatal("未找到 Multipart 校验候选", candidates, err)
+				}
+				if claimed, err := store.ClaimMultipartUploadVerificationLease(ctx, candidates[0], "fixture-multipart-worker"); err != nil || claimed == nil {
+					t.Fatal("未取得 Multipart 校验租约", err)
+				}
+			}
 			if scenario.blockedTarget {
 				execute("UPDATE file_entries SET status='TRASHED',deleted_at=UTC_TIMESTAMP(6) WHERE id=15")
 			}
 			if scenario.protectedCopy {
 				execute(`INSERT INTO file_entries(user_id,parent_id,name,name_key,entry_type,category,object_id,file_size,status,deleted_at)
 					VALUES(7,13,'protected fixture',CAST('protected fixture' AS BINARY),'FILE','OTHER',23,?,'TRASHED',UTC_TIMESTAMP(6))`, digest.SizeBytes)
+			}
+			if scenario.changedOrphan {
+				execute("CREATE TRIGGER fixture_orphan_changes_version BEFORE UPDATE ON stored_objects FOR EACH ROW SET NEW.storage_version_id='other-version'")
 			}
 			task, err := store.FindUserUploadTask(ctx, 7, 19)
 			if err != nil {
@@ -182,11 +215,23 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 				}
 				orphaned := readObject(staged.ID)
 				if orphaned.Status != domain.StoredObjectStatusOrphaned || orphaned.UnreferencedAt == nil || orphaned.GCAfter == nil ||
-					!orphaned.GCAfter.Equal(orphaned.UnreferencedAt.Add(7*24*time.Hour)) || !reflect.DeepEqual(readObject(reusable.ID), reusable) {
+					!orphaned.GCAfter.Equal(orphaned.UnreferencedAt.Add(7*24*time.Hour)) || !sameStoredObjectLocation(orphaned, staged) ||
+					!sameUploadStorageText(orphaned.StorageETag, staged.StorageETag) || !reflect.DeepEqual(readObject(reusable.ID), reusable) {
 					t.Fatal("失败收尾未正确处理暂存对象", orphaned)
 				}
 				if retried, err := publisher.Publish(ctx, task, staged, digest); retried != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 					t.Fatal("重复收尾不应再次释放预占", retried, err)
+				}
+				if scenario.multipart {
+					if !sameMultipartUploadPlan(task, savedTask) || !sameUploadStorageText(task.StorageUploadID, savedTask.StorageUploadID) {
+						t.Fatal("Multipart 失败收尾改动了原会话或声明")
+					}
+					var retryReserved, retryUsed uint64
+					if err := pool.QueryRowContext(ctx, "SELECT reserved_storage,used_storage FROM users WHERE id=7").Scan(&retryReserved, &retryUsed); err != nil ||
+						retryReserved != savedReserved || retryUsed != savedUsed || !reflect.DeepEqual(readObject(staged.ID), orphaned) {
+						t.Fatal("重复收尾改变了其他配额或对象计时", err)
+					}
+					t.Logf("Multipart %s，返还 %d 字节预占，保留 %d 字节其他预占和原对象版本，回收宽限期 7 天", failedView.LastError.Code, digest.SizeBytes, savedReserved)
 				}
 				return
 			}
