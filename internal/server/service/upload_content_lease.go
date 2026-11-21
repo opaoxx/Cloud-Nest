@@ -16,22 +16,8 @@ func ValidateUploadContentLease(task *domain.UploadTask, userID, taskID uint64, 
 	}
 
 	// 2. 核对租约持有者、期限配对及已领取版本。
-	if (task.LeaseOwner == nil) != (task.LeaseUntil == nil) {
-		return domain.ErrInvalidUploadTaskData
-	}
-	if task.LeaseOwner != nil {
-		if len(*task.LeaseOwner) == 0 || len(*task.LeaseOwner) > 64 || task.LeaseVersion == 0 {
-			return domain.ErrInvalidUploadTaskData
-		}
-		for _, character := range *task.LeaseOwner {
-			if character > 127 {
-				return domain.ErrInvalidUploadTaskData
-			}
-		}
-		until := task.LeaseUntil.UTC()
-		if until.Year() < 1000 || until.Year() > 9999 || until.Nanosecond()%1000 != 0 {
-			return domain.ErrInvalidUploadTaskData
-		}
+	if err := validateUploadLeaseData(task); err != nil {
+		return err
 	}
 
 	// 3. 有效租约返回忙碌，阻止重复领取。
@@ -44,4 +30,30 @@ func ValidateUploadContentLease(task *domain.UploadTask, userID, taskID uint64, 
 		return domain.ErrUploadLeaseVersionExhausted
 	}
 	return nil
+}
+
+// validateUploadLeaseData 检查读取的任务是否保留完整、有效的租约字段。
+func validateUploadLeaseData(task *domain.UploadTask) error {
+	if (task.LeaseOwner == nil) != (task.LeaseUntil == nil) {
+		return domain.ErrInvalidUploadTaskData
+	}
+	if task.LeaseOwner != nil {
+		if len(*task.LeaseOwner) == 0 || len(*task.LeaseOwner) > 64 || task.LeaseVersion == 0 {
+			return domain.ErrInvalidUploadTaskData
+		}
+		for _, character := range *task.LeaseOwner {
+			if character > 127 {
+				return domain.ErrInvalidUploadTaskData
+			}
+		}
+		if !validUploadDatabaseTime(*task.LeaseUntil) {
+			return domain.ErrInvalidUploadTaskData
+		}
+	}
+	return nil
+}
+
+func validUploadDatabaseTime(stamp time.Time) bool {
+	year := stamp.UTC().Year()
+	return year >= 1000 && year <= 9999 && stamp.Nanosecond()%1000 == 0
 }
