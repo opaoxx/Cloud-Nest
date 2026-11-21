@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, Modal } from 'antd'
 import { ApiError, apiErrorMessage } from './api/http'
 import { maxSingleUploadSizeMiB, prepareSingleUpload } from './api/upload'
-import type { SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader, UploadTaskReceipt, UploadTaskSnapshot } from './api/uploadTask'
+import type {
+  PublishedUploadEntry, PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator,
+  SingleUploadTaskReader, UploadTaskReceipt, UploadTaskSnapshot,
+} from './api/uploadTask'
 
 const uploadTaskStatusLabels: Record<UploadTaskSnapshot['status'], string> = {
   CREATING: '创建中',
@@ -17,12 +20,16 @@ const uploadTaskStatusLabels: Record<UploadTaskSnapshot['status'], string> = {
   FAILED: '失败',
 }
 
-export default function SingleUploadDialog({ parentId, targetPath, createUploadTask, sendUploadContent, readUploadTask, onClose }: {
+export default function SingleUploadDialog({
+  parentId, targetPath, createUploadTask, sendUploadContent, readUploadTask, readPublishedEntry, onPublishedEntryRead, onClose,
+}: {
   parentId: string
   targetPath: string
   createUploadTask: SingleUploadTaskCreator
   sendUploadContent: SingleUploadContentSender
   readUploadTask: SingleUploadTaskReader
+  readPublishedEntry: PublishedUploadEntryReader
+  onPublishedEntryRead: () => void
   onClose: () => void
 }) {
   const [file, setFile] = useState<File | null>(null)
@@ -33,6 +40,8 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
   const [taskSnapshot, setTaskSnapshot] = useState<UploadTaskSnapshot | null>(null)
   const [querying, setQuerying] = useState(false)
   const [queryError, setQueryError] = useState('')
+  const [publishedEntry, setPublishedEntry] = useState<PublishedUploadEntry | null>(null)
+  const [publishedError, setPublishedError] = useState('')
   const inFlight = useRef(false)
   const taskQuery = useRef<AbortController | null>(null)
   const idempotencyKey = useRef<string | null>(null)
@@ -47,6 +56,21 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
     idempotencyKey.current = null
     setErrorMessage('')
     setFile(selectedFile)
+  }
+
+  async function loadPublishedEntry(entryId: string, signal: AbortSignal) {
+    // 1. 读取结果文件，避免用任务里保存的发布名称代替当前详情。
+    try {
+      const entry = await readPublishedEntry(entryId, signal)
+      if (signal.aborted) return
+
+      // 2. 保存当前名称，再让原上传目录从首页读取真实列表。
+      setPublishedEntry(entry)
+      onPublishedEntryRead()
+    } catch (error) {
+      // 3. 详情读取失败只影响文件展示，保留已确认的任务状态。
+      if (!signal.aborted) setPublishedError(apiErrorMessage(error))
+    }
   }
 
   async function submit() {
@@ -108,6 +132,11 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
       if (controller.signal.aborted) return
       setTaskSnapshot(snapshot)
       setErrorMessage('')
+      setPublishedEntry(null)
+      setPublishedError('')
+      if (snapshot.status === 'COMPLETED' && snapshot.resultEntryId) {
+        await loadPublishedEntry(snapshot.resultEntryId, controller.signal)
+      }
     } catch (error) {
       // 3. 读取失败时保留上一次结果，允许再次查询。
       if (!controller.signal.aborted) setQueryError(apiErrorMessage(error))
@@ -118,8 +147,12 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
   }
 
   function close() {
-    if (!inFlight.current) onClose()
+    if (inFlight.current) return
+    taskQuery.current?.abort()
+    onClose()
   }
+
+  const publishedName = publishedEntry?.name ?? taskSnapshot?.resolvedName
 
   return (
     <Modal title="准备单文件上传" open onCancel={close} width={440}
@@ -133,8 +166,8 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
             </Button>
           )}
           {receipt && (
-            <Button onClick={() => void queryTask()} disabled={submitting || querying} loading={querying}>
-              查询任务状态
+            <Button onClick={() => void queryTask()} disabled={submitting || querying}>
+              {querying ? '查询中…' : '查询任务状态'}
             </Button>
           )}
           {receipt && canSendContent && (
@@ -162,7 +195,7 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
         {taskSnapshot && <div><dt>任务状态</dt><dd role="status">{uploadTaskStatusLabels[taskSnapshot.status]}</dd></div>}
         {taskSnapshot?.status === 'COMPLETED' && (
           <>
-            {taskSnapshot.resolvedName && <div><dt>发布文件</dt><dd>{taskSnapshot.resolvedName}</dd></div>}
+            {publishedName && <div><dt>{publishedEntry ? '当前文件名' : '发布时文件名'}</dt><dd>{publishedName}</dd></div>}
             <div><dt>文件 ID</dt><dd>{taskSnapshot.resultEntryId}</dd></div>
           </>
         )}
@@ -175,6 +208,8 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
       {!taskSnapshot && contentStatus === 'needs-status-check' && <p>请保留任务 ID，查询任务状态后再重试。</p>}
       {taskSnapshot?.lastError && <p className="auth-error" role="alert">{taskSnapshot.lastError}</p>}
       {queryError && <p className="auth-error" role="alert">无法查询上传任务。{queryError}</p>}
+      {publishedError && <p className="auth-error" role="alert">无法读取发布文件。{publishedError}</p>}
+      {publishedEntry && publishedEntry.parentId !== parentId && <p>文件当前位于其他目录。</p>}
       {preparation && 'error' in preparation && <p className="auth-error" role="alert">{preparation.error}</p>}
       {errorMessage && <p className="auth-error" role="alert">{errorMessage}</p>}
     </Modal>

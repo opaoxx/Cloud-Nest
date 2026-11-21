@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"io"
 	"net/http"
 	"os/exec"
@@ -21,23 +22,8 @@ func TestServerWebSingleUploadContentIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
-	// 1. 建立独占数据库、MinIO 容器和随机测试桶，再启动正式 Web 与后端。
-	startIsolatedWebMySQL(t, ctx)
-	startIsolatedWebMinIO(t, ctx)
-	pool, databaseName := prepareServerIntegrationDatabase(t, ctx)
-	bucket := prepareServerUploadContentBucket(t, ctx)
-	hash, err := bcrypt.GenerateFromPassword([]byte(webLoginFixturePassword), bcrypt.MinCost)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.ExecContext(ctx, "INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(7,?,?,?,1024)",
-		webLoginFixtureUsername, webLoginFixtureDisplayName, string(hash)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(33,7,'',X'','DIR')"); err != nil {
-		t.Fatal(err)
-	}
-	webURL := startServerWebFixture(t, ctx, databaseName, run)
+	// 1. 建立独占存储和生产路由实例。
+	pool, bucket, webURL := prepareWebSingleUploadFixture(t, ctx)
 
 	// 2. 在浏览器验证原始正文、零字节、同任务 202、连点和超时后的提示。
 	runWebBrowserProbe(t, ctx, cli, webURL, "web_upload_content.js", "CN524 browser checks passed")
@@ -88,6 +74,26 @@ func TestServerWebSingleUploadContentIntegration(t *testing.T) {
 		t.Fatalf("接收结果不符，对象版本=%d 任务=%d 未发送任务=%d 配额核对=%d", versions, tasks, unsent, accounted)
 	}
 	t.Log("MinIO 读回 6 字节和 0 字节均一致，对象版本 2 个，模拟超时任务仍为 UPLOADING")
+}
+
+func prepareWebSingleUploadFixture(t *testing.T, ctx context.Context) (*sql.DB, *serverUploadContentBucket, string) {
+	t.Helper()
+	startIsolatedWebMySQL(t, ctx)
+	startIsolatedWebMinIO(t, ctx)
+	pool, databaseName := prepareServerIntegrationDatabase(t, ctx)
+	bucket := prepareServerUploadContentBucket(t, ctx)
+	hash, err := bcrypt.GenerateFromPassword([]byte(webLoginFixturePassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, "INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(7,?,?,?,1024)",
+		webLoginFixtureUsername, webLoginFixtureDisplayName, string(hash)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(33,7,'',X'','DIR')"); err != nil {
+		t.Fatal(err)
+	}
+	return pool, bucket, startServerWebFixture(t, ctx, databaseName, run)
 }
 
 // startIsolatedWebMinIO 只在 startIsolatedWebMySQL 确认本机 Docker 后调用。

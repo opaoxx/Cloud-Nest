@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Button } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
-import type { SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
+import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
 import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
@@ -11,13 +11,17 @@ import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
 
-export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, createUploadTask, sendUploadContent, readUploadTask, renameEntry, moveEntry, trashEntry }: {
+export default function DirectoryBrowser({
+  rootEntryId, readDirectoryPage, createDirectory, createUploadTask, sendUploadContent, readUploadTask, readPublishedEntry,
+  renameEntry, moveEntry, trashEntry,
+}: {
   rootEntryId: string
   readDirectoryPage: DirectoryPageReader
   createDirectory: DirectoryCreator
   createUploadTask: SingleUploadTaskCreator
   sendUploadContent: SingleUploadContentSender
   readUploadTask: SingleUploadTaskReader
+  readPublishedEntry: PublishedUploadEntryReader
   renameEntry: EntryRenamer
   moveEntry: EntryMover
   trashEntry: EntryTrasher
@@ -81,6 +85,7 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
         <SingleUploadDialog parentId={currentDirectory.id}
           targetPath={listing.breadcrumbs.map(crumb => crumb.name || '根目录').join(' / ')}
           createUploadTask={createUploadTask} sendUploadContent={sendUploadContent} readUploadTask={readUploadTask}
+          readPublishedEntry={readPublishedEntry} onPublishedEntryRead={() => requestPage(null)}
           onClose={() => setEntryAction(null)} />
       )}
       {(entryAction?.kind === 'create' || entryAction?.kind === 'rename') && currentDirectory?.id === request.directoryId && (

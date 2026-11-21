@@ -25,6 +25,15 @@ export interface UploadTaskSnapshot {
 
 export type SingleUploadTaskReader = (taskId: string, signal: AbortSignal) => Promise<UploadTaskSnapshot>
 
+export interface PublishedUploadEntry {
+  name: string
+  parentId: string
+}
+
+export type PublishedUploadEntryReader = (entryId: string, signal: AbortSignal) => Promise<PublishedUploadEntry>
+
+const fileKinds = ['document', 'image', 'video', 'audio', 'archive', 'other']
+
 function isUploadTaskStatus(value: unknown): value is UploadTaskStatus {
   return uploadTaskStatuses.some(status => status === value)
 }
@@ -96,4 +105,22 @@ export async function readSingleUploadTask(accessToken: string, taskId: string, 
     throw new ApiError(200, '服务返回的上传任务状态有误。')
   }
   return { status, resultEntryId, resolvedName, lastError: lastErrorMessage }
+}
+
+export async function readPublishedUploadEntry(accessToken: string, entryId: string, signal: AbortSignal): Promise<PublishedUploadEntry> {
+  // 1. 使用任务返回的结果 ID，通过现有详情入口读取当前可见项。
+  if (!isUploadId(entryId)) throw new ApiError(0, '发布文件 ID 有误。')
+  const data = await requestData(`/api/v1/entries/${entryId}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    redirect: 'error',
+    signal,
+  }, 200)
+
+  // 2. 核对同一文件，再交付当前实际名称和父目录。
+  if (data.id !== entryId || data.status !== 'ACTIVE' || !isUploadId(data.parent_id) ||
+      typeof data.kind !== 'string' || !fileKinds.includes(data.kind) || typeof data.name !== 'string' || !data.name) {
+    throw new ApiError(200, '服务返回的发布文件详情有误。')
+  }
+  return { name: data.name, parentId: data.parent_id }
 }
