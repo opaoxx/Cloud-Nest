@@ -14,8 +14,8 @@ import (
 // 候选供内部 worker 使用，领取租约时仍须按所属用户重新核对。
 func (store *Store) ListMultipartUploadInitializationCandidates(ctx context.Context, limit int) ([]domain.MultipartUploadInitializationCandidate, error) {
 	// 1. 校验读取入口和批量大小，限制单次查询等待时间。
-	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > maxUploadLeaseCandidates {
-		return nil, fmt.Errorf("扫描分片初始化需要数据入口、上下文和 1～100 条的批量大小")
+	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > domain.MaxMultipartUploadInitializationCandidates {
+		return nil, fmt.Errorf("扫描分片初始化需要数据入口、上下文和 1～%d 条的批量大小", domain.MaxMultipartUploadInitializationCandidates)
 	}
 	if _, inTransaction := store.database.Statement.ConnPool.(gorm.TxCommitter); inTransaction {
 		return nil, fmt.Errorf("跨用户扫描分片初始化须使用事务外的数据入口")

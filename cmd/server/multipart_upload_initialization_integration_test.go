@@ -182,19 +182,19 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		}
 		return "", context.DeadlineExceeded
 	})
-	scheduled, err := timeoutProcessor.Process(ctx, scan(1)[0], worker)
-	if err != nil || scheduled == nil || scheduled.Status != domain.UploadStatusCreating || scheduled.StorageUploadID != nil ||
+	timeoutBatch := service.NewMultipartUploadInitializationBatch(store.ListMultipartUploadInitializationCandidates, timeoutProcessor.Process)
+	summary, err := timeoutBatch.RunOnce(ctx, 1, worker)
+	if err != nil || summary.Scanned != 1 || summary.Bound != 0 || summary.RetriesScheduled != 1 || len(summary.CandidateErrors) != 0 {
+		t.Fatal("本轮未汇总已提交的重试安排", summary, err)
+	}
+	scheduled := read(ctx)
+	if scheduled.Status != domain.UploadStatusCreating || scheduled.StorageUploadID != nil ||
 		scheduled.LeaseVersion != 1 || scheduled.LeaseOwner != nil || scheduled.LeaseUntil != nil || scheduled.AttemptCount != 6 ||
 		scheduled.NextAttemptAt == nil || !scheduled.NextAttemptAt.Equal(scheduled.UpdatedAt.Add(30*time.Second)) ||
 		scheduled.LastErrorCode == nil || *scheduled.LastErrorCode != "STORAGE_UNAVAILABLE" {
-		t.Fatal("存储超时未提交当前任务的重试安排", err)
+		t.Fatal("存储超时未提交当前任务的重试安排")
 	}
-	current := read(ctx)
-	if current.NextAttemptAt == nil || !current.NextAttemptAt.Equal(*scheduled.NextAttemptAt) ||
-		current.LeaseOwner != nil || current.LeaseUntil != nil || current.AttemptCount != 6 || current.StorageUploadID != nil {
-		t.Fatal("独立读回与已提交的重试安排不符")
-	}
-	checkQuota(current)
+	checkQuota(scheduled)
 	scan(0)
 	execute("UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE user_id=7 AND id=19")
 
@@ -209,17 +209,18 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 
 	// 4. 原任务重新领租并完成绑定，核对已提交任务与 MinIO 会话。
 	candidate := scan(1)[0]
-	task, err := processor.Process(ctx, candidate, worker)
-	if err != nil || task == nil || task.ID != 19 || task.Status != domain.UploadStatusUploading || task.StorageUploadID == nil ||
+	batch := service.NewMultipartUploadInitializationBatch(store.ListMultipartUploadInitializationCandidates, processor.Process)
+	summary, err = batch.RunOnce(ctx, 1, worker)
+	if err != nil || summary.Scanned != 1 || summary.Bound != 1 || summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 0 {
+		t.Fatal("本轮未汇总已提交的会话绑定", summary, err)
+	}
+	task := read(ctx)
+	if task.ID != 19 || task.Status != domain.UploadStatusUploading || task.StorageUploadID == nil ||
 		len(createdIDs) != 3 || *task.StorageUploadID != createdIDs[2] || task.LeaseVersion != 3 || task.LeaseOwner != nil ||
 		task.NextAttemptAt != nil || task.LastErrorCode != nil || task.AttemptCount != 6 {
-		t.Fatal("重新初始化未返回本轮绑定的已提交任务", err)
+		t.Fatal("重新初始化未提交本轮绑定的任务")
 	}
 	checkQuota(task)
-	if current := read(ctx); current.StorageUploadID == nil || *current.StorageUploadID != *task.StorageUploadID ||
-		current.Status != task.Status || current.LeaseVersion != task.LeaseVersion {
-		t.Fatal("从独立连接读取的绑定结果与返回值不同")
-	}
 	scan(0)
 	if result, err := processor.Process(ctx, candidate, worker); result != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 		t.Fatal("已绑定任务被旧候选重复处理", err)
@@ -232,6 +233,6 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	if err != nil || page.Key != key || page.UploadID != *task.StorageUploadID || len(page.ObjectParts) != 0 || page.ChecksumAlgorithm != "SHA256" {
 		t.Fatal("绑定的会话位置或 SHA256 算法不符", minio.ToErrorResponse(err).Code)
 	}
-	t.Logf("隔离 MySQL %s %s，MinIO %s %s，确认 30 秒重试，同一任务最终绑定 1 个会话并保留 2 个待核对会话",
+	t.Logf("隔离 MySQL %s %s，MinIO %s %s，单轮分别汇总 1 次重试和 1 次会话绑定",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }
