@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -37,16 +36,17 @@ import (
 func prepareServerIntegrationDatabase(t *testing.T, ctx context.Context) (*sql.DB, string) {
 	t.Helper()
 	pool, databaseName := prepareEmptyServerIntegrationDatabase(t, ctx)
-	// 在独占库应用正式业务迁移，供生产启动检查。
-	if _, err := pool.ExecContext(ctx, migrations.InitialSQL); err != nil {
-		t.Fatal(err)
-	}
+	// 在独占库按清单应用正式业务迁移，供生产启动检查。
 	if _, err := pool.ExecContext(ctx, "CREATE TABLE schema_migrations(version BIGINT UNSIGNED PRIMARY KEY,checksum CHAR(64) NOT NULL,dirty BOOLEAN NOT NULL)"); err != nil {
 		t.Fatal(err)
 	}
-	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte(migrations.InitialSQL)))
-	if _, err := pool.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(1,?,false)", checksum); err != nil {
-		t.Fatal(err)
+	for _, migration := range migrations.Ordered() {
+		if _, err := pool.ExecContext(ctx, migration.SQL); err != nil {
+			t.Fatalf("迁移版本 %d: %v", migration.Version, err)
+		}
+		if _, err := pool.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(?,?,false)", migration.Version, migration.Checksum()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return pool, databaseName
 }

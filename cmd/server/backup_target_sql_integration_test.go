@@ -51,8 +51,8 @@ func TestServerBackupTargetSQLIntegration(t *testing.T) {
 
 	// 3. 从目标库只读核对迁移、表行数、配额和完整目录与对象引用。
 	userID := backupFixtureID(t, source.login.User.ID)
-	tableRows, migrationChecksum := inspectBackupDatabase(t, ctx, target.pool, userID)
-	verifyBackupSourceSQL(t, dump, tableRows, migrationChecksum)
+	tableRows := inspectBackupDatabase(t, ctx, target.pool, userID)
+	verifyBackupSourceSQL(t, dump, tableRows)
 	tableCount, err := backupTargetTableCount(ctx, target.pool, target.name)
 	if err != nil || tableCount != len(tableRows) {
 		t.Fatalf("目标库表数为 %d，预期 %d，错误 %v", tableCount, len(tableRows), err)
@@ -61,7 +61,7 @@ func TestServerBackupTargetSQLIntegration(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(restored, manifest) {
 		t.Fatal("目标库的目录、文件引用或源对象定位与清单不符", err)
 	}
-	t.Log("目标库核对通过：迁移版本 1，九张表，2 个目录、3 条文件引用及原对象版本，已用 10 B、预占 3 B")
+	t.Logf("目标库核对通过：迁移历史完整，%d 张表，2 个目录、3 条文件引用及原对象版本，已用 10 B、预占 3 B", tableCount)
 }
 
 func prepareBackupTargetDatabase(t *testing.T, ctx context.Context, source backupSourceFixture) backupTargetDatabase {

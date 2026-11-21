@@ -80,7 +80,7 @@ func openEmptyMigrationFixture(t *testing.T) *sql.Conn {
 	t.Cleanup(func() { connection.Close() })
 
 	// 单独创建空库，在本连接执行迁移，避免写入现有测试基线。
-	fixtureName := fmt.Sprintf("cloudnest_migrate_verify_cn560_%d", time.Now().UnixNano())
+	fixtureName := fmt.Sprintf("cloudnest_migrate_verify_fixture_%d", time.Now().UnixNano())
 	if _, err := connection.ExecContext(t.Context(), "CREATE DATABASE "+fixtureName); err != nil {
 		t.Fatal(err)
 	}

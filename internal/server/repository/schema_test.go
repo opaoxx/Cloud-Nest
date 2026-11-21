@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/config"
+	"github.com/opaoxx/cloud-nest/migrations"
 )
 
 // schemaCheckDatabase 仅在显式启用时创建本用例独占的测试库，并登记删除操作。
@@ -64,6 +65,7 @@ func TestCheckSchemaIntegration(t *testing.T) {
 		dirty    bool
 	}
 	validRecord := migrationRecord{version: 1, checksum: validChecksum}
+	versionTwo := migrationRecord{version: 2, checksum: migrations.Ordered()[1].Checksum()}
 	testCases := []struct {
 		name      string
 		noTable   bool
@@ -72,12 +74,15 @@ func TestCheckSchemaIntegration(t *testing.T) {
 	}{
 		{name: "missing table", noTable: true, wantError: "缺少 schema_migrations"},
 		{name: "empty ledger", wantError: "记录缺失"},
-		{name: "valid initial migration", records: []migrationRecord{validRecord}},
+		{name: "valid schema", records: []migrationRecord{validRecord, versionTwo}},
+		{name: "missing second migration", records: []migrationRecord{validRecord}, wantError: "迁移版本 2 的记录缺失"},
 		{name: "older version", records: []migrationRecord{{version: 0, checksum: validChecksum}}, wantError: "迁移版本 0"},
-		{name: "future version", records: []migrationRecord{{version: 2, checksum: validChecksum}}, wantError: "迁移版本 2"},
-		{name: "extra future version", records: []migrationRecord{validRecord, {version: 2, checksum: validChecksum}}, wantError: "迁移版本 2"},
+		{name: "missing first migration", records: []migrationRecord{versionTwo}, wantError: "迁移版本 2"},
+		{name: "extra future version", records: []migrationRecord{validRecord, versionTwo, {version: 3, checksum: validChecksum}}, wantError: "迁移版本 3"},
 		{name: "dirty migration", records: []migrationRecord{{version: 1, checksum: validChecksum, dirty: true}}, wantError: "dirty=true"},
 		{name: "checksum mismatch", records: []migrationRecord{{version: 1, checksum: strings.Repeat("0", 64)}}, wantError: "摘要"},
+		{name: "dirty second migration", records: []migrationRecord{validRecord, {version: 2, checksum: versionTwo.checksum, dirty: true}}, wantError: "迁移版本 2 的 dirty=true"},
+		{name: "second checksum mismatch", records: []migrationRecord{validRecord, {version: 2, checksum: strings.Repeat("0", 64)}}, wantError: "迁移版本 2 的摘要"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

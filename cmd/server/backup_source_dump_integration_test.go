@@ -42,7 +42,7 @@ func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture bac
 		startedAt.Format(time.RFC3339Nano), stoppedAt.Format(time.RFC3339Nano))
 
 	// 2. 从停止写入的专用库记录基线，再导出全部结构和数据。
-	tableRows, migrationChecksum := inspectBackupDatabase(t, ctx, fixture.pool, backupFixtureID(t, fixture.login.User.ID))
+	tableRows := inspectBackupDatabase(t, ctx, fixture.pool, backupFixtureID(t, fixture.login.User.ID))
 	for _, container := range []struct{ name, id string }{{"MySQL", fixture.mysqlContainer}, {"MinIO", fixture.minioContainer}} {
 		image, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{.Image}}", container.id).Output()
 		if err != nil {
@@ -53,7 +53,7 @@ func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture bac
 	dump := exportBackupSourceSQL(t, ctx, fixture, backupDir)
 
 	// 3. 核对导出文件中的表、逐行记录和迁移摘要，保留可复验的日志。
-	verifyBackupSourceSQL(t, dump, tableRows, migrationChecksum)
+	verifyBackupSourceSQL(t, dump, tableRows)
 	t.Logf("SQL 快照 %d B，SHA-256 %x，结构共 %d 张表，数据行数与停写基线逐表一致", len(dump), sha256.Sum256(dump), len(tableRows))
 	return dump
 }
@@ -79,7 +79,7 @@ func verifyBackupSourceStopped(t *testing.T, baseURL, logs string) {
 	}
 }
 
-func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, userID uint64) (map[string]int, string) {
+func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, userID uint64) map[string]int {
 	t.Helper()
 	// 1. 确认停写后仍然只有一个未发送任务，并且没有待删除或到期清理的样本。
 	var used, reserved, pending, unsent, purging, deleting int
@@ -98,25 +98,26 @@ func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, user
 			used, reserved, pending, unsent, purging, deleting)
 	}
 
-	// 2. 记录正式迁移状态和九张表的行数，以便独立核对导出结构和数据。
-	var version int
-	var name, checksum string
-	var dirty bool
-	var appliedAt time.Time
-	if err := pool.QueryRowContext(ctx, "SELECT version,name,checksum,dirty,applied_at FROM schema_migrations").
-		Scan(&version, &name, &checksum, &dirty, &appliedAt); err != nil {
-		t.Fatal(err)
+	// 2. 核对全部正式迁移记录及各表行数，供导出和恢复后的检查使用。
+	expectedMigrations := migrations.Ordered()
+	for _, migration := range expectedMigrations {
+		var name, checksum string
+		var dirty bool
+		var appliedAt time.Time
+		if err := pool.QueryRowContext(ctx, "SELECT name,checksum,dirty,applied_at FROM schema_migrations WHERE version=?", migration.Version).
+			Scan(&name, &checksum, &dirty, &appliedAt); err != nil {
+			t.Fatal(err)
+		}
+		if name != migration.Name || checksum != migration.Checksum() || dirty || appliedAt.IsZero() {
+			t.Fatalf("迁移版本 %d 与当前程序不兼容", migration.Version)
+		}
+		t.Logf("迁移记录：版本 %d，文件 %s，SHA-256 %s，dirty=%t，应用时间 %s",
+			migration.Version, name, checksum, dirty, appliedAt.Format(time.RFC3339Nano))
 	}
-	if version != 1 || name != "000001_initial.up.sql" || dirty || appliedAt.IsZero() ||
-		checksum != fmt.Sprintf("%x", sha256.Sum256([]byte(migrations.InitialSQL))) {
-		t.Fatal("迁移记录与当前程序不兼容")
-	}
-	t.Logf("迁移记录：版本 %d，文件 %s，SHA-256 %s，dirty=%t，应用时间 %s",
-		version, name, checksum, dirty, appliedAt.Format(time.RFC3339Nano))
 	counts := map[string]int{
 		"users": 1, "user_devices": 1, "auth_sessions": 1, "stored_objects": 4,
 		"file_entries": 5, "user_entry_preferences": 0, "upload_tasks": 4, "idempotency_records": 6,
-		"schema_migrations": 1,
+		"upload_parts": 0, "schema_migrations": len(expectedMigrations),
 	}
 	for table, expected := range counts {
 		var rows int
@@ -124,7 +125,7 @@ func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, user
 			t.Fatalf("表 %s 行数 %d，预期 %d，错误 %v", table, rows, expected, err)
 		}
 	}
-	return counts, checksum
+	return counts
 }
 
 func exportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string) []byte {
@@ -163,7 +164,7 @@ func verifyBackupSQLContainerDigest(ctx context.Context, containerID, path, expe
 	return nil
 }
 
-func verifyBackupSourceSQL(t *testing.T, dump []byte, tableRows map[string]int, migrationChecksum string) {
+func verifyBackupSourceSQL(t *testing.T, dump []byte, tableRows map[string]int) {
 	t.Helper()
 	if !bytes.Contains(dump, []byte("\n-- Dump completed on ")) || bytes.Count(dump, []byte("\nCREATE TABLE ")) != len(tableRows) ||
 		bytes.Contains(dump, []byte("\nUSE ")) || bytes.Contains(dump, []byte("\nDROP TABLE ")) {
@@ -178,8 +179,10 @@ func verifyBackupSourceSQL(t *testing.T, dump []byte, tableRows map[string]int, 
 			t.Fatalf("SQL 快照中的表 %s 导出 %d 行，预期 %d 行", table, rows, expected)
 		}
 	}
-	migration := []byte("\nINSERT INTO `schema_migrations` VALUES (1,'000001_initial.up.sql','" + migrationChecksum + "',0,")
-	if !bytes.Contains(dump, migration) {
-		t.Fatal("导出文件的迁移记录与停写基线不符")
+	for _, migration := range migrations.Ordered() {
+		record := fmt.Sprintf("\nINSERT INTO `schema_migrations` VALUES (%d,'%s','%s',0,", migration.Version, migration.Name, migration.Checksum())
+		if !bytes.Contains(dump, []byte(record)) {
+			t.Fatalf("导出文件中的迁移版本 %d 与停写基线不符", migration.Version)
+		}
 	}
 }
