@@ -11,7 +11,7 @@ import (
 // ValidateUploadPublicationTarget 复核已领取校验任务的目标目录和全部祖先。
 // 调用方提供写回复核回调中的任务、上下文和当前事务读取能力。
 func ValidateUploadPublicationTarget(ctx context.Context, task *domain.UploadTask, reader FileEntryPathReader) (*domain.FileEntryPath, error) {
-	// 1. 核对事务读取能力、任务及目标目录。
+	// 1. 核对事务读取能力、任务阶段、上传方式及目标目录。
 	if ctx == nil || reader == nil {
 		return nil, fmt.Errorf("复核发布目标需要事务上下文和路径读取能力")
 	}
@@ -24,7 +24,7 @@ func ValidateUploadPublicationTarget(ctx context.Context, task *domain.UploadTas
 	if task.TargetParentID == 0 {
 		return nil, domain.ErrInvalidUploadParentID
 	}
-	if task.Status != domain.UploadStatusVerifying || task.UploadMode != "SINGLE" {
+	if task.Status != domain.UploadStatusVerifying || (task.UploadMode != "SINGLE" && task.UploadMode != "MULTIPART") {
 		return nil, domain.ErrUploadTaskNotReady
 	}
 
