@@ -281,18 +281,33 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 	published := awaitServerUploadPublication(t, ctx, store, 7, singleTaskID)
 	var singleCompleted dto.UploadTaskResponse
 	owner.request(t, ctx, http.MethodPost, singleCompletionPath, "", nil, http.StatusOK, &singleCompleted)
+	// 7. 配额与分片任务状态取同一快照，适配分片合并和校验 worker 的独立节拍。
 	var used, reserved uint64
-	if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
-		published.ResultEntryID == nil || singleCompleted.Data.ResultEntryID == nil ||
+	var multipartStatus domain.UploadStatus
+	if err := pool.QueryRowContext(ctx, `SELECT users.used_storage,users.reserved_storage,upload_tasks.status
+		FROM users JOIN upload_tasks ON upload_tasks.user_id=users.id WHERE users.id=7 AND upload_tasks.id=19`).
+		Scan(&used, &reserved, &multipartStatus); err != nil {
+		t.Fatal("无法读取分片任务和配额快照", err)
+	}
+	wantUsed, wantReserved := uint64(len(single)), uint64(fileSize)
+	switch multipartStatus {
+	case domain.UploadStatusCompleting, domain.UploadStatusVerifying:
+	case domain.UploadStatusCompleted:
+		wantUsed += fileSize
+		wantReserved = 0
+	default:
+		t.Fatal("分片任务未继续校验或完成发布", multipartStatus)
+	}
+	if published.ResultEntryID == nil || singleCompleted.Data.ResultEntryID == nil ||
 		*singleCompleted.Data.ResultEntryID != fmt.Sprint(*published.ResultEntryID) || singleCompleted.Data.Status != "COMPLETED" ||
-		singleCompleted.Data.UploadMode != "SINGLE" || used != uint64(len(single)) || reserved != fileSize {
-		t.Fatal("单文件发布、完成确认或分片任务预占不符", used, reserved, err)
+		singleCompleted.Data.UploadMode != "SINGLE" || used != wantUsed || reserved != wantReserved {
+		t.Fatal("单文件发布、完成确认或分片任务配额不符", multipartStatus, used, reserved)
 	}
 	logs, err := stopServer()
 	if err != nil || strings.Contains(logs, uploadID) || strings.Contains(logs, "X-Amz-Signature") ||
 		strings.Contains(logs, owner.accessToken) || strings.Contains(logs, other.accessToken) {
 		t.Fatal("隔离服务关停或签名日志保护失败", err)
 	}
-	t.Logf("独占 MySQL %s 库 %s，MinIO %s 桶 %s，HTTP %s。分片失配 409，成功及重试 202，快照 2 行、预占 %d 字节，SINGLE 发布确认 200",
-		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name, api.baseURL, fileSize)
+	t.Logf("独占 MySQL %s 库 %s，MinIO %s 桶 %s，HTTP %s。分片失配 409，受理及重试 202，快照 2 行，SINGLE 发布确认 200，分片 %s，已用 %d 字节，预占 %d 字节",
+		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name, api.baseURL, multipartStatus, used, reserved)
 }

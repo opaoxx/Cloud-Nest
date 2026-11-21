@@ -699,7 +699,12 @@ func runWithPurgeRootWorker(
 	stopUploadMerge := startServerUploadMergeWorker(ctx, uploadMergeBatch.RunOnce, logger)
 	defer stopUploadMerge()
 
-	// 39. 启动 HTTP 并处理退出通知。
+	// 39. 启动分片校验，释放 MinIO 与 MySQL 连接前先等待校验 worker 退出。
+	multipartVerification := newServerMultipartUploadVerificationBatch(store, storageClient.OpenUploadVerificationObject)
+	stopMultipartVerification := startServerMultipartUploadVerificationWorker(ctx, multipartVerification.RunOnce, logger)
+	defer stopMultipartVerification()
+
+	// 40. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

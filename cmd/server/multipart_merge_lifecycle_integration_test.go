@@ -107,7 +107,7 @@ func TestServerMultipartMergeLifecycleIntegration(t *testing.T) {
 		t.Fatal("启动前未提交完成意图并释放核对租约", err)
 	}
 
-	// 2. 运行正式启停入口，暂停首轮汇报并核对任务、对象版本与预占。
+	// 2. 运行正式启停入口，先在首轮分片校验启动前核对合并结果。
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -122,36 +122,49 @@ func TestServerMultipartMergeLifecycleIntegration(t *testing.T) {
 	t.Setenv("CLOUDNEST_JWT_SECRET", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("m"), 32)))
 
 	var logs bytes.Buffer
-	const reportMessage = "分片合并轮次结束"
-	gate := &serverWorkerReportGate{
-		Handler: logging.New(&logs).Handler(), reportMessage: reportMessage, reportStarted: make(chan struct{}),
-		releaseReport: make(chan struct{}), httpStopped: make(chan struct{}), deadline: ctx.Done(),
+	const mergeReportMessage, verifyReportMessage = "分片合并轮次结束", "分片校验轮次结束"
+	newReportGate := func(next slog.Handler, message string) *serverWorkerReportGate {
+		return &serverWorkerReportGate{
+			Handler: next, reportMessage: message, reportStarted: make(chan struct{}),
+			releaseReport: make(chan struct{}), httpStopped: make(chan struct{}), deadline: ctx.Done(),
+		}
 	}
-	releaseReport := sync.OnceFunc(func() { close(gate.releaseReport) })
+	mergeReport := newReportGate(logging.New(&logs).Handler(), mergeReportMessage)
+	verifyStart := newReportGate(mergeReport, "分片校验 worker 已启动")
+	verifyReport := newReportGate(verifyStart, verifyReportMessage)
+	releaseMerge := sync.OnceFunc(func() { close(mergeReport.releaseReport) })
+	releaseVerifyStart := sync.OnceFunc(func() { close(verifyStart.releaseReport) })
+	releaseVerifyReport := sync.OnceFunc(func() { close(verifyReport.releaseReport) })
 	runContext, stop := context.WithCancel(ctx)
 	runDone := make(chan struct{})
 	var runError error
 	go func() {
 		defer close(runDone)
-		runError = run(runContext, slog.New(gate))
+		runError = run(runContext, slog.New(verifyReport))
 	}()
 	defer func() {
 		stop()
-		releaseReport()
+		releaseMerge()
+		releaseVerifyStart()
+		releaseVerifyReport()
 		select {
 		case <-runDone:
 		case <-time.After(35 * time.Second):
 			t.Error("隔离服务未在清理期限内关闭")
 		}
 	}()
-	select {
-	case <-gate.reportStarted:
-	case <-runDone:
-		t.Fatal("服务在合并首轮汇报前退出", runError)
-	case <-ctx.Done():
-		t.Fatal("合并首轮未在期限内汇报")
+	waitForGate := func(gate *serverWorkerReportGate, waitContext context.Context) {
+		t.Helper()
+		select {
+		case <-gate.reportStarted:
+		case <-runDone:
+			t.Fatal("服务在预期事件前退出", gate.reportMessage, runError)
+		case <-waitContext.Done():
+			t.Fatal("未在期限内到达预期事件", gate.reportMessage)
+		}
 	}
-	waitForServerIntegrationHTTP(t, ctx, address)
+	waitForGate(verifyStart, ctx)
+	waitForGate(mergeReport, ctx)
 	task, err := store.FindUserUploadTask(ctx, actor.UserID, completing.ID)
 	if err != nil || task.Status != domain.UploadStatusVerifying || task.StagedObjectID != completing.StagedObjectID ||
 		task.LeaseVersion != completing.LeaseVersion+1 || task.LeaseOwner != nil || task.LeaseUntil != nil ||
@@ -172,11 +185,43 @@ func TestServerMultipartMergeLifecycleIntegration(t *testing.T) {
 		reserved != fileSize || used != 0 {
 		t.Fatal("合并后应保留全额预占，已用空间仍为零", reserved, used, err)
 	}
+	releaseMerge()
 
-	// 3. 先停 HTTP，确认服务等待合并汇报结束，再核对两种连接的释放顺序。
+	// 3. 放行校验首轮，核对原版本发布、目录项和只结算一次的配额。
+	firstRoundContext, stopFirstRoundWait := context.WithTimeout(ctx, uploadVerificationInterval)
+	releaseVerifyStart()
+	waitForGate(verifyReport, firstRoundContext)
+	stopFirstRoundWait()
+	waitForServerIntegrationHTTP(t, ctx, address)
+	published, err := store.FindUserUploadTask(ctx, actor.UserID, task.ID)
+	if err != nil || published.Status != domain.UploadStatusCompleted || published.LeaseVersion != task.LeaseVersion+1 ||
+		published.LeaseOwner != nil || published.LeaseUntil != nil || published.NextAttemptAt != nil || published.ReservedBytes != 0 ||
+		published.PublishedObjectID == nil || *published.PublishedObjectID != object.ID || published.ResultEntryID == nil {
+		t.Fatal("分片校验首轮未提交预期的发布结果", published, err)
+	}
+	verifiedObject, err := store.FindUserStoredObject(ctx, actor.UserID, object.ID)
+	if err != nil || verifiedObject.Status != domain.StoredObjectStatusReady || verifiedObject.VerifiedSHA256 == nil ||
+		!bytes.Equal(verifiedObject.VerifiedSHA256[:], digest.Sum(nil)) || verifiedObject.FileSize != fileSize ||
+		verifiedObject.StorageVersionID == nil || *verifiedObject.StorageVersionID != info.VersionID ||
+		verifiedObject.StorageETag == nil || *verifiedObject.StorageETag != info.ETag {
+		t.Fatal("分片校验未用合并保存的原版本发布", verifiedObject, err)
+	}
+	entry, err := store.FindUserFileEntry(ctx, actor.UserID, *published.ResultEntryID)
+	if err != nil || entry.Status != "ACTIVE" || entry.EntryType != "FILE" || entry.ParentID == nil ||
+		*entry.ParentID != task.TargetParentID || entry.Name != task.RequestedName || entry.FileSize != fileSize {
+		t.Fatal("发布后的目录项不符", entry, err)
+	}
+	var files int
+	if err := pool.QueryRowContext(ctx, `SELECT reserved_storage,used_storage,
+		(SELECT COUNT(*) FROM file_entries WHERE user_id=users.id AND entry_type='FILE') FROM users WHERE id=?`, actor.UserID).
+		Scan(&reserved, &used, &files); err != nil || reserved != 0 || used != fileSize || files != 1 {
+		t.Fatal("校验发布后必须恰好结算一次配额", reserved, used, files, err)
+	}
+
+	// 4. 先停 HTTP，确认服务等待分片校验汇报，再核对连接释放顺序。
 	stop()
 	select {
-	case <-gate.httpStopped:
+	case <-verifyReport.httpStopped:
 	case <-runDone:
 		t.Fatal("HTTP 正常停止前服务已退出", runError)
 	case <-ctx.Done():
@@ -184,10 +229,10 @@ func TestServerMultipartMergeLifecycleIntegration(t *testing.T) {
 	}
 	select {
 	case <-runDone:
-		t.Fatal("合并 worker 仍在汇报，服务已提前退出", runError)
+		t.Fatal("分片校验 worker 仍在汇报，服务已提前退出", runError)
 	case <-time.After(100 * time.Millisecond):
 	}
-	releaseReport()
+	releaseVerifyReport()
 	select {
 	case <-runDone:
 		if runError != nil {
@@ -198,18 +243,23 @@ func TestServerMultipartMergeLifecycleIntegration(t *testing.T) {
 	}
 	logged := logs.String()
 	previous := -1
-	for _, message := range []string{"HTTP 服务已停止", reportMessage, "分片合并 worker 已停止", "MinIO 空闲连接已释放", "MySQL 连接池已关闭"} {
+	for _, message := range []string{"HTTP 服务已停止", verifyReportMessage, "分片校验 worker 已停止", "MinIO 空闲连接已释放", "MySQL 连接池已关闭"} {
 		position := strings.Index(logged, message)
 		if position <= previous {
 			t.Fatal("关停日志缺失或顺序不符", message)
 		}
 		previous = position
 	}
-	if strings.Count(logged, reportMessage) != 1 ||
-		!strings.Contains(logged, `"scanned":1,"verifying":1,"reopened":0,"failed":0,"retries_scheduled":0,"skipped":0,"candidate_errors":0`) ||
-		strings.Contains(logged, uploadID) {
-		t.Fatal("首轮汇报计数或脱敏不符")
+	mergeStopped := strings.Index(logged, "分片合并 worker 已停止")
+	if mergeStopped < 0 || mergeStopped >= strings.Index(logged, "MinIO 空闲连接已释放") {
+		t.Fatal("分片合并 worker 未在释放连接前停止")
 	}
-	t.Logf("HTTP %s，任务 %d 首轮 %s → %s，版本 %s，%d 字节预占，%d 字节已用。先等合并 worker，再释放 MinIO 和 MySQL",
-		address, task.ID, completing.Status, task.Status, info.VersionID, reserved, used)
+	if strings.Count(logged, mergeReportMessage) != 1 || strings.Count(logged, verifyReportMessage) != 1 ||
+		!strings.Contains(logged, `"scanned":1,"verifying":1,"reopened":0,"failed":0,"retries_scheduled":0,"skipped":0,"candidate_errors":0`) ||
+		!strings.Contains(logged, `"scanned":1,"published":1,"retries_scheduled":0,"candidate_errors":0`) ||
+		strings.Contains(logged, uploadID) {
+		t.Fatal("合并或分片校验首轮汇报计数、脱敏不符")
+	}
+	t.Logf("HTTP %s，任务 %d 首轮 %s → %s → %s，条目 %d，版本 %s，SHA-256 %x，%d 字节预占，%d 字节已用。先等分片校验 worker，再释放 MinIO 和 MySQL",
+		address, task.ID, completing.Status, task.Status, published.Status, entry.ID, info.VersionID, *verifiedObject.VerifiedSHA256, reserved, used)
 }
