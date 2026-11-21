@@ -15,7 +15,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
-func TestMarkUploadCleanupRetryError(t *testing.T) {
+func TestMarkUploadTransactionRetryError(t *testing.T) {
 	lockWait := &mysql.MySQLError{Number: 1205}
 	deadlock := &mysql.MySQLError{Number: 1213}
 	canceled, cancel := context.WithCancel(t.Context())
@@ -42,13 +42,13 @@ func TestMarkUploadCleanupRetryError(t *testing.T) {
 		{name: "typed nil database error", err: (*mysql.MySQLError)(nil)},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			// 1. 传入收尾可能返回的错误，核对是否附加标记。
+			// 1. 传入上传事务可能返回的错误，核对是否附加标记。
 			caller := scenario.caller
 			if caller == nil {
 				caller = t.Context()
 			}
-			for _, marker := range []error{domain.ErrUploadExpirationRetryable, domain.ErrUploadCancellationRetryable} {
-				marked := markUploadCleanupRetryError(caller, scenario.err, marker)
+			for _, marker := range []error{domain.ErrUploadExpirationRetryable, domain.ErrUploadCancellationRetryable, domain.ErrUploadMergeWriteRetryable} {
+				marked := markUploadTransactionRetryError(caller, scenario.err, marker)
 				if errors.Is(marked, marker) != scenario.retryable {
 					t.Fatal("重试标记不符", marker, marked)
 				}

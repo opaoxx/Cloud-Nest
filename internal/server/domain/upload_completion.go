@@ -17,6 +17,9 @@ var ErrMultipartUploadPartRejected = errors.New("存储拒绝了分片合并回�
 // ErrMultipartUploadCompletionUnknown 表示合并请求的结果仍须通过恢复检查确认。
 var ErrMultipartUploadCompletionUnknown = fmt.Errorf("分片合并结果未确认: %w", ErrUploadStorageUnavailable)
 
+// ErrUploadMergeWriteRetryable 标记可通过后续核对恢复的合并结果写回故障。
+var ErrUploadMergeWriteRetryable = errors.New("分片合并结果写回可重试")
+
 // UploadPartsMismatchError 保存升序的受影响编号，最多交付前 20 个。
 type UploadPartsMismatchError struct {
 	PartNumbers []uint32

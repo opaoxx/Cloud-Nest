@@ -15,10 +15,16 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 	const provider, bucket, key, session = "local_minio", "fixture-bucket", "users/7/objects/merge +%.bin", "Opaque+A/= "
 	now := time.Date(2026, 11, 22, 12, 0, 0, 123456000, time.UTC)
 	full := []string{"preflight", "complete", "write"}
+	completionRetry := []string{"preflight", "complete", "retry"}
+	writeRetry := []string{"preflight", "complete", "write", "retry"}
 	failure := errors.New("fixture write failed")
+	retryableWrite := errors.Join(domain.ErrUploadMergeWriteRetryable, failure)
 	for _, fixture := range []struct {
 		name, mode, cancelAt                string
 		preflightErr, completeErr, writeErr error
+		retryErr                            error
+		attemptCount                        uint32
+		wantDelay                           int
 		want                                error
 		wantCalls                           []string
 	}{
@@ -29,8 +35,21 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 		{name: "contradictory actions", mode: "both", want: domain.ErrInvalidUploadTaskData, wantCalls: full[:1]},
 		{name: "target belongs to another session", mode: "wrong session", want: domain.ErrInvalidUploadTaskData, wantCalls: full[:1]},
 		{name: "receipt list incomplete", mode: "short receipts", want: domain.ErrInvalidUploadTaskData, wantCalls: full[:1]},
-		{name: "unknown completion does not write", completeErr: domain.ErrMultipartUploadCompletionUnknown,
-			want: domain.ErrMultipartUploadCompletionUnknown, wantCalls: full[:2]},
+		{name: "unknown completion schedules retry", completeErr: domain.ErrMultipartUploadCompletionUnknown,
+			want: domain.ErrMultipartUploadCompletionUnknown, wantCalls: completionRetry, wantDelay: 1},
+		{name: "temporary storage error backs off", preflightErr: domain.ErrUploadStorageUnavailable,
+			want: domain.ErrUploadStorageUnavailable, wantCalls: []string{"preflight", "retry"}, attemptCount: 4, wantDelay: 16},
+		{name: "missing session needs recheck", preflightErr: domain.ErrUploadPartSessionMissing,
+			want: domain.ErrUploadPartSessionMissing, wantCalls: []string{"preflight", "retry"}, wantDelay: 1},
+		{name: "storage deadline caps backoff", completeErr: context.DeadlineExceeded,
+			want: context.DeadlineExceeded, wantCalls: completionRetry, attemptCount: 10, wantDelay: 30},
+		{name: "known lock failure schedules retry", writeErr: retryableWrite, want: failure, wantCalls: writeRetry, wantDelay: 1},
+		{name: "retry write failure retains both errors", completeErr: domain.ErrMultipartUploadCompletionUnknown, retryErr: domain.ErrUploadTaskBusy,
+			want: domain.ErrMultipartUploadCompletionUnknown, wantCalls: completionRetry, wantDelay: 1},
+		{name: "invalid retry result retains original error", mode: "wrong retry", completeErr: domain.ErrMultipartUploadCompletionUnknown,
+			want: domain.ErrMultipartUploadCompletionUnknown, wantCalls: completionRetry, wantDelay: 1},
+		{name: "mismatched parts need separate handling", preflightErr: domain.ErrUploadPartsMismatch,
+			want: domain.ErrUploadPartsMismatch, wantCalls: full[:1]},
 		{name: "explicit rejection does not write", completeErr: domain.ErrMultipartUploadPartRejected,
 			want: domain.ErrMultipartUploadPartRejected, wantCalls: full[:2]},
 		{name: "size differs on confirmation", mode: "wrong size", want: domain.ErrUploadBodySizeMismatch, wantCalls: full[:2]},
@@ -51,9 +70,14 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 			claimed := uploadPartSigningTaskFixture(now.Add(time.Hour))
 			claimed.Status, claimed.LeaseOwner, claimed.LeaseUntil = domain.UploadStatusCompleting, new("merge-worker"), new(now.Add(time.Minute))
 			claimed.StorageUploadID = new(session)
+			claimed.AttemptCount = fixture.attemptCount
 			original := copyUploadTask(claimed)
 			committed := copyUploadTask(claimed)
 			committed.Status, committed.LeaseOwner, committed.LeaseUntil = domain.UploadStatusVerifying, nil, nil
+			scheduled := copyUploadTask(claimed)
+			scheduled.LeaseOwner, scheduled.LeaseUntil = nil, nil
+			scheduled.AttemptCount++
+			scheduled.UpdatedAt, scheduled.NextAttemptAt = now, new(now.Add(time.Minute))
 			target := UploadPartSigningTarget{TaskID: claimed.ID, UserID: claimed.UserID, StagedObjectID: claimed.StagedObjectID,
 				LeaseVersion: claimed.LeaseVersion, ObjectKey: key, UploadID: session, FileSizeBytes: claimed.FileSize,
 				PartSizeBytes: *claimed.PartSize, PartCount: *claimed.PartCount, ExpiresAt: claimed.ExpiresAt}
@@ -77,6 +101,8 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 				metadata = nil
 			case "wrong commit":
 				committed.ID++
+			case "wrong retry":
+				scheduled.ID++
 			}
 
 			// 2. 记录预检、合并和写回，逐项检查传入的原租约、位置及确认。
@@ -113,6 +139,13 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 						cancel()
 					}
 					return committed, fixture.writeErr
+				},
+				func(callContext context.Context, lease *domain.UploadTask, delay int) (*domain.UploadTask, error) {
+					calls = append(calls, "retry")
+					if callContext != ctx || lease != claimed || delay != fixture.wantDelay {
+						t.Fatal("重试登记未使用原租约和预期退避", delay)
+					}
+					return scheduled, fixture.retryErr
 				})
 
 			// 3. 核对两条成功路径和失败边界。
@@ -125,6 +158,14 @@ func TestUploadMergeExecutionServiceExecute(t *testing.T) {
 			}
 			if fixture.name == "canceled with unknown result" && !errors.Is(err, context.Canceled) {
 				t.Fatal("结果不明时丢失了取消原因", err)
+			}
+			var registered *UploadMergeRetryScheduledError
+			wantRegistered := fixture.wantDelay > 0 && fixture.retryErr == nil && fixture.mode != "wrong retry"
+			if errors.As(err, &registered) != wantRegistered || (wantRegistered && !registered.NextAttemptAt.Equal(*scheduled.NextAttemptAt)) {
+				t.Fatal("重试登记结果或时间不符", err)
+			}
+			if fixture.retryErr != nil && !errors.Is(err, fixture.retryErr) || fixture.mode == "wrong retry" && !errors.Is(err, domain.ErrInvalidUploadTaskData) {
+				t.Fatal("重试登记失败原因未保留", err)
 			}
 		})
 	}

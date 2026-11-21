@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -51,7 +52,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execute(t, "INSERT INTO users(id,username,display_name,password_hash,reserved_storage) VALUES(7,'multipart_merge_fixture','分片合并','fixture_hash',?)", 2*fileSize)
+	execute(t, "INSERT INTO users(id,username,display_name,password_hash,reserved_storage) VALUES(7,'multipart_merge_fixture','分片合并','fixture_hash',?)", 3*fileSize)
 	execute(t, "INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB')")
 	execute(t, "INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(41,7,11,UNHEX(REPEAT('41',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY)")
 	execute(t, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
@@ -72,12 +73,12 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 	expectedDigest := digest.Sum(nil)
 
 	for _, fixture := range []struct {
-		name, key        string
+		name, key, fault string
 		taskID, objectID uint64
-		loseResponse     bool
 	}{
-		{"new completion", "b4/execution-normal.bin", 19, 23, false},
-		{"recover confirmed version after lost response", "b4/execution-recovered.bin", 20, 24, true},
+		{"new completion", "b4/execution-normal.bin", "", 19, 23},
+		{"recover confirmed version after lost response", "b4/execution-recovered.bin", "response", 20, 24},
+		{"recover confirmed version after write fault", "b4/execution-write-fault.bin", "write", 21, 25},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			// 1. 合成分片走正式回执冻结，再领取本轮合并租约。
@@ -136,27 +137,48 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 			}
 			lease := claim("fixture-merge")
 
-			// 2. 真实完成后可模拟响应丢失，复验新租约应从 HEAD 恢复而跳过合并调用。
+			// 2. 模拟响应丢失或数据库锁等待，使用已登记的重试重新读取原版本。
+			if fixture.fault == "write" {
+				execute(t, `CREATE TRIGGER fixture_merge_lock BEFORE UPDATE ON stored_objects FOR EACH ROW
+					SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'`)
+			}
 			completeCalls := 0
 			execution := service.NewUploadMergeExecutionService(settings.Provider, settings.Bucket, preflight.Check,
 				func(callContext context.Context, key, uploadID string, size, partSize uint64, count uint32, receipts []domain.UploadPartReceipt) (*domain.UploadObjectResult, error) {
 					completeCalls++
 					confirmation, err := client.CompleteMultipartUpload(callContext, key, uploadID, size, partSize, count, receipts)
-					if err == nil && fixture.loseResponse {
+					if err == nil && fixture.fault == "response" {
 						return nil, domain.ErrMultipartUploadCompletionUnknown
 					}
 					return confirmation, err
-				}, store.BeginMultipartUploadVerification)
+				}, store.BeginMultipartUploadVerification, store.ScheduleMultipartUploadMergeRetry)
 			result, err := execution.Execute(ctx, lease)
-			if fixture.loseResponse {
-				if result != nil || !errors.Is(err, domain.ErrMultipartUploadCompletionUnknown) || readTask().Status != domain.UploadStatusCompleting || completeCalls != 1 {
-					t.Fatal("结果未确认的首轮不应推进或重放", result, err, completeCalls)
+			if fixture.fault != "" {
+				var retry *service.UploadMergeRetryScheduledError
+				scheduled := readTask()
+				if result != nil || !errors.As(err, &retry) || scheduled.Status != domain.UploadStatusCompleting || completeCalls != 1 ||
+					scheduled.NextAttemptAt == nil || !scheduled.NextAttemptAt.Equal(retry.NextAttemptAt) || scheduled.NextAttemptAt.Before(*lease.LeaseUntil) ||
+					scheduled.LeaseOwner != nil || scheduled.LeaseUntil != nil || scheduled.AttemptCount != lease.AttemptCount+1 {
+					t.Fatal("首轮未按旧租约安全窗口登记重试", result, err, completeCalls)
+				}
+				if fixture.fault == "response" && !errors.Is(err, domain.ErrMultipartUploadCompletionUnknown) {
+					t.Fatal("响应丢失的原错误未保留", err)
+				}
+				if fixture.fault == "write" {
+					var mysqlError *mysql.MySQLError
+					if !errors.Is(err, domain.ErrUploadMergeWriteRetryable) || !errors.As(err, &mysqlError) || mysqlError.Number != 1205 {
+						t.Fatal("写回事务的 MySQL 原错误未保留", err)
+					}
+					execute(t, "DROP TRIGGER fixture_merge_lock")
+				}
+				if candidates, scanError := store.ListMultipartUploadCompletionCandidates(ctx, 1); scanError != nil || len(candidates) != 0 {
+					t.Fatal("原租约安全窗口内提前选入候选", candidates, scanError)
 				}
 				object, readError := store.FindUserStoredObject(ctx, actor.UserID, fixture.objectID)
 				if readError != nil || object.Status != domain.StoredObjectStatusStaging || object.StorageETag != nil || object.StorageVersionID != nil {
 					t.Fatal("结果未确认时不应留下半条写回", readError)
 				}
-				execute(t, "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6) WHERE id=?", fixture.taskID)
+				execute(t, "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", fixture.taskID)
 				firstVersion := lease.LeaseVersion
 				lease = claim("fixture-recovery")
 				if lease.LeaseVersion != firstVersion+1 {
@@ -179,7 +201,7 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				t.Fatal("写回元数据与存储版本不一致", err)
 			}
 			var reserved, used uint64
-			if err := pool.QueryRowContext(ctx, "SELECT reserved_storage,used_storage FROM users WHERE id=7").Scan(&reserved, &used); err != nil || reserved != 2*fileSize || used != 0 {
+			if err := pool.QueryRowContext(ctx, "SELECT reserved_storage,used_storage FROM users WHERE id=7").Scan(&reserved, &used); err != nil || reserved != 3*fileSize || used != 0 {
 				t.Fatal("单条合并改变了账户配额", reserved, used, err)
 			}
 			t.Logf("任务 %d 进入 %s，确认版本 %s，合并调用 %d 次", fixture.taskID, result.Status, *object.StorageVersionID, completeCalls)

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
@@ -12,23 +13,26 @@ type UploadMergeExecutionService struct {
 	preflight         func(context.Context, *domain.UploadTask) (*UploadMergePreflightResult, error)
 	complete          func(context.Context, string, string, uint64, uint64, uint32, []domain.UploadPartReceipt) (*domain.UploadObjectResult, error)
 	beginVerification func(context.Context, *domain.UploadTask, string, string, string, domain.UploadObjectResult) (*domain.UploadTask, error)
+	scheduleRetry     func(context.Context, *domain.UploadTask, int) (*domain.UploadTask, error)
 }
 
-// NewUploadMergeExecutionService 绑定预检、同一存储配置的合并适配和校验状态写回。
+// NewUploadMergeExecutionService 绑定预检、合并适配、校验状态写回和重试登记。
 func NewUploadMergeExecutionService(
 	provider, bucket string,
 	preflight func(context.Context, *domain.UploadTask) (*UploadMergePreflightResult, error),
 	complete func(context.Context, string, string, uint64, uint64, uint32, []domain.UploadPartReceipt) (*domain.UploadObjectResult, error),
 	beginVerification func(context.Context, *domain.UploadTask, string, string, string, domain.UploadObjectResult) (*domain.UploadTask, error),
+	scheduleRetry func(context.Context, *domain.UploadTask, int) (*domain.UploadTask, error),
 ) *UploadMergeExecutionService {
 	location := domain.CreateStagedObjectInput{Provider: provider, Bucket: bucket, ObjectKey: "validation"}
-	if !location.IsValid() || preflight == nil || complete == nil || beginVerification == nil {
-		panic("单条分片合并执行需要存储配置、预检、合并及校验写回方法")
+	if !location.IsValid() || preflight == nil || complete == nil || beginVerification == nil || scheduleRetry == nil {
+		panic("单条分片合并执行需要存储配置、预检、合并、校验写回及重试登记方法")
 	}
-	return &UploadMergeExecutionService{provider: provider, bucket: bucket, preflight: preflight, complete: complete, beginVerification: beginVerification}
+	return &UploadMergeExecutionService{provider: provider, bucket: bucket, preflight: preflight, complete: complete,
+		beginVerification: beginVerification, scheduleRetry: scheduleRetry}
 }
 
-// Execute 只用当前租约执行一次。存储结果未确认和写回失败留给后续恢复处理。
+// Execute 只用当前租约执行一次。可重试错误登记后返回 UploadMergeRetryScheduledError，保留原原因。
 func (execution *UploadMergeExecutionService) Execute(ctx context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
 	// 1. 复核任务和预检结果，固定本次执行的目标。
 	if ctx == nil || !validUploadMergeClaim(claimed) {
@@ -39,7 +43,7 @@ func (execution *UploadMergeExecutionService) Execute(ctx context.Context, claim
 	}
 	preflight, err := execution.preflight(ctx, claimed)
 	if err != nil {
-		return nil, err
+		return nil, execution.scheduleStorageRetry(ctx, claimed, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -64,7 +68,7 @@ func (execution *UploadMergeExecutionService) Execute(ctx context.Context, claim
 		}
 		confirmation, err = execution.complete(ctx, target.ObjectKey, target.UploadID, target.FileSizeBytes, target.PartSizeBytes, target.PartCount, ready.Parts)
 		if err != nil {
-			return nil, err
+			return nil, execution.scheduleStorageRetry(ctx, claimed, err)
 		}
 	}
 
@@ -77,7 +81,7 @@ func (execution *UploadMergeExecutionService) Execute(ctx context.Context, claim
 	}
 	committed, err := execution.beginVerification(ctx, claimed, execution.provider, execution.bucket, target.ObjectKey, *confirmation)
 	if err != nil {
-		return nil, err
+		return nil, execution.registerRetry(ctx, claimed, err, errors.Is(err, domain.ErrUploadMergeWriteRetryable))
 	}
 	if committed == nil || committed.Status != domain.UploadStatusVerifying || committed.UploadMode != claimed.UploadMode ||
 		committed.StorageUploadID == nil || committed.PartSize == nil || committed.PartCount == nil ||

@@ -114,7 +114,7 @@ func (store *Store) BeginMultipartUploadVerification(
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, markUploadTransactionRetryError(ctx, err, domain.ErrUploadMergeWriteRetryable)
 	}
 	return committed, nil
 }

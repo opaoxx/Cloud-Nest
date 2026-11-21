@@ -13,8 +13,8 @@ const (
 	mysqlLockDeadlock    = 1213
 )
 
-// markUploadCleanupRetryError 为确认可重试的收尾错误附加对应的领域标记。
-func markUploadCleanupRetryError(ctx context.Context, err, retryMarker error) error {
+// markUploadTransactionRetryError 为确认可重试的上传事务错误附加对应的领域标记。
+func markUploadTransactionRetryError(ctx context.Context, err, retryMarker error) error {
 	// 1. 确认调用仍有效，保留原来的取消、超时和其他错误。
 	if err == nil || ctx == nil || ctx.Err() != nil {
 		return err
