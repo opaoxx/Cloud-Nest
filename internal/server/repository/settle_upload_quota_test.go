@@ -17,6 +17,7 @@ func TestSettlePublishedUploadQuotaResults(t *testing.T) {
 	for _, scenario := range []struct {
 		name       string
 		rows       int64
+		multipart  bool
 		zero       bool
 		expiresNow bool
 		writeError error
@@ -24,6 +25,7 @@ func TestSettlePublishedUploadQuotaResults(t *testing.T) {
 		wantUpdate bool
 	}{
 		{name: "transfer with fenced SQL", rows: 2, wantUpdate: true},
+		{name: "multipart transfer binds original session", rows: 2, multipart: true, wantUpdate: true},
 		{name: "zero bytes", zero: true},
 		{name: "zero bytes with expired lease", zero: true, expiresNow: true, wantError: domain.ErrUploadTaskBusy},
 		{name: "lease expires before conditional write", wantUpdate: true, wantError: domain.ErrUploadTaskBusy},
@@ -40,7 +42,18 @@ func TestSettlePublishedUploadQuotaResults(t *testing.T) {
 			if scenario.expiresNow {
 				values[18] = now
 			}
-			const quota, used, reserved = uint64(4096), uint64(1024), uint64(2048)
+			quota, used, reserved := uint64(4096), uint64(1024), uint64(2048)
+			var sessionArgument any
+			if scenario.multipart {
+				const session = "fixture-session "
+				const size = domain.MaxSingleUploadSizeBytes + 1
+				task.UploadMode, task.StorageUploadID = "MULTIPART", new(session)
+				task.FileSize, task.ReservedBytes = size, size
+				task.PartSize, task.PartCount = new(domain.MaxSingleUploadSizeBytes), new(uint32(2))
+				values[8], values[9] = task.UploadMode, session
+				values[11], values[12], values[13], values[16] = strconv.FormatUint(size, 10), "16777216", "2", strconv.FormatUint(size, 10)
+				quota, reserved, sessionArgument = size+4096, size+512, session
+			}
 			script := &loginTransactionScript{status: "ACTIVE"}
 			script.uploadQuery = func(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
 				return &uploadTaskReadRows{&idempotencyRecordRows{values: values}}, nil
@@ -56,7 +69,7 @@ func TestSettlePublishedUploadQuotaResults(t *testing.T) {
 				for _, fragment := range []string{
 					"upload_task.reserved_bytes = 0", "CAST(upload_task.lease_owner AS BINARY) = ?", "upload_task.lease_version = ?",
 					"upload_task.lease_until > UTC_TIMESTAMP(6)", "upload_task.expires_at > UTC_TIMESTAMP(6)",
-					"upload_task.reserved_bytes = upload_task.file_size",
+					"upload_task.reserved_bytes = upload_task.file_size", "upload_task.upload_mode = ?", "CAST(upload_task.storage_upload_id AS BINARY) <=> ?",
 				} {
 					if !strings.Contains(statement, fragment) {
 						t.Fatal("结算 SQL 缺少保护条件", fragment)
@@ -67,7 +80,7 @@ func TestSettlePublishedUploadQuotaResults(t *testing.T) {
 					actual = append(actual, argument.Value)
 				}
 				want := []any{used + task.FileSize, reserved - task.FileSize, task.UserID, quota, used, reserved,
-					task.ID, task.StagedObjectID, *task.LeaseOwner, task.LeaseVersion, task.FileSize}
+					task.ID, task.StagedObjectID, *task.LeaseOwner, task.LeaseVersion, task.UploadMode, sessionArgument, task.FileSize}
 				if !scenario.wantUpdate || !reflect.DeepEqual(actual, want) {
 					t.Fatal("结算参数或更新次数错误", actual)
 				}
