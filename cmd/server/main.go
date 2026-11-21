@@ -694,7 +694,12 @@ func runWithPurgeRootWorker(
 	stopMultipartInitialization := startServerMultipartUploadInitializationWorker(ctx, multipartInitialization.RunOnce, logger)
 	defer stopMultipartInitialization()
 
-	// 38. 启动 HTTP 并处理退出通知。
+	// 38. 启动分片合并，无受信实例确认时保留缺失任务的重试；释放连接前等待 worker 退出。
+	uploadMergeBatch := newServerUploadMergeBatch(store, storageClient, storageConfig, nil)
+	stopUploadMerge := startServerUploadMergeWorker(ctx, uploadMergeBatch.RunOnce, logger)
+	defer stopUploadMerge()
+
+	// 39. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
