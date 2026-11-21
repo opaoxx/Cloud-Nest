@@ -101,7 +101,7 @@ func runWebBrowserProbe(t *testing.T, ctx context.Context, cli, webURL, filename
 	return cliDir
 }
 
-func startIsolatedWebMySQL(t *testing.T, ctx context.Context) {
+func startIsolatedWebMySQL(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	// 1. 仅允许本机 Docker，数据库地址和凭据由这次启动给出。
 	if os.Getenv("DOCKER_HOST") != "" {
@@ -147,4 +147,5 @@ func startIsolatedWebMySQL(t *testing.T, ctx context.Context) {
 	t.Setenv("CLOUDNEST_DB_NAME", "information_schema")
 	t.Setenv("CLOUDNEST_DB_USER", "root")
 	t.Setenv("CLOUDNEST_DB_PASSWORD", password)
+	return containerID
 }

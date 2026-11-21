@@ -97,7 +97,7 @@ func prepareWebSingleUploadFixture(t *testing.T, ctx context.Context) (*sql.DB, 
 }
 
 // startIsolatedWebMinIO 只在 startIsolatedWebMySQL 确认本机 Docker 后调用。
-func startIsolatedWebMinIO(t *testing.T, ctx context.Context) {
+func startIsolatedWebMinIO(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	const image = "sha256:7c840b89c21e0af0e824cf57310becadbbd45c7fb407c78cd2ada4b74c76f733"
 	accessKey, secretKey := rand.Text(), rand.Text()
@@ -146,4 +146,5 @@ func startIsolatedWebMinIO(t *testing.T, ctx context.Context) {
 	t.Setenv("CLOUDNEST_S3_BUCKET", "cloudnest-web-upload-test")
 	t.Setenv("CLOUDNEST_S3_ACCESS_KEY", accessKey)
 	t.Setenv("CLOUDNEST_S3_SECRET_KEY", secretKey)
+	return containerID
 }

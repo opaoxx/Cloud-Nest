@@ -33,15 +33,30 @@ type backupSourceClient struct {
 	httpClient  *http.Client
 }
 
+type backupSourceFixture struct {
+	api            backupSourceClient
+	pool           *sql.DB
+	bucket         *serverUploadContentBucket
+	login          dto.LoginData
+	databaseName   string
+	mysqlContainer string
+	minioContainer string
+	stop           func() (string, error)
+}
+
 func TestServerBackupSourceIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_BACKUP_SOURCE_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_BACKUP_SOURCE_TEST=1 后启动隔离备份源端")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
+	verifyBackupSourceBaseline(t, ctx, prepareBackupSource(t, ctx))
+}
 
-	// 1. 使用独占库、版本化桶和真实启动流程登录合成账号。
-	source, pool, bucket, login := prepareBackupSource(t, ctx)
+func verifyBackupSourceBaseline(t *testing.T, ctx context.Context, fixture backupSourceFixture) {
+	t.Helper()
+	// 1. 使用隔离账号在真实根目录下创建回收样本的父目录。
+	source, pool, bucket, login := fixture.api, fixture.pool, fixture.bucket, fixture.login
 	store, err := repository.NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -156,11 +171,11 @@ func TestServerBackupSourceIntegration(t *testing.T) {
 		rootID, folderID, task.ID, used, reserved)
 }
 
-func prepareBackupSource(t *testing.T, ctx context.Context) (backupSourceClient, *sql.DB, *serverUploadContentBucket, dto.LoginData) {
+func prepareBackupSource(t *testing.T, ctx context.Context) backupSourceFixture {
 	t.Helper()
 	// 1. 独立启动 MySQL 与 MinIO，使用正式命令初始化空库和合成账号。
-	startIsolatedWebMySQL(t, ctx)
-	startIsolatedWebMinIO(t, ctx)
+	mysqlContainer := startIsolatedWebMySQL(t, ctx)
+	minioContainer := startIsolatedWebMinIO(t, ctx)
 	t.Setenv("CLOUDNEST_STORAGE_PROVIDER", "local_minio")
 	pool, databaseName := prepareEmptyServerIntegrationDatabase(t, ctx)
 	password := rand.Text()
@@ -184,18 +199,26 @@ func prepareBackupSource(t *testing.T, ctx context.Context) (backupSourceClient,
 	t.Setenv("CLOUDNEST_HTTP_ADDR", address)
 	t.Setenv("CLOUDNEST_TEMP_DIR", t.TempDir())
 	t.Setenv("CLOUDNEST_JWT_SECRET", base64.RawURLEncoding.EncodeToString(secret[:]))
-	serverContext, stop := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- run(serverContext, logging.New(io.Discard)) }()
-	t.Cleanup(func() {
-		stop()
+	serverContext, cancelServer := context.WithCancel(ctx)
+	done := make(chan struct{})
+	var serverLogs bytes.Buffer
+	var runError error
+	go func() {
+		defer close(done)
+		runError = run(serverContext, logging.New(&serverLogs))
+	}()
+	stop := func() (string, error) {
+		cancelServer()
 		select {
-		case err := <-done:
-			if err != nil {
-				t.Error("隔离备份源服务退出失败", err)
-			}
+		case <-done:
+			return serverLogs.String(), runError
 		case <-time.After(35 * time.Second):
-			t.Error("隔离备份源服务未在期限内退出")
+			return "", fmt.Errorf("隔离备份源服务未在期限内退出")
+		}
+	}
+	t.Cleanup(func() {
+		if _, err := stop(); err != nil {
+			t.Error("隔离备份源服务退出失败", err)
 		}
 	})
 	waitForServerIntegrationHTTP(t, ctx, address)
@@ -217,7 +240,8 @@ func prepareBackupSource(t *testing.T, ctx context.Context) (backupSourceClient,
 	}
 	source.accessToken = login.Data.AccessToken
 	t.Logf("隔离源端 MySQL 库 %s，MinIO 桶 %s，后端 %s，迁移 SHA-256 %s", databaseName, bucket.name, address, checksum)
-	return source, pool, bucket, login.Data
+	return backupSourceFixture{api: source, pool: pool, bucket: bucket, login: login.Data, databaseName: databaseName,
+		mysqlContainer: mysqlContainer, minioContainer: minioContainer, stop: stop}
 }
 
 func publishBackupSourceFile(t *testing.T, ctx context.Context, source backupSourceClient, store *repository.Store,
