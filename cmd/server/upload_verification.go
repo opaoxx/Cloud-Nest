@@ -26,6 +26,13 @@ func newServerUploadVerificationBatch(store *repository.Store, storageClient *st
 	return service.NewUploadVerificationBatch(store.ListUploadVerificationCandidates, processor.Process)
 }
 
+// newServerMultipartUploadVerificationBatch 装配一轮有上限的分片校验。
+func newServerMultipartUploadVerificationBatch(store *repository.Store, open func(context.Context, *domain.StoredObject) (io.ReadCloser, error)) *service.UploadVerificationBatch {
+	// 1. 绑定 Multipart 扫描和单条处理，由共用批次顺序执行并汇总。
+	processor := newServerMultipartUploadVerificationProcessor(store, open)
+	return service.NewUploadVerificationBatch(store.ListMultipartUploadVerificationCandidates, processor.Process)
+}
+
 // newServerMultipartUploadVerificationProcessor 装配一条已合并任务的校验入口。
 func newServerMultipartUploadVerificationProcessor(store *repository.Store, open func(context.Context, *domain.StoredObject) (io.ReadCloser, error)) *service.UploadVerificationCandidateProcessor {
 	// 1. Multipart 使用独立的领取入口，读回及写回复用现有校验流程。
