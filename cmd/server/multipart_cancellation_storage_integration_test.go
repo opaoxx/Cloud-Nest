@@ -142,7 +142,7 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 						execute(t, "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE user_id=7 AND id=?", fixture.taskID)
 					}
 					return observed, err
-				})
+				}, client.StatMultipartUploadObject)
 			observed, err := execution.ObserveBoundSession(ctx, claimed)
 			if aborts != 1 {
 				t.Fatal("单次执行的中止请求次数错误", aborts)

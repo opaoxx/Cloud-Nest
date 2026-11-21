@@ -121,6 +121,10 @@ func TestObserveBoundMultipartUploadCancellationSession(t *testing.T) {
 						checked.Object = stored
 					}
 					return checked, nil
+				},
+				func(context.Context, string) (*domain.UploadObjectResult, error) {
+					t.Fatal("已绑定分支应通过会话复查读取对象")
+					return nil, nil
 				})
 			// 2. 核对调用顺序、中止次数及证据。粘连的可空字段不能影响原记录。
 			observed, err := execution.ObserveBoundSession(ctx, task)

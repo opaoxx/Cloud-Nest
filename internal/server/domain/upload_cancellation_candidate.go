@@ -21,8 +21,9 @@ type MultipartUploadCancellationTarget struct {
 	UploadID *string
 }
 
-// MultipartUploadCancellationObservation 保存与同一任务、租约及原会话匹配的存储观察。
-// Object 为 nil 表示会话和对象都明确缺失。非空时保留原对象的元数据供事务复核。
+// MultipartUploadCancellationObservation 保存与任务、租约及原存储绑定匹配的观察。
+// Object 为 nil 表示原对象明确缺失；若 Task 已绑定会话，也已确认该会话缺失。
+// Task 尚未绑定时，可能存在未关联会话，由独立的孤儿会话流程处理。
 type MultipartUploadCancellationObservation struct {
 	Task      UploadTask
 	ObjectKey string

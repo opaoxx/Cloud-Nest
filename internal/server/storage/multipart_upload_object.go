@@ -12,7 +12,7 @@ import (
 )
 
 // StatMultipartUploadObject 只读查询配置桶中原暂存键的当前对象元数据。
-// objectKey 来自已核对的合并目标。返回值只提供对象事实，任务大小、内容及结果写回由调用方复核。
+// objectKey 来自已核对的任务目标。返回值只提供对象事实，任务大小、内容及结果写回由调用方复核。
 func (client *Client) StatMultipartUploadObject(ctx context.Context, objectKey string) (*domain.UploadObjectResult, error) {
 	// 1. 校验原对象键，并设置查询期限。
 	if ctx == nil || client == nil || client.sdkClient == nil || client.bucket == "" {
