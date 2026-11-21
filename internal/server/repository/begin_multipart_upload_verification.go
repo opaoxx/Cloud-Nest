@@ -47,10 +47,7 @@ func (store *Store) BeginMultipartUploadVerification(
 		if !current.LeaseUntil.Equal(*claimed.LeaseUntil) {
 			return domain.ErrUploadTaskBusy
 		}
-		if object.Status != domain.StoredObjectStatusStaging || object.FileSize != current.FileSize ||
-			object.Provider != provider || object.Bucket != bucket || object.ObjectKey != objectKey ||
-			object.StorageETag != nil || object.StorageVersionID != nil || object.VerifiedAt != nil ||
-			object.VerifiedSHA256 != nil || object.DedupHash != nil || object.UnreferencedAt != nil || object.GCAfter != nil || object.LastErrorCode != nil {
+		if !matchesUnwrittenMultipartObject(object, current.FileSize, location) {
 			return domain.ErrInvalidStoredObjectData
 		}
 		result := txStore.database.WithContext(txContext).Exec(`
@@ -117,6 +114,14 @@ func (store *Store) BeginMultipartUploadVerification(
 		return nil, markUploadTransactionRetryError(ctx, err, domain.ErrUploadMergeWriteRetryable)
 	}
 	return committed, nil
+}
+
+// matchesUnwrittenMultipartObject 核对原暂存对象尚未记录合并结果或回收事实。
+func matchesUnwrittenMultipartObject(object *domain.StoredObject, fileSize uint64, location domain.CreateStagedObjectInput) bool {
+	return object.Status == domain.StoredObjectStatusStaging && object.FileSize == fileSize &&
+		object.Provider == location.Provider && object.Bucket == location.Bucket && object.ObjectKey == location.ObjectKey &&
+		object.StorageETag == nil && object.StorageVersionID == nil && object.VerifiedAt == nil &&
+		object.VerifiedSHA256 == nil && object.DedupHash == nil && object.UnreferencedAt == nil && object.GCAfter == nil && object.LastErrorCode == nil
 }
 
 func validMultipartMergeObjectText(value string) bool {

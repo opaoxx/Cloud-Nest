@@ -98,7 +98,8 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		})
 	preflight := service.NewUploadMergePreflightService(recovery, receiptCheck)
 	evidence, err := preflight.CheckRepair(ctx, lease, partError)
-	if err != nil || evidence == nil || evidence.Target != target || !slices.Equal(evidence.PartNumbers, []uint32{1}) {
+	if err != nil || evidence == nil || evidence.ObjectKey != key || evidence.Task.ID != lease.ID ||
+		evidence.Task.LeaseVersion != lease.LeaseVersion || !slices.Equal(evidence.PartNumbers, []uint32{1}) {
 		t.Fatal("原会话的首片变化应得到只读修复依据", evidence, err)
 	}
 

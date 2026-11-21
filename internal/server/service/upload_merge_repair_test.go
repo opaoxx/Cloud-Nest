@@ -127,7 +127,9 @@ func TestUploadMergePreflightCheckRepair(t *testing.T) {
 				}
 				return
 			}
-			if evidence == nil || evidence.Target != target || !slices.Equal(evidence.PartNumbers, []uint32{2}) {
+			*claimed.StorageUploadID = "mutated"
+			if evidence == nil || evidence.ObjectKey != target.ObjectKey || !reflect.DeepEqual(&evidence.Task, original) ||
+				!slices.Equal(evidence.PartNumbers, []uint32{2}) {
 				t.Fatal("修复依据不符，须保留原目标与本轮观察的失配编号", evidence)
 			}
 		})

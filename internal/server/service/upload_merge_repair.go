@@ -8,15 +8,8 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// UploadMergeRepairEvidence 保存当前租约核对出的原目标及受影响分片编号。
-// 后续状态写回仍须在账号事务里复核租约和绑定。
-type UploadMergeRepairEvidence struct {
-	Target      UploadPartSigningTarget
-	PartNumbers []uint32
-}
-
 // CheckRepair 在明确失配后对原对象和会话做只读核对。
-func (preflight *UploadMergePreflightService) CheckRepair(ctx context.Context, claimed *domain.UploadTask, failure error) (*UploadMergeRepairEvidence, error) {
+func (preflight *UploadMergePreflightService) CheckRepair(ctx context.Context, claimed *domain.UploadTask, failure error) (*domain.UploadMergeRepairEvidence, error) {
 	// 1. 确认失配原因，固定当前租约绑定的目标。
 	if !errors.Is(failure, domain.ErrUploadPartsMismatch) && !errors.Is(failure, domain.ErrMultipartUploadPartRejected) {
 		return nil, domain.ErrUploadTaskNotReady
@@ -47,7 +40,7 @@ func (preflight *UploadMergePreflightService) CheckRepair(ctx context.Context, c
 	if err := preflight.checkRepairObjectMissing(ctx, claimed, target); err != nil {
 		return nil, err
 	}
-	return &UploadMergeRepairEvidence{Target: target, PartNumbers: slices.Clone(mismatch.PartNumbers)}, nil
+	return &domain.UploadMergeRepairEvidence{Task: *copyUploadTask(claimed), ObjectKey: target.ObjectKey, PartNumbers: slices.Clone(mismatch.PartNumbers)}, nil
 }
 
 func (preflight *UploadMergePreflightService) checkRepairObjectMissing(ctx context.Context, claimed *domain.UploadTask, target UploadPartSigningTarget) error {
