@@ -6,8 +6,8 @@ import type { CurrentUserProfile } from './api/auth'
 import { confirmPurge, createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, readPurgeProgress, renameEntry, restoreEntry, trashEntry } from './api/drive'
 import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgeConfirmer, PurgePreviewReader, PurgeProgressReader, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
-import { createSingleUploadTask, sendSingleUploadContent } from './api/uploadTask'
-import type { SingleUploadContentSender, SingleUploadTaskCreator } from './api/uploadTask'
+import { createSingleUploadTask, readSingleUploadTask, sendSingleUploadContent } from './api/uploadTask'
+import type { SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
 import DirectoryBrowser from './DirectoryBrowser'
 import TrashBrowser from './TrashBrowser'
 import { formatSize } from './demo'
@@ -99,6 +99,12 @@ export default function AuthPage() {
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
     await sendSingleUploadContent(session.accessToken, receipt, file)
+  }
+
+  const readUploadTask: SingleUploadTaskReader = async (taskId, signal) => {
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return readSingleUploadTask(session.accessToken, taskId, signal)
   }
 
   const submitEntryRename: EntryRenamer = async rename => {
@@ -237,7 +243,7 @@ export default function AuthPage() {
             <div hidden={view !== 'files'}>
               <DirectoryBrowser key={profile.root_entry_id} rootEntryId={profile.root_entry_id}
                 readDirectoryPage={readDirectoryPage} createDirectory={submitDirectoryCreation} createUploadTask={submitUploadTask}
-                sendUploadContent={submitUploadContent}
+                sendUploadContent={submitUploadContent} readUploadTask={readUploadTask}
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
             {view === 'trash' && <TrashBrowser rootEntryId={profile.root_entry_id} readTrashPage={readTrashPage}

@@ -10,6 +10,25 @@ export interface UploadTaskReceipt {
 export type SingleUploadTaskCreator = (declaration: SingleUploadDeclaration, idempotencyKey: string) => Promise<UploadTaskReceipt>
 export type SingleUploadContentSender = (receipt: UploadTaskReceipt, file: File) => Promise<void>
 
+const uploadTaskStatuses = [
+  'CREATING', 'UPLOADING', 'COMPLETING', 'VERIFYING', 'COMPLETED',
+  'CANCELLING', 'CANCELLED', 'EXPIRING', 'EXPIRED', 'FAILED',
+] as const
+type UploadTaskStatus = typeof uploadTaskStatuses[number]
+
+export interface UploadTaskSnapshot {
+  status: UploadTaskStatus
+  resultEntryId: string | null
+  resolvedName: string | null
+  lastError: string | null
+}
+
+export type SingleUploadTaskReader = (taskId: string, signal: AbortSignal) => Promise<UploadTaskSnapshot>
+
+function isUploadTaskStatus(value: unknown): value is UploadTaskStatus {
+  return uploadTaskStatuses.some(status => status === value)
+}
+
 export async function createSingleUploadTask(accessToken: string, declaration: SingleUploadDeclaration, idempotencyKey: string): Promise<UploadTaskReceipt> {
   // 1. 仅提交创建任务的文件声明和本次操作的幂等键。
   const data = await requestData('/api/v1/uploads', {
@@ -55,4 +74,26 @@ export async function sendSingleUploadContent(accessToken: string, receipt: Uplo
   if (data.task_id !== receipt.taskId || data.status !== 'VERIFYING') {
     throw new ApiError(202, '服务返回的上传接收回执有误。')
   }
+}
+
+export async function readSingleUploadTask(accessToken: string, taskId: string, signal: AbortSignal): Promise<UploadTaskSnapshot> {
+  // 1. 使用当前任务 ID，用 GET 获取服务端快照。
+  if (!isUploadId(taskId)) throw new ApiError(0, '上传任务 ID 有误。')
+  const data = await requestData(`/api/v1/uploads/${taskId}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    redirect: 'error',
+    signal,
+  }, 200)
+
+  // 2. 核对任务及展示字段，已完成时必须有发布结果 ID。
+  const { status, result_entry_id: resultEntryId, resolved_name: resolvedName, last_error: lastError } = data
+  const lastErrorMessage = isRecord(lastError) && typeof lastError.message === 'string' ? lastError.message : null
+  if (data.id !== taskId || data.upload_mode !== 'SINGLE' || !isUploadTaskStatus(status) ||
+      (resultEntryId !== null && !isUploadId(resultEntryId)) || (status === 'COMPLETED' && resultEntryId === null) ||
+      (resolvedName !== null && (typeof resolvedName !== 'string' || !resolvedName)) ||
+      (lastError !== null && !lastErrorMessage)) {
+    throw new ApiError(200, '服务返回的上传任务状态有误。')
+  }
+  return { status, resultEntryId, resolvedName, lastError: lastErrorMessage }
 }
