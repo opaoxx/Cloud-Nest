@@ -40,6 +40,12 @@ func (receiptService *UploadMergeReceiptService) Verify(ctx context.Context, cla
 	if err != nil {
 		return nil, err
 	}
+	return receiptService.verifyTarget(ctx, claimed, target)
+}
+
+// verifyTarget 对照已固定的原目标读取冻结回执和存储分片。
+func (receiptService *UploadMergeReceiptService) verifyTarget(ctx context.Context, claimed *domain.UploadTask, target UploadPartSigningTarget) (*UploadMergeReceiptSnapshot, error) {
+	// 1. 读取并检查同一租约的冻结回执。
 	frozen, err := receiptService.readFrozen(ctx, claimed)
 	if contextError := ctx.Err(); contextError != nil {
 		return nil, contextError

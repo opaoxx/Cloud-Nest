@@ -38,7 +38,11 @@ func (recovery *UploadMergeRecoveryService) Check(ctx context.Context, claimed *
 	if err != nil {
 		return nil, err
 	}
+	return recovery.checkTarget(ctx, claimed, target)
+}
 
+// checkTarget 查询调用方已复核的原目标，读回后仍检查租约和绑定。
+func (recovery *UploadMergeRecoveryService) checkTarget(ctx context.Context, claimed *domain.UploadTask, target UploadPartSigningTarget) (*UploadMergeRecoveryObservation, error) {
 	// 2. 只读查询对象元数据。
 	observed, statError := recovery.statObject(ctx, target.ObjectKey)
 
