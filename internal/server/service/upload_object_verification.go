@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"strings"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
@@ -17,7 +19,7 @@ func VerifyUploadObject(
 	object *domain.StoredObject,
 	open func(context.Context, *domain.StoredObject) (io.ReadCloser, error),
 ) (digest *domain.UploadContentDigest, resultError error) {
-	// 1. 核对任务、租约快照和暂存对象。
+	// 1. 核对任务、租约快照、分片计划和暂存对象定位。
 	if ctx == nil || open == nil {
 		return nil, fmt.Errorf("校验上传对象需要上下文和存储读取方法")
 	}
@@ -27,24 +29,37 @@ func VerifyUploadObject(
 	if task == nil || task.ID == 0 || task.UserID == 0 || task.StagedObjectID == 0 {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if task.Status != domain.UploadStatusVerifying || task.UploadMode != "SINGLE" {
+	if task.Status != domain.UploadStatusVerifying || (task.UploadMode != "SINGLE" && task.UploadMode != "MULTIPART") {
 		return nil, domain.ErrUploadTaskNotReady
 	}
 	if task.LeaseVersion == 0 || task.LeaseOwner == nil || *task.LeaseOwner == "" || task.LeaseUntil == nil ||
 		!task.LeaseUntil.After(task.UpdatedAt) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if task.FileSize > domain.MaxSingleUploadSizeBytes {
+	maxSize := domain.MaxSingleUploadSizeBytes
+	if task.UploadMode == "MULTIPART" {
+		// 使用已保存的计划。int64 上限只保护流长度转换。
+		maxSize = math.MaxInt64
+		if task.ExpectedSHA256 == nil || task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) ||
+			task.PartSize == nil || task.PartCount == nil || !domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	}
+	if task.FileSize > maxSize {
 		return nil, domain.ErrUploadFileTooLarge
 	}
 	if object == nil || object.ID != task.StagedObjectID || object.OwnerUserID != task.UserID ||
 		object.Status != domain.StoredObjectStatusVerifying || object.FileSize != task.FileSize {
 		return nil, domain.ErrInvalidStoredObjectData
 	}
+	if task.UploadMode == "MULTIPART" && (object.StorageETag == nil || strings.TrimSpace(*object.StorageETag) == "" ||
+		(object.StorageVersionID != nil && strings.TrimSpace(*object.StorageVersionID) == "")) {
+		return nil, domain.ErrInvalidStoredObjectData
+	}
 	declaredSize, expected := task.FileSize, copyOptionalValue(task.ExpectedSHA256)
 	taskID, userID, objectID, leaseVersion := task.ID, task.UserID, task.StagedObjectID, task.LeaseVersion
 
-	// 2. 打开对象流，安排退出时关闭。
+	// 2. 按保存的对象定位打开流，安排退出时关闭。
 	stream, openError := open(ctx, object)
 	defer func() {
 		if stream != nil {
@@ -71,7 +86,7 @@ func VerifyUploadObject(
 
 	// 3. 按声明读取并记录实际观察量，再核对摘要。
 	reader := &uploadVerificationReader{Reader: stream}
-	actual, err := ReadUploadVerificationDigest(ctx, reader, declaredSize)
+	actual, err := readUploadVerificationDigest(ctx, reader, declaredSize, maxSize)
 	if err == domain.ErrUploadBodySizeMismatch {
 		if reader.readError != nil {
 			return nil, errors.Join(err, reader.readError)

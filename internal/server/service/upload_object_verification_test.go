@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"math"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -289,6 +290,72 @@ func TestVerifyUploadObjectRejectsInvalidRecords(t *testing.T) {
 			})
 			if result != nil || !errors.Is(err, want) {
 				t.Fatal("无效输入的错误类别不符", result, err)
+			}
+		})
+	}
+}
+
+func uploadMultipartObjectVerificationFixture() (*domain.UploadTask, *domain.StoredObject) {
+	task, object := uploadObjectVerificationFixture(domain.MaxSingleUploadSizeBytes + 1)
+	task.UploadMode = "MULTIPART"
+	task.ExpectedSHA256 = new(sha256.Sum256([]byte("fixture")))
+	task.StorageUploadID = new("fixture-session")
+	task.PartSize, task.PartCount = new(domain.MaxSingleUploadSizeBytes), new(uint32(2))
+	object.StorageETag, object.StorageVersionID = new("fixture-etag"), new("fixture-version")
+	return task, object
+}
+
+func TestVerifyUploadObjectKeepsOptionalMultipartVersion(t *testing.T) {
+	for _, version := range []*string{nil, new("null")} {
+		task, object := uploadMultipartObjectVerificationFixture()
+		object.StorageVersionID = version
+		result, err := VerifyUploadObject(t.Context(), task, object, func(_ context.Context, selected *domain.StoredObject) (io.ReadCloser, error) {
+			if selected.StorageVersionID != version || selected.StorageETag != object.StorageETag {
+				t.Fatal("校验没有保留存储定位")
+			}
+			return io.NopCloser(bytes.NewBufferString("fixture")), nil
+		})
+		mismatch, ok := err.(*domain.UploadVerificationSizeMismatch)
+		if result != nil || !ok || mismatch.ObservedSizeBytes != uint64(len("fixture")) {
+			t.Fatal("可选版本的 Multipart 未进入流式校验", result, err)
+		}
+	}
+}
+
+func TestVerifyUploadObjectRejectsInvalidMultipartRecords(t *testing.T) {
+	for _, name := range []string{"missing checksum", "missing session", "invalid session", "missing plan", "invalid layout", "size exceeds reader range", "missing ETag", "blank ETag", "blank version"} {
+		t.Run(name, func(t *testing.T) {
+			task, object := uploadMultipartObjectVerificationFixture()
+			want := domain.ErrInvalidUploadTaskData
+			switch name {
+			case "missing checksum":
+				task.ExpectedSHA256 = nil
+			case "missing session":
+				task.StorageUploadID = nil
+			case "invalid session":
+				task.StorageUploadID = new("\n")
+			case "missing plan":
+				task.PartSize = nil
+			case "invalid layout":
+				task.PartCount = new(uint32(1))
+			case "size exceeds reader range":
+				const beyondReaderLimit = uint64(math.MaxInt64) + 1
+				task.FileSize, object.FileSize = beyondReaderLimit, beyondReaderLimit
+				task.PartSize = new(beyondReaderLimit / 2)
+				want = domain.ErrUploadFileTooLarge
+			case "missing ETag":
+				object.StorageETag, want = nil, domain.ErrInvalidStoredObjectData
+			case "blank ETag":
+				object.StorageETag, want = new(" "), domain.ErrInvalidStoredObjectData
+			case "blank version":
+				object.StorageVersionID, want = new(""), domain.ErrInvalidStoredObjectData
+			}
+			result, err := VerifyUploadObject(t.Context(), task, object, func(context.Context, *domain.StoredObject) (io.ReadCloser, error) {
+				t.Fatal("异常 Multipart 快照仍打开了对象流")
+				return nil, nil
+			})
+			if result != nil || !errors.Is(err, want) {
+				t.Fatal("Multipart 快照错误类别不符", result, err)
 			}
 		})
 	}

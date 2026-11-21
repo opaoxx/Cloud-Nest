@@ -13,6 +13,11 @@ import (
 // 输入输出流的生命周期及失败后的目标清理由调用方管理。
 // 取消在 I/O 边界生效，阻塞调用由上层上下文感知实现或读写超时解除。
 func CopyUploadContent(ctx context.Context, destination io.Writer, source io.Reader, declaredSize uint64) (*domain.UploadContentDigest, error) {
+	return copyUploadContent(ctx, destination, source, declaredSize, domain.MaxSingleUploadSizeBytes)
+}
+
+// copyUploadContent 供接收及校验复用。调用方提供符合 int64 读取范围的大小上限。
+func copyUploadContent(ctx context.Context, destination io.Writer, source io.Reader, declaredSize, maxSize uint64) (*domain.UploadContentDigest, error) {
 	// 1. 检查上下文、输入输出流和声明大小上限。
 	if ctx == nil || destination == nil || source == nil {
 		return nil, fmt.Errorf("复制上传内容需要上下文、目标写入器和源读取器")
@@ -20,7 +25,7 @@ func CopyUploadContent(ctx context.Context, destination io.Writer, source io.Rea
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if declaredSize > domain.MaxSingleUploadSizeBytes {
+	if declaredSize > maxSize {
 		return nil, domain.ErrUploadFileTooLarge
 	}
 

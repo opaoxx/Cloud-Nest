@@ -14,9 +14,13 @@ import (
 // uploadMIMESampleBytes 是 Go 媒体类型识别使用的文件头长度上限。
 const uploadMIMESampleBytes = 512
 
-// ReadUploadVerificationDigest 读取原始对象流，返回实际大小、SHA-256 和识别出的 MIME。
+// ReadUploadVerificationDigest 按单文件大小上限读取对象流，返回大小、SHA-256 和识别出的 MIME。
 // 调用方负责关闭对象流；大小不符、读取故障及取消均返回空结果。
 func ReadUploadVerificationDigest(ctx context.Context, source io.Reader, declaredSize uint64) (*domain.UploadContentDigest, error) {
+	return readUploadVerificationDigest(ctx, source, declaredSize, domain.MaxSingleUploadSizeBytes)
+}
+
+func readUploadVerificationDigest(ctx context.Context, source io.Reader, declaredSize, maxSize uint64) (*domain.UploadContentDigest, error) {
 	// 1. 根据文件大小准备有上限的内容采样。
 	sampleSize := declaredSize
 	if declaredSize > maxTextPreviewBytes {
@@ -25,7 +29,7 @@ func ReadUploadVerificationDigest(ctx context.Context, source io.Reader, declare
 	sample := make(uploadVerificationSample, 0, int(sampleSize))
 
 	// 2. 复用原来的流式读取，在计算摘要时顺手采样。
-	digest, err := CopyUploadContent(ctx, &sample, source, declaredSize)
+	digest, err := copyUploadContent(ctx, &sample, source, declaredSize, maxSize)
 	if err != nil {
 		return nil, err
 	}

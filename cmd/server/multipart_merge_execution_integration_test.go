@@ -405,11 +405,80 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 					t.Error("清理本用例的合成版本失败", minio.ToErrorResponse(err).Code)
 				}
 			})
+			if fixture.fault == "" {
+				committed := readTask()
+				verifyMergedMultipartVersion(t, ctx, bucket, client, committed, object, expectedDigest)
+				currentObject, err := store.FindUserStoredObject(ctx, actor.UserID, fixture.objectID)
+				if err != nil || !reflect.DeepEqual(currentObject, object) || !reflect.DeepEqual(readTask(), committed) {
+					t.Fatal("只读校验改变了任务或对象记录", err)
+				}
+			}
 			assertQuota(reservedStorage)
 			if publicTask := readPublicTask(t, fixture.taskID); publicTask.Status != string(domain.UploadStatusVerifying) || publicTask.LastError != nil {
 				t.Fatal("已进入校验的任务查询保留了过时错误", publicTask.LastError)
 			}
 			t.Logf("任务 %d 进入 %s，确认版本 %s", fixture.taskID, result.Status, *object.StorageVersionID)
 		})
+	}
+}
+
+func verifyMergedMultipartVersion(
+	t *testing.T, ctx context.Context, bucket *serverUploadContentBucket, client *storage.Client,
+	committed *domain.UploadTask, object *domain.StoredObject, expectedDigest []byte,
+) {
+	t.Helper()
+	// 1. 写入同键的新合成版本，校验继续使用已提交的定位和内存租约快照。
+	key := object.ObjectKey
+	newContent := []byte("new synthetic version")
+	latest, err := bucket.client.PutObject(ctx, bucket.name, key, bytes.NewReader(newContent), int64(len(newContent)), minio.PutObjectOptions{DisableMultipart: true})
+	if err != nil || latest.VersionID == "" || latest.VersionID == *object.StorageVersionID || latest.ETag == *object.StorageETag {
+		t.Fatal("未产生同键的独立版本", minio.ToErrorResponse(err).Code)
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if err := bucket.client.RemoveObject(cleanup, bucket.name, key, minio.RemoveObjectOptions{VersionID: latest.VersionID}); err != nil {
+			t.Error("清理同键的新合成版本失败", minio.ToErrorResponse(err).Code)
+		}
+	})
+	current, err := bucket.client.StatObject(ctx, bucket.name, key, minio.StatObjectOptions{})
+	if err != nil || current.VersionID != latest.VersionID {
+		t.Fatal("测试的新版本未成为当前版本", minio.ToErrorResponse(err).Code)
+	}
+	claimed := *committed
+	claimed.LeaseVersion++
+	claimed.LeaseOwner = new("fixture-only-verification")
+	claimed.LeaseUntil = new(claimed.UpdatedAt.Add(time.Minute))
+
+	// 2. 实际读取已合并的版本，核对声明大小和独立计算的整文件摘要。
+	digest, err := service.VerifyUploadObject(ctx, &claimed, object, client.OpenUploadVerificationObject)
+	if err != nil || digest == nil || digest.SizeBytes != claimed.FileSize || !bytes.Equal(digest.SHA256[:], expectedDigest) {
+		t.Fatal("没有取得已保存版本的实际字节数与摘要", digest, err)
+	}
+	t.Logf("只读校验版本 %s（当前版本 %s），%d 字节，SHA-256 %x", *object.StorageVersionID, latest.VersionID, digest.SizeBytes, digest.SHA256)
+
+	// 3. 按同一个存储版本复验摘要错误、长度错误和定位错误。
+	wrongChecksum := claimed
+	wrongChecksum.ExpectedSHA256 = new(sha256.Sum256(newContent))
+	result, err := service.VerifyUploadObject(ctx, &wrongChecksum, object, client.OpenUploadVerificationObject)
+	checksumMismatch, ok := err.(*domain.UploadVerificationChecksumMismatch)
+	if result != nil || !ok || checksumMismatch.LeaseVersion != claimed.LeaseVersion ||
+		checksumMismatch.ExpectedSHA256 != *wrongChecksum.ExpectedSHA256 || checksumMismatch.Actual.SHA256 != digest.SHA256 {
+		t.Fatal("同版本的摘要失配证据不符", result, err)
+	}
+	wrongSize, recordedObject := claimed, *object
+	wrongSize.FileSize++
+	recordedObject.FileSize = wrongSize.FileSize
+	result, err = service.VerifyUploadObject(ctx, &wrongSize, &recordedObject, client.OpenUploadVerificationObject)
+	sizeMismatch, ok := err.(*domain.UploadVerificationSizeMismatch)
+	if result != nil || !ok || sizeMismatch.LeaseVersion != claimed.LeaseVersion ||
+		sizeMismatch.DeclaredSizeBytes != wrongSize.FileSize || sizeMismatch.ObservedSizeBytes != digest.SizeBytes {
+		t.Fatal("同版本的大小失配证据不符", result, err)
+	}
+	recordedObject = *object
+	recordedObject.StorageVersionID = &latest.VersionID
+	result, err = service.VerifyUploadObject(ctx, &claimed, &recordedObject, client.OpenUploadVerificationObject)
+	if result != nil || !errors.Is(err, domain.ErrInvalidStoredObjectData) {
+		t.Fatal("版本与 ETag 不匹配仍返回了内容结果", result, err)
 	}
 }
