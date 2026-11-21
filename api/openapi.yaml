@@ -599,6 +599,121 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/files/reuse:
+    post:
+      tags: [Entries]
+      operationId: reuseFile
+      summary: 复用当前账号可见文件的已验证内容
+      description: |
+        B4 计划契约，等待服务接入。客户端提交目标目录、文件名、字节数和整文件 SHA-256。
+        1. Bearer 授权后校验 Idempotency-Key 和 JSON，在当前用户事务内复查授权及本复用操作的幂等记录。
+           以规范化的父目录、名称、大小与摘要比较参数。同键同参数在八天保留期内返回已提交的 201 快照并关联当前请求 ID。
+           同键不同参数返回 IDEMPOTENCY_CONFLICT，过期返回 IDEMPOTENCY_EXPIRED。历史快照仅用于重放原结果，当前可见状态由目录项查询交付。
+        2. 首次执行时，按当前用户核对目标目录及完整路径，并按同账号、SHA-256 与字节数查找已校验的 READY 对象。
+           至少一个引用该对象的同账号 FILE 及其完整祖先路径须为 ACTIVE。锁定对象后复核状态、位置与有效引用。
+           只有回收引用、仅其他账号命中、对象已进入清理或没有匹配内容时，统一返回 REUSABLE_CONTENT_NOT_FOUND。
+           客户端在该错误后可发起普通上传。目标目录不可用时返回 ENTRY_NOT_FOUND，客户端需先确认目标。
+        3. 以当前已用和预占空间核对配额，将新逻辑文件的完整字节数计入已用空间。
+           复用既有上传发布的重名后缀规则。在同一事务创建新 FILE 条目、增加已用空间并保存幂等结果。
+           成功返回新目录项的创建快照。该操作使用既有物理对象，响应字段限于公开目录项和请求 ID。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReuseFileRequest'
+      responses:
+        '201':
+          description: 复用提交成功或重放原结果，返回新文件条目的稳定快照。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReuseFileResponse'
+        '400':
+          description: 幂等头、JSON、目录类型、深度及声明字段错误使用 INVALID_ARGUMENT，名称不符合目录项命名规则时使用 INVALID_NAME。声明字段错误按实际字段定位。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用使用 ACCOUNT_DISABLED，来源策略拒绝使用 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: ENTRY_NOT_FOUND 表示目标目录不存在或不可见。REUSABLE_CONTENT_NOT_FOUND 表示当前账号没有可复用的内容，返回固定提示且不交付对象存在性或来源信息。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [ENTRY_NOT_FOUND, REUSABLE_CONTENT_NOT_FOUND]
+                          details:
+                            type: object
+                            nullable: true
+                            enum: [null]
+              examples:
+                targetNotFound:
+                  value:
+                    error:
+                      code: ENTRY_NOT_FOUND
+                      message: 目录项不存在
+                      details: null
+                    request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+                reusableContentNotFound:
+                  value:
+                    error:
+                      code: REUSABLE_CONTENT_NOT_FOUND
+                      message: 没有可复用的内容
+                      details: null
+                    request_id: 38ee758a-0727-42de-ae7d-3bb33155e148
+        '409':
+          $ref: '#/components/responses/CreateUploadConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '507':
+          description: QUOTA_EXCEEDED。已有已用、预占与本次新增逻辑大小之和超过配额，details 为 null。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/directories:
     post:
       tags: [Entries]
@@ -3019,6 +3134,70 @@ components:
             etag: 51fa3c51150bf68adeb04359200eb699
           - part_number: 2
             etag: eccbc87e4b5ce2fe28308fd9f2a7baf3
+    ReuseFileRequest:
+      type: object
+      additionalProperties: false
+      required: [parent_id, name, size_bytes, sha256]
+      properties:
+        parent_id:
+          $ref: '#/components/schemas/CreateUploadRequest/properties/parent_id'
+        name:
+          $ref: '#/components/schemas/CreateUploadRequest/properties/name'
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: 拟复用内容的完整字节数，零字节有效。服务端与已验证对象的大小精确匹配。
+        sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[0-9A-Fa-f]{64}(?![\s\S])'
+          description: 已读取的整文件 SHA-256，接受大小写十六进制，服务端按相同摘要值比较。
+      example:
+        parent_id: '11'
+        name: 合成分片.bin
+        size_bytes: 16777217
+        sha256: d125f628ab4f65c600f82c8ad68462fd1383c0af64e476c1342dc96ded9e33f5
+    ReuseFileResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [entry]
+          properties:
+            entry:
+              description: 新文件创建时的公开目录项快照，name 为实际分配的可用名称。
+              allOf:
+                - $ref: '#/components/schemas/DirectoryEntrySummary'
+                - type: object
+                  properties:
+                    entry_type:
+                      type: string
+                      enum: [FILE]
+                    revision:
+                      type: string
+                      enum: ['1']
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          entry:
+            id: '42'
+            parent_id: '11'
+            name: 合成分片 (1).bin
+            entry_type: FILE
+            size_bytes: 16777217
+            revision: '1'
+            created_at: '2026-11-21T08:00:00.123456Z'
+            modified_at: '2026-11-21T08:00:00.123456Z'
+            updated_at: '2026-11-21T08:00:00.123456Z'
+            status: ACTIVE
+        request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     CreateDirectoryRequest:
       type: object
       additionalProperties: false
