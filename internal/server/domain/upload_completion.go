@@ -11,6 +11,12 @@ const MaxUploadPartsMismatchNumbers = 20
 // ErrUploadPartsMismatch 表示当前分片不足以受理完成请求。
 var ErrUploadPartsMismatch = errors.New("分片回执不一致，请核对后补传")
 
+// ErrMultipartUploadPartRejected 表示存储明确拒绝了本次合并请求的分片回执。
+var ErrMultipartUploadPartRejected = errors.New("存储拒绝了分片合并回执")
+
+// ErrMultipartUploadCompletionUnknown 表示合并请求的结果仍须通过恢复检查确认。
+var ErrMultipartUploadCompletionUnknown = fmt.Errorf("分片合并结果未确认: %w", ErrUploadStorageUnavailable)
+
 // UploadPartsMismatchError 保存升序的受影响编号，最多交付前 20 个。
 type UploadPartsMismatchError struct {
 	PartNumbers []uint32

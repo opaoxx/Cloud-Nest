@@ -6,7 +6,7 @@ import (
 	"regexp"
 )
 
-// ErrUploadPartSessionMissing 表示 ListParts 报告存储会话不存在。应用层应先复查任务。
+// ErrUploadPartSessionMissing 表示存储报告分片会话不存在。应用层应先复查任务。
 var ErrUploadPartSessionMissing = fmt.Errorf("分片上传会话不存在: %w", ErrUploadStorageUnavailable)
 
 // ErrInvalidUploadPartReceiptListData 表示回执结果不满足公开响应的字段约束。
