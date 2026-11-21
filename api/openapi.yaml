@@ -443,7 +443,7 @@ paths:
       operationId: issueUploadPartURLs
       summary: 为当前用户的分片上传任务批量签发 PUT URL
       description: |
-        B4 计划契约，等待服务接入。
+        已接入 B4 批量签发，面向已有存储会话绑定的分片上传任务。
         1. Bearer 授权通过后校验路径 id 和 JSON 声明。任务归属取自认证账号，同账号其他设备可请求签发。
            parts 包含 1～20 个不同分片编号。编号范围为 1～10000，且必须在任务固定计划内。摘要为对应片正文的 64 位十六进制 SHA-256。
         2. 任务须为未到期且已绑定存储会话的 MULTIPART/UPLOADING。按数据库时间复查状态和有效执行租约。

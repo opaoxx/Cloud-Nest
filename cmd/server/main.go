@@ -582,6 +582,11 @@ func runWithPurgeRootWorker(
 		},
 	)
 
+	// 分片签发使用同一份存储配置，显式续期复用账号事务。
+	uploadPartTargets := service.NewUploadPartSigningTargetService(storageConfig.Provider, storageConfig.Bucket,
+		store.FindUserUploadTaskForPartSigning, store.FindUserStoredObject)
+	uploadPartURLs := service.NewUploadPartURLService(uploadPartTargets.Get, storageClient.SignUploadPartURL, store.RenewUserUploadPartExpiry)
+
 	// 下载目标在只读快照内检查，签发后通过当前用户事务复查并记录访问。
 	downloadTargets := service.NewEntryDownloadTargetService(func(ctx context.Context, read func(context.Context, service.EntryDownloadTargetReader) error) error {
 		return store.WithFileEntrySnapshot(ctx, func(snapshotContext context.Context, snapshotStore *repository.Store) error {
@@ -603,6 +608,7 @@ func runWithPurgeRootWorker(
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)
 	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize, createUploadService.Create)
+	serverhttp.RegisterUploadPartURLsRoute(router, authorizationService.Authorize, uploadPartURLs.Create)
 	serverhttp.RegisterUploadContentRoute(router, authorizationService.Authorize, uploadTaskService.Get, receiveUploadContent.Receive)
 	serverhttp.RegisterUploadCompletionRoute(router, authorizationService.Authorize, uploadTaskService.ConfirmCompletion)
 	serverhttp.RegisterUploadCancellationRoute(router, authorizationService.Authorize, store.BeginUserUploadCancellation)
