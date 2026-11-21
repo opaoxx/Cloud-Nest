@@ -22,13 +22,17 @@ func (store *Store) ScheduleUploadVerificationRetry(ctx context.Context, task *d
 	if task == nil || task.UserID == 0 {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
+	uploadMode := task.UploadMode
+	if uploadMode != "SINGLE" && uploadMode != "MULTIPART" {
+		return nil, domain.ErrUploadTaskNotReady
+	}
 	retryMessage := domain.ErrUploadStorageUnavailable.Error()
 	var scheduled *domain.UploadTask
 	err := store.withActiveUserTransaction(ctx, task.UserID, func(txContext context.Context, txStore *Store) error {
-		// 2. 锁定当前任务，复核租约版本和预占。
+		// 2. 锁定当前任务，复核租约、完整预占和 Multipart 原会话。
 		lockedStore := *txStore
 		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
-		current, err := lockedStore.findVerifyingUploadWithFullReservation(txContext, task, "SINGLE")
+		current, err := lockedStore.findVerifyingUploadWithFullReservation(txContext, task, uploadMode)
 		if err != nil {
 			return err
 		}
@@ -46,9 +50,10 @@ func (store *Store) ScheduleUploadVerificationRetry(ctx context.Context, task *d
 				"attempt_count = attempt_count + 1, last_error_code = ?, last_error_message = ?, "+
 				"lease_owner = NULL, lease_until = NULL, updated_at = UTC_TIMESTAMP(6) "+
 				"WHERE user_id = ? AND id = ? AND staged_object_id = ? AND lease_version = ? AND CAST(lease_owner AS BINARY) = ? "+
-				"AND status = 'VERIFYING' AND upload_mode = 'SINGLE' AND reserved_bytes = file_size "+
+				"AND status = 'VERIFYING' AND upload_mode = ? AND CAST(storage_upload_id AS BINARY) <=> ? AND reserved_bytes = file_size "+
 				"AND lease_until > UTC_TIMESTAMP(6) AND expires_at > UTC_TIMESTAMP(6)",
-			delaySeconds, uploadVerificationRetryCode, retryMessage, current.UserID, current.ID, current.StagedObjectID, current.LeaseVersion, *current.LeaseOwner)
+			delaySeconds, uploadVerificationRetryCode, retryMessage, current.UserID, current.ID, current.StagedObjectID,
+			current.LeaseVersion, *current.LeaseOwner, current.UploadMode, current.StorageUploadID)
 		if err := txContext.Err(); err != nil {
 			return err
 		}
@@ -79,6 +84,10 @@ func (store *Store) ScheduleUploadVerificationRetry(ctx context.Context, task *d
 			updated.ReservedBytes != current.ReservedBytes || !updated.ExpiresAt.Equal(current.ExpiresAt) ||
 			updated.LastErrorCode == nil || *updated.LastErrorCode != uploadVerificationRetryCode ||
 			updated.LastErrorMessage == nil || *updated.LastErrorMessage != retryMessage {
+			return domain.ErrInvalidUploadTaskData
+		}
+		if uploadMode == "MULTIPART" && (!sameUploadStorageText(updated.StorageUploadID, current.StorageUploadID) ||
+			!sameMultipartUploadDeclaration(current, updated)) {
 			return domain.ErrInvalidUploadTaskData
 		}
 		scheduled = updated

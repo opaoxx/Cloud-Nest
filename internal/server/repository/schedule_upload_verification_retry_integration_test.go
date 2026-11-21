@@ -12,25 +12,26 @@ import (
 )
 
 func TestScheduleUploadVerificationRetryIntegration(t *testing.T) {
-	for _, scenario := range []struct {
+	type retryScenario struct {
 		name                string
+		multipart           bool
 		delaySeconds        int
 		changeAfterClaimSQL string
 		wantError           error
 		waitUntilExpiry     bool
+		expireAfterClaim    bool
 		cancel              bool
-	}{
+	}
+	scenarios := []retryScenario{
 		{name: "release current lease and let scanner reclaim when due", delaySeconds: 30},
-		{name: "retry time stops at task expiry", delaySeconds: 30, waitUntilExpiry: true,
-			changeAfterClaimSQL: "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 15 SECOND WHERE id=19"},
+		{name: "retry time stops at task expiry", delaySeconds: 30, waitUntilExpiry: true},
 		{name: "reject changed lease owner", delaySeconds: 1,
 			changeAfterClaimSQL: "UPDATE upload_tasks SET lease_owner='Other-worker' WHERE id=19", wantError: domain.ErrUploadTaskBusy},
 		{name: "reject changed lease version", delaySeconds: 1,
 			changeAfterClaimSQL: "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19", wantError: domain.ErrUploadTaskBusy},
 		{name: "reject expired lease", delaySeconds: 1,
 			changeAfterClaimSQL: "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
-		{name: "reject expired task", delaySeconds: 1,
-			changeAfterClaimSQL: "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "reject expired task", delaySeconds: 1, expireAfterClaim: true, wantError: domain.ErrUploadTaskBusy},
 		{name: "reject non-verifying task", delaySeconds: 1,
 			changeAfterClaimSQL: "UPDATE upload_tasks SET status='CANCELLING' WHERE id=19", wantError: domain.ErrUploadTaskNotReady},
 		{name: "reject incomplete reservation", delaySeconds: 1,
@@ -41,10 +42,29 @@ func TestScheduleUploadVerificationRetryIntegration(t *testing.T) {
 		{name: "roll back invalid readback", delaySeconds: 1,
 			changeAfterClaimSQL: "CREATE TRIGGER fixture_retry BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.attempt_count=OLD.attempt_count", wantError: domain.ErrInvalidUploadTaskData},
 		{name: "preserve cancellation", delaySeconds: 1, cancel: true, wantError: context.Canceled},
-	} {
+	}
+	multipartScenarios := []retryScenario{
+		{name: "multipart reject changed raw session", multipart: true, delaySeconds: 1,
+			changeAfterClaimSQL: "UPDATE upload_tasks SET storage_upload_id=RTRIM(storage_upload_id) WHERE id=19", wantError: domain.ErrUploadTaskBusy},
+		{name: "multipart reject changed part layout", multipart: true, delaySeconds: 1,
+			changeAfterClaimSQL: "UPDATE upload_tasks SET part_size=part_size-1 WHERE id=19", wantError: domain.ErrInvalidUploadTaskData},
+		{name: "multipart reject rewritten expiry", multipart: true, delaySeconds: 1,
+			changeAfterClaimSQL: "UPDATE upload_tasks SET expires_at=expires_at-INTERVAL 1 SECOND WHERE id=19", wantError: domain.ErrInvalidUploadTaskData},
+		{name: "multipart roll back changed raw session on readback", multipart: true, delaySeconds: 1,
+			changeAfterClaimSQL: "CREATE TRIGGER fixture_retry BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.storage_upload_id=RTRIM(OLD.storage_upload_id)",
+			wantError:           domain.ErrInvalidUploadTaskData},
+	}
+	for _, scenario := range scenarios {
+		scenario.name = "multipart " + scenario.name
+		scenario.multipart = true
+		multipartScenarios = append(multipartScenarios, scenario)
+	}
+	for _, scenario := range append(scenarios, multipartScenarios...) {
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 在独占库创建待校验记录，走正式扫描和领取入口。
 			pool, original := uploadTaskDatabase(t)
+			pool.SetMaxOpenConns(1)
+			pool.SetMaxIdleConns(1)
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
 			store, err := NewStore(pool)
@@ -57,22 +77,49 @@ func TestScheduleUploadVerificationRetryIntegration(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// 固定独占连接的时钟，到期时只推进时间，保留任务声明。
+			execute("SET timestamp = ?", time.Now().Unix())
+			t.Cleanup(func() {
+				cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelCleanup()
+				if _, err := pool.ExecContext(cleanupContext, "SET timestamp = DEFAULT"); err != nil {
+					t.Error("复原隔离连接的时间失败", err)
+				}
+			})
+			expiresInSeconds := 24 * 60 * 60
+			if scenario.waitUntilExpiry || scenario.expireAfterClaim {
+				expiresInSeconds = 15
+			}
 			const userID, taskID, objectID = 7, 19, 23
 			const initialUsed, otherReserved = 1024, 512
-			originalReserved := original.FileSize + otherReserved
+			fileSize := original.FileSize
+			if scenario.multipart {
+				fileSize = domain.MaxSingleUploadSizeBytes + 1
+			}
+			originalReserved := fileSize + otherReserved
 			execute("UPDATE users SET used_storage=?,reserved_storage=? WHERE id=?", initialUsed, originalReserved, userID)
-			execute("UPDATE stored_objects SET status='VERIFYING' WHERE id=?", objectID)
+			execute("UPDATE stored_objects SET status='VERIFYING',file_size=? WHERE id=?", fileSize, objectID)
 			execute(`UPDATE upload_tasks SET status='VERIFYING',upload_mode='SINGLE',storage_upload_id=NULL,part_size=NULL,
 				part_count=NULL,published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
-				reserved_bytes=file_size,lease_owner=NULL,lease_until=NULL,lease_version=3,
+				file_size=?,reserved_bytes=?,lease_owner=NULL,lease_until=NULL,lease_version=3,
 				next_attempt_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND,attempt_count=4,last_error_code='DATABASE_UNAVAILABLE',
-				last_error_message='old diagnostic',expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY WHERE id=?`, taskID)
+				last_error_message='old diagnostic',expires_at=TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP(6)) WHERE id=?`,
+				fileSize, fileSize, expiresInSeconds, taskID)
+			scanCandidates := store.ListUploadVerificationCandidates
+			claimLease := store.ClaimUploadVerificationLease
+			if scenario.multipart {
+				execute("UPDATE stored_objects SET storage_etag='fixture-etag',storage_version_id='merged-version' WHERE id=?", objectID)
+				execute(`UPDATE upload_tasks SET upload_mode='MULTIPART',storage_upload_id='fixture-retry-session ',
+					part_size=?,part_count=2,expected_sha256=UNHEX(REPEAT('ab',32)) WHERE id=?`, fileSize-1, taskID)
+				scanCandidates = store.ListMultipartUploadVerificationCandidates
+				claimLease = store.ClaimMultipartUploadVerificationLease
+			}
 			if scenario.wantError == domain.ErrUploadLeaseVersionExhausted {
 				execute("UPDATE upload_tasks SET lease_version=18446744073709551614 WHERE id=?", taskID)
 			}
 			list := func() []domain.UploadVerificationCandidate {
 				t.Helper()
-				candidates, err := store.ListUploadVerificationCandidates(ctx, 1)
+				candidates, err := scanCandidates(ctx, 1)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -82,9 +129,12 @@ func TestScheduleUploadVerificationRetryIntegration(t *testing.T) {
 			if len(candidate) != 1 {
 				t.Fatal("待校验任务未进入候选", candidate)
 			}
-			claimed, err := store.ClaimUploadVerificationLease(ctx, candidate[0], "verify-worker")
-			if err != nil {
-				t.Fatal(err)
+			claimed, err := claimLease(ctx, candidate[0], "verify-worker")
+			if err != nil || claimed == nil {
+				t.Fatal("未领取校验租约", claimed, err)
+			}
+			if scenario.expireAfterClaim {
+				execute("SET timestamp = ?", claimed.ExpiresAt.Unix())
 			}
 			if scenario.changeAfterClaimSQL != "" {
 				execute(scenario.changeAfterClaimSQL)
@@ -161,27 +211,30 @@ func TestScheduleUploadVerificationRetryIntegration(t *testing.T) {
 				t.Fatal("扫描提前读到了候选", results)
 			}
 			if scenario.waitUntilExpiry {
-				execute("UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6),next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", taskID)
+				execute("SET timestamp = ?", after.ExpiresAt.Unix())
 				if results := list(); len(results) != 0 {
 					t.Fatal("到期任务被识别为重试候选", results)
 				}
 				return
 			}
 			delayedCandidate := domain.UploadVerificationCandidate{TaskID: taskID, UserID: userID, StagedObjectID: objectID, LeaseVersion: claimed.LeaseVersion}
-			if premature, err := store.ClaimUploadVerificationLease(ctx, delayedCandidate, "second-worker"); premature != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+			if premature, err := claimLease(ctx, delayedCandidate, "second-worker"); premature != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 				t.Fatal("重新领取绕过了等待时间", premature, err)
 			}
-			execute("UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?", taskID)
+			execute("SET timestamp = ?", after.NextAttemptAt.Unix())
 			results := list()
 			if len(results) != 1 || results[0] != delayedCandidate {
 				t.Fatal("到点的重试任务未进入候选", results)
 			}
-			reclaimed, err := store.ClaimUploadVerificationLease(ctx, results[0], "second-worker")
-			if err != nil || reclaimed.LeaseVersion != claimed.LeaseVersion+1 || reclaimed.AttemptCount != 5 {
+			reclaimed, err := claimLease(ctx, results[0], "second-worker")
+			if err != nil || reclaimed == nil || reclaimed.LeaseVersion != claimed.LeaseVersion+1 || reclaimed.AttemptCount != 5 {
 				t.Fatal("重试领取未建立新的租约", reclaimed, err)
 			}
+			if repeated, err := store.ScheduleUploadVerificationRetry(ctx, claimed, 1); repeated != nil || !errors.Is(err, domain.ErrUploadTaskBusy) {
+				t.Fatal("旧租约在重新领取后仍能安排重试", repeated, err)
+			}
 			second, err := store.ScheduleUploadVerificationRetry(ctx, reclaimed, 1)
-			if err != nil || second.AttemptCount != 6 || second.NextAttemptAt == nil || !second.NextAttemptAt.Equal(second.UpdatedAt.Add(time.Second)) {
+			if err != nil || second == nil || second.AttemptCount != 6 || second.NextAttemptAt == nil || !second.NextAttemptAt.Equal(second.UpdatedAt.Add(time.Second)) {
 				t.Fatal("新租约不能继续安排下一次重试", second, err)
 			}
 		})
