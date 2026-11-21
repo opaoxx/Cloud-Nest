@@ -121,6 +121,17 @@ func TestOpenUploadVerificationObjectMinIOIntegration(t *testing.T) {
 	if old.VersionID == "" || old.VersionID == "null" || latest.VersionID == "" || latest.VersionID == old.VersionID {
 		t.Fatal("未创建两个独立版本")
 	}
+	t.Run("multipart metadata reads latest version or definite absence", func(t *testing.T) {
+		// 用独占桶的现有合成版本测试 HEAD，核对原键定位和明确缺失。
+		result, err := client.StatMultipartUploadObject(ctx, key)
+		if err != nil || result == nil || result.SizeBytes != 0 || result.StorageETag == nil || *result.StorageETag != latest.ETag ||
+			result.StorageVersionID == nil || *result.StorageVersionID != latest.VersionID {
+			t.Fatal("原键元数据未匹配当前合成版本", result, err)
+		}
+		if absent, err := client.StatMultipartUploadObject(ctx, key+"-never-written"); absent != nil || !errors.Is(err, domain.ErrUploadObjectMissing) {
+			t.Fatal("独占桶中从未写入的键未返回明确缺失", absent, err)
+		}
+	})
 
 	// 2. 从同一个键打开精确版本，并独立比较原始字节。
 	object := domain.StoredObject{ID: 23, OwnerUserID: 7, Provider: settings.Provider, Bucket: bucket, ObjectKey: key, Status: domain.StoredObjectStatusVerifying}

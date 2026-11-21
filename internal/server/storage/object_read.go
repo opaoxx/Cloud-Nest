@@ -21,9 +21,7 @@ func objectReadOptions(location domain.CreateStagedObjectInput, version *string)
 	// 2. 区分未保存版本和明确版本，保留版本原文。
 	options := minio.GetObjectOptions{}
 	if version != nil {
-		if len(*version) == 0 || len(*version) > 255 || strings.ContainsFunc(*version, func(character rune) bool {
-			return character < 32 || character > 126
-		}) {
+		if !validStoredObjectHeaderValue(*version) {
 			return minio.GetObjectOptions{}, domain.ErrInvalidStoredObjectData
 		}
 		options.VersionID = *version
@@ -34,6 +32,13 @@ func objectReadOptions(location domain.CreateStagedObjectInput, version *string)
 
 func validStoredObjectLocation(location domain.CreateStagedObjectInput) bool {
 	return location.IsValid() && strings.TrimSpace(location.ObjectKey) != "" && !strings.ContainsFunc(location.ObjectKey, unicode.IsControl)
+}
+
+// validStoredObjectHeaderValue 检查可按原值保存的 ETag 或版本 ID。
+func validStoredObjectHeaderValue(value string) bool {
+	return len(value) > 0 && len(value) <= 255 && !strings.ContainsFunc(value, func(character rune) bool {
+		return character < 32 || character > 126
+	})
 }
 
 // matchesObjectReadVersion 保留 MinIO 在版本功能开启前写入的 null 版本语义。
