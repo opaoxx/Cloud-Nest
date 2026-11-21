@@ -25,7 +25,7 @@ func (store *Store) FailUploadForBodySizeMismatch(ctx context.Context, task *dom
 		return domain.ErrInvalidUploadTaskData
 	}
 
-	// 2. 锁内复核声明、暂存对象和校验租约。
+	// 2. 锁内复核声明、暂存对象版本、校验租约和 Multipart 原会话。
 	return store.withUploadVerificationResultTransaction(ctx, task, staged, mismatch.ObservedSizeBytes, nil, false,
 		func(txContext context.Context, txStore *Store, current *domain.UploadTask, _ *domain.StoredObject) error {
 			// 3. 写入 BODY_SIZE_MISMATCH，释放预占并开始回收计时。

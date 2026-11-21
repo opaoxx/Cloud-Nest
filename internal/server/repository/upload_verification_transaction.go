@@ -47,8 +47,8 @@ func (store *Store) withUploadVerificationResultTransaction(
 		return domain.ErrInvalidUploadTaskData
 	}
 	uploadMode := verifiedTask.UploadMode
-	// Multipart 先接入成功结果复核，失败收尾继续使用原入口约束。
-	multipart := uploadMode == "MULTIPART" && checksum != nil && !expectChecksumMismatch
+	// Multipart 复核校验通过和已确认的大小失配两种结果。
+	multipart := uploadMode == "MULTIPART" && !expectChecksumMismatch
 	if verifiedTask.Status != domain.UploadStatusVerifying || (uploadMode != "SINGLE" && !multipart) {
 		return domain.ErrUploadTaskNotReady
 	}
