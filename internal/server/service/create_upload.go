@@ -17,6 +17,8 @@ type CreateUploadTransaction interface {
 	CreateUserStagedObject(ctx context.Context, input domain.CreateStagedObjectInput) (*domain.StoredObject, error)
 	// CreateUserUploadTask 引用暂存对象创建 SINGLE 上传任务。
 	CreateUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, expiresAt time.Time) (*domain.UploadTask, error)
+	// CreateUserMultipartUploadTask 引用暂存对象和固定计划创建 Multipart 上传任务。
+	CreateUserMultipartUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error)
 }
 
 // CreateUploadService 组合路径校验、空间预占及暂存对象和任务创建。
@@ -52,10 +54,7 @@ func NewCreateUploadService(provider, bucket string, withTransaction func(contex
 // 失败返回 nil 与错误，外层提交确认后返回独立任务记录。
 func (createService *CreateUploadService) Create(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput) (*domain.UploadTask, error) {
 	// 1. 检查认证身份、上下文和上传声明。
-	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
-		return nil, fmt.Errorf("创建上传任务需要上下文和完整认证身份")
-	}
-	if err := ctx.Err(); err != nil {
+	if err := validateUploadCreationContext(ctx, actor); err != nil {
 		return nil, err
 	}
 	declaration, err := ValidateCreateUploadInput(input)
@@ -63,7 +62,34 @@ func (createService *CreateUploadService) Create(ctx context.Context, actor doma
 		return nil, err
 	}
 
-	// 2. 进入用户事务，检查目标目录及完整祖先链。
+	// 2. 在同一个用户事务中完成 SINGLE 任务创建。
+	return createService.createPreparedUpload(ctx, actor, *declaration, domain.UploadPlan{Mode: "SINGLE"})
+}
+
+// CreateWithPlan 根据声明大小选择上传模式，提交后返回保存了固定计划的任务。
+func (createService *CreateUploadService) CreateWithPlan(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, limits domain.UploadPlanLimits) (*domain.UploadTask, error) {
+	// 1. 在进入事务前校验身份、声明和存储限制，固定上传计划。
+	if err := validateUploadCreationContext(ctx, actor); err != nil {
+		return nil, err
+	}
+	declaration, plan, err := ValidateCreateUploadInputWithPlan(input, limits)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 在同一个用户事务中保存配额、暂存对象和计划对应的任务。
+	return createService.createPreparedUpload(ctx, actor, *declaration, plan)
+}
+
+func validateUploadCreationContext(ctx context.Context, actor domain.Actor) error {
+	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
+		return fmt.Errorf("创建上传任务需要上下文和完整认证身份")
+	}
+	return ctx.Err()
+}
+
+func (createService *CreateUploadService) createPreparedUpload(ctx context.Context, actor domain.Actor, declaration domain.CreateUploadInput, plan domain.UploadPlan) (*domain.UploadTask, error) {
+	// 1. 进入用户事务，检查目标目录及完整祖先链。
 	var prepared *domain.UploadTask
 	transactionError := createService.withTransaction(ctx, actor, func(txContext context.Context, txStore CreateUploadTransaction) error {
 		if txContext == nil || txStore == nil {
@@ -80,7 +106,7 @@ func (createService *CreateUploadService) Create(ctx context.Context, actor doma
 			return domain.ErrFileEntryNotDirectory
 		}
 
-		// 3. 检查新增文件的深度，生成对象键并预占空间。
+		// 2. 检查新增文件的深度，生成对象键并预占完整声明空间。
 		if len(path.Entries) > domain.MaxFileEntryDepth {
 			return domain.ErrFileEntryDepthExceeded
 		}
@@ -108,7 +134,7 @@ func (createService *CreateUploadService) Create(ctx context.Context, actor doma
 			return fmt.Errorf("预占上传空间失败: %w", reserveError)
 		}
 
-		// 4. 创建暂存对象，核对归属和存储位置。
+		// 3. 创建暂存对象，核对归属和存储位置。
 		staged, createError := txStore.CreateUserStagedObject(txContext, objectInput)
 		if err := txContext.Err(); err != nil {
 			return err
@@ -122,22 +148,29 @@ func (createService *CreateUploadService) Create(ctx context.Context, actor doma
 		}
 		objectID := staged.ID
 
-		// 5. 创建 SINGLE 上传任务，核对并复制初始结果。
+		// 4. 按模式创建任务，核对并复制初始结果。
 		expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(24 * time.Hour)
-		taskInput := *declaration
+		taskInput := declaration
 		taskInput.ExpectedSHA256 = copyOptionalValue(declaration.ExpectedSHA256)
-		task, createError := txStore.CreateUserUploadTask(txContext, objectID, taskInput, expiresAt)
+		status := domain.UploadStatusUploading
+		var task *domain.UploadTask
+		if plan.Mode == "MULTIPART" {
+			status = domain.UploadStatusCreating
+			task, createError = txStore.CreateUserMultipartUploadTask(txContext, objectID, taskInput, plan, expiresAt)
+		} else {
+			task, createError = txStore.CreateUserUploadTask(txContext, objectID, taskInput, expiresAt)
+		}
 		if err := txContext.Err(); err != nil {
 			return err
 		}
 		if createError != nil {
-			return fmt.Errorf("创建 SINGLE 上传任务失败: %w", createError)
+			return fmt.Errorf("创建 %s 上传任务失败: %w", plan.Mode, createError)
 		}
 		if task == nil || task.ID == 0 || task.UserID != actor.UserID || task.DeviceID != actor.DeviceID || task.StagedObjectID != objectID ||
 			task.TargetParentID != declaration.ParentID || task.RequestedName != declaration.Name || task.FileSize != declaration.SizeBytes ||
-			task.UploadMode != "SINGLE" || task.Status != domain.UploadStatusUploading || task.ReservedBytes != declaration.SizeBytes ||
+			task.UploadMode != plan.Mode || task.Status != status || task.ReservedBytes != declaration.SizeBytes ||
 			!task.ExpiresAt.Equal(expiresAt) || task.CreatedAt.IsZero() || task.UpdatedAt.IsZero() ||
-			(task.ExpectedSHA256 == nil) != (declaration.ExpectedSHA256 == nil) || task.StorageUploadID != nil || task.PartSize != nil || task.PartCount != nil ||
+			(task.ExpectedSHA256 == nil) != (declaration.ExpectedSHA256 == nil) || task.StorageUploadID != nil ||
 			task.PublishedObjectID != nil || task.ResolvedName != nil || task.ResultEntryID != nil || task.LeaseOwner != nil || task.LeaseUntil != nil ||
 			task.LeaseVersion != 0 || task.NextAttemptAt != nil || task.AttemptCount != 0 || task.LastErrorCode != nil || task.LastErrorMessage != nil || task.CompletedAt != nil {
 			return domain.ErrInvalidUploadTaskData
@@ -145,13 +178,18 @@ func (createService *CreateUploadService) Create(ctx context.Context, actor doma
 		if task.ExpectedSHA256 != nil && *task.ExpectedSHA256 != *declaration.ExpectedSHA256 {
 			return domain.ErrInvalidUploadTaskData
 		}
-		result := *task
-		result.ExpectedSHA256 = copyOptionalValue(task.ExpectedSHA256)
-		prepared = &result
+		if plan.Mode == "MULTIPART" {
+			if task.PartSize == nil || *task.PartSize != plan.PartSizeBytes || task.PartCount == nil || *task.PartCount != plan.PartCount {
+				return domain.ErrInvalidUploadTaskData
+			}
+		} else if task.PartSize != nil || task.PartCount != nil {
+			return domain.ErrInvalidUploadTaskData
+		}
+		prepared = copyUploadTask(task)
 		return nil
 	})
 
-	// 6. 确认事务提交成功后返回任务。
+	// 5. 确认事务提交成功后返回任务。
 	if transactionError != nil {
 		return nil, fmt.Errorf("创建上传事务失败: %w", transactionError)
 	}

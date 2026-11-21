@@ -55,11 +55,23 @@ func (transaction *createUploadTransactionStub) CreateUserStagedObject(ctx conte
 }
 
 func (transaction *createUploadTransactionStub) CreateUserUploadTask(ctx context.Context, objectID uint64, input domain.CreateUploadInput, expiresAt time.Time) (*domain.UploadTask, error) {
+	return transaction.createTask(ctx, objectID, input, domain.UploadPlan{Mode: "SINGLE"}, expiresAt)
+}
+
+func (transaction *createUploadTransactionStub) CreateUserMultipartUploadTask(ctx context.Context, objectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error) {
+	return transaction.createTask(ctx, objectID, input, plan, expiresAt)
+}
+
+func (transaction *createUploadTransactionStub) createTask(ctx context.Context, objectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error) {
 	transaction.events = append(transaction.events, "task")
 	transaction.writeContexts = append(transaction.writeContexts, ctx)
 	transaction.taskInput = input
 	stamp := transaction.entries[11].CreatedAt
-	transaction.task = &domain.UploadTask{ID: transaction.taskID, UserID: transaction.profile.ID, DeviceID: 19, StagedObjectID: objectID, TargetParentID: input.ParentID, RequestedName: input.Name, ExpectedSHA256: input.ExpectedSHA256, FileSize: input.SizeBytes, ReservedBytes: input.SizeBytes, UploadMode: "SINGLE", Status: domain.UploadStatusUploading, ExpiresAt: expiresAt, CreatedAt: stamp, UpdatedAt: stamp}
+	transaction.task = &domain.UploadTask{ID: transaction.taskID, UserID: transaction.profile.ID, DeviceID: 19, StagedObjectID: objectID, TargetParentID: input.ParentID, RequestedName: input.Name, ExpectedSHA256: input.ExpectedSHA256, FileSize: input.SizeBytes, ReservedBytes: input.SizeBytes, UploadMode: plan.Mode, Status: domain.UploadStatusUploading, ExpiresAt: expiresAt, CreatedAt: stamp, UpdatedAt: stamp}
+	if plan.Mode == "MULTIPART" {
+		transaction.task.Status = domain.UploadStatusCreating
+		transaction.task.PartSize, transaction.task.PartCount = &plan.PartSizeBytes, &plan.PartCount
+	}
 	if transaction.afterTask != nil {
 		transaction.afterTask(transaction.task)
 	}
@@ -72,6 +84,47 @@ func (transaction *createUploadTransactionStub) CreateUserUploadTask(ctx context
 func createUploadFixture() (domain.Actor, domain.CreateUploadInput, *createUploadTransactionStub) {
 	actor, reader := fileEntryPathFixture()
 	return actor, domain.CreateUploadInput{ParentID: 12, Name: " 学习.bin ", SizeBytes: 40}, &createUploadTransactionStub{fileEntryPathReaderStub: reader, objectID: 23, taskID: 29}
+}
+
+func TestCreateUploadServiceWithPlan(t *testing.T) {
+	for _, scenario := range []string{"single", "multipart", "invalid readback"} {
+		t.Run(scenario, func(t *testing.T) {
+			actor, input, transaction := createUploadFixture()
+			digest := sha256.Sum256([]byte("fixture"))
+			mode := "SINGLE"
+			if scenario != "single" {
+				input.SizeBytes, input.ExpectedSHA256 = domain.MaxSingleUploadSizeBytes+1, &digest
+				mode = "MULTIPART"
+			}
+			if scenario == "invalid readback" {
+				transaction.afterTask = func(task *domain.UploadTask) { *task.PartCount = 3 }
+			}
+			creator := NewCreateUploadService("local_minio", "cloudnest", func(ctx context.Context, _ domain.Actor, action func(context.Context, CreateUploadTransaction) error) error {
+				return action(ctx, transaction)
+			})
+			limits := domain.UploadPlanLimits{
+				MaxFileSizeBytes: domain.DefaultMaxUploadSizeBytes, MaxObjectSizeBytes: domain.DefaultMaxUploadSizeBytes,
+				MaxPartSizeBytes: 64 * 1024 * 1024,
+			}
+			task, err := creator.CreateWithPlan(t.Context(), actor, input, limits)
+			if scenario == "invalid readback" {
+				if task != nil || !errors.Is(err, domain.ErrInvalidUploadTaskData) {
+					t.Fatalf("incorrect readback accepted: %+v %v", task, err)
+				}
+				return
+			}
+			if err != nil || task == nil || task.UploadMode != mode || !reflect.DeepEqual(task, transaction.task) {
+				t.Fatalf("unexpected result: %+v %v", task, err)
+			}
+			if scenario == "multipart" {
+				*transaction.task.PartSize, *transaction.task.PartCount = 0, 0
+				transaction.task.ExpectedSHA256[0] ^= 0xff
+				if *task.PartSize != 16777216 || *task.PartCount != 2 || *task.ExpectedSHA256 != digest {
+					t.Fatal("result shares the task's optional values")
+				}
+			}
+		})
+	}
 }
 
 func TestCreateUploadServiceResults(t *testing.T) {

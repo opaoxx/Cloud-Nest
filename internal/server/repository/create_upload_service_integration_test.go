@@ -57,6 +57,14 @@ func (store *createUploadServiceStore) CreateUserUploadTask(ctx context.Context,
 	return task, store.finishCreateStep("task")
 }
 
+func (store *createUploadServiceStore) CreateUserMultipartUploadTask(ctx context.Context, objectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error) {
+	task, err := store.Store.CreateUserMultipartUploadTask(ctx, objectID, input, plan, expiresAt)
+	if err != nil {
+		return nil, err
+	}
+	return task, store.finishCreateStep("task")
+}
+
 func TestCreateUploadServiceIntegration(t *testing.T) {
 	// 1. 使用独占库中的正式表，准备两位用户的授权、目录和配额事实。
 	pool := userProfileDatabase(t)
@@ -249,6 +257,72 @@ func TestCreateUploadServiceIntegration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("multipart commit and rollback", func(t *testing.T) {
+		pool.SetMaxOpenConns(1)
+		defer pool.SetMaxOpenConns(3)
+		limits := domain.UploadPlanLimits{
+			MaxFileSizeBytes: domain.DefaultMaxUploadSizeBytes, MaxObjectSizeBytes: domain.DefaultMaxUploadSizeBytes,
+			MaxPartSizeBytes: 64 * 1024 * 1024,
+		}
+		digest := sha256.Sum256([]byte("multipart fixture"))
+		input := inputFor()
+		input.SizeBytes, input.ExpectedSHA256 = domain.MaxSingleUploadSizeBytes+1, &digest
+
+		// 1. 提交后从独占库核对配额、对象和任务的状态。
+		before := readState(actor.UserID)
+		task, err := creator.CreateWithPlan(ctx, actor, input, limits)
+		if err != nil || task == nil || task.UserID != actor.UserID || task.UploadMode != "MULTIPART" ||
+			task.Status != domain.UploadStatusCreating || task.StorageUploadID != nil || task.ReservedBytes != input.SizeBytes ||
+			task.PartSize == nil || *task.PartSize != 16777216 || task.PartCount == nil || *task.PartCount != 2 {
+			t.Fatalf("事务提交未返回固定计划: %+v %v", task, err)
+		}
+		after := readState(actor.UserID)
+		if after.reserved != before.reserved+input.SizeBytes || after.reserved != after.taskReserved ||
+			after.objects != before.objects+1 || after.tasks != before.tasks+1 || after.used != before.used || after.sequence != before.sequence {
+			t.Fatalf("配额、对象和任务未一起提交: before=%+v after=%+v", before, after)
+		}
+		object, err := store.FindUserStoredObject(ctx, actor.UserID, task.StagedObjectID)
+		if err != nil || object == nil || object.FileSize != input.SizeBytes || object.Status != domain.StoredObjectStatusStaging {
+			t.Fatal("分片任务未引用相同大小的暂存对象", err)
+		}
+		persisted, err := store.FindUserUploadTask(ctx, actor.UserID, task.ID)
+		if err != nil || !reflect.DeepEqual(persisted, task) {
+			t.Fatal("提交后读回的任务与结果不同", err)
+		}
+
+		// 2. 在三项真实写入后分别注入错误，任务写入后另外验证取消。
+		for _, stage := range []string{"reserve", "object", "task"} {
+			task, err := newCreator(stage, nil).CreateWithPlan(ctx, actor, input, limits)
+			if task != nil || !errors.Is(err, failure) || readState(actor.UserID) != after {
+				t.Fatalf("%s 后失败没有整体回滚: %v", stage, err)
+			}
+		}
+		cancelContext, cancel := context.WithCancel(ctx)
+		defer cancel()
+		task, err = newCreator("task", cancel).CreateWithPlan(cancelContext, actor, input, limits)
+		if task != nil || !errors.Is(err, context.Canceled) || readState(actor.UserID) != after {
+			t.Fatal("任务写入后取消没有整体回滚", err)
+		}
+
+		// 3. 祖先不可见、配额不足或摘要缺失时保持创建前的记录。
+		badTarget, tooLarge, missingDigest := input, input, input
+		badTarget.ParentID = 16
+		tooLarge.SizeBytes = 104857601
+		missingDigest.ExpectedSHA256 = nil
+		for _, fixture := range []struct {
+			input domain.CreateUploadInput
+			want  error
+		}{
+			{badTarget, domain.ErrFileEntryNotFound},
+			{tooLarge, domain.ErrQuotaExceeded},
+			{missingDigest, domain.ErrMultipartUploadSHA256Required},
+		} {
+			task, err := creator.CreateWithPlan(ctx, actor, fixture.input, limits)
+			if task != nil || !errors.Is(err, fixture.want) || readState(actor.UserID) != after {
+				t.Fatalf("无效声明或目标改变了创建记录: %v，预期 %v", err, fixture.want)
+			}
+		}
+	})
 	t.Run("concurrent quota protects complete creation", func(t *testing.T) {
 		before := readState(actor.UserID)
 		if _, err := pool.ExecContext(ctx, "UPDATE users SET storage_quota=? WHERE id=1", before.reserved+100); err != nil {
