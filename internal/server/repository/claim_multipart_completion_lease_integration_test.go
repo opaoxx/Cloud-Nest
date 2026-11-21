@@ -168,6 +168,99 @@ func TestClaimUserMultipartCompletionLeaseIntegration(t *testing.T) {
 			t.Fatal("归属或版本拒绝改变了任务")
 		}
 	})
+
+	t.Run("release", func(t *testing.T) {
+		claimForRelease := func(t *testing.T) *domain.UploadTask {
+			t.Helper()
+			reset(t)
+			claimed, err := claim(primary, read(t), "completion-owner")
+			if err != nil || claimed == nil {
+				t.Fatal("测试租约领取失败", err)
+			}
+			return claimed
+		}
+		assertRelease := func(t *testing.T, actor domain.Actor, claimed *domain.UploadTask, want bool, wantError error) {
+			t.Helper()
+			released, err := store.ReleaseUserMultipartCompletionLease(ctx, actor, claimed)
+			if released != want || !errors.Is(err, wantError) {
+				t.Fatalf("释放结果错误，得到 %t、%v，预期 %t、%v", released, err, want, wantError)
+			}
+		}
+
+		// 1. 真实领取后释放，确认恢复签发资格并且重复释放不再写入。
+		t.Run("current lease only releases once", func(t *testing.T) {
+			claimed := claimForRelease(t)
+			assertRelease(t, primary, claimed, true, nil)
+			released := read(t)
+			expected := *claimed
+			expected.LeaseOwner, expected.LeaseUntil, expected.UpdatedAt = nil, nil, released.UpdatedAt
+			if released.UpdatedAt.Before(claimed.UpdatedAt) || !reflect.DeepEqual(&expected, released) {
+				t.Fatal("释放修改了持有者、租约截止时间和更新时间以外的字段")
+			}
+			if err := service.ValidateUploadPartSigningState(released, userID, taskID, released.UpdatedAt); err != nil {
+				t.Fatal("释放后未恢复分片签发资格", err)
+			}
+			assertRelease(t, primary, claimed, false, nil)
+			if !reflect.DeepEqual(released, read(t)) {
+				t.Fatal("重复释放改变了任务")
+			}
+			var used, reserved, parts uint64
+			err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage,(SELECT COUNT(*) FROM upload_parts) FROM users WHERE id=7").
+				Scan(&used, &reserved, &parts)
+			if err != nil || used != 0 || reserved != fileSize || parts != 0 {
+				t.Fatal("释放改变了配额或完成快照", used, reserved, parts, err)
+			}
+		})
+
+		// 2. 旧租约到期后重新领取，即使持有者标识相同，旧版本也不能释放新租约。
+		t.Run("late release preserves replacement", func(t *testing.T) {
+			old := claimForRelease(t)
+			execute(t, "UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=19")
+			current, err := claim(secondary, read(t), *old.LeaseOwner)
+			if err != nil || current == nil || current.LeaseVersion != old.LeaseVersion+1 {
+				t.Fatal("新版本领取失败", err)
+			}
+			assertRelease(t, primary, old, false, nil)
+			if !reflect.DeepEqual(current, read(t)) {
+				t.Fatal("旧版本释放改变了新租约")
+			}
+			assertRelease(t, secondary, current, true, nil)
+			t.Logf("旧版本 %d 未改动新版本 %d，新请求成功释放", old.LeaseVersion, current.LeaseVersion)
+		})
+
+		// 3. 会话、持有者、账号或阶段不匹配时，目标保持原样。
+		t.Run("identity and stage constraints", func(t *testing.T) {
+			claimed := claimForRelease(t)
+			wrongOwner := *claimed
+			wrongOwner.LeaseOwner = new("Completion-owner")
+			wrongSession := *claimed
+			wrongSession.StorageUploadID = new("Fixture+A/=")
+			assertRelease(t, primary, &wrongOwner, false, nil)
+			assertRelease(t, primary, &wrongSession, false, nil)
+			assertRelease(t, foreign, claimed, false, domain.ErrUploadTaskNotFound)
+			foreignScope := *claimed
+			foreignScope.UserID = foreign.UserID
+			assertRelease(t, foreign, &foreignScope, false, nil)
+			if !reflect.DeepEqual(claimed, read(t)) {
+				t.Fatal("绑定或认证账号不匹配时改变了任务")
+			}
+			execute(t, "UPDATE upload_tasks SET status='COMPLETING' WHERE id=19")
+			before := read(t)
+			assertRelease(t, primary, claimed, false, nil)
+			if !reflect.DeepEqual(before, read(t)) {
+				t.Fatal("进入 COMPLETING 后的租约被旧请求修改")
+			}
+		})
+		t.Run("revoked session", func(t *testing.T) {
+			claimed := claimForRelease(t)
+			execute(t, "UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(6) WHERE id=17")
+			assertRelease(t, primary, claimed, false, domain.ErrSessionRevoked)
+			if !reflect.DeepEqual(claimed, read(t)) {
+				t.Fatal("撤销后的会话改变了任务")
+			}
+		})
+	})
+
 	var databaseName string
 	if err := pool.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&databaseName); err != nil {
 		t.Fatal(err)
