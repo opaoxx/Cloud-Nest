@@ -38,21 +38,7 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Close)
-	verifyMinIO := func(callContext context.Context, endpoint string) (string, error) {
-		// 只检查本测试启动的容器。依次读取容器 ID、镜像 ID、运行状态、启动时间和公布的端口。
-		const fields = `{{.Id}} {{.Image}} {{.State.Running}} {{.State.StartedAt}} {{range index .NetworkSettings.Ports "9000/tcp"}}{{.HostIp}}:{{.HostPort}} {{end}}`
-		const image = "sha256:7c840b89c21e0af0e824cf57310becadbbd45c7fb407c78cd2ada4b74c76f733"
-		output, err := exec.CommandContext(callContext, "docker", "container", "inspect", "--format", fields, containerID).Output()
-		if err != nil {
-			return "", err
-		}
-		instance := strings.Fields(string(output))
-		if len(instance) != 5 || instance[0] != containerID || instance[1] != image || instance[2] != "true" ||
-			!strings.HasPrefix(instance[4], "127.0.0.1:") || endpoint != "http://"+instance[4] {
-			return "", nil
-		}
-		return instance[0] + "/" + instance[3], nil
-	}
+	verifyMinIO := isolatedMinIOVerifier(containerID)
 	const key = "b4/synthetic +%.bin"
 	const partSize = 16 << 20
 	const fileSize = partSize + 1
@@ -261,4 +247,22 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 	t.Log("ListParts 确认会话缺失后找到原版本，已中止会话的迟到合并未生成对象")
 	t.Logf("专用 MinIO %s，回环地址 %s，合成版本 %s，读回 %d B，SHA-256 %x，版本数 %d",
 		containerID[:12], settings.EndpointURL, version, readSize, actualDigest.Sum(nil), versions)
+}
+
+func isolatedMinIOVerifier(containerID string) storage.MultipartSessionLockVerifier {
+	return func(callContext context.Context, endpoint string) (string, error) {
+		// 只检查本测试启动的容器。依次读取容器 ID、镜像 ID、运行状态、启动时间和公布的端口。
+		const fields = `{{.Id}} {{.Image}} {{.State.Running}} {{.State.StartedAt}} {{range index .NetworkSettings.Ports "9000/tcp"}}{{.HostIp}}:{{.HostPort}} {{end}}`
+		const image = "sha256:7c840b89c21e0af0e824cf57310becadbbd45c7fb407c78cd2ada4b74c76f733"
+		output, err := exec.CommandContext(callContext, "docker", "container", "inspect", "--format", fields, containerID).Output()
+		if err != nil {
+			return "", err
+		}
+		instance := strings.Fields(string(output))
+		if len(instance) != 5 || instance[0] != containerID || instance[1] != image || instance[2] != "true" ||
+			!strings.HasPrefix(instance[4], "127.0.0.1:") || endpoint != "http://"+instance[4] {
+			return "", nil
+		}
+		return instance[0] + "/" + instance[3], nil
+	}
 }

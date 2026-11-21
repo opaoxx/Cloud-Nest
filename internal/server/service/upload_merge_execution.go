@@ -18,6 +18,8 @@ type UploadMergeExecutionService struct {
 	checkRepair       func(context.Context, *domain.UploadTask, error) (*domain.UploadMergeRepairEvidence, error)
 	reopenForRepair   func(context.Context, string, string, *domain.UploadMergeRepairEvidence) (*domain.UploadTask, error)
 	checkMissing      func(context.Context, *domain.UploadTask, error) (*UploadMergeMissingSessionResult, error)
+	confirmMissing    func(context.Context, string, string) (bool, error)
+	failMissing       func(context.Context, string, string, *domain.UploadMergeMissingSessionObservation, bool) (*domain.UploadTask, error)
 }
 
 // NewUploadMergeExecutionService 绑定合并、校验写回、重试登记、补传及会话复核所需的操作。
@@ -30,18 +32,20 @@ func NewUploadMergeExecutionService(
 	checkRepair func(context.Context, *domain.UploadTask, error) (*domain.UploadMergeRepairEvidence, error),
 	reopenForRepair func(context.Context, string, string, *domain.UploadMergeRepairEvidence) (*domain.UploadTask, error),
 	checkMissing func(context.Context, *domain.UploadTask, error) (*UploadMergeMissingSessionResult, error),
+	confirmMissing func(context.Context, string, string) (bool, error),
+	failMissing func(context.Context, string, string, *domain.UploadMergeMissingSessionObservation, bool) (*domain.UploadTask, error),
 ) *UploadMergeExecutionService {
 	location := domain.CreateStagedObjectInput{Provider: provider, Bucket: bucket, ObjectKey: "validation"}
 	if !location.IsValid() || preflight == nil || complete == nil || beginVerification == nil || scheduleRetry == nil ||
-		checkRepair == nil || reopenForRepair == nil || checkMissing == nil {
-		panic("单条分片合并执行需要存储配置、预检、合并、校验写回、重试登记、补传和会话复核方法")
+		checkRepair == nil || reopenForRepair == nil || checkMissing == nil || confirmMissing == nil || failMissing == nil {
+		panic("单条分片合并执行需要存储配置及合并、校验、重试、补传、会话确认和失败收尾方法")
 	}
 	return &UploadMergeExecutionService{provider: provider, bucket: bucket, preflight: preflight, complete: complete,
 		beginVerification: beginVerification, scheduleRetry: scheduleRetry, checkRepair: checkRepair, reopenForRepair: reopenForRepair,
-		checkMissing: checkMissing}
+		checkMissing: checkMissing, confirmMissing: confirmMissing, failMissing: failMissing}
 }
 
-// Execute 只用当前租约执行一次。成功返回已提交的 VERIFYING 或 UPLOADING 任务。
+// Execute 只用当前租约执行一次。成功返回已提交的 VERIFYING、UPLOADING 或 FAILED 任务。
 // 可重试错误登记后返回 UploadMergeRetryScheduledError，保留原原因。
 func (execution *UploadMergeExecutionService) Execute(ctx context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
 	// 1. 复核任务和预检结果，固定本次执行的目标。
@@ -131,8 +135,7 @@ func (execution *UploadMergeExecutionService) handleStorageFailure(ctx context.C
 	if err := ctx.Err(); err != nil {
 		return nil, errors.Join(cause, err)
 	}
-	if evidence == nil || evidence.ObjectKey == "" || !validUploadMergeClaim(&evidence.Task) || !sameMergeExecutionBinding(&evidence.Task, claimed) ||
-		*evidence.Task.LeaseOwner != *claimed.LeaseOwner || !evidence.Task.LeaseUntil.Equal(*claimed.LeaseUntil) ||
+	if evidence == nil || evidence.ObjectKey == "" || !sameMergeExecutionLease(&evidence.Task, claimed) ||
 		(attemptedKey != "" && evidence.ObjectKey != attemptedKey) {
 		return nil, errors.Join(cause, domain.ErrInvalidUploadTaskData)
 	}
@@ -172,15 +175,53 @@ func (execution *UploadMergeExecutionService) recheckMissingSession(
 			}
 			return execution.commitVerification(ctx, claimed, recovered.Target, &recovered.Object)
 		}
+		return execution.finishMissingSession(ctx, claimed, attemptedKey, checked.Missing, cause)
 	}
 
-	// 3. 结果未确认时按条件登记重试，保留原因。
-	if err == nil {
-		return nil, execution.scheduleStorageRetry(ctx, claimed, cause)
-	}
+	// 3. 复核失败时按条件登记重试，保留原因。
 	retryable := errors.Is(err, domain.ErrUploadStorageUnavailable) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, errUploadMergeSessionPresent)
 	return nil, execution.registerRetry(ctx, claimed, errors.Join(cause, fmt.Errorf("复核分片会话失败: %w", err)), retryable)
+}
+
+func (execution *UploadMergeExecutionService) finishMissingSession(
+	ctx context.Context, claimed *domain.UploadTask, attemptedKey string, observation *domain.UploadMergeMissingSessionObservation, cause error,
+) (*domain.UploadTask, error) {
+	// 1. 核对缺失观察绑定的原任务、对象和租约。
+	if observation == nil || observation.ObjectKey == "" || !sameMergeExecutionLease(&observation.Task, claimed) ||
+		(attemptedKey != "" && observation.ObjectKey != attemptedKey) {
+		return nil, errors.Join(cause, domain.ErrInvalidUploadTaskData)
+	}
+
+	// 2. 在受信实例上确认原会话和对象均缺失。
+	confirmed, err := execution.confirmMissing(ctx, observation.ObjectKey, *observation.Task.StorageUploadID)
+	if contextError := ctx.Err(); contextError != nil {
+		return nil, errors.Join(cause, err, contextError)
+	}
+	if err != nil {
+		return nil, execution.scheduleStorageRetry(ctx, claimed, errors.Join(cause, fmt.Errorf("确认原分片会话和对象缺失失败: %w", err)))
+	}
+	if !confirmed {
+		return nil, execution.scheduleStorageRetry(ctx, claimed, cause)
+	}
+
+	// 3. 交给仓储事务锁内复查，提交后返回 FAILED 任务。
+	failed, err := execution.failMissing(ctx, execution.provider, execution.bucket, observation, confirmed)
+	if err != nil {
+		return nil, execution.registerRetry(ctx, claimed, errors.Join(cause, fmt.Errorf("收尾丢失会话失败: %w", err)),
+			errors.Is(err, domain.ErrUploadMergeWriteRetryable))
+	}
+	if failed == nil || failed.Status != domain.UploadStatusFailed || !sameMergeExecutionBinding(failed, claimed) ||
+		failed.ReservedBytes != 0 || failed.LeaseOwner != nil || failed.LeaseUntil != nil || failed.NextAttemptAt != nil ||
+		failed.CompletedAt == nil || failed.ResultEntryID != nil || failed.LastErrorCode == nil || *failed.LastErrorCode != domain.UploadSessionLostCode {
+		return nil, errors.Join(cause, domain.ErrInvalidUploadTaskData)
+	}
+	return failed, nil
+}
+
+func sameMergeExecutionLease(task, claimed *domain.UploadTask) bool {
+	return validUploadMergeClaim(task) && sameMergeExecutionBinding(task, claimed) &&
+		*task.LeaseOwner == *claimed.LeaseOwner && task.LeaseUntil.Equal(*claimed.LeaseUntil)
 }
 
 func sameMergeExecutionBinding(task, claimed *domain.UploadTask) bool {
