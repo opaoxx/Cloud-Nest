@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"net"
 	"os"
@@ -41,7 +42,7 @@ func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture bac
 		startedAt.Format(time.RFC3339Nano), stoppedAt.Format(time.RFC3339Nano))
 
 	// 2. 从停止写入的专用库记录基线，再导出全部结构和数据。
-	tableRows, migrationChecksum := inspectBackupSourceForDump(t, ctx, fixture)
+	tableRows, migrationChecksum := inspectBackupDatabase(t, ctx, fixture.pool, backupFixtureID(t, fixture.login.User.ID))
 	for _, container := range []struct{ name, id string }{{"MySQL", fixture.mysqlContainer}, {"MinIO", fixture.minioContainer}} {
 		image, err := exec.CommandContext(ctx, "docker", "inspect", "--type", "container", "--format", "{{.Image}}", container.id).Output()
 		if err != nil {
@@ -78,22 +79,22 @@ func verifyBackupSourceStopped(t *testing.T, baseURL, logs string) {
 	}
 }
 
-func inspectBackupSourceForDump(t *testing.T, ctx context.Context, fixture backupSourceFixture) (map[string]int, string) {
+func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, userID uint64) (map[string]int, string) {
 	t.Helper()
 	// 1. 确认停写后仍然只有一个未发送任务，并且没有待删除或到期清理的样本。
 	var used, reserved, pending, unsent, purging, deleting int
-	if err := fixture.pool.QueryRowContext(ctx, `SELECT u.used_storage,u.reserved_storage,
+	if err := pool.QueryRowContext(ctx, `SELECT u.used_storage,u.reserved_storage,
 		(SELECT COUNT(*) FROM upload_tasks WHERE status NOT IN ('COMPLETED','CANCELLED','EXPIRED','FAILED')),
 		(SELECT COUNT(*) FROM upload_tasks WHERE user_id=u.id AND status='UPLOADING' AND upload_mode='SINGLE'
 			AND lease_owner IS NULL AND lease_until IS NULL AND reserved_bytes=3 AND expires_at>UTC_TIMESTAMP(6)),
 		(SELECT COUNT(*) FROM file_entries WHERE status='PURGING' OR (status='TRASHED' AND deleted_at<UTC_TIMESTAMP(6)-INTERVAL 30 DAY)),
 		(SELECT COUNT(*) FROM stored_objects WHERE status='DELETING' OR gc_after<=UTC_TIMESTAMP(6))
-		FROM users u WHERE u.id=?`, backupFixtureID(t, fixture.login.User.ID)).
+		FROM users u WHERE u.id=?`, userID).
 		Scan(&used, &reserved, &pending, &unsent, &purging, &deleting); err != nil {
 		t.Fatal(err)
 	}
 	if used != 10 || reserved != 3 || pending != 1 || unsent != 1 || purging != 0 || deleting != 0 {
-		t.Fatalf("停写基线不符，已用 %d，预占 %d，待处理 %d，未发送 %d，目录清理 %d，对象回收 %d",
+		t.Fatalf("快照基线不符，已用 %d，预占 %d，待处理 %d，未发送 %d，目录清理 %d，对象回收 %d",
 			used, reserved, pending, unsent, purging, deleting)
 	}
 
@@ -102,13 +103,13 @@ func inspectBackupSourceForDump(t *testing.T, ctx context.Context, fixture backu
 	var name, checksum string
 	var dirty bool
 	var appliedAt time.Time
-	if err := fixture.pool.QueryRowContext(ctx, "SELECT version,name,checksum,dirty,applied_at FROM schema_migrations").
+	if err := pool.QueryRowContext(ctx, "SELECT version,name,checksum,dirty,applied_at FROM schema_migrations").
 		Scan(&version, &name, &checksum, &dirty, &appliedAt); err != nil {
 		t.Fatal(err)
 	}
 	if version != 1 || name != "000001_initial.up.sql" || dirty || appliedAt.IsZero() ||
 		checksum != fmt.Sprintf("%x", sha256.Sum256([]byte(migrations.InitialSQL))) {
-		t.Fatal("源端迁移记录与当前程序不兼容")
+		t.Fatal("迁移记录与当前程序不兼容")
 	}
 	t.Logf("迁移记录：版本 %d，文件 %s，SHA-256 %s，dirty=%t，应用时间 %s",
 		version, name, checksum, dirty, appliedAt.Format(time.RFC3339Nano))
@@ -119,8 +120,8 @@ func inspectBackupSourceForDump(t *testing.T, ctx context.Context, fixture backu
 	}
 	for table, expected := range counts {
 		var rows int
-		if err := fixture.pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+table+"`").Scan(&rows); err != nil || rows != expected {
-			t.Fatalf("停写后的表 %s 行数 %d，预期 %d，错误 %v", table, rows, expected, err)
+		if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+table+"`").Scan(&rows); err != nil || rows != expected {
+			t.Fatalf("表 %s 行数 %d，预期 %d，错误 %v", table, rows, expected, err)
 		}
 	}
 	return counts, checksum
@@ -144,12 +145,22 @@ func exportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSour
 	if err != nil {
 		t.Fatal("读回临时 SQL 快照失败", err)
 	}
-	containerSum, err := exec.CommandContext(ctx, "docker", "exec", fixture.mysqlContainer, "sha256sum", containerPath).Output()
-	fields := strings.Fields(string(containerSum))
-	if err != nil || len(fields) != 2 || fields[1] != containerPath || fields[0] != fmt.Sprintf("%x", sha256.Sum256(local)) {
-		t.Fatal("容器内外的 SQL 快照 SHA-256 不一致", err)
+	if err := verifyBackupSQLContainerDigest(ctx, fixture.mysqlContainer, containerPath, fmt.Sprintf("%x", sha256.Sum256(local))); err != nil {
+		t.Fatal(err)
 	}
 	return local
+}
+
+func verifyBackupSQLContainerDigest(ctx context.Context, containerID, path, expectedDigest string) error {
+	containerSum, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sha256sum", path).Output()
+	if err != nil {
+		return fmt.Errorf("读取容器内 SQL 摘要失败: %w", err)
+	}
+	fields := strings.Fields(string(containerSum))
+	if len(fields) != 2 || fields[1] != path || fields[0] != expectedDigest {
+		return fmt.Errorf("容器内外的 SQL 快照 SHA-256 不一致")
+	}
+	return nil
 }
 
 func verifyBackupSourceSQL(t *testing.T, dump []byte, tableRows map[string]int, migrationChecksum string) {
