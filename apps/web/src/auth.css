@@ -92,6 +92,7 @@
 .directory-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .entry-name-form { display: grid; gap: 8px; }
 .raster-preview-image { justify-self: center; max-width: 100%; max-height: 60vh; object-fit: contain; }
+.plain-text-preview { margin: 0; padding: 12px; max-height: 60vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); }
 .entry-name-form .auth-error { margin: 0; }
 .directory-actions { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .move-entry-form { overflow-wrap: anywhere; }

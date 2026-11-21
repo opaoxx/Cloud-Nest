@@ -40,26 +40,29 @@ func TestServerWebPreviewGrantIntegration(t *testing.T) {
 	t.Log("数据库核对通过：三个授权文件均有最近访问记录，目录、对象和配额保持原样")
 }
 
-func prepareWebPreviewFixture(t *testing.T, ctx context.Context) (*sql.DB, string) {
+type webPreviewFixtureEntry struct {
+	id       uint64
+	name     string
+	category string
+	mimeType any
+	revision uint64
+	body     []byte
+}
+
+func prepareWebPreviewFixture(t *testing.T, ctx context.Context, extra ...webPreviewFixtureEntry) (*sql.DB, string) {
 	t.Helper()
 	pool, bucket, webURL := prepareWebSingleUploadFixture(t, ctx)
 	var raster bytes.Buffer
 	if err := png.Encode(&raster, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
 		t.Fatal(err)
 	}
-	usedBytes := 0
-	for _, fixture := range []struct {
-		id       uint64
-		name     string
-		category string
-		mimeType any
-		revision uint64
-		body     []byte
-	}{
+	fixtures := append([]webPreviewFixtureEntry{
 		{64, "合成预览.png", "IMAGE", "image/png", 9007199254740995, raster.Bytes()},
-		{65, "合成预览.txt", "DOCUMENT", "text/plain", 2, []byte("隔离纯文本预览。")},
+		{65, "合成预览.txt", "DOCUMENT", "text/plain", 2, []byte("隔离纯文本预览。\n<strong>保持原样</strong> & 符号\n尾行")},
 		{66, "不支持预览.bin", "OTHER", nil, 1, []byte{1, 4, 2}},
-	} {
+	}, extra...)
+	usedBytes := 0
+	for _, fixture := range fixtures {
 		key := fmt.Sprintf("preview-fixture/%d", fixture.id)
 		stored, err := bucket.client.PutObject(ctx, bucket.name, key, bytes.NewReader(fixture.body), int64(len(fixture.body)), minio.PutObjectOptions{})
 		if err != nil || stored.VersionID == "" {
@@ -78,7 +81,7 @@ func prepareWebPreviewFixture(t *testing.T, ctx context.Context) (*sql.DB, strin
 		}
 		usedBytes += len(fixture.body)
 	}
-	if _, err := pool.ExecContext(ctx, "UPDATE users SET used_storage=? WHERE id=7", usedBytes); err != nil {
+	if _, err := pool.ExecContext(ctx, "UPDATE users SET used_storage=?, storage_quota=GREATEST(storage_quota,?) WHERE id=7", usedBytes, usedBytes); err != nil {
 		t.Fatal(err)
 	}
 	return pool, webURL

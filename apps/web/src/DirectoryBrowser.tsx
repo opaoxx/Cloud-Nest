@@ -12,6 +12,7 @@ import MoveEntryDialog from './MoveEntryDialog'
 import EntryConfirmationDialog from './EntryConfirmationDialog'
 import SingleUploadDialog from './SingleUploadDialog'
 import RasterImagePreview from './RasterImagePreview'
+import PlainTextPreview from './PlainTextPreview'
 import { useDirectoryListing } from './useDirectoryListing'
 
 type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
@@ -204,6 +205,9 @@ export default function DirectoryBrowser({
               {fileAccess.purpose === 'preview' && isRasterPreviewMimeType(fileAccess.grant.previewMimeType) && (
                 <RasterImagePreview filename={fileAccess.entry.name} grant={fileAccess.grant}
                   onRefresh={() => void requestFileAccess(fileAccess.entry, 'preview')} />
+              )}
+              {fileAccess.purpose === 'preview' && fileAccess.grant.previewMimeType === 'text/plain' && (
+                <PlainTextPreview grant={fileAccess.grant} onRefresh={() => void requestFileAccess(fileAccess.entry, 'preview')} />
               )}
             </div>
           )}

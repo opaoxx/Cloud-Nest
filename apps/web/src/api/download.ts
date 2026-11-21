@@ -1,14 +1,16 @@
-import { ApiError, requestData } from './http'
+import { ApiError, isByteCount, requestData } from './http'
 
 export type FileAccessPurpose = 'download' | 'preview'
 
 const rasterPreviewMimeTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
 type RasterPreviewMimeType = typeof rasterPreviewMimeTypes[number]
 type PreviewMimeType = RasterPreviewMimeType | 'text/plain'
+export const maxPlainTextPreviewBytes = 2 * 1024 * 1024
 
 export interface FileAccessGrant {
   url: string
   expiresAt: number
+  sizeBytes: number
   previewMimeType: PreviewMimeType | null
 }
 
@@ -45,11 +47,13 @@ export async function createFileAccessGrant(accessToken: string, entryId: string
   const expiresAt = typeof data.expires_at === 'string' ? Date.parse(data.expires_at) : NaN
   const mimeType = data.mime_type
   const previewMimeType = preview && (isRasterPreviewMimeType(mimeType) || mimeType === 'text/plain') ? mimeType : null
+  const sizeBytes = data.size_bytes
   if (data.revision !== expectedRevision || !isSignedAccessUrl(data.url) || !Number.isFinite(expiresAt) ||
       typeof data.disposition !== 'string' || !data.disposition.startsWith(dispositionPrefix) ||
-      (preview && !previewMimeType)) {
+      !isByteCount(sizeBytes) || (preview && !previewMimeType) ||
+      (previewMimeType === 'text/plain' && sizeBytes > maxPlainTextPreviewBytes)) {
     throw new ApiError(200, `服务返回的${purposeLabel}授权有误。`)
   }
   if (expiresAt <= Date.now()) throw new ApiError(200, `${purposeLabel}链接已过期，请重新获取。`)
-  return { url: data.url, expiresAt, previewMimeType }
+  return { url: data.url, expiresAt, sizeBytes, previewMimeType }
 }
