@@ -1,17 +1,19 @@
 import { useRef, useState } from 'react'
 import { Button, Modal } from 'antd'
-import { apiErrorMessage } from './api/http'
+import { ApiError, apiErrorMessage } from './api/http'
 import { maxSingleUploadSizeMiB, prepareSingleUpload } from './api/upload'
-import type { SingleUploadTaskCreator, UploadTaskReceipt } from './api/uploadTask'
+import type { SingleUploadContentSender, SingleUploadTaskCreator, UploadTaskReceipt } from './api/uploadTask'
 
-export default function SingleUploadDialog({ parentId, targetPath, createUploadTask, onClose }: {
+export default function SingleUploadDialog({ parentId, targetPath, createUploadTask, sendUploadContent, onClose }: {
   parentId: string
   targetPath: string
   createUploadTask: SingleUploadTaskCreator
+  sendUploadContent: SingleUploadContentSender
   onClose: () => void
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [receipt, setReceipt] = useState<UploadTaskReceipt | null>(null)
+  const [contentStatus, setContentStatus] = useState<'pending' | 'verifying' | 'needs-status-check'>('pending')
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
   const inFlight = useRef(false)
@@ -47,6 +49,29 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
     }
   }
 
+  async function submitContent() {
+    // 1. 只发送当前任务对应的原文件，挡住并发点击。
+    if (!file || !receipt || inFlight.current || contentStatus !== 'pending') return
+    inFlight.current = true
+    setSubmitting(true)
+    setErrorMessage('')
+    try {
+      // 2. 收到同一任务的 202 后，展示校验中并结束正文提交。
+      await sendUploadContent(receipt, file)
+      setContentStatus('verifying')
+    } catch (error) {
+      // 3. 结果不明确或任务状态冲突时保留 ID，提示先查状态。
+      const rejected = error instanceof ApiError && error.status >= 400 && error.status < 500 &&
+        error.status !== 408 && error.status !== 409
+      if (!rejected) setContentStatus('needs-status-check')
+      const message = error instanceof ApiError ? error.message : '暂时无法确认文件接收结果。'
+      setErrorMessage(message)
+    } finally {
+      inFlight.current = false
+      setSubmitting(false)
+    }
+  }
+
   function close() {
     if (!inFlight.current) onClose()
   }
@@ -60,6 +85,11 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
           {!receipt && (
             <Button type="primary" onClick={() => void submit()} disabled={!declaration || submitting} loading={submitting}>
               创建上传任务
+            </Button>
+          )}
+          {receipt && contentStatus === 'pending' && (
+            <Button type="primary" onClick={() => void submitContent()} disabled={submitting} loading={submitting}>
+              上传文件内容
             </Button>
           )}
         </>
@@ -80,8 +110,12 @@ export default function SingleUploadDialog({ parentId, targetPath, createUploadT
         )}
         {receipt && <div><dt>任务 ID</dt><dd>{receipt.taskId}</dd></div>}
       </dl>
-      {receipt ? <p role="status">任务已创建，等待上传文件内容。</p> :
-        declaration && !submitting && <p role="status">文件已就绪，尚未上传。</p>}
+      {!receipt && declaration && !submitting && <p role="status">文件已就绪，尚未上传。</p>}
+      {receipt && contentStatus === 'pending' && (
+        <p role="status">{submitting ? '正在发送文件内容…' : '任务已创建，等待上传文件内容。'}</p>
+      )}
+      {contentStatus === 'verifying' && <p role="status">文件内容已接收，校验中。</p>}
+      {contentStatus === 'needs-status-check' && <p>请保留任务 ID，查询任务状态后再重试。</p>}
       {preparation && 'error' in preparation && <p className="auth-error" role="alert">{preparation.error}</p>}
       {errorMessage && <p className="auth-error" role="alert">{errorMessage}</p>}
     </Modal>

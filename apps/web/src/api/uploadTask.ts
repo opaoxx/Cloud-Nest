@@ -8,6 +8,7 @@ export interface UploadTaskReceipt {
 }
 
 export type SingleUploadTaskCreator = (declaration: SingleUploadDeclaration, idempotencyKey: string) => Promise<UploadTaskReceipt>
+export type SingleUploadContentSender = (receipt: UploadTaskReceipt, file: File) => Promise<void>
 
 export async function createSingleUploadTask(accessToken: string, declaration: SingleUploadDeclaration, idempotencyKey: string): Promise<UploadTaskReceipt> {
   // 1. 仅提交创建任务的文件声明和本次操作的幂等键。
@@ -31,4 +32,27 @@ export async function createSingleUploadTask(accessToken: string, declaration: S
     throw new ApiError(201, '服务返回的上传任务回执有误。')
   }
   return { taskId: task.id, contentPath: data.content_path }
+}
+
+export async function sendSingleUploadContent(accessToken: string, receipt: UploadTaskReceipt, file: File): Promise<void> {
+  // 1. 将发送地址限定在同源的当前上传任务。
+  if (!isUploadId(receipt.taskId) || receipt.contentPath !== `/api/v1/uploads/${receipt.taskId}/content`) {
+    throw new ApiError(0, '上传任务的内容接收地址有误。')
+  }
+
+  // 2. 直接把 File 作为正文，浏览器根据文件大小生成 Content-Length。
+  const data = await requestData(receipt.contentPath, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/octet-stream',
+    },
+    body: file,
+    redirect: 'error',
+  }, 202)
+
+  // 3. 只接受同一个任务的校验受理结果。
+  if (data.task_id !== receipt.taskId || data.status !== 'VERIFYING') {
+    throw new ApiError(202, '服务返回的上传接收回执有误。')
+  }
 }
