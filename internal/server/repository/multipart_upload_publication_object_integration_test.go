@@ -8,10 +8,13 @@ import (
 	"testing"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
 func TestSelectMultipartUploadPublicationObjectIntegration(t *testing.T) {
 	const fileSize = domain.MaxSingleUploadSizeBytes + 1
+	const requestedName = "Report.PDF"
+	const sourceName = "  已改名设备  "
 	digest := domain.UploadContentDigest{SizeBytes: fileSize, SHA256: sha256.Sum256([]byte("multipart publication fixture"))}
 	rollback := errors.New("fixture rollback after object selection")
 	for _, fixture := range []struct {
@@ -56,14 +59,14 @@ func TestSelectMultipartUploadPublicationObjectIntegration(t *testing.T) {
 			}
 			if fixture.existingUser == 7 {
 				execute(`INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size)
-					VALUES(91,7,13,'existing.bin',CAST('existing.bin' AS BINARY),'FILE','OTHER',90,?)`, fileSize)
+					VALUES(91,7,13,'Report.PDF',CAST('report.pdf' AS BINARY),'FILE','DOCUMENT',90,?)`, fileSize)
 			}
 			execute("UPDATE users SET reserved_storage=? WHERE id=7", fileSize)
 			execute(`UPDATE upload_tasks SET status='VERIFYING',upload_mode='MULTIPART',storage_upload_id='Fixture+A/= ',
-				file_size=?,part_size=?,part_count=2,expected_sha256=?,reserved_bytes=?,
+				requested_name=?,file_size=?,part_size=?,part_count=2,expected_sha256=?,reserved_bytes=?,
 				published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
 				lease_owner=NULL,lease_until=NULL,lease_version=3,next_attempt_at=NULL,
-				expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19`, fileSize, fileSize-1, digest.SHA256[:], fileSize)
+				expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19`, requestedName, fileSize, fileSize-1, digest.SHA256[:], fileSize)
 			execute("UPDATE stored_objects SET file_size=?,status='VERIFYING',storage_version_id=?,storage_etag='merged-etag' WHERE id=23", fileSize, fixture.version)
 			candidates, err := store.ListMultipartUploadVerificationCandidates(ctx, 1)
 			if err != nil || len(candidates) != 1 {
@@ -73,6 +76,7 @@ func TestSelectMultipartUploadPublicationObjectIntegration(t *testing.T) {
 			if err != nil || claimed == nil {
 				t.Fatal("未提交校验租约", err)
 			}
+			execute("UPDATE user_devices SET name=?,revoked_at=UTC_TIMESTAMP(6) WHERE user_id=7 AND id=11", sourceName)
 			staged := readObject(23)
 			var existing *domain.StoredObject
 			if fixture.existingUser == 7 {
@@ -82,8 +86,9 @@ func TestSelectMultipartUploadPublicationObjectIntegration(t *testing.T) {
 				t.Fatal("事务外选择未被拒绝", err)
 			}
 
-			// 2. 在发布复核事务内选择对象，覆盖复用、推进和条件失效。
+			// 2. 复核目标并选择对象，按事务读取的名称和设备生成输入。
 			var selected *domain.StoredObject
+			var entryInput *domain.CreatePublishedFileEntryInput
 			err = store.WithUploadVerificationTransaction(ctx, claimed, staged, digest,
 				func(txContext context.Context, txStore *Store, current *domain.UploadTask, object *domain.StoredObject) error {
 					if fixture.change != "" {
@@ -92,12 +97,30 @@ func TestSelectMultipartUploadPublicationObjectIntegration(t *testing.T) {
 							t.Fatal("未模拟预期的条件变化", result.Error)
 						}
 					}
+					if _, err := service.ValidateUploadPublicationTarget(txContext, current, txStore); err != nil {
+						return err
+					}
 					var selectionError error
 					selected, selectionError = txStore.SelectUploadPublicationObject(txContext, current, object, digest)
-					if selectionError == nil && fixture.wantError == rollback {
+					if selectionError != nil {
+						return selectionError
+					}
+					name, err := service.ResolveUploadPublicationName(txContext, current.UserID, current.TargetParentID, current.RequestedName, txStore.FindUserActiveFileEntryByName)
+					if err != nil {
+						return err
+					}
+					device, err := txStore.FindUploadSourceDevice(txContext, current)
+					if err != nil || device == nil || device.RevokedAt == nil {
+						t.Fatal("未读到已撤销的历史来源设备", err)
+					}
+					entryInput, err = service.BuildPublishedFileEntryInput(current, selected, name, device)
+					if err != nil {
+						return err
+					}
+					if fixture.wantError == rollback {
 						return rollback
 					}
-					return selectionError
+					return nil
 				})
 			if !errors.Is(err, fixture.wantError) {
 				t.Fatal("选择结果不符", fixture.wantError, err)
@@ -110,8 +133,19 @@ func TestSelectMultipartUploadPublicationObjectIntegration(t *testing.T) {
 				if fixture.wantID == staged.ID && (!sameStoredObjectLocation(selected, staged) || !sameUploadStorageText(selected.StorageETag, staged.StorageETag)) {
 					t.Fatal("推进时改动了合并保存的定位")
 				}
-			} else if selected != nil {
-				t.Fatal("条件不成立仍返回了对象")
+				wantName, wantNameKey := requestedName, "report.pdf"
+				if fixture.existingUser == 7 {
+					wantName, wantNameKey = "Report (1).PDF", "report (1).pdf"
+				}
+				if entryInput == nil || entryInput.ParentID != claimed.TargetParentID || entryInput.ObjectID != selected.ID ||
+					entryInput.Name != wantName || string(entryInput.NameKey) != wantNameKey || entryInput.Category != "DOCUMENT" ||
+					entryInput.Extension == nil || *entryInput.Extension != "pdf" || entryInput.SizeBytes != fileSize ||
+					entryInput.SourceDeviceID != claimed.DeviceID || entryInput.SourceDeviceName != sourceName {
+					t.Fatal("发布事务生成的文件条目参数不符", entryInput)
+				}
+				t.Logf("目录 %d，文件名 %s，选定对象 %d，%d 字节，来源设备 %d", entryInput.ParentID, entryInput.Name, entryInput.ObjectID, entryInput.SizeBytes, entryInput.SourceDeviceID)
+			} else if selected != nil || entryInput != nil {
+				t.Fatal("条件不成立仍生成了对象或参数")
 			}
 
 			// 3. 核对最终提交或回滚，任务、文件数和配额仍符合原夹具。

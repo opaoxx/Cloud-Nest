@@ -83,7 +83,7 @@ func TestBuildPublishedFileEntryInputErrors(t *testing.T) {
 			task.Status = domain.UploadStatusCompleted
 		}, domain.ErrUploadTaskNotReady},
 		{"wrong upload mode", func(task *domain.UploadTask, _ *domain.StoredObject, _ *domain.UserDevice) {
-			task.UploadMode = "MULTIPART"
+			task.UploadMode = "UNKNOWN"
 		}, domain.ErrUploadTaskNotReady},
 		{"oversize task", func(task *domain.UploadTask, _ *domain.StoredObject, _ *domain.UserDevice) {
 			task.FileSize = domain.MaxSingleUploadSizeBytes + 1
@@ -124,6 +124,82 @@ func TestBuildPublishedFileEntryInputErrors(t *testing.T) {
 			input, err := BuildPublishedFileEntryInput(scenario.task, scenario.object, scenario.display, scenario.device)
 			if input != nil || !errors.Is(err, scenario.wantError) {
 				t.Fatalf("生成失败时得到 %+v 和 %v，期望 %v", input, err, scenario.wantError)
+			}
+		})
+	}
+}
+
+func multipartPublishedFileEntryFixture(size uint64) (*domain.UploadTask, *domain.StoredObject, *domain.UserDevice) {
+	task, object, device := publishedFileEntryFixture()
+	task.UploadMode, task.FileSize, object.FileSize = "MULTIPART", size, size
+	task.PartSize = new(domain.MaxSingleUploadSizeBytes)
+	task.PartCount = new(uint32((size-1)/(*task.PartSize) + 1))
+	task.ExpectedSHA256, object.VerifiedSHA256 = new([32]byte{0x21}), new([32]byte{0x21})
+	return task, object, device
+}
+
+func TestBuildPublishedFileEntryInputMultipart(t *testing.T) {
+	for _, fixture := range []struct {
+		name   string
+		size   uint64
+		object uint64
+	}{
+		{"first multipart byte and original object", domain.MaxSingleUploadSizeBytes + 1, 23},
+		{"50 GiB and reused object", domain.DefaultMaxUploadSizeBytes, 29},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			task, object, device := multipartPublishedFileEntryFixture(fixture.size)
+			object.ID = fixture.object
+			resolvedName := "Cafe\u0301 (2).PDF"
+			input, err := BuildPublishedFileEntryInput(task, object, resolvedName, device)
+			if err != nil || input == nil || input.ParentID != task.TargetParentID || input.Name != resolvedName ||
+				string(input.NameKey) != "café (2).pdf" || input.Category != "DOCUMENT" || input.Extension == nil || *input.Extension != "pdf" ||
+				input.ObjectID != fixture.object || input.SizeBytes != fixture.size ||
+				input.SourceDeviceID != device.ID || input.SourceDeviceName != device.Name {
+				t.Fatal("Multipart 文件条目写入参数不符", input, err)
+			}
+		})
+	}
+}
+
+func TestBuildPublishedFileEntryInputMultipartErrors(t *testing.T) {
+	for _, fixture := range []struct {
+		name string
+		want error
+	}{
+		{"size fits single mode", domain.ErrInvalidUploadTaskData},
+		{"invalid part count", domain.ErrInvalidUploadTaskData},
+		{"missing declared checksum", domain.ErrInvalidUploadTaskData},
+		{"missing verified checksum", domain.ErrInvalidStoredObjectData},
+		{"wrong verified checksum", domain.ErrUploadChecksumMismatch},
+		{"size exceeds reader range", domain.ErrUploadFileTooLarge},
+		{"foreign ready object", domain.ErrInvalidStoredObjectData},
+		{"foreign source device", domain.ErrInvalidDeviceData},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			task, object, device := multipartPublishedFileEntryFixture(domain.MaxSingleUploadSizeBytes + 1)
+			switch fixture.name {
+			case "size fits single mode":
+				task.FileSize, object.FileSize, task.PartCount = domain.MaxSingleUploadSizeBytes, domain.MaxSingleUploadSizeBytes, new(uint32(1))
+			case "invalid part count":
+				task.PartCount = new(uint32(3))
+			case "missing declared checksum":
+				task.ExpectedSHA256 = nil
+			case "missing verified checksum":
+				object.VerifiedSHA256 = nil
+			case "wrong verified checksum":
+				object.VerifiedSHA256[0] ^= 1
+			case "size exceeds reader range":
+				const beyondReaderLimit = uint64(math.MaxInt64) + 1
+				task.FileSize, object.FileSize, task.PartSize = beyondReaderLimit, beyondReaderLimit, new(beyondReaderLimit/2)
+			case "foreign ready object":
+				object.OwnerUserID++
+			case "foreign source device":
+				device.UserID++
+			}
+			input, err := BuildPublishedFileEntryInput(task, object, "example.pdf", device)
+			if input != nil || !errors.Is(err, fixture.want) {
+				t.Fatal("Multipart 入参错误类型不符", input, err, fixture.want)
 			}
 		})
 	}
