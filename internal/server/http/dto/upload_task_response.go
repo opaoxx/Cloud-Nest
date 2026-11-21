@@ -126,6 +126,8 @@ func uploadTaskErrorSummary(code *string) *UploadTaskErrorSummary {
 		message = domain.ErrUploadChecksumMismatch.Error()
 	case domain.UploadPartsMismatchCode:
 		message = domain.ErrUploadPartsMismatch.Error()
+	case domain.UploadSessionLostCode:
+		message = domain.ErrUploadSessionLost.Error()
 	case "QUOTA_EXCEEDED":
 		message = "存储空间不足"
 	case "TEMP_SPACE_EXHAUSTED":

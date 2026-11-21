@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,7 @@ import (
 )
 
 func TestRegisterUploadTaskRoute(t *testing.T) {
+	const lostSessionTaskID = 24
 	actor := domain.Actor{UserID: 7, SessionID: 17, DeviceID: 19}
 	authorizeCalls, taskCalls, listCalls := 0, 0, 0
 	var receivedTarget uint64
@@ -40,6 +42,12 @@ func TestRegisterUploadTaskRoute(t *testing.T) {
 		receivedTarget = taskID
 		result := uploadTaskSuccessFixture()
 		result.ID = taskID
+		if taskID == lostSessionTaskID {
+			result.Status, result.UploadMode = domain.UploadStatusFailed, "MULTIPART"
+			result.ReservedBytes, result.LeaseOwner, result.LeaseUntil = 0, nil, nil
+			result.CompletedAt, result.LastErrorCode = &result.UpdatedAt, new(domain.UploadSessionLostCode)
+			result.StorageUploadID = new("private-upload-session")
+		}
 		return result, nil
 	})
 	for _, testCase := range []struct {
@@ -49,6 +57,7 @@ func TestRegisterUploadTaskRoute(t *testing.T) {
 		targetID                   uint64
 	}{
 		{name: "task", method: "GET", path: "/api/v1/uploads/23", bearer: true, status: 200, auth: 1, tasks: 1, targetID: 23},
+		{name: "failed multipart session", method: "GET", path: "/api/v1/uploads/24", bearer: true, status: 200, auth: 1, tasks: 1, targetID: lostSessionTaskID},
 		{name: "decoded id", method: "GET", path: "/api/v1/uploads/%32%33", bearer: true, status: 200, auth: 1, tasks: 1, targetID: 23},
 		{name: "full unsigned id", method: "GET", path: "/api/v1/uploads/18446744073709551615", bearer: true, status: 200, auth: 1, tasks: 1, targetID: ^uint64(0)},
 		{name: "invalid id", method: "GET", path: "/api/v1/uploads/0", bearer: true, status: 400, auth: 1},
@@ -85,6 +94,14 @@ func TestRegisterUploadTaskRoute(t *testing.T) {
 				if receivedTarget != testCase.targetID || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Data.ID != strconv.FormatUint(testCase.targetID, 10) ||
 					body.RequestID != response.Header().Get("X-Request-ID") || response.Header().Get("Cache-Control") != "no-store" {
 					t.Fatal("正式上传任务路由目标或完整响应错误")
+				}
+				if receivedTarget == lostSessionTaskID {
+					// 核对当前任务的失败原因和面向客户端的固定提示。
+					if body.Data.Status != "FAILED" || body.Data.UploadMode != "MULTIPART" || body.Data.CompletedAt == nil ||
+						body.Data.ResultEntryID != nil || body.Data.LastError == nil || body.Data.LastError.Code != "UPLOAD_SESSION_LOST" ||
+						body.Data.LastError.Message != "存储上传会话已失效，请重新创建任务" || strings.Contains(response.Body.String(), "private-upload") {
+						t.Fatal("会话丢失任务的公开响应不符", body.Data.LastError)
+					}
 				}
 			}
 		})
