@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -105,7 +104,7 @@ func (completion *MultipartUploadCompletionService) Complete(
 		releaseContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), multipartCompletionReleaseTimeout)
 		defer cancel()
 		if _, releaseError := completion.release(releaseContext, actor, claimed); releaseError != nil {
-			err = errors.Join(err, fmt.Errorf("释放本次分片完成核对租约失败: %w", releaseError))
+			err = &domain.UploadCompletionReleaseError{Cause: err, ReleaseError: releaseError}
 		}
 	}()
 	if err := ctx.Err(); err != nil {

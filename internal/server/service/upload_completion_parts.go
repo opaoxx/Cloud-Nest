@@ -6,8 +6,6 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-const maxUploadPartMismatchNumbers = 20
-
 // MatchUploadCompletionParts 对照固定计划和完整存储回执核对客户端的完成声明。
 // 成功交付可用于完成快照的独立回执。发生任何失配或错误时不交付部分结果。
 func MatchUploadCompletionParts(
@@ -59,7 +57,7 @@ func MatchUploadCompletionParts(
 			}
 		}
 		mismatchNumbers = append(mismatchNumbers, partNumber)
-		if len(mismatchNumbers) == maxUploadPartMismatchNumbers {
+		if len(mismatchNumbers) == domain.MaxUploadPartsMismatchNumbers {
 			break
 		}
 	}

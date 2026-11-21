@@ -1,6 +1,12 @@
 package domain
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
+
+// MaxUploadPartsMismatchNumbers 限定完成失配响应可列出的编号数。
+const MaxUploadPartsMismatchNumbers = 20
 
 // ErrUploadPartsMismatch 表示当前分片不足以受理完成请求。
 var ErrUploadPartsMismatch = errors.New("分片回执不一致，请核对后补传")
@@ -13,6 +19,20 @@ type UploadPartsMismatchError struct {
 func (*UploadPartsMismatchError) Error() string { return ErrUploadPartsMismatch.Error() }
 
 func (*UploadPartsMismatchError) Unwrap() error { return ErrUploadPartsMismatch }
+
+// UploadCompletionReleaseError 保留完成操作的原错误及随后发生的租约释放错误。
+type UploadCompletionReleaseError struct {
+	Cause        error
+	ReleaseError error
+}
+
+func (releaseFailure *UploadCompletionReleaseError) Error() string {
+	return fmt.Sprintf("%v（释放本次分片完成核对租约失败：%v）", releaseFailure.Cause, releaseFailure.ReleaseError)
+}
+
+func (releaseFailure *UploadCompletionReleaseError) Unwrap() []error {
+	return []error{releaseFailure.Cause, releaseFailure.ReleaseError}
+}
 
 // UploadPartCompletionClaim 保存客户端提交的分片回执声明，受理完成前须与存储核对。
 type UploadPartCompletionClaim struct {
