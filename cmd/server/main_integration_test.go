@@ -36,6 +36,24 @@ import (
 // prepareServerIntegrationDatabase 为正式启动测试创建并迁移本轮独占库。
 func prepareServerIntegrationDatabase(t *testing.T, ctx context.Context) (*sql.DB, string) {
 	t.Helper()
+	pool, databaseName := prepareEmptyServerIntegrationDatabase(t, ctx)
+	// 在独占库应用正式业务迁移，供生产启动检查。
+	if _, err := pool.ExecContext(ctx, migrations.InitialSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, "CREATE TABLE schema_migrations(version BIGINT UNSIGNED PRIMARY KEY,checksum CHAR(64) NOT NULL,dirty BOOLEAN NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte(migrations.InitialSQL)))
+	if _, err := pool.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(1,?,false)", checksum); err != nil {
+		t.Fatal(err)
+	}
+	return pool, databaseName
+}
+
+// prepareEmptyServerIntegrationDatabase 分配独占空库，允许调用方选择初始化方式。
+func prepareEmptyServerIntegrationDatabase(t *testing.T, ctx context.Context) (*sql.DB, string) {
+	t.Helper()
 	// 1. 建立管理连接，只用于创建和清理本轮独占库。
 	databaseConfig, err := config.LoadDatabaseConfig()
 	if err != nil {
@@ -73,7 +91,7 @@ func prepareServerIntegrationDatabase(t *testing.T, ctx context.Context) (*sql.D
 		}
 	})
 
-	// 2. 在独占库应用正式迁移，供生产启动检查。
+	// 2. 返回只指向本轮空库的连接池。
 	driverConfig := mysql.NewConfig()
 	driverConfig.Net, driverConfig.Addr, driverConfig.DBName = "tcp", databaseConfig.Address, databaseName
 	driverConfig.User, driverConfig.Passwd = databaseConfig.Username, databaseConfig.Password
@@ -89,16 +107,6 @@ func prepareServerIntegrationDatabase(t *testing.T, ctx context.Context) (*sql.D
 	}
 	pool := sql.OpenDB(connector)
 	t.Cleanup(func() { _ = pool.Close() })
-	if _, err := pool.ExecContext(ctx, migrations.InitialSQL); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.ExecContext(ctx, "CREATE TABLE schema_migrations(version BIGINT UNSIGNED PRIMARY KEY,checksum CHAR(64) NOT NULL,dirty BOOLEAN NOT NULL)"); err != nil {
-		t.Fatal(err)
-	}
-	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte(migrations.InitialSQL)))
-	if _, err := pool.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(1,?,false)", checksum); err != nil {
-		t.Fatal(err)
-	}
 	return pool, databaseName
 }
 
