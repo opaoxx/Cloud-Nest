@@ -64,6 +64,22 @@ export function refreshWebSession(): Promise<string> {
   return pendingRefresh
 }
 
+export async function logoutWebSession(accessToken: string): Promise<void> {
+  // 1. 等待已发出的刷新交付 Cookie，让退出响应最后清理 Cookie。
+  if (pendingRefresh) await pendingRefresh.catch(() => undefined)
+
+  // 2. 使用点击退出时的会话凭证，请求服务端撤销这一会话。
+  const data = await requestData('/api/v1/auth/logout', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'X-CloudNest-Client': 'web' },
+    body: JSON.stringify({ client_type: 'web' }),
+    redirect: 'error',
+  }, 200)
+
+  // 3. 只在服务确认撤销后完成退出，Cookie 由浏览器按响应清除。
+  if (data.revoked !== true) throw new ApiError(200, '服务返回的退出回执有误。')
+}
+
 export async function getCurrentUser(accessToken: string, signal?: AbortSignal): Promise<CurrentUserProfile> {
   // 1. 用 Access Token 读取当前会话对应的资料。
   const data = await requestData('/api/v1/me', {

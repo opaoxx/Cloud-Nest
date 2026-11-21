@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
-import { getCurrentUser, login, refreshWebSession } from './api/auth'
+import { getCurrentUser, login, logoutWebSession, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
 import { confirmPurge, createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, readPurgeProgress, renameEntry, restoreEntry, trashEntry } from './api/drive'
 import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgeConfirmer, PurgePreviewReader, PurgeProgressReader, TrashPageReader } from './api/drive'
@@ -21,18 +21,19 @@ export default function AuthPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const activeSession = useRef<{ accessToken: string } | null>(null)
+  const logoutInFlight = useRef(false)
   const profileReadVersion = useRef(0)
   const [profile, setProfile] = useState<CurrentUserProfile | null>(null)
   const [view, setView] = useState<'files' | 'trash'>('files')
   const [restoring, setRestoring] = useState(true)
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'login' | 'profile' | 'logout' | null>(null)
   const [errorMessage, setErrorMessage] = useState('')
 
-  const clearSession = useCallback((error: unknown) => {
+  const clearSession = useCallback((error?: unknown) => {
     activeSession.current = null
     setProfile(null)
     setView('files')
-    setErrorMessage(apiErrorMessage(error))
+    setErrorMessage(error === undefined ? '' : apiErrorMessage(error))
   }, [])
 
   const readDirectoryPage = useCallback<DirectoryPageReader>(async (parentId, cursor, signal) => {
@@ -45,13 +46,14 @@ export default function AuthPage() {
       // 2. 共享已有刷新请求，令牌更新后由当前会话继续使用。
       if (activeSession.current !== session) throw new ApiError(401, '请登录后重试。')
       if (session.accessToken !== requestedToken) return session.accessToken
+      if (logoutInFlight.current) throw new ApiError(0, '正在退出，请稍后再试。')
       try {
         const renewedToken = await refreshWebSession()
         if (activeSession.current !== session) throw new ApiError(401, '请登录后重试。')
         session.accessToken = renewedToken
         return renewedToken
       } catch (error) {
-        if (activeSession.current === session) clearSession(error)
+        if (activeSession.current === session && !logoutInFlight.current) clearSession(error)
         throw error
       }
     }
@@ -60,7 +62,8 @@ export default function AuthPage() {
       return await readDirectoryPageWithRefresh(requestedToken, parentId, cursor, signal, renewAccessToken)
     } catch (error) {
       // 3. 列表返回其他 401 或重试仍返回 401 时，清理本地会话。
-      if (!signal.aborted && activeSession.current === session && error instanceof ApiError && error.status === 401) {
+      if (!signal.aborted && activeSession.current === session && !logoutInFlight.current &&
+          error instanceof ApiError && error.status === 401) {
         clearSession(error)
       }
       throw error
@@ -201,7 +204,7 @@ export default function AuthPage() {
     // 1. 取出本次凭据，清空输入框并开始登录。
     event.preventDefault()
     if (busy) return
-    setBusy(true)
+    setBusy('login')
     setErrorMessage('')
     const submittedPassword = password
     setPassword('')
@@ -215,7 +218,7 @@ export default function AuthPage() {
       // 3. 登录或资料读取失败时，交付可重试的错误提示。
       setErrorMessage(apiErrorMessage(error))
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
@@ -236,12 +239,37 @@ export default function AuthPage() {
     }
   }
 
+  async function submitLogout() {
+    // 1. 记录当前会话，通过同步标记拦住连点和新的会话刷新。
+    const session = activeSession.current
+    if (!session || busy || logoutInFlight.current) return
+    const requestedToken = session.accessToken
+    logoutInFlight.current = true
+    setBusy('logout')
+    setErrorMessage('')
+    try {
+      // 2. 服务确认撤销后清理本页会话，再显示登录表单。
+      await logoutWebSession(requestedToken)
+      if (activeSession.current === session) clearSession()
+    } catch (error) {
+      // 3. 失败时保留当前会话。令牌过期时引导恢复会话后手动退出。
+      if (activeSession.current !== session) return
+      const message = error instanceof ApiError && error.code === 'TOKEN_EXPIRED' && session.accessToken === requestedToken
+        ? '访问令牌已过期，请重新加载页面后再退出。'
+        : apiErrorMessage(error)
+      setErrorMessage(`无法确认退出。${message}`)
+    } finally {
+      logoutInFlight.current = false
+      setBusy(null)
+    }
+  }
+
   async function readProfileAgain() {
     // 1. 用当前内存会话重新读取资料。
     const session = activeSession.current
     if (!session || busy) return
     const requestedToken = session.accessToken
-    setBusy(true)
+    setBusy('profile')
     setErrorMessage('')
     try {
       await refreshProfile()
@@ -251,7 +279,7 @@ export default function AuthPage() {
       if (error instanceof ApiError && error.status === 401) clearSession(error)
       else setErrorMessage(apiErrorMessage(error))
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
@@ -272,7 +300,12 @@ export default function AuthPage() {
               <div><dt>已用空间</dt><dd>{formatSize(profile.used_bytes)}</dd></div>
               <div><dt>预占空间</dt><dd>{formatSize(profile.reserved_bytes)}</dd></div>
             </dl>
-            <Button loading={busy} onClick={() => void readProfileAgain()}>重新读取资料</Button>
+            <div className="auth-actions">
+              <Button loading={busy === 'profile'} disabled={busy !== null} onClick={() => void readProfileAgain()}>重新读取资料</Button>
+              <Button disabled={busy !== null} onClick={() => void submitLogout()}>
+                {busy === 'logout' ? '正在退出…' : '退出登录'}
+              </Button>
+            </div>
             <nav className="drive-view-nav" aria-label="文件视图">
               <Button type={view === 'files' ? 'primary' : 'default'} aria-pressed={view === 'files'}
                 onClick={() => setView('files')}>我的文件</Button>
@@ -295,11 +328,11 @@ export default function AuthPage() {
           <form className="auth-form" onSubmit={submitLogin}>
             <label htmlFor="auth-username">用户名</label>
             <Input id="auth-username" name="username" autoComplete="username" required value={username}
-              onChange={event => setUsername(event.target.value)} disabled={busy} />
+              onChange={event => setUsername(event.target.value)} disabled={busy !== null} />
             <label htmlFor="auth-password">密码</label>
             <Input.Password id="auth-password" name="password" autoComplete="current-password" required value={password}
-              onChange={event => setPassword(event.target.value)} disabled={busy} />
-            <Button type="primary" htmlType="submit" loading={busy} disabled={busy}>登录</Button>
+              onChange={event => setPassword(event.target.value)} disabled={busy !== null} />
+            <Button type="primary" htmlType="submit" loading={busy === 'login'} disabled={busy !== null}>登录</Button>
           </form>
         ))}
       </section>
