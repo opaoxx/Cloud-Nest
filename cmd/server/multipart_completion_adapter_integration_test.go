@@ -103,12 +103,44 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal("原会话的首片变化应得到只读修复依据", evidence, err)
 	}
 
-	// 2. 用同一会话的当前回执执行一次合并，再按返回的精确版本校验内容。
+	// 2. 并发合并和读取同一会话，核对返回的结果。
+	type concurrentRead struct {
+		page                 *domain.UploadPartReceiptPage
+		listError, headError error
+		object               *domain.UploadObjectResult
+	}
+	start := make(chan struct{})
+	reads := make(chan concurrentRead, 1)
+	go func() {
+		<-start
+		page, listError := client.ListUploadPartsPage(ctx, key, uploadID, 0, 2)
+		read := concurrentRead{page: page, listError: listError}
+		if errors.Is(listError, domain.ErrUploadPartSessionMissing) {
+			read.object, read.headError = client.StatMultipartUploadObject(ctx, key)
+		}
+		reads <- read
+	}()
+	close(start)
 	result, err := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, receipts)
+	competing := <-reads
 	if err != nil || result == nil || result.SizeBytes != fileSize || result.StorageETag == nil || result.StorageVersionID == nil || *result.StorageVersionID == "null" {
 		t.Fatal("当前回执未得到有效的版本化合并确认", result, err)
 	}
 	version := *result.StorageVersionID
+	switch {
+	case competing.listError == nil:
+		if competing.page == nil || competing.page.NextMarker != 0 || !slices.Equal(competing.page.Parts, receipts) {
+			t.Fatal("并发读取返回了不完整的会话快照", competing.page)
+		}
+		t.Log("并发 ListParts 仍读到原会话的完整回执")
+	case errors.Is(competing.listError, domain.ErrUploadPartSessionMissing):
+		if competing.headError != nil || competing.object == nil || competing.object.StorageVersionID == nil || *competing.object.StorageVersionID != version {
+			t.Fatal("并发读取发现会话缺失后未得到原对象版本", competing.headError)
+		}
+		t.Log("并发 ListParts 返回 NoSuchUpload，后续 HEAD 读到原版本")
+	default:
+		t.Fatal("并发读取失败", competing.listError)
+	}
 	if evidence, err := preflight.CheckRepair(ctx, lease, partError); evidence != nil || !errors.Is(err, domain.ErrUploadObjectExists) {
 		t.Fatal("已完成对象不应交付修复依据", evidence, err)
 	}
@@ -127,7 +159,16 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal("合并读回的大小、版本、ETag 或 SHA-256 不符", readSize, err)
 	}
 
-	// 3. 显式重发用于模拟重复派发，再用只读复核找回原对象版本。
+	// 3. 确认会话缺失后读取原对象版本，再模拟一次迟到的合并。
+	_, listError := core.ListObjectParts(ctx, bucket.name, key, uploadID, 0, 2)
+	missingResponse := minio.ToErrorResponse(listError)
+	if missingResponse.StatusCode != http.StatusNotFound || missingResponse.Code != "NoSuchUpload" || missingResponse.RequestID == "" {
+		t.Fatal("完成后的 ListParts 未返回明确的会话缺失", missingResponse.StatusCode, missingResponse.Code)
+	}
+	observed, err := client.StatMultipartUploadObject(ctx, key)
+	if err != nil || observed == nil || observed.StorageVersionID == nil || *observed.StorageVersionID != version {
+		t.Fatal("ListParts 确认会话缺失后未找到原对象版本", err)
+	}
 	replay, replayError := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, receipts)
 	if replay != nil || !errors.Is(replayError, domain.ErrUploadPartSessionMissing) || !errors.Is(replayError, domain.ErrMultipartUploadCompletionUnknown) {
 		t.Fatal("已关闭会话未返回恢复信号", replay, replayError)
@@ -148,11 +189,20 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal("重复派发后版本数量不符", versions)
 	}
 
-	// 4. 在独占测试桶准备一个已中止的会话，验证复核只交付缺失观察。
+	// 4. 验证已中止的测试会话收到迟到合并后仍无对象。
 	const missingKey = "b4/synthetic-absent.bin"
 	missingUploadID, err := client.CreateMultipartUpload(ctx, missingKey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	missingProbe := multipartProbe{core: core, bucket: bucket.name, key: missingKey, uploadID: missingUploadID, endpoint: settings.EndpointURL}
+	for index, data := range [][]byte{replacement, tail} {
+		digest := multipartProbeSHA256(data)
+		putMultipartProbePart(t, ctx, httpClient, missingProbe.sign(t, ctx, index+1, len(data), digest), digest, data, http.StatusOK, "")
+	}
+	missingReceipts, err := client.ListUploadParts(ctx, missingKey, missingUploadID, 1)
+	if err != nil || len(missingReceipts) != 2 {
+		t.Fatal("未读回将被中止的测试会话的两条回执", err)
 	}
 	if err := core.AbortMultipartUpload(ctx, bucket.name, missingKey, missingUploadID); err != nil {
 		t.Fatal("无法中止合成会话", minio.ToErrorResponse(err).Code)
@@ -174,7 +224,14 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		checked.Missing.Task.LeaseVersion != missingLease.LeaseVersion {
 		t.Fatal("原会话和对象均缺失时未交付对应观察", checked, err)
 	}
-	t.Log("原会话消失后找回已完成版本，已中止的另一会话返回原对象及会话均缺失")
+	lateResult, lateError := client.CompleteMultipartUpload(ctx, missingKey, missingUploadID, fileSize, partSize, 2, missingReceipts)
+	if lateResult != nil || !errors.Is(lateError, domain.ErrUploadPartSessionMissing) {
+		t.Fatal("已中止会话上的迟到合并未被拒绝", lateResult, lateError)
+	}
+	if _, err := client.StatMultipartUploadObject(ctx, missingKey); !errors.Is(err, domain.ErrUploadObjectMissing) {
+		t.Fatal("迟到合并后原键不应出现对象", err)
+	}
+	t.Log("ListParts 确认会话缺失后找到原版本，已中止会话的迟到合并未生成对象")
 	t.Logf("专用 MinIO %s，回环地址 %s，合成版本 %s，读回 %d B，SHA-256 %x，版本数 %d",
 		containerID[:12], settings.EndpointURL, version, readSize, actualDigest.Sum(nil), versions)
 }
