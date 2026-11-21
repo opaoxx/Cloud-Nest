@@ -60,10 +60,11 @@ func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
 		t.Fatalf("启动隔离 Edge 失败，%v\n%s", err, output)
 	}
 	output, err := runBrowser(ctx, "run-code", "--filename", probe)
-	if err != nil || strings.Contains(output, "### Error") || !strings.Contains(output, "CN520 browser checks passed") {
-		t.Fatalf("清理确认浏览器验收失败，%v\n%s", err, output)
+	if err != nil || strings.Contains(output, "### Error") || !strings.Contains(output, "CN520 and CN521 browser checks passed") {
+		t.Fatalf("清理确认及进度浏览器验收失败，%v\n%s", err, output)
 	}
 	t.Log("Edge 验收通过：同一范围、取消焦点、取消、Esc、Enter、过期、跨页恢复、原凭证和一次 202")
+	t.Log("进度验收通过：真实受理地址、加载、清理中 4 项、读取失败和重试、无效状态拒绝、模拟完成 0 项；五次 GET")
 
 	// 3. 确认只有受理根项和刻意恢复的对照项发生变化，对象和配额保持原样。
 	var accepted, restored, writes int

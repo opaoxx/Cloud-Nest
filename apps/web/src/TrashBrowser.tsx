@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Button } from 'antd'
-import type { DirectoryBreadcrumb, DirectoryPageReader, EntryRestorer, PurgeConfirmer, PurgePreviewReader, RestoredEntryLocation, TrashEntrySummary, TrashPageReader } from './api/drive'
+import type { DirectoryBreadcrumb, DirectoryPageReader, EntryRestorer, PurgeConfirmer, PurgePreviewReader, PurgeProgressReader, PurgeReceipt, RestoredEntryLocation, TrashEntrySummary, TrashPageReader } from './api/drive'
 import { apiErrorMessage } from './api/http'
 import { formatDate } from './demo'
 import EntryConfirmationDialog from './EntryConfirmationDialog'
 import PurgePreviewDialog from './PurgePreviewDialog'
+import PurgeProgressPanel from './PurgeProgressPanel'
 
 type TrashListing = {
   items: TrashEntrySummary[]
@@ -17,12 +18,13 @@ function formatDirectoryPath(path: DirectoryBreadcrumb[]) {
   return path.map(directory => directory.name || '根目录').join(' / ')
 }
 
-export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectoryPage, readPreview, confirmPurge, restoreEntry }: {
+export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectoryPage, readPreview, confirmPurge, readProgress, restoreEntry }: {
   rootEntryId: string
   readTrashPage: TrashPageReader
   readDirectoryPage: DirectoryPageReader
   readPreview: PurgePreviewReader
   confirmPurge: PurgeConfirmer
+  readProgress: PurgeProgressReader
   restoreEntry: EntryRestorer
 }) {
   const [request, setRequest] = useState<{ cursor: string | null }>({ cursor: null })
@@ -31,7 +33,7 @@ export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectory
   })
   const [restoreTarget, setRestoreTarget] = useState<TrashEntrySummary | null>(null)
   const [previewTarget, setPreviewTarget] = useState<TrashEntrySummary | null>(null)
-  const [purgeAcceptedName, setPurgeAcceptedName] = useState('')
+  const [acceptedPurge, setAcceptedPurge] = useState<{ name: string; receipt: PurgeReceipt } | null>(null)
   const [restored, setRestored] = useState<RestoredEntryLocation | null>(null)
   const [restoredPath, setRestoredPath] = useState<DirectoryBreadcrumb[] | null>(null)
 
@@ -105,7 +107,8 @@ export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectory
     <section className="directory-browser" aria-labelledby="trash-browser-title">
       <h2 id="trash-browser-title">回收站</h2>
       {restored && <p role="status">已将「{restored.name}」恢复到「{restoredPosition}」。</p>}
-      {purgeAcceptedName && <p role="status">「{purgeAcceptedName}」的永久清理已受理，正在等待后台处理。</p>}
+      {acceptedPurge && <PurgeProgressPanel key={acceptedPurge.receipt.entryId} name={acceptedPurge.name}
+        receipt={acceptedPurge.receipt} readProgress={readProgress} />}
       {restoreTarget && (
         <EntryConfirmationDialog title="确认恢复" message={`恢复「${restoreTarget.name}」？`}
           confirmText="恢复条目" onClose={() => setRestoreTarget(null)}
@@ -114,8 +117,8 @@ export default function TrashBrowser({ rootEntryId, readTrashPage, readDirectory
       {previewTarget && (
         <PurgePreviewDialog target={previewTarget} originalLocation={formatDirectoryPath(previewTarget.originalPath)}
           readPreview={readPreview} confirmPurge={confirmPurge} onClose={() => setPreviewTarget(null)}
-          onRefreshTrash={refreshTrashAfterPreview} onAccepted={() => {
-            setPurgeAcceptedName(previewTarget.name)
+          onRefreshTrash={refreshTrashAfterPreview} onAccepted={receipt => {
+            setAcceptedPurge({ name: previewTarget.name, receipt })
             refreshTrashAfterPreview()
           }} />
       )}

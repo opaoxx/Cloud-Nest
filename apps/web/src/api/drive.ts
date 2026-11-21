@@ -47,7 +47,19 @@ export interface PurgePreview {
 }
 
 export type PurgePreviewReader = (entryId: string, signal: AbortSignal) => Promise<PurgePreview>
-export type PurgeConfirmer = (preview: PurgePreview, idempotencyKey: string) => Promise<void>
+
+export interface PurgeReceipt {
+  entryId: string
+  progressUrl: string
+}
+
+export interface PurgeProgress {
+  status: 'PURGING' | 'PURGED'
+  remainingCount: number
+}
+
+export type PurgeConfirmer = (preview: PurgePreview, idempotencyKey: string) => Promise<PurgeReceipt>
+export type PurgeProgressReader = (receipt: PurgeReceipt, signal: AbortSignal) => Promise<PurgeProgress>
 
 export async function readPurgePreview(accessToken: string, entryId: string, signal: AbortSignal): Promise<PurgePreview> {
   // 1. 使用现有 GET 同时读取范围和确认凭证。
@@ -74,7 +86,7 @@ export async function readPurgePreview(accessToken: string, entryId: string, sig
   return { entryId, revision, digest, expiresAt, fileCount, directoryCount, logicalBytes }
 }
 
-export async function confirmPurge(accessToken: string, preview: PurgePreview, idempotencyKey: string): Promise<void> {
+export async function confirmPurge(accessToken: string, preview: PurgePreview, idempotencyKey: string): Promise<PurgeReceipt> {
   // 1. 原样提交用户看过的预检版本和凭证。
   const path = `/api/v1/trash/${encodeURIComponent(preview.entryId)}`
   const data = await requestData(path, {
@@ -88,10 +100,29 @@ export async function confirmPurge(accessToken: string, preview: PurgePreview, i
     redirect: 'error',
   }, 202)
 
-  // 2. 核对受理的是同一目标，进度地址留给后续只读查询。
+  // 2. 核对受理目标和同源进度路径，再交付用于后续读取的回执。
   if (data.entry_id !== preview.entryId || data.status !== 'PURGING' || data.progress_url !== `${path}/purge`) {
     throw new ApiError(202, '服务返回的清理受理结果有误。')
   }
+  return { entryId: preview.entryId, progressUrl: data.progress_url }
+}
+
+export async function readPurgeProgress(accessToken: string, receipt: PurgeReceipt, signal: AbortSignal): Promise<PurgeProgress> {
+  // 1. 使用受理回执中的地址，只携带当前访问令牌读取进度。
+  const data = await requestData(receipt.progressUrl, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    redirect: 'error',
+    signal,
+  }, 200)
+
+  // 2. 清理中至少剩下目标自身，已完成时剩余数必须为零。
+  const { status, remaining_count: remainingCount } = data
+  if (data.entry_id !== receipt.entryId || (status !== 'PURGING' && status !== 'PURGED') ||
+      !isByteCount(remainingCount) || remainingCount > 10000 || (status === 'PURGED') !== (remainingCount === 0)) {
+    throw new ApiError(200, '服务返回的清理进度有误。')
+  }
+  return { status, remainingCount }
 }
 
 interface EntryRestore {

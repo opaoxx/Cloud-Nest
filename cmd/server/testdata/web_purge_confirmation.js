@@ -6,9 +6,13 @@ async page => {
   page.setDefaultTimeout(12000)
   const requests = []
   const purgePath = '/api/v1/trash/56'
+  const progressPath = `${purgePath}/purge`
   const restorePath = '/api/v1/trash/60/restore'
   let allowedWrite = ''
   let expireOnRecheck = null
+  let progressReply = null
+  const firstProgressGate = Promise.withResolvers()
+  let holdFirstProgress = true
   const assert = (condition, message) => { if (!condition) throw new Error(message) }
   const writes = () => requests.filter(({ method, path }) => method !== 'GET' && !path.startsWith('/api/v1/auth/'))
   const atPath = (url, path) => new URL(url).origin === baseURL && new URL(url).pathname === path
@@ -24,6 +28,17 @@ async page => {
       const expiry = expireOnRecheck
       expireOnRecheck = null
       await page.clock.setFixedTime(expiry)
+    }
+    if (method === 'GET' && path === progressPath) {
+      if (holdFirstProgress) {
+        holdFirstProgress = false
+        await firstProgressGate.promise
+      }
+      if (progressReply) {
+        const reply = progressReply
+        progressReply = null
+        return route.fulfill(reply)
+      }
     }
     if (method === 'GET' || (method === 'POST' && /^\/api\/v1\/auth\/(login|refresh)$/.test(path))) return route.continue()
     if (`${method} ${path}` === allowedWrite) {
@@ -122,6 +137,7 @@ async page => {
   const reviewed = await openPreview('预检回收目录', 56)
   await enterConfirmation()
   const accepted = page.waitForResponse(result => atPath(result.url(), purgePath) && result.request().method() === 'DELETE')
+  const firstProgress = page.waitForResponse(result => atPath(result.url(), progressPath))
   allowedWrite = `DELETE ${purgePath}`
   await popup.getByRole('button', { name: '确认清理', exact: true }).evaluate(button => {
     button.click()
@@ -134,9 +150,38 @@ async page => {
     headers['x-cloudnest-purge-preview'] === reviewed.preview_digest &&
     /^[0-9a-f-]{36}$/.test(headers['idempotency-key'] ?? '') && response.request().postData() === null,
   '请求须准确使用原预检版本、凭证、UUID 幂等键及无请求体')
-  await page.getByText('「预检回收目录」的永久清理已受理，正在等待后台处理。').waitFor()
+  // 5. 使用真实 202 的地址读取 MySQL 中的清理进度，模拟失败及完成响应。
+  const receipt = (await response.json()).data
+  const panel = page.getByRole('region', { name: '永久清理进度' })
+  await panel.getByText('「预检回收目录」的永久清理已受理。').waitFor()
+  await panel.getByRole('status').getByText('正在读取清理进度…').waitFor()
+  firstProgressGate.resolve()
+  const initial = await firstProgress
+  const progressHeaders = initial.request().headers()
+  assert(initial.status() === 200 && atPath(initial.url(), receipt.progress_url) && initial.request().method() === 'GET' &&
+    (progressHeaders.authorization ?? '').startsWith('Bearer ') && !progressHeaders['x-cloudnest-purge-preview'] &&
+    !progressHeaders['x-cloudnest-expected-revision'] && !progressHeaders['idempotency-key'], '进度须用原回执地址及当前会话只读查询')
+  await panel.getByRole('status').getByText('清理中，剩余 4 项。').waitFor()
   await page.getByRole('button', { name: '清理预检 预检回收目录', exact: true }).waitFor({ state: 'hidden' })
+
+  const refreshProgress = () => panel.getByRole('button', { name: '刷新清理进度', exact: true }).click()
+  progressReply = { status: 503, json: { error: { message: '进度服务暂时不可用。' } } }
+  await refreshProgress()
+  await panel.getByRole('alert').getByText('无法读取清理进度。进度服务暂时不可用。').waitFor()
+  await refreshProgress()
+  await panel.getByRole('status').getByText('清理中，剩余 4 项。').waitFor()
+
+  progressReply = { status: 200, json: { data: { entry_id: '56', status: 'PURGED', remaining_count: 1 } } }
+  await refreshProgress()
+  await panel.getByRole('alert').getByText('无法读取清理进度。服务返回的清理进度有误。').waitFor()
+
+  progressReply = { status: 200, json: { data: { entry_id: '56', status: 'PURGED', remaining_count: 0 } } }
+  await refreshProgress()
+  await panel.getByRole('status').getByText('清理完成，剩余 0 项。').waitFor()
+  const progressRequests = requests.filter(({ path }) => path === progressPath)
+  assert(progressRequests.length === 5 && progressRequests.every(({ method }) => method === 'GET'),
+    '进度只允许首轮和四次手动刷新发送 GET')
   assert(writes().length === 2 && writes()[1].method === 'DELETE' && writes()[1].path === purgePath,
     '全程只能发出一次对照恢复和一次清理确认')
-  return 'CN520 browser checks passed'
+  return 'CN520 and CN521 browser checks passed'
 }

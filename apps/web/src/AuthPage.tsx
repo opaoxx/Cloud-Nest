@@ -3,8 +3,8 @@ import type { FormEvent } from 'react'
 import { Button, Input } from 'antd'
 import { getCurrentUser, login, refreshWebSession } from './api/auth'
 import type { CurrentUserProfile } from './api/auth'
-import { confirmPurge, createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, renameEntry, restoreEntry, trashEntry } from './api/drive'
-import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgeConfirmer, PurgePreviewReader, TrashPageReader } from './api/drive'
+import { confirmPurge, createDirectory, listTrashPage, moveEntry, readDirectoryPageWithRefresh, readPurgePreview, readPurgeProgress, renameEntry, restoreEntry, trashEntry } from './api/drive'
+import type { DirectoryCreator, DirectoryPageReader, EntryMover, EntryRenamer, EntryRestorer, EntryTrasher, PurgeConfirmer, PurgePreviewReader, PurgeProgressReader, TrashPageReader } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 import DirectoryBrowser from './DirectoryBrowser'
 import TrashBrowser from './TrashBrowser'
@@ -74,6 +74,12 @@ export default function AuthPage() {
     return readPurgePreview(session.accessToken, entryId, signal)
   }, [])
 
+  const readProgress = useCallback<PurgeProgressReader>(async (receipt, signal) => {
+    const session = activeSession.current
+    if (!session) throw new ApiError(401, '请登录后重试。')
+    return readPurgeProgress(session.accessToken, receipt, signal)
+  }, [])
+
   const submitDirectoryCreation: DirectoryCreator = async creation => {
     // 从当前内存会话取令牌，写请求直接提交一次。
     const session = activeSession.current
@@ -113,7 +119,7 @@ export default function AuthPage() {
     // 使用当前内存令牌交付确认，沿用现有写请求的单次提交规则。
     const session = activeSession.current
     if (!session) throw new ApiError(401, '请登录后重试。')
-    await confirmPurge(session.accessToken, preview, idempotencyKey)
+    return confirmPurge(session.accessToken, preview, idempotencyKey)
   }
 
   useEffect(() => {
@@ -220,7 +226,7 @@ export default function AuthPage() {
                 renameEntry={submitEntryRename} moveEntry={submitEntryMove} trashEntry={submitEntryTrash} />
             </div>
             {view === 'trash' && <TrashBrowser rootEntryId={profile.root_entry_id} readTrashPage={readTrashPage}
-              readDirectoryPage={readDirectoryPage} readPreview={readPreview} confirmPurge={submitPurgeConfirmation}
+              readDirectoryPage={readDirectoryPage} readPreview={readPreview} confirmPurge={submitPurgeConfirmation} readProgress={readProgress}
               restoreEntry={submitEntryRestore} />}
           </>
         ) : (

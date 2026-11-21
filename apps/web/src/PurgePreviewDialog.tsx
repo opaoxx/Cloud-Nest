@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, Modal } from 'antd'
-import type { PurgeConfirmer, PurgePreview, PurgePreviewReader, TrashEntrySummary } from './api/drive'
+import type { PurgeConfirmer, PurgePreview, PurgePreviewReader, PurgeReceipt, TrashEntrySummary } from './api/drive'
 import { ApiError, apiErrorMessage } from './api/http'
 
 type PreviewState =
@@ -16,7 +16,7 @@ export default function PurgePreviewDialog({ target, originalLocation, readPrevi
   originalLocation: string
   readPreview: PurgePreviewReader
   confirmPurge: PurgeConfirmer
-  onAccepted: () => void
+  onAccepted: (receipt: PurgeReceipt) => void
   onClose: () => void
   onRefreshTrash: () => void
 }) {
@@ -95,8 +95,8 @@ export default function PurgePreviewDialog({ target, originalLocation, readPrevi
       // 3. 使用原凭证发送一次。服务端在事务内按原凭证复核完整子树。
       const idempotencyKey = crypto.randomUUID()
       sent = true
-      await confirmPurge(reviewed, idempotencyKey)
-      if (!controller.signal.aborted) onAccepted()
+      const receipt = await confirmPurge(reviewed, idempotencyKey)
+      if (!controller.signal.aborted) onAccepted(receipt)
     } catch (error) {
       if (controller.signal.aborted) return
       if (error instanceof ApiError && (error.status === 404 || error.code === 'REVISION_CONFLICT' ||
