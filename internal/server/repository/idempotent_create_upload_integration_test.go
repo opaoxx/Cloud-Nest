@@ -82,13 +82,33 @@ func TestIdempotentCreateUploadServiceIntegration(t *testing.T) {
 	other := domain.Actor{UserID: 3, DeviceID: 31, SessionID: 37}
 	failure := errors.New("fixture idempotent creation rollback")
 	encode := func(task *domain.UploadTask) (json.RawMessage, error) {
+		if task.UploadMode == "MULTIPART" {
+			data, err := dto.NewCreateMultipartUploadData(task)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(data)
+		}
 		data, err := dto.NewCreateUploadData(task)
 		if err != nil {
 			return nil, err
 		}
 		return json.Marshal(data)
 	}
-	validate := func(body json.RawMessage) error { _, err := dto.RestoreCreateUploadData(body); return err }
+	validate := func(body json.RawMessage) error {
+		var snapshot struct {
+			UploadMode string `json:"upload_mode"`
+		}
+		if err := json.Unmarshal(body, &snapshot); err != nil {
+			return err
+		}
+		if snapshot.UploadMode == "MULTIPART" {
+			_, err := dto.RestoreCreateMultipartUploadData(body)
+			return err
+		}
+		_, err := dto.RestoreCreateUploadData(body)
+		return err
+	}
 	newCreator := func(mode string, cancelCall context.CancelFunc) *service.IdempotentCreateUploadService {
 		withTransaction := func(ctx context.Context, current domain.Actor, action func(context.Context, service.IdempotentCreateUploadTransaction) error) error {
 			return store.WithUserTransaction(ctx, current, func(txContext context.Context, txStore *Store) error {
@@ -177,6 +197,80 @@ func TestIdempotentCreateUploadServiceIntegration(t *testing.T) {
 			record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, key)
 			if err != nil || record.ResourceID == nil || strconv.FormatUint(*record.ResourceID, 10) != data.Task.ID || record.ExpiresAt.Sub(record.CreatedAt) < 7*24*time.Hour {
 				t.Fatal("已存任务关联或保留期错误", err)
+			}
+		}
+	})
+	t.Run("multipart create replay conflict and rollback", func(t *testing.T) {
+		limits := domain.UploadPlanLimits{
+			MaxFileSizeBytes: domain.DefaultMaxUploadSizeBytes, MaxObjectSizeBytes: domain.DefaultMaxUploadSizeBytes,
+			MaxPartSizeBytes: 64 * 1024 * 1024,
+		}
+		digest := sha256.Sum256([]byte("multipart idempotent fixture"))
+		input := inputFor()
+		input.SizeBytes, input.ExpectedSHA256 = domain.MaxSingleUploadSizeBytes+1, &digest
+		const key = "multipart-original"
+
+		// 1. 首次创建提交四项事实，并保存相同请求摘要和公开计划。
+		before := readState(actor.UserID)
+		first, err := creator.CreateWithPlan(ctx, actor, input, key, limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := dto.RestoreCreateMultipartUploadData(first)
+		if err != nil || data.Task.Status != "CREATING" || data.PartCount != 2 || data.PartSizeBytes != domain.MaxSingleUploadSizeBytes {
+			t.Fatal("分片创建的初始快照不符", err)
+		}
+		state := readState(actor.UserID)
+		if state.reserved != before.reserved+input.SizeBytes || state.reserved != state.taskReserved ||
+			state.objects != before.objects+1 || state.tasks != before.tasks+1 || state.records != before.records+1 ||
+			state.used != before.used || state.sequence != before.sequence {
+			t.Fatal("分片创建四项数据未一起提交")
+		}
+		requestHash, err := service.BuildCreateUploadRequestHashWithMultipart(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateUploadOperation, key)
+		if err != nil || record.RequestHash != requestHash || !bytes.Equal(first, record.ResponseBody) {
+			t.Fatal("分片幂等记录的摘要或快照不符", err)
+		}
+
+		// 2. 当前任务推进且上传上限调低后，同账号不同设备仍获得原快照。
+		if _, err := pool.ExecContext(ctx, "UPDATE upload_tasks SET status='UPLOADING',storage_upload_id='fixture-session',expires_at=UTC_TIMESTAMP(6)+INTERVAL 2 DAY WHERE id=?", data.Task.ID); err != nil {
+			t.Fatal(err)
+		}
+		lowered := limits
+		lowered.MaxFileSizeBytes = domain.MaxSingleUploadSizeBytes
+		replayed, err := creator.CreateWithPlan(ctx, sameUser, input, key, lowered)
+		if err != nil || !bytes.Equal(first, replayed) || readState(actor.UserID) != state {
+			t.Fatal("重试受当前任务或新配置影响", err)
+		}
+		body, err := creator.CreateWithPlan(ctx, actor, input, "multipart-new-over-limit", lowered)
+		var limitError *domain.UploadSizeLimitError
+		if body != nil || !errors.As(err, &limitError) || limitError.MaxSizeBytes != lowered.MaxFileSizeBytes ||
+			readState(actor.UserID) != state {
+			t.Fatal("新任务未受当前上限约束", err)
+		}
+
+		// 3. 同键变参或切换模式返回冲突，保存后的注入故障回滚全部写入。
+		changed, single := input, input
+		changed.SizeBytes++
+		single.SizeBytes--
+		for _, declaration := range []domain.CreateUploadInput{changed, single} {
+			body, err := creator.CreateWithPlan(ctx, actor, declaration, key, lowered)
+			if body != nil || !errors.Is(err, domain.ErrIdempotencyRequestConflict) || readState(actor.UserID) != state {
+				t.Fatal("同键冲突未优先返回或发生了额外写入", err)
+			}
+		}
+		body, err = creator.CreateWithPlan(ctx, actor, input, "idempotent-upload-ordinary", limits)
+		if body != nil || !errors.Is(err, domain.ErrIdempotencyRequestConflict) || readState(actor.UserID) != state {
+			t.Fatal("历史 SINGLE 幂等键未阻止跨模式创建", err)
+		}
+		for _, mode := range []string{"validate encoded", "save", "outer failure"} {
+			failureKey := "multipart-rollback-" + strings.ReplaceAll(mode, " ", "-")
+			body, err := newCreator(mode, nil).CreateWithPlan(ctx, actor, input, failureKey, limits)
+			if body != nil || !errors.Is(err, failure) || readState(actor.UserID) != state {
+				t.Fatalf("%s 阶段失败后未完整回滚: %v", mode, err)
 			}
 		}
 	})

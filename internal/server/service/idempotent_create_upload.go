@@ -57,8 +57,18 @@ func NewIdempotentCreateUploadService(provider, bucket string,
 	}
 }
 
-// Create 在一次用户事务中创建并保存上传结果，或复用同键同参数的已存结果。
+// Create 在一次用户事务中创建 SINGLE 上传，或复用同键同参数的已存结果。
 func (createService *IdempotentCreateUploadService) Create(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, key string) (json.RawMessage, error) {
+	return createService.create(ctx, actor, input, key, nil)
+}
+
+// CreateWithPlan 支持两种上传模式，仅在首次创建时应用当前限制。
+// 装配的编码器和恢复校验器须支持两种创建快照。
+func (createService *IdempotentCreateUploadService) CreateWithPlan(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, key string, limits domain.UploadPlanLimits) (json.RawMessage, error) {
+	return createService.create(ctx, actor, input, key, &limits)
+}
+
+func (createService *IdempotentCreateUploadService) create(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, key string, limits *domain.UploadPlanLimits) (json.RawMessage, error) {
 	// 1. 校验身份、请求键和声明，复制输入并生成摘要。
 	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 || !domain.ValidIdempotencyKey(key) {
 		return nil, fmt.Errorf("幂等上传创建需要上下文、完整认证身份和有效幂等键")
@@ -66,11 +76,17 @@ func (createService *IdempotentCreateUploadService) Create(ctx context.Context, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	declaration, err := ValidateCreateUploadInput(input)
-	if err != nil {
-		return nil, err
+	input.ExpectedSHA256 = copyOptionalValue(input.ExpectedSHA256)
+	buildHash := BuildCreateUploadRequestHash
+	expectedMode := ""
+	if limits != nil {
+		buildHash = BuildCreateUploadRequestHashWithMultipart
+		expectedMode = "SINGLE"
+		if input.SizeBytes > domain.MaxSingleUploadSizeBytes {
+			expectedMode = "MULTIPART"
+		}
 	}
-	requestHash, err := BuildCreateUploadRequestHash(*declaration)
+	requestHash, err := buildHash(input)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +108,7 @@ func (createService *IdempotentCreateUploadService) Create(ctx context.Context, 
 			return fmt.Errorf("查询上传创建幂等结果失败: %w", findError)
 		}
 
-		// 3. 记录缺失时，复用当前事务完成核心上传创建。
+		// 3. 记录缺失才执行核心创建，分片计划在此时按当前限制确定。
 		if errors.Is(findError, domain.ErrIdempotencyRecordNotFound) {
 			if record != nil {
 				return domain.ErrInvalidIdempotencyRecordData
@@ -102,7 +118,13 @@ func (createService *IdempotentCreateUploadService) Create(ctx context.Context, 
 					return action(ctx, txStore)
 				},
 			)
-			task, err := creator.Create(txContext, actor, *declaration)
+			var task *domain.UploadTask
+			var err error
+			if limits == nil {
+				task, err = creator.Create(txContext, actor, input)
+			} else {
+				task, err = creator.CreateWithPlan(txContext, actor, input, *limits)
+			}
 			if err != nil {
 				return err
 			}
@@ -116,7 +138,7 @@ func (createService *IdempotentCreateUploadService) Create(ctx context.Context, 
 			if encodeError != nil {
 				return fmt.Errorf("编码上传创建结果失败: %w", encodeError)
 			}
-			validationError := createService.validateResult(body)
+			validationError := createService.validateSnapshot(body, expectedMode)
 			if err := txContext.Err(); err != nil {
 				return err
 			}
@@ -149,7 +171,7 @@ func (createService *IdempotentCreateUploadService) Create(ctx context.Context, 
 		if err := ValidateCreateUploadReplay(record, actor.UserID, key, requestHash, createService.now()); err != nil {
 			return err
 		}
-		validationError := createService.validateResult(record.ResponseBody)
+		validationError := createService.validateSnapshot(record.ResponseBody, expectedMode)
 		if err := txContext.Err(); err != nil {
 			return err
 		}
@@ -171,4 +193,18 @@ func (createService *IdempotentCreateUploadService) Create(ctx context.Context, 
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}
 	return prepared, nil
+}
+
+func (createService *IdempotentCreateUploadService) validateSnapshot(body json.RawMessage, expectedMode string) error {
+	// 1. 两模式创建时，核对快照模式与请求摘要对应的模式一致。
+	if expectedMode != "" {
+		var data struct {
+			UploadMode string `json:"upload_mode"`
+		}
+		if json.Unmarshal(body, &data) != nil || data.UploadMode != expectedMode {
+			return domain.ErrInvalidIdempotencyRecordData
+		}
+	}
+	// 2. 再由装配的校验器核对完整快照。
+	return createService.validateResult(body)
 }
