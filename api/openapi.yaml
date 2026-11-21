@@ -303,27 +303,60 @@ paths:
     post:
       tags: [Uploads]
       operationId: completeUpload
-      summary: 确认当前用户的单文件上传完成状态
+      summary: 确认单文件上传状态或受理分片上传完成
       description: |
-        服务启动时绑定共享 Bearer 授权和单文件上传完成确认服务。
-        1. Bearer 授权通过后解析路径 id，按当前用户归属读取任务。同账号的其他设备也可确认完成状态，MULTIPART 返回 TASK_NOT_READY。
-        2. SINGLE 任务处于 VERIFYING 时返回 202 和当前快照，涵盖等待校验、执行校验和等待重试。
-           COMPLETED 返回 200 和已保存的发布结果，data.result_entry_id 为已经发布的目录项 ID。
-        3. CREATING、UPLOADING、COMPLETING、CANCELLING、CANCELLED、EXPIRING、EXPIRED、FAILED 返回 409 TASK_NOT_READY。
-        请求无需正文或 Idempotency-Key，重复请求按任务 ID 读取当前状态。单文件内容接收提交 VERIFYING 后，校验、发布与到期推进由后台执行。
-        收到 202 后可通过 GET /api/v1/uploads/{id} 查询进度。收到 409 时可用同一查询读取当前阶段和公开错误摘要。
+        SINGLE 已接入服务。MULTIPART 为 B4 计划契约，等待接入。
+        1. Bearer 授权后解析路径 id，按当前用户归属读取任务。缺失或跨账号统一返回 UPLOAD_NOT_FOUND，同账号其他设备可以操作。
+        2. SINGLE 沿用无正文的状态确认。VERIFYING 返回 202，COMPLETED 返回 200，其余阶段返回 409 TASK_NOT_READY。
+        3. MULTIPART 为未到期且已绑定存储会话的 UPLOADING 时，首次受理及修复后再次提交均要求 JSON 分片回执。
+           编号在任务固定计划内且唯一，客户端提交每片的 ETag。编号可按任意顺序提交，服务端按编号核对和保存。
+           账号事务内复查授权和任务并领取核对租约，有有效执行租约时返回 UPLOAD_BUSY。
+           事务外读完 ListParts，核对计划内每片的编号、长度、总大小、ETag 与存储端 SHA-256 回执。缺片、长度或 ETag 失配时释放核对租约，保留 UPLOADING 并返回 UPLOAD_PARTS_MISMATCH。
+           校验通过后，在同一事务内按原会话及租约版本提交完成快照和 COMPLETING，释放核对租约，再返回 202。
+        4. MULTIPART 已在 COMPLETING 或 VERIFYING 时返回 202，已在 COMPLETED 时返回 200，读取已保存的 data.result_entry_id 和完成时间。
+           这些请求可省略正文，带回的回执仅在进入 UPLOADING 的受理分支时读取。已受理完成快照不会被重试覆盖。
+           尚未受理且不具备完成条件、正在取消或过期收尾，或已失败、取消、过期的任务返回 409 TASK_NOT_READY。
+        5. 后台完成存储对象并校验整文件大小及 SHA-256，发布事务一次性创建目录项并结算配额。202 后通过 GET /api/v1/uploads/{id} 查询进度。
+           旧回执在后台被确认失配且原会话还能继续上传时，任务回到 UPLOADING，客户端补传后携带新回执提交。
+           存储完成结果不明时沿原任务核对，保留 COMPLETING，后续查询交付实际阶段。重复完成请求以任务 ID 复用进度和已发布的同一结果。
+        请求无需 Idempotency-Key。服务端依靠任务状态、租约及提交的完成快照约束重复操作。
       security:
         - BearerAuth: []
       parameters:
         - $ref: '#/components/parameters/RequestID'
         - $ref: '#/components/parameters/UploadTaskID'
+      requestBody:
+        required: false
+        description: SINGLE 与已受理的 MULTIPART 可省略正文。MULTIPART 在 UPLOADING 接受新的完成请求时必须提交 JSON 回执。
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteMultipartUploadRequest'
       responses:
         '200':
           $ref: '#/components/responses/UploadCompletionSucceeded'
         '202':
           $ref: '#/components/responses/UploadCompletionInProgress'
         '400':
-          $ref: '#/components/responses/UploadTaskQueryRejected'
+          description: |
+            INVALID_ARGUMENT。无效路径定位 id。MULTIPART 新提交缺少正文、回执缺失或编号重复时定位 parts，
+            单项编号或 ETag 无效时定位 parts.<下标>.part_number 或 parts.<下标>.etag，下标从零开始。
+            JSON 读取错误复用 InvalidJSONRequest。结构有效但缺少任务所需的部分分片时返回 409 UPLOAD_PARTS_MISMATCH。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '401':
           $ref: '#/components/responses/AuthorizationRejected'
         '403':
@@ -336,8 +369,18 @@ paths:
           $ref: '#/components/responses/UploadTaskNotFound'
         '409':
           $ref: '#/components/responses/UploadCompletionConflict'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          description: STORAGE_UNAVAILABLE。存储端暂时无法完整核对回执，返回固定错误和本次请求 ID。客户端先查询当前任务再重试。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/uploads/{id}/cancel:
     post:
       tags: [Uploads]
@@ -2426,11 +2469,11 @@ components:
       properties:
         code:
           type: string
-          enum: [TARGET_UNAVAILABLE, BODY_SIZE_MISMATCH, FILE_TOO_LARGE, CHECKSUM_MISMATCH, QUOTA_EXCEEDED, TEMP_SPACE_EXHAUSTED, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, INTERNAL_ERROR]
+          enum: [TARGET_UNAVAILABLE, BODY_SIZE_MISMATCH, FILE_TOO_LARGE, CHECKSUM_MISMATCH, QUOTA_EXCEEDED, TEMP_SPACE_EXHAUSTED, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, INTERNAL_ERROR, UPLOAD_PARTS_MISMATCH, UPLOAD_SESSION_LOST]
           description: 未知或空的内部错误码统一转换为 INTERNAL_ERROR。
         message:
           type: string
-          enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常']
+          enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常', '分片回执不一致，请核对后补传', '存储上传会话已失效，请重新创建任务']
           description: 按 code 生成的固定中文提示。
     UploadTaskData:
       type: object
@@ -2822,6 +2865,34 @@ components:
               etag: eccbc87e4b5ce2fe28308fd9f2a7baf3
               checksum_sha256: TgdAhWK+24tgzgXB3s/jrRa3IjCWfeAfZAt+Rym0n84=
         request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CompleteMultipartUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [parts]
+      properties:
+        parts:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          description: 客户端上传成功的分片回执。每个计划编号须恰好出现一次；完成之前服务端逐一核对存储记录及其分片摘要。
+          items:
+            type: object
+            additionalProperties: false
+            required: [part_number, etag]
+            properties:
+              part_number:
+                type: integer
+                minimum: 1
+                maximum: 10000
+                description: 需与任务计划中对应的分片编号一致。
+              etag:
+                $ref: '#/components/schemas/UploadPartReceipt/properties/etag'
+      example:
+        parts:
+          - part_number: 1
+            etag: 51fa3c51150bf68adeb04359200eb699
+          - part_number: 2
+            etag: eccbc87e4b5ce2fe28308fd9f2a7baf3
     CreateDirectoryRequest:
       type: object
       additionalProperties: false
@@ -4955,7 +5026,7 @@ components:
                     properties:
                       upload_mode:
                         type: string
-                        enum: [SINGLE]
+                        enum: [SINGLE, MULTIPART]
                       status:
                         type: string
                         enum: [COMPLETED]
@@ -4982,7 +5053,8 @@ components:
             request_id: 38ee758a-0727-42de-ae7d-3bb33155e148
     UploadCompletionInProgress:
       description: |
-        HTTP 202，已保存的任务阶段是 VERIFYING，客户端可按 data.id 查询后续状态。
+        HTTP 202。SINGLE 已进入 VERIFYING，MULTIPART 已进入 COMPLETING 或 VERIFYING。
+        客户端可按 data.id 查询后续状态，发布结果和完成时间当前均为 null。
         响应关联本次请求 ID，使用 no-store 和 Pragma no-cache。
       headers:
         X-Request-ID:
@@ -5004,13 +5076,24 @@ components:
                 properties:
                   data:
                     type: object
+                    oneOf:
+                      - type: object
+                        properties:
+                          upload_mode:
+                            type: string
+                            enum: [SINGLE]
+                          status:
+                            type: string
+                            enum: [VERIFYING]
+                      - type: object
+                        properties:
+                          upload_mode:
+                            type: string
+                            enum: [MULTIPART]
+                          status:
+                            type: string
+                            enum: [COMPLETING, VERIFYING]
                     properties:
-                      upload_mode:
-                        type: string
-                        enum: [SINGLE]
-                      status:
-                        type: string
-                        enum: [VERIFYING]
                       result_entry_id:
                         type: string
                         nullable: true
@@ -5019,22 +5102,41 @@ components:
                         type: string
                         nullable: true
                         enum: [null]
-          example:
-            data:
-              id: '19'
-              parent_id: '13'
-              requested_name: 学习笔记.md
-              resolved_name: null
-              size_bytes: 2048
-              upload_mode: SINGLE
-              status: VERIFYING
-              result_entry_id: null
-              created_at: '2026-11-20T08:00:00.123456Z'
-              updated_at: '2026-11-20T08:01:00.123456Z'
-              expires_at: '2026-11-21T08:00:00.123456Z'
-              completed_at: null
-              last_error: null
-            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+          examples:
+            singleVerifying:
+              value:
+                data:
+                  id: '19'
+                  parent_id: '13'
+                  requested_name: 学习笔记.md
+                  resolved_name: null
+                  size_bytes: 2048
+                  upload_mode: SINGLE
+                  status: VERIFYING
+                  result_entry_id: null
+                  created_at: '2026-11-20T08:00:00.123456Z'
+                  updated_at: '2026-11-20T08:01:00.123456Z'
+                  expires_at: '2026-11-21T08:00:00.123456Z'
+                  completed_at: null
+                  last_error: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            multipartCompleting:
+              value:
+                data:
+                  id: '20'
+                  parent_id: '13'
+                  requested_name: 合成分片.bin
+                  resolved_name: null
+                  size_bytes: 16777217
+                  upload_mode: MULTIPART
+                  status: COMPLETING
+                  result_entry_id: null
+                  created_at: '2026-11-21T08:00:00.123456Z'
+                  updated_at: '2026-11-21T08:01:00.123456Z'
+                  expires_at: '2026-11-22T08:00:00.123456Z'
+                  completed_at: null
+                  last_error: null
+                request_id: 38ee758a-0727-42de-ae7d-3bb33155e148
     UploadCancellationAccepted:
       description: |
         HTTP 202，已提交 CANCELLING 或任务正处于该阶段。客户端可按 data.id 查询进度。
@@ -5802,8 +5904,9 @@ components:
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadCompletionConflict:
       description: |
-        HTTP 409，上传模式或当前任务阶段不满足完成条件，返回 TASK_NOT_READY。
-        客户端可通过任务查询读取实际阶段与公开错误摘要。
+        HTTP 409。任务不可完成返回 TASK_NOT_READY，新的 MULTIPART 核对与有效执行租约冲突时返回 UPLOAD_BUSY。
+        分片回执核对发现缺片、长度或 ETag 失配时返回 UPLOAD_PARTS_MISMATCH，details.part_numbers 给出最多 20 个受影响编号。
+        编号从小到大，只交付前 20 项。客户端可通过任务查询读取阶段，并通过分片核对接口检查全部分片。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -5824,16 +5927,58 @@ components:
                 properties:
                   error:
                     type: object
-                    properties:
-                      code:
-                        type: string
-                        enum: [TASK_NOT_READY]
-          example:
-            error:
-              code: TASK_NOT_READY
-              message: 上传任务当前不可完成
-              details: null
-            request_id: 48ee758a-0727-42de-ae7d-3bb33155e148
+                    oneOf:
+                      - type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [TASK_NOT_READY, UPLOAD_BUSY]
+                          details:
+                            type: object
+                            nullable: true
+                            enum: [null]
+                      - type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [UPLOAD_PARTS_MISMATCH]
+                          details:
+                            type: object
+                            additionalProperties: false
+                            required: [part_numbers]
+                            properties:
+                              part_numbers:
+                                type: array
+                                minItems: 1
+                                maxItems: 20
+                                uniqueItems: true
+                                items:
+                                  type: integer
+                                  minimum: 1
+                                  maximum: 10000
+          examples:
+            taskNotReady:
+              value:
+                error:
+                  code: TASK_NOT_READY
+                  message: 上传任务当前不可完成
+                  details: null
+                request_id: 48ee758a-0727-42de-ae7d-3bb33155e148
+            taskBusy:
+              value:
+                error:
+                  code: UPLOAD_BUSY
+                  message: 上传任务正在处理中
+                  details: null
+                request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            partsMismatch:
+              value:
+                error:
+                  code: UPLOAD_PARTS_MISMATCH
+                  message: 分片回执不一致，请核对后补传
+                  details:
+                    part_numbers: [2]
+                request_id: 58ee758a-0727-42de-ae7d-3bb33155e148
     UploadCancellationConflict:
       description: |
         HTTP 409。仍有有效执行租约返回 UPLOAD_BUSY。任务正在过期收尾、未开始取消且已经到期，
