@@ -210,6 +210,7 @@ func TestNewUploadTaskDataErrorSummaries(t *testing.T) {
 		{"CHECKSUM_MISMATCH", "CHECKSUM_MISMATCH", "文件校验失败，请重新上传"},
 		{"QUOTA_EXCEEDED", "QUOTA_EXCEEDED", "存储空间不足"},
 		{"TEMP_SPACE_EXHAUSTED", "TEMP_SPACE_EXHAUSTED", "上传临时空间不足，请稍后重试"},
+		{domain.UploadPartsMismatchCode, "UPLOAD_PARTS_MISMATCH", "分片回执不一致，请核对后补传"},
 		{"STORAGE_UNAVAILABLE", "STORAGE_UNAVAILABLE", "存储服务暂时不可用"},
 		{"DATABASE_UNAVAILABLE", "DATABASE_UNAVAILABLE", "数据服务暂时不可用"},
 		{"INTERNAL_ERROR", "INTERNAL_ERROR", "上传任务处理异常"},

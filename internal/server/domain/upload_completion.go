@@ -11,6 +11,9 @@ const MaxUploadPartsMismatchNumbers = 20
 // ErrUploadPartsMismatch 表示当前分片不足以受理完成请求。
 var ErrUploadPartsMismatch = errors.New("分片回执不一致，请核对后补传")
 
+// UploadPartsMismatchCode 标记完成核对失配，客户端可核对分片后补传。
+const UploadPartsMismatchCode = "UPLOAD_PARTS_MISMATCH"
+
 // ErrMultipartUploadPartRejected 表示存储明确拒绝了本次合并请求的分片回执。
 var ErrMultipartUploadPartRejected = errors.New("存储拒绝了分片合并回执")
 

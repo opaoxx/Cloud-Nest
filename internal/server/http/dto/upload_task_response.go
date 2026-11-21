@@ -124,6 +124,8 @@ func uploadTaskErrorSummary(code *string) *UploadTaskErrorSummary {
 		message = "文件大小超过当前上传限制"
 	case domain.UploadChecksumMismatchCode:
 		message = domain.ErrUploadChecksumMismatch.Error()
+	case domain.UploadPartsMismatchCode:
+		message = domain.ErrUploadPartsMismatch.Error()
 	case "QUOTA_EXCEEDED":
 		message = "存储空间不足"
 	case "TEMP_SPACE_EXHAUSTED":

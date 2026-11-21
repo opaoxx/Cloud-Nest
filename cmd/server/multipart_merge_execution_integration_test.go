@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -14,6 +18,9 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
+	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
@@ -57,6 +64,27 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 	execute(t, "INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB')")
 	execute(t, "INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(41,7,11,UNHEX(REPEAT('41',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY)")
 	execute(t, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
+	const fixtureBearer = "fixture-multipart-query"
+	taskQuery := service.NewUploadTaskService(store.FindUserUploadTask)
+	router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
+	serverhttp.RegisterUploadTaskRoute(router, func(_ context.Context, token string) (*domain.Actor, error) {
+		if token != fixtureBearer {
+			return nil, domain.ErrInvalidAccessToken
+		}
+		return &actor, nil
+	}, taskQuery.Get)
+	readPublicTask := func(t *testing.T, taskID uint64) dto.UploadTaskData {
+		t.Helper()
+		request := httptest.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("/api/v1/uploads/%d", taskID), nil)
+		request.Header.Set("Authorization", "Bearer "+fixtureBearer)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		var body dto.UploadTaskResponse
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Data.ID != fmt.Sprint(taskID) {
+			t.Fatal("正式任务查询未返回当前账号的任务", response.Code)
+		}
+		return body.Data
+	}
 	targets := service.NewUploadPartSigningTargetService(settings.Provider, settings.Bucket, store.FindUserUploadTaskForPartSigning, store.FindUserStoredObject)
 	recovery := service.NewUploadMergeRecoveryService(targets.GetForMerge, client.StatMultipartUploadObject)
 	receiptCheck := service.NewUploadMergeReceiptService(targets.GetForMerge, store.ReadMultipartCompletionReceipts,
@@ -210,8 +238,14 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				if _, err := client.StatMultipartUploadObject(ctx, fixture.key); !errors.Is(err, domain.ErrUploadObjectMissing) {
 					t.Fatal("补传过程中不应生成对象", err)
 				}
+				// 任务查询从已提交记录生成公开提示，客户端据此重新核对分片。
+				publicTask := readPublicTask(t, fixture.taskID)
+				if publicTask.Status != string(domain.UploadStatusUploading) || publicTask.LastError == nil ||
+					publicTask.LastError.Code != "UPLOAD_PARTS_MISMATCH" || publicTask.LastError.Message != "分片回执不一致，请核对后补传" {
+					t.Fatal("恢复补传后查询未交付公开提示", publicTask.LastError)
+				}
 				assertQuotaUnchanged()
-				t.Logf("任务 %d 恢复 %s，旧回执 %d 条，原会话可读取，合并调用 %d 次", fixture.taskID, persisted.Status, receiptCount, completeCalls)
+				t.Logf("任务 %d 恢复 %s，查询返回 %s，旧回执 %d 条，合并调用 %d 次", fixture.taskID, persisted.Status, publicTask.LastError.Code, receiptCount, completeCalls)
 				return
 			}
 
@@ -264,6 +298,9 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				t.Fatal("写回元数据与存储版本不一致", err)
 			}
 			assertQuotaUnchanged()
+			if publicTask := readPublicTask(t, fixture.taskID); publicTask.Status != string(domain.UploadStatusVerifying) || publicTask.LastError != nil {
+				t.Fatal("已进入校验的任务查询保留了过时错误", publicTask.LastError)
+			}
 			t.Logf("任务 %d 进入 %s，确认版本 %s，合并调用 %d 次", fixture.taskID, result.Status, *object.StorageVersionID, completeCalls)
 		})
 	}

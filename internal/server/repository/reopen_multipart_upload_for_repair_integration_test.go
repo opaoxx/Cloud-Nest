@@ -39,6 +39,7 @@ func TestReopenMultipartUploadForRepairIntegration(t *testing.T) {
 		{name: "freeze loses a row", change: "DELETE FROM upload_parts WHERE task_id=19 AND part_number=2", want: domain.ErrInvalidUploadTaskData},
 		{name: "delete failure rolls back state", change: "CREATE TRIGGER fixture_repair_delete BEFORE DELETE ON upload_parts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture reject delete'", mysqlCode: 1644},
 		{name: "readback failure restores old rows", change: "CREATE TRIGGER fixture_repair_drift BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.storage_upload_id='drift'", want: domain.ErrInvalidUploadTaskData},
+		{name: "error code drift rolls back repair", change: "CREATE TRIGGER fixture_repair_code BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.last_error_code=NULL", want: domain.ErrInvalidUploadTaskData},
 		{name: "canceled context", want: context.Canceled},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -92,6 +93,8 @@ func TestReopenMultipartUploadForRepairIntegration(t *testing.T) {
 				}
 			}
 			freeze(frozen)
+			// 模拟先前登记过重试，补传提示应覆盖旧诊断。
+			execute("UPDATE upload_tasks SET last_error_code='MERGE_RECHECK_REQUIRED',last_error_message='fixture-retry' WHERE id=19")
 			candidates, err := store.ListMultipartUploadCompletionCandidates(ctx, 1)
 			if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
 				t.Fatal("未取得任务 19 的候选", candidates, err)
@@ -177,7 +180,9 @@ func TestReopenMultipartUploadForRepairIntegration(t *testing.T) {
 				t.Fatal("恢复成功未返回任务")
 			}
 			before.task.Status, before.task.LeaseOwner, before.task.LeaseUntil = domain.UploadStatusUploading, nil, nil
-			before.task.NextAttemptAt, before.task.LastErrorCode, before.task.LastErrorMessage = nil, nil, nil
+			before.task.NextAttemptAt = nil
+			before.task.LastErrorCode = new(domain.UploadPartsMismatchCode)
+			before.task.LastErrorMessage = new(domain.ErrUploadPartsMismatch.Error())
 			before.task.UpdatedAt = result.UpdatedAt
 			before.parts = before.parts[2:]
 			if !reflect.DeepEqual(before.task, result) || !reflect.DeepEqual(before, read()) {
@@ -188,8 +193,9 @@ func TestReopenMultipartUploadForRepairIntegration(t *testing.T) {
 			}
 			freeze(observed)
 			newRound := read()
-			if newRound.task.Status != domain.UploadStatusCompleting || len(newRound.parts) != 4 || newRound.parts[0].ETag != "NewFirst" {
-				t.Fatal("原会话未成功提交替换后的回执")
+			if newRound.task.Status != domain.UploadStatusCompleting || newRound.task.LastErrorCode != nil || newRound.task.LastErrorMessage != nil ||
+				len(newRound.parts) != 4 || newRound.parts[0].ETag != "NewFirst" {
+				t.Fatal("原会话提交替换回执后未进入新一轮或未清除补传提示")
 			}
 			if repeated, err := store.ReopenMultipartUploadForRepair(ctx, provider, bucket, evidence); repeated != nil || !errors.Is(err, domain.ErrUploadTaskBusy) ||
 				!reflect.DeepEqual(newRound, read()) {

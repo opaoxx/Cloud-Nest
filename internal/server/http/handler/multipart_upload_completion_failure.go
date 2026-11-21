@@ -69,7 +69,7 @@ func writeUploadPartsMismatch(requestContext *gin.Context, partNumbers []uint32)
 
 	// 2. 写出固定错误、允许公开的编号和请求 ID。
 	requestContext.AbortWithStatusJSON(http.StatusConflict, dto.ErrorResponse{
-		Error: dto.ErrorDetail{Code: "UPLOAD_PARTS_MISMATCH", Message: domain.ErrUploadPartsMismatch.Error(),
+		Error: dto.ErrorDetail{Code: domain.UploadPartsMismatchCode, Message: domain.ErrUploadPartsMismatch.Error(),
 			Details: map[string]any{"part_numbers": partNumbers}},
 		RequestID: requestcontext.RequestID(requestContext.Request.Context()),
 	})
