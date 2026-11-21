@@ -8,6 +8,9 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
+// uploadTaskLifetime 是创建及续期使用的任务有效期。
+const uploadTaskLifetime = 24 * time.Hour
+
 // CreateUploadTransaction 汇集上传创建所需的事务内读取和写入能力。
 type CreateUploadTransaction interface {
 	FileEntryPathReader
@@ -149,7 +152,7 @@ func (createService *CreateUploadService) createPreparedUpload(ctx context.Conte
 		objectID := staged.ID
 
 		// 4. 按模式创建任务，核对并复制初始结果。
-		expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(24 * time.Hour)
+		expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(uploadTaskLifetime)
 		taskInput := declaration
 		taskInput.ExpectedSHA256 = copyOptionalValue(declaration.ExpectedSHA256)
 		status := domain.UploadStatusUploading
