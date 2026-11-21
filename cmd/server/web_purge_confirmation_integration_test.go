@@ -14,21 +14,12 @@ import (
 )
 
 func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
-	cli := os.Getenv("CLOUDNEST_WEB_PURGE_PLAYWRIGHT_CLI")
-	if cli == "" {
-		t.Skip("设置 CLOUDNEST_WEB_PURGE_PLAYWRIGHT_CLI 指向本地 playwright-cli.js 后进行隔离浏览器验收")
-	}
-	if !filepath.IsAbs(cli) {
-		t.Fatal("Playwright CLI 必须是绝对路径")
-	}
-	if _, err := os.Stat(cli); err != nil {
-		t.Fatal(err)
-	}
+	cli := webFixtureBrowserCLI(t, "CLOUDNEST_WEB_PURGE_PLAYWRIGHT_CLI")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
 	// 1. 启动本轮专用 MySQL，再复用合成子树、只读存储桩和停用清理 worker 的实例。
-	startWebPurgeConfirmationMySQL(t, ctx)
+	startIsolatedWebMySQL(t, ctx)
 	pool, webURL := prepareWebPurgePreviewFixture(t, ctx)
 	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at)
 		VALUES(60,7,33,'跨页恢复目录',CAST('跨页恢复目录' AS BINARY),'DIR','TRASHED',UTC_TIMESTAMP(6))`); err != nil {
@@ -37,32 +28,7 @@ func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
 	before := readWebPurgePreviewSnapshot(t, ctx, pool)
 
 	// 2. 在独立 Edge 会话中验证交互、请求次数和提交使用的原预检。
-	probe, err := filepath.Abs(filepath.Join("testdata", "web_purge_confirmation.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cliDir := t.TempDir()
-	session := "-s=cloudnest-purge-" + strings.ToLower(rand.Text())
-	runBrowser := func(runContext context.Context, args ...string) (string, error) {
-		cmd := exec.CommandContext(runContext, "node", append([]string{cli, session}, args...)...)
-		cmd.Dir = cliDir
-		output, err := cmd.CombinedOutput()
-		return string(output), err
-	}
-	t.Cleanup(func() {
-		cleanupContext, stop := context.WithTimeout(context.Background(), 15*time.Second)
-		defer stop()
-		if _, err := runBrowser(cleanupContext, "close"); err != nil {
-			t.Error("隔离浏览器会话未正常关闭", err)
-		}
-	})
-	if output, err := runBrowser(ctx, "open", webURL, "--browser=msedge"); err != nil || strings.Contains(output, "### Error") {
-		t.Fatalf("启动隔离 Edge 失败，%v\n%s", err, output)
-	}
-	output, err := runBrowser(ctx, "run-code", "--filename", probe)
-	if err != nil || strings.Contains(output, "### Error") || !strings.Contains(output, "CN520 and CN521 browser checks passed") {
-		t.Fatalf("清理确认及进度浏览器验收失败，%v\n%s", err, output)
-	}
+	runWebBrowserProbe(t, ctx, cli, webURL, "web_purge_confirmation.js", "CN520 and CN521 browser checks passed")
 	t.Log("Edge 验收通过：同一范围、取消焦点、取消、Esc、Enter、过期、跨页恢复、原凭证和一次 202")
 	t.Log("进度验收通过：真实受理地址、加载、清理中 4 项、读取失败和重试、无效状态拒绝、模拟完成 0 项；五次 GET")
 
@@ -89,7 +55,52 @@ func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
 	t.Log("数据库核对通过：56 进入 PURGING，60 恢复为 ACTIVE，其余条目、对象和配额保持原样")
 }
 
-func startWebPurgeConfirmationMySQL(t *testing.T, ctx context.Context) {
+func webFixtureBrowserCLI(t *testing.T, envKey string) string {
+	t.Helper()
+	cli := os.Getenv(envKey)
+	if cli == "" {
+		t.Skipf("设置 %s 指向本地 playwright-cli.js 后进行隔离浏览器验收", envKey)
+	}
+	if !filepath.IsAbs(cli) {
+		t.Fatal("Playwright CLI 必须是绝对路径")
+	}
+	if _, err := os.Stat(cli); err != nil {
+		t.Fatal(err)
+	}
+	return cli
+}
+
+func runWebBrowserProbe(t *testing.T, ctx context.Context, cli, webURL, filename, successMarker string) {
+	t.Helper()
+	probe, err := filepath.Abs(filepath.Join("testdata", filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliDir := t.TempDir()
+	session := "-s=cloudnest-fixture-" + strings.ToLower(rand.Text())
+	runBrowser := func(runContext context.Context, args ...string) (string, error) {
+		cmd := exec.CommandContext(runContext, "node", append([]string{cli, session}, args...)...)
+		cmd.Dir = cliDir
+		output, err := cmd.CombinedOutput()
+		return string(output), err
+	}
+	t.Cleanup(func() {
+		cleanupContext, stop := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stop()
+		if _, err := runBrowser(cleanupContext, "close"); err != nil {
+			t.Error("隔离浏览器会话未正常关闭", err)
+		}
+	})
+	if output, err := runBrowser(ctx, "open", webURL, "--browser=msedge"); err != nil || strings.Contains(output, "### Error") {
+		t.Fatalf("启动隔离 Edge 失败，%v\n%s", err, output)
+	}
+	output, err := runBrowser(ctx, "run-code", "--filename", probe)
+	if err != nil || strings.Contains(output, "### Error") || !strings.Contains(output, successMarker) {
+		t.Fatalf("浏览器验收失败，%v\n%s", err, output)
+	}
+}
+
+func startIsolatedWebMySQL(t *testing.T, ctx context.Context) {
 	t.Helper()
 	// 1. 仅允许本机 Docker，数据库地址和凭据由这次启动给出。
 	if os.Getenv("DOCKER_HOST") != "" {

@@ -89,7 +89,7 @@
 .trash-items th:last-child { width: 14%; }
 .directory-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .directory-items + button { margin-top: 12px; }
-.create-directory-trigger { margin-bottom: 10px; }
+.directory-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .entry-name-form { display: grid; gap: 8px; }
 .entry-name-form .auth-error { margin: 0; }
 .directory-actions { display: flex; flex-wrap: wrap; gap: 4px 10px; }

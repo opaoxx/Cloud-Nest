@@ -5,9 +5,10 @@ import { formatSize } from './demo'
 import EntryNameDialog from './EntryNameDialog'
 import MoveEntryDialog from './MoveEntryDialog'
 import EntryConfirmationDialog from './EntryConfirmationDialog'
+import SingleUploadDialog from './SingleUploadDialog'
 import { useDirectoryListing } from './useDirectoryListing'
 
-type EntryAction = { kind: 'create' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
+type EntryAction = { kind: 'create' | 'select-upload' } | { kind: 'rename' | 'move' | 'trash'; entry: DirectoryEntry }
 
 export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, createDirectory, renameEntry, moveEntry, trashEntry }: {
   rootEntryId: string
@@ -67,8 +68,15 @@ export default function DirectoryBrowser({ rootEntryId, readDirectoryPage, creat
         </nav>
       )}
       {currentDirectory?.id === request.directoryId && (
-        <Button className="create-directory-trigger" disabled={!canModify}
-          onClick={() => setEntryAction({ kind: 'create' })}>新建文件夹</Button>
+        <div className="directory-toolbar">
+          <Button disabled={!canModify} onClick={() => setEntryAction({ kind: 'create' })}>新建文件夹</Button>
+          <Button disabled={!canModify} onClick={() => setEntryAction({ kind: 'select-upload' })}>选择上传文件</Button>
+        </div>
+      )}
+      {entryAction?.kind === 'select-upload' && currentDirectory?.id === request.directoryId && (
+        <SingleUploadDialog parentId={currentDirectory.id}
+          targetPath={listing.breadcrumbs.map(crumb => crumb.name || '根目录').join(' / ')}
+          onClose={() => setEntryAction(null)} />
       )}
       {(entryAction?.kind === 'create' || entryAction?.kind === 'rename') && currentDirectory?.id === request.directoryId && (
         <EntryNameDialog title={renameTarget ? '重命名' : '新建文件夹'}
