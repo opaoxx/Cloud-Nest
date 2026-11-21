@@ -14,7 +14,7 @@ import (
 // objectReadOptions 核对已保存的位置及版本，供 GET 和 HEAD 共用。
 func objectReadOptions(location domain.CreateStagedObjectInput, version *string) (minio.GetObjectOptions, error) {
 	// 1. 检查对象键并保留原始位置。
-	if !location.IsValid() || strings.TrimSpace(location.ObjectKey) == "" || strings.ContainsFunc(location.ObjectKey, unicode.IsControl) {
+	if !validStoredObjectLocation(location) {
 		return minio.GetObjectOptions{}, domain.ErrInvalidStoredObjectData
 	}
 
@@ -30,6 +30,10 @@ func objectReadOptions(location domain.CreateStagedObjectInput, version *string)
 	}
 	options.Set("Accept-Encoding", "identity")
 	return options, nil
+}
+
+func validStoredObjectLocation(location domain.CreateStagedObjectInput) bool {
+	return location.IsValid() && strings.TrimSpace(location.ObjectKey) != "" && !strings.ContainsFunc(location.ObjectKey, unicode.IsControl)
 }
 
 // matchesObjectReadVersion 保留 MinIO 在版本功能开启前写入的 null 版本语义。
