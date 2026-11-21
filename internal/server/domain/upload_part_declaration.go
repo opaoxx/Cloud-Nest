@@ -14,6 +14,16 @@ type UploadPartDeclaration struct {
 	SHA256     string
 }
 
+// UploadPartDeclarationError 携带固定的公开字段名及提示，供调用方定位批次或单项错误。
+type UploadPartDeclarationError struct {
+	Field   string
+	Message string
+}
+
+func (inputError *UploadPartDeclarationError) Error() string {
+	return inputError.Message
+}
+
 // DecodeUploadPartSHA256 将恰好 64 位的十六进制文本解码为固定长度摘要。
 func DecodeUploadPartSHA256(text string) ([sha256.Size]byte, bool) {
 	// 1. 先检查长度，再验证每个字符并解码。

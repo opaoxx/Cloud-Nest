@@ -22,14 +22,7 @@ type UploadPartSigningInput struct {
 }
 
 // UploadPartDeclarationError 携带可定位到批次或单项的输入错误。
-type UploadPartDeclarationError struct {
-	Field   string
-	Message string
-}
-
-func (inputError *UploadPartDeclarationError) Error() string {
-	return inputError.Message
-}
+type UploadPartDeclarationError = domain.UploadPartDeclarationError
 
 // PrepareUploadPartSigningInputs 根据已保存的计划校验声明，按输入顺序返回完整批次。
 func PrepareUploadPartSigningInputs(fileSizeBytes, partSizeBytes uint64, partCount uint32, parts []UploadPartDeclaration) ([]UploadPartSigningInput, error) {
