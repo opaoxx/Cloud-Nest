@@ -18,37 +18,20 @@ func (store *Store) BindMultipartUploadSession(ctx context.Context, claimed *dom
 	if store == nil || store.database == nil || ctx == nil {
 		return nil, fmt.Errorf("绑定分片会话需要数据入口和上下文")
 	}
-	if claimed == nil || claimed.UserID == 0 || claimed.ID == 0 || claimed.StagedObjectID == 0 ||
-		claimed.LeaseVersion == 0 || claimed.LeaseOwner == nil || !domain.ValidMultipartUploadID(uploadID) {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	userID, taskID, objectID := claimed.UserID, claimed.ID, claimed.StagedObjectID
-	leaseOwner, leaseVersion := *claimed.LeaseOwner, claimed.LeaseVersion
-	if len(leaseOwner) == 0 || len(leaseOwner) > 64 || strings.ContainsFunc(leaseOwner, func(character rune) bool { return character > 127 }) {
+	if !validMultipartInitializationClaim(claimed) || !domain.ValidMultipartUploadID(uploadID) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
 	var bound *domain.UploadTask
-	err := store.withActiveUserTransaction(ctx, userID, func(txContext context.Context, txStore *Store) error {
+	err := store.withActiveUserTransaction(ctx, claimed.UserID, func(txContext context.Context, txStore *Store) error {
 		lockedStore := *txStore
 		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
-		task, err := lockedStore.FindUserUploadTask(txContext, userID, taskID)
+		task, err := lockedStore.findCreatingMultipartWithLease(txContext, claimed)
 		if err != nil {
 			return err
 		}
-		if task.Status != domain.UploadStatusCreating || task.UploadMode != "MULTIPART" || task.StorageUploadID != nil {
-			return domain.ErrUploadTaskNotReady
-		}
-		if task.StagedObjectID != objectID || task.LeaseVersion != leaseVersion ||
-			task.LeaseOwner == nil || *task.LeaseOwner != leaseOwner || task.LeaseUntil == nil {
-			return domain.ErrUploadTaskBusy
-		}
-		if task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
-			!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) ||
-			task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil ||
-			task.ResolvedName != nil || task.ResultEntryID != nil || task.CompletedAt != nil {
-			return domain.ErrInvalidUploadTaskData
-		}
+		userID, taskID, objectID := task.UserID, task.ID, task.StagedObjectID
+		leaseOwner, leaseVersion := *task.LeaseOwner, task.LeaseVersion
 		object, err := lockedStore.FindUserStoredObject(txContext, userID, objectID)
 		if err != nil {
 			return err
@@ -109,14 +92,7 @@ func (store *Store) BindMultipartUploadSession(ctx context.Context, claimed *dom
 			updated.StagedObjectID != objectID || updated.LeaseVersion != leaseVersion ||
 			updated.LeaseOwner != nil || updated.LeaseUntil != nil || updated.NextAttemptAt != nil ||
 			updated.LastErrorCode != nil || updated.LastErrorMessage != nil ||
-			updated.FileSize != task.FileSize || updated.ReservedBytes != task.ReservedBytes ||
-			updated.PartSize == nil || *updated.PartSize != *task.PartSize ||
-			updated.PartCount == nil || *updated.PartCount != *task.PartCount ||
-			updated.ExpectedSHA256 == nil || *updated.ExpectedSHA256 != *task.ExpectedSHA256 ||
-			updated.DeviceID != task.DeviceID || updated.TargetParentID != task.TargetParentID ||
-			updated.RequestedName != task.RequestedName || updated.AttemptCount != task.AttemptCount ||
-			updated.PublishedObjectID != nil || updated.ResolvedName != nil || updated.ResultEntryID != nil || updated.CompletedAt != nil ||
-			!updated.CreatedAt.Equal(task.CreatedAt) || !updated.ExpiresAt.Equal(task.ExpiresAt) ||
+			updated.AttemptCount != task.AttemptCount || !sameMultipartInitializationDeclaration(task, updated) ||
 			updated.UpdatedAt.Before(now) || !updated.UpdatedAt.Before(task.ExpiresAt) || !updated.UpdatedAt.Before(*task.LeaseUntil) {
 			return domain.ErrInvalidUploadTaskData
 		}
@@ -127,4 +103,47 @@ func (store *Store) BindMultipartUploadSession(ctx context.Context, claimed *dom
 		return nil, err
 	}
 	return bound, nil
+}
+
+func validMultipartInitializationClaim(claimed *domain.UploadTask) bool {
+	if claimed == nil || claimed.UserID == 0 || claimed.ID == 0 || claimed.StagedObjectID == 0 ||
+		claimed.LeaseVersion == 0 || claimed.LeaseOwner == nil {
+		return false
+	}
+	owner := *claimed.LeaseOwner
+	return len(owner) > 0 && len(owner) <= 64 && !strings.ContainsFunc(owner, func(character rune) bool { return character > 127 })
+}
+
+// findCreatingMultipartWithLease 供已加锁的仓储入口共用，数据库写入时另行核对期限。
+func (lockedStore *Store) findCreatingMultipartWithLease(ctx context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
+	task, err := lockedStore.FindUserUploadTask(ctx, claimed.UserID, claimed.ID)
+	if err != nil {
+		return nil, err
+	}
+	if task.Status != domain.UploadStatusCreating || task.UploadMode != "MULTIPART" || task.StorageUploadID != nil {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	if task.StagedObjectID != claimed.StagedObjectID || task.LeaseVersion != claimed.LeaseVersion ||
+		task.LeaseOwner == nil || *task.LeaseOwner != *claimed.LeaseOwner || task.LeaseUntil == nil {
+		return nil, domain.ErrUploadTaskBusy
+	}
+	if task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
+		!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) ||
+		task.ReservedBytes != task.FileSize || task.PublishedObjectID != nil ||
+		task.ResolvedName != nil || task.ResultEntryID != nil || task.CompletedAt != nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	return task, nil
+}
+
+// sameMultipartInitializationDeclaration 核对初始化写回未改变原声明、预占或发布事实。
+func sameMultipartInitializationDeclaration(before, after *domain.UploadTask) bool {
+	return after.FileSize == before.FileSize && after.ReservedBytes == before.ReservedBytes &&
+		after.PartSize != nil && *after.PartSize == *before.PartSize &&
+		after.PartCount != nil && *after.PartCount == *before.PartCount &&
+		after.ExpectedSHA256 != nil && *after.ExpectedSHA256 == *before.ExpectedSHA256 &&
+		after.DeviceID == before.DeviceID && after.TargetParentID == before.TargetParentID &&
+		after.RequestedName == before.RequestedName && after.PublishedObjectID == nil &&
+		after.ResolvedName == nil && after.ResultEntryID == nil && after.CompletedAt == nil &&
+		after.CreatedAt.Equal(before.CreatedAt) && after.ExpiresAt.Equal(before.ExpiresAt)
 }
