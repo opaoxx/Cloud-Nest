@@ -73,7 +73,9 @@ func run(databaseName string, seed bool) error {
 		_, _ = connection.ExecContext(releaseContext, "SELECT RELEASE_LOCK(?)", lockName)
 	}()
 
-	if err := migrate(ctx, connection); err != nil {
+	// 当前命令执行清单首项，即首期迁移。
+	initialMigration := migrations.Ordered()[0]
+	if err := migrate(ctx, connection, initialMigration); err != nil {
 		return err
 	}
 	if seed {
@@ -81,11 +83,12 @@ func run(databaseName string, seed bool) error {
 			return err
 		}
 	}
-	fmt.Printf("Database %s is at schema version 1.\n", databaseName)
+	fmt.Printf("Database %s is at schema version %d.\n", databaseName, initialMigration.Version)
 	return nil
 }
 
-func migrate(ctx context.Context, connection *sql.Conn) error {
+func migrate(ctx context.Context, connection *sql.Conn, initialMigration migrations.Migration) error {
+	// 1. 准备迁移记录表，按清单中的版本号读取已应用记录。
 	_, err := connection.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
  version BIGINT UNSIGNED NOT NULL PRIMARY KEY COMMENT '迁移版本',
  name VARCHAR(255) NOT NULL COMMENT '迁移文件',
@@ -97,23 +100,27 @@ func migrate(ctx context.Context, connection *sql.Conn) error {
 	if err != nil {
 		return err
 	}
-	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte(migrations.InitialSQL)))
+	checksum := initialMigration.Checksum()
 	var existingChecksum string
 	var dirty bool
-	err = connection.QueryRowContext(ctx, "SELECT checksum, dirty FROM schema_migrations WHERE version=1").Scan(&existingChecksum, &dirty)
+	err = connection.QueryRowContext(ctx, "SELECT checksum, dirty FROM schema_migrations WHERE version=?", initialMigration.Version).Scan(&existingChecksum, &dirty)
+
+	// 2. 已有记录时核对 dirty 和摘要，匹配后直接返回。
 	if err == nil {
 		if dirty {
-			return errors.New("migration 1 is dirty; inspect the partial DDL and restore before retrying")
+			return fmt.Errorf("migration %d is dirty; inspect the partial DDL and restore before retrying", initialMigration.Version)
 		}
 		if existingChecksum != checksum {
-			return errors.New("migration 1 checksum differs; add a new migration instead of editing an applied file")
+			return fmt.Errorf("migration %d checksum differs; add a new migration instead of editing an applied file", initialMigration.Version)
 		}
-		fmt.Println("Migration 1 already applied; checksum verified.")
+		fmt.Printf("Migration %d already applied; checksum verified.\n", initialMigration.Version)
 		return nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+
+	// 3. 首次执行时确认业务库为空，先写 dirty，再执行 SQL，成功后标记完成。
 	var otherTables int
 	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name <> 'schema_migrations'").Scan(&otherTables); err != nil {
 		return err
@@ -121,16 +128,16 @@ func migrate(ctx context.Context, connection *sql.Conn) error {
 	if otherTables != 0 {
 		return errors.New("initial migration requires an empty business schema; existing tables need explicit reconciliation")
 	}
-	if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,checksum,dirty) VALUES(1,?, ?,true)", "000001_initial.up.sql", checksum); err != nil {
+	if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,checksum,dirty) VALUES(?,?,?,true)", initialMigration.Version, initialMigration.Name, checksum); err != nil {
 		return err
 	}
-	if _, err := connection.ExecContext(ctx, migrations.InitialSQL); err != nil {
+	if _, err := connection.ExecContext(ctx, initialMigration.SQL); err != nil {
 		return fmt.Errorf("migration failed and is marked dirty: %w", err)
 	}
-	if _, err := connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false, applied_at=UTC_TIMESTAMP(6) WHERE version=1"); err != nil {
+	if _, err := connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false, applied_at=UTC_TIMESTAMP(6) WHERE version=?", initialMigration.Version); err != nil {
 		return err
 	}
-	fmt.Println("Migration 1 applied successfully.")
+	fmt.Printf("Migration %d applied successfully.\n", initialMigration.Version)
 	return nil
 }
 

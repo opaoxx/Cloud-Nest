@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/opaoxx/cloud-nest/migrations"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -215,18 +216,19 @@ func TestMigrationAndBootstrapGuards(t *testing.T) {
 	if currentHash != originalHash {
 		t.Fatal("repeated seed changed the existing password")
 	}
-	if err := migrate(ctx, connection); err != nil {
+	initialMigration := migrations.Ordered()[0]
+	if err := migrate(ctx, connection, initialMigration); err != nil {
 		t.Fatal(err)
 	}
 	var checksum string
 	connection.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE version=1").Scan(&checksum)
 	defer connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false,checksum=? WHERE version=1", checksum)
 	connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=true WHERE version=1")
-	if err := migrate(ctx, connection); err == nil || !strings.Contains(err.Error(), "dirty") {
+	if err := migrate(ctx, connection, initialMigration); err == nil || !strings.Contains(err.Error(), "dirty") {
 		t.Fatal("dirty migration not rejected", err)
 	}
 	connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false,checksum=REPEAT('0',64) WHERE version=1")
-	if err := migrate(ctx, connection); err == nil || !strings.Contains(err.Error(), "checksum") {
+	if err := migrate(ctx, connection, initialMigration); err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatal("changed migration not rejected", err)
 	}
 }
