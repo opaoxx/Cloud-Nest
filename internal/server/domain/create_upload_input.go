@@ -15,6 +15,9 @@ var ErrInvalidUploadParentID = errors.New("上传目标目录 ID 须为非零值
 // ErrUploadFileTooLarge 表示文件声明超过首期 SINGLE 上传能力上限。
 var ErrUploadFileTooLarge = errors.New("文件大小不能超过 16 MiB")
 
+// ErrMultipartUploadSHA256Required 表示 Multipart 声明缺少整文件摘要。
+var ErrMultipartUploadSHA256Required = errors.New("分片上传须提供整文件 SHA-256")
+
 // CreateUploadInput 保存创建单文件上传任务所需的业务声明。
 // 用户和来源设备由可信 Actor 提供，完整命名规则由服务复用统一校验。
 type CreateUploadInput struct {
