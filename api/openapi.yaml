@@ -99,6 +99,7 @@ info:
     CreateUploadRequest 定义单文件上传创建请求 DTO，必填 parent_id/name/size_bytes，可空 sha256 转换为固定摘要，声明原值交给上传服务核对。
     CreateUploadData/CreateUploadResponse 定义上传创建稳定快照，包含公开任务、SINGLE 上传方式、应用内容路径和一致的到期时间。
     CreateUploadSucceeded 定义上传创建成功的 HTTP 201 交付，稳定快照关联当前请求 ID，并采用 no-store 与 Pragma no-cache。
+    B4 上传创建契约增加 MULTIPART 的请求与 201 快照，服务端分支等待接入。
     UploadContentAcceptedData/UploadContentAcceptedResponse 定义上传内容接收后的 HTTP 202 响应数据。
     UploadContentAccepted 定义该成功响应的请求 ID 与禁止缓存头，供后续内容接收操作引用。
     POST /api/v1/uploads/{id}/complete 由启动入口绑定共享授权与完成确认服务，确认校验进度或返回已保存的发布结果。
@@ -152,13 +153,21 @@ paths:
       operationId: createUpload
       summary: 在当前用户的可见目录中创建上传任务
       description: |
+        SINGLE 已接入服务。MULTIPART 为 B4 计划契约，等待接入。
         Bearer JWT 和数据库授权通过后，依次解析 Idempotency-Key、受限 JSON 和上传声明。
         parent_id 使用完整标准十进制字符串，用户及来源设备取自可信 Actor。
-        首期 SINGLE 支持 0～16777216 字节，sha256 可空或为 64 位十六进制声明。
-        同一用户事务复查身份、目录完整路径及新增文件深度，预占空间并创建 STAGING 对象和 UPLOADING 任务。
-        稳定结果与创建数据同时提交并保留八天，有效期内同键同参数返回原始 201 快照，各次交付关联当前 request_id。
-        同键不同参数及记录保留期到期分别返回 IDEMPOTENCY_CONFLICT 和 IDEMPOTENCY_EXPIRED。
-        成功返回 task、SINGLE、content_path 和 expires_at，任务期限按默认值在创建时计算为 24 小时。
+        1. 服务端按 size_bytes 选择模式。0～16777216 字节为 SINGLE，sha256 可空；超过 16777216 字节为 MULTIPART，须提供整文件的 64 位十六进制 SHA-256。
+           新建时核对当前文件大小上限。B4 初始上限为 50 GiB（53687091200 字节），可配置且受目标存储能力约束。超限在预占前返回 FILE_TOO_LARGE。
+        2. 同一用户事务复查身份和幂等记录。两种模式共享当前用户的上传创建操作和幂等键范围。
+           有效期内同键同规范化参数返回原始 201 快照。原任务、分片计划和初始截止时间取自已保存的快照，各次交付关联当前 request_id。
+           规范化参数包含父目录、名称、字节数和 SHA-256。SINGLE 沿用已有摘要，MULTIPART 摘要额外绑定服务端选定的模式。
+           有效同键参数不同（包括改变模式）时返回 IDEMPOTENCY_CONFLICT，记录过期返回 IDEMPOTENCY_EXPIRED。
+        3. 无既有记录时，在同一用户事务核对目录归属、完整路径、深度及配额，按声明大小预占全额，创建 STAGING 对象、任务和 201 快照，幂等结果保留八天。
+           SINGLE 创建为 UPLOADING，返回 content_path。MULTIPART 创建为 CREATING，返回固定的 part_size_bytes 和 part_count。
+           分片从 16 MiB 起按 MiB 向上调节，以满足存储端限制并确保总数不超过 10000。业务计划在首次创建时确定并保存。
+           两种模式均返回 task、upload_mode 和 expires_at。任务期限初始为创建后 24 小时。
+        4. MULTIPART 的 201 表示任务、计划及配额预占已提交。后台初始化存储会话并按租约条件推进为 UPLOADING。
+           客户端保存任务 ID 和分片计划，通过 GET /api/v1/uploads/{id} 读取当前状态和期限，进入 UPLOADING 后申请分片 URL。
       security:
         - BearerAuth: []
       parameters:
@@ -169,7 +178,9 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateUploadRequest'
+              oneOf:
+                - $ref: '#/components/schemas/CreateUploadRequest'
+                - $ref: '#/components/schemas/CreateMultipartUploadRequest'
       responses:
         '201':
           $ref: '#/components/responses/CreateUploadSucceeded'
@@ -2691,6 +2702,115 @@ components:
         name: 学习笔记.md
         size_bytes: 2048
         sha256: null
+    CreateMultipartUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [parent_id, name, size_bytes, sha256]
+      description: 大文件上传声明。服务端按 size_bytes 选择 MULTIPART 并计算分片计划。
+      properties:
+        parent_id:
+          $ref: '#/components/schemas/CreateUploadRequest/properties/parent_id'
+        name:
+          $ref: '#/components/schemas/CreateUploadRequest/properties/name'
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 16777217
+          maximum: 9007199254740991
+          description: 大于 16 MiB 的整数。Schema 上限为 JSON 安全整数，服务端对新任务检查当前配置及存储能力决定的文件上限，初始为 50 GiB。
+        sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[0-9A-Fa-f]{64}(?![\s\S])'
+          description: 必填的整文件 SHA-256，接受大小写十六进制，服务端规范化后用于幂等比较和发布前校验。
+      example:
+        parent_id: '11'
+        name: 合成分片.bin
+        size_bytes: 16777217
+        sha256: d125f628ab4f65c600f82c8ad68462fd1383c0af64e476c1342dc96ded9e33f5
+    CreateMultipartUploadResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      description: 已提交的 Multipart 创建快照，重试交付同一快照及当前请求 ID。
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [task, upload_mode, part_size_bytes, part_count, expires_at]
+          properties:
+            task:
+              allOf:
+                - $ref: '#/components/schemas/UploadTaskData'
+                - type: object
+                  properties:
+                    upload_mode:
+                      type: string
+                      enum: [MULTIPART]
+                    status:
+                      type: string
+                      enum: [CREATING]
+                    size_bytes:
+                      $ref: '#/components/schemas/CreateMultipartUploadRequest/properties/size_bytes'
+                    resolved_name:
+                      type: string
+                      nullable: true
+                      enum: [null]
+                    result_entry_id:
+                      type: string
+                      nullable: true
+                      enum: [null]
+                    completed_at:
+                      type: string
+                      nullable: true
+                      enum: [null]
+                    last_error:
+                      type: object
+                      nullable: true
+                      enum: [null]
+            upload_mode:
+              type: string
+              enum: [MULTIPART]
+            part_size_bytes:
+              type: integer
+              format: int64
+              minimum: 16777216
+              maximum: 9007199254740991
+              multipleOf: 1048576
+              description: 服务端保存的标准分片大小，按 MiB 取整。尾片可短于标准大小。
+            part_count:
+              type: integer
+              minimum: 1
+              maximum: 10000
+              description: 任务总字节数除以标准分片大小向上取整，分片编号从 1 开始。
+            expires_at:
+              allOf:
+                - $ref: '#/components/schemas/UploadTaskData/properties/expires_at'
+              description: 创建时的初始任务截止时间，与 task.expires_at 一致。
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+      example:
+        data:
+          task:
+            id: '20'
+            parent_id: '11'
+            requested_name: 合成分片.bin
+            resolved_name: null
+            size_bytes: 16777217
+            upload_mode: MULTIPART
+            status: CREATING
+            result_entry_id: null
+            created_at: '2026-11-21T08:00:00.123456Z'
+            updated_at: '2026-11-21T08:00:00.123456Z'
+            expires_at: '2026-11-22T08:00:00.123456Z'
+            completed_at: null
+            last_error: null
+          upload_mode: MULTIPART
+          part_size_bytes: 16777216
+          part_count: 2
+          expires_at: '2026-11-22T08:00:00.123456Z'
+        request_id: 38ee758a-0727-42de-ae7d-3bb33155e148
     UploadPartURLsRequest:
       type: object
       additionalProperties: false
@@ -4284,6 +4404,7 @@ components:
       description: |
         HTTP 400，幂等头、JSON/DTO、父目录类型或深度错误使用 INVALID_ARGUMENT，完整命名不符合规则使用 INVALID_NAME。
         details.field 定位 Idempotency-Key、parent_id、name、size_bytes 或 sha256，JSON 读取/绑定错误的 details 为 null。
+        MULTIPART 缺少整文件 SHA-256 或传入 null 时返回 INVALID_ARGUMENT，定位 sha256。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -4343,7 +4464,8 @@ components:
     CreateUploadTooLarge:
       description: |
         HTTP 413，JSON 请求正文超过 1 MiB 使用 REQUEST_BODY_TOO_LARGE，details 为 null。
-        声明文件大小超过首期 16 MiB 使用 FILE_TOO_LARGE，details.field 为 size_bytes，max_size_bytes 给出当前允许的字节上限。
+        新建声明超过当前文件大小上限使用 FILE_TOO_LARGE，details.field 为 size_bytes，max_size_bytes 给出实际允许的字节上限。
+        首期为 16 MiB。B4 启用 Multipart 后，初始上限为 50 GiB，并服从配置与存储能力。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -4369,6 +4491,15 @@ components:
                     field: size_bytes
                     max_size_bytes: 16777216
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+            multipart_file_too_large:
+              value:
+                error:
+                  code: FILE_TOO_LARGE
+                  message: 文件大小超过当前上传限制
+                  details:
+                    field: size_bytes
+                    max_size_bytes: 53687091200
+                request_id: 38ee758a-0727-42de-ae7d-3bb33155e148
             json_too_large:
               value:
                 error:
@@ -4963,8 +5094,8 @@ components:
     CreateUploadSucceeded:
       description: |
         上传创建成功 HTTP 201，使用创建时稳定快照与当前请求 ID。
-        交付前恢复已确认提交且通过复用条件检查的稳定 JSON，关联 task、SINGLE、content_path 和 expires_at。
-        响应采用 no-store 和 Pragma no-cache，字段和时间规则沿用 CreateUploadResponse。
+        交付通过提交与复用校验的 SINGLE 或 MULTIPART 快照。SINGLE 提供 content_path，MULTIPART 提供固定分片计划。
+        两种快照均采用 no-store 和 Pragma no-cache，实时阶段及期限由任务查询交付。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -4979,7 +5110,9 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/CreateUploadResponse'
+            oneOf:
+              - $ref: '#/components/schemas/CreateUploadResponse'
+              - $ref: '#/components/schemas/CreateMultipartUploadResponse'
     UploadContentAccepted:
       description: |
         上传内容接收成功 HTTP 202，任务已进入 VERIFYING。
