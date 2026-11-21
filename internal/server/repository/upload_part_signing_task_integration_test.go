@@ -40,7 +40,7 @@ func TestFindUserUploadTaskForPartSigningIntegration(t *testing.T) {
 			t.Error("复位隔离连接的数据库时间失败", err)
 		}
 	})
-	execute("UPDATE stored_objects SET file_size=16777217 WHERE id=23")
+	execute("UPDATE stored_objects SET provider='local_minio',file_size=16777217 WHERE id=23")
 	execute(`UPDATE upload_tasks SET status='CREATING',storage_upload_id=NULL,published_object_id=NULL,
 		resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,file_size=16777217,part_size=16777216,
 		part_count=2,reserved_bytes=16777217,lease_owner=NULL,lease_until=NULL,lease_version=3,
@@ -77,6 +77,24 @@ func TestFindUserUploadTaskForPartSigningIntegration(t *testing.T) {
 	if actual := check(now, nil); !reflect.DeepEqual(bound, actual) {
 		t.Fatal("已提交绑定状态未按原值读回")
 	}
+	// 3. 装配正式任务与对象读取，核对已绑定会话及同账号暂存对象。
+	targets := service.NewUploadPartSigningTargetService("local_minio", "fixture-bucket", store.FindUserUploadTaskForPartSigning, store.FindUserStoredObject)
+	actor := domain.Actor{UserID: userID, DeviceID: 31, SessionID: 41}
+	target, err := targets.Get(ctx, actor, taskID)
+	wantTarget := service.UploadPartSigningTarget{TaskID: taskID, UserID: userID, StagedObjectID: 23, LeaseVersion: 4,
+		ObjectKey: "upload-staged", UploadID: uploadID, FileSizeBytes: 16777217, PartSizeBytes: 16777216, PartCount: 2, ExpiresAt: taskExpiry}
+	if err != nil || target == nil || *target != wantTarget {
+		t.Fatal("应用层未读回预期的签发目标", err)
+	}
+	execute("UPDATE stored_objects SET bucket='other-fixture-bucket' WHERE id=23")
+	if target, err := targets.Get(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrInvalidStoredObjectData) {
+		t.Fatal("应用层接受了与签名客户端不匹配的桶", err)
+	}
+	execute("UPDATE stored_objects SET bucket='fixture-bucket' WHERE id=23")
+	actor.UserID = 8
+	if target, err := targets.Get(ctx, actor, taskID); target != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
+		t.Fatal("应用层读取了其他账号的签名目标", err)
+	}
 	for _, query := range [][2]uint64{{8, taskID}, {userID, 999}} {
 		task, clock, err := store.FindUserUploadTaskForPartSigning(ctx, query[0], query[1])
 		if task != nil || !clock.IsZero() || !errors.Is(err, domain.ErrUploadTaskNotFound) {
@@ -84,7 +102,7 @@ func TestFindUserUploadTaskForPartSigningIntegration(t *testing.T) {
 		}
 	}
 
-	// 3. 调整隔离夹具时钟，验证租约和任务截止由数据库时间决定。
+	// 4. 调整隔离夹具时钟，验证租约和任务截止由数据库时间决定。
 	leaseEnds := now.Add(time.Minute)
 	execute("UPDATE upload_tasks SET lease_owner='fixture-completer',lease_until=? WHERE id=?", leaseEnds, taskID)
 	check(now, domain.ErrUploadTaskBusy)
