@@ -17,6 +17,31 @@ import (
 // 缺失返回 ErrUploadTaskNotFound，异常记录返回 ErrInvalidUploadTaskData。
 // 返回值独立持有可空字段，后续业务写入复用已认证用户事务中的 Store。
 func (store *Store) FindUserUploadTask(ctx context.Context, userID, taskID uint64) (*domain.UploadTask, error) {
+	return store.findUserUploadTask(ctx, userID, taskID, nil)
+}
+
+// FindUserUploadTaskForPartSigning 在同一条只读查询中取得任务快照和 MySQL UTC 时间。
+// userID 必须来自可信身份。任务阶段与签发资格由调用方继续判断。
+func (store *Store) FindUserUploadTaskForPartSigning(ctx context.Context, userID, taskID uint64) (*domain.UploadTask, time.Time, error) {
+	var databaseTime time.Time
+	task, err := store.findUserUploadTask(ctx, userID, taskID, &databaseTime)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	databaseTime = databaseTime.UTC()
+	if databaseTime.Year() < 1000 || databaseTime.Year() > 9999 || databaseTime.Nanosecond()%1000 != 0 {
+		return nil, time.Time{}, domain.ErrInvalidUploadTaskData
+	}
+	return task, databaseTime, nil
+}
+
+// uploadTaskReadRow 复用原有任务列，并按需承接本条 SQL 的数据库时间。
+type uploadTaskReadRow struct {
+	models.UploadTask
+	DatabaseTime time.Time `gorm:"column:database_time;->"`
+}
+
+func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint64, databaseTime *time.Time) (*domain.UploadTask, error) {
 	// 1. 检查查询范围和上下文，设置最多五秒期限。
 	if ctx == nil || userID == 0 || taskID == 0 {
 		return nil, fmt.Errorf("查询上传任务需要上下文、非零用户 ID 和任务 ID")
@@ -27,14 +52,17 @@ func (store *Store) FindUserUploadTask(ctx context.Context, userID, taskID uint6
 		return nil, fmt.Errorf("查询上传任务失败: %w", err)
 	}
 
-	// 2. 绑定用户与任务 ID，读取明确的二十八列。
-	var record models.UploadTask
-	queryError := store.database.WithContext(queryContext).
-		Select("id", "user_id", "device_id", "staged_object_id", "published_object_id", "target_parent_id",
-			"requested_name", "resolved_name", "upload_mode", "storage_upload_id", "expected_sha256",
-			"file_size", "part_size", "part_count", "status", "result_entry_id", "reserved_bytes",
-			"lease_owner", "lease_until", "lease_version", "next_attempt_at", "attempt_count", "expires_at",
-			"last_error_code", "last_error_message", "created_at", "updated_at", "completed_at").
+	// 2. 绑定用户与任务 ID，仅在签发查询中同时读取数据库时间。
+	columns := []string{"id", "user_id", "device_id", "staged_object_id", "published_object_id", "target_parent_id",
+		"requested_name", "resolved_name", "upload_mode", "storage_upload_id", "expected_sha256",
+		"file_size", "part_size", "part_count", "status", "result_entry_id", "reserved_bytes",
+		"lease_owner", "lease_until", "lease_version", "next_attempt_at", "attempt_count", "expires_at",
+		"last_error_code", "last_error_message", "created_at", "updated_at", "completed_at"}
+	if databaseTime != nil {
+		columns = append(columns, "UTC_TIMESTAMP(6) AS database_time")
+	}
+	var record uploadTaskReadRow
+	queryError := store.database.WithContext(queryContext).Select(columns).
 		Where("user_id = ? AND id = ?", userID, taskID).Take(&record).Error
 
 	// 3. 处理取消、未找到及数据库故障。
@@ -137,9 +165,12 @@ func (store *Store) FindUserUploadTask(ctx context.Context, userID, taskID uint6
 		}
 	}
 
-	// 6. 复查取消，返回独立领域记录。
+	// 6. 复查取消，返回独立领域记录及所请求的数据库时间。
 	if err := queryContext.Err(); err != nil {
 		return nil, fmt.Errorf("查询上传任务已取消: %w", err)
+	}
+	if databaseTime != nil {
+		*databaseTime = record.DatabaseTime
 	}
 	return result, nil
 }
