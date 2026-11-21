@@ -9,6 +9,11 @@ import (
 // ValidateUploadPartReceiptState 判断按归属读取的任务能否只读核对分片回执。
 // databaseTime 来自读取任务时的数据库时钟。有效租约期间仍可核对 UPLOADING 任务。
 func ValidateUploadPartReceiptState(task *domain.UploadTask, userID, taskID uint64, databaseTime time.Time) error {
+	return validateUploadPartTargetState(task, userID, taskID, databaseTime, domain.UploadStatusUploading)
+}
+
+// validateUploadPartTargetState 检查指定分片阶段所需的任务事实。
+func validateUploadPartTargetState(task *domain.UploadTask, userID, taskID uint64, databaseTime time.Time, status domain.UploadStatus) error {
 	// 1. 复查任务和账号匹配，并核对数据库时间及记录状态。
 	if task == nil || userID == 0 || taskID == 0 || task.ID != taskID || task.UserID != userID ||
 		task.DeviceID == 0 || task.StagedObjectID == 0 || task.TargetParentID == 0 ||
@@ -18,7 +23,7 @@ func ValidateUploadPartReceiptState(task *domain.UploadTask, userID, taskID uint
 	}
 
 	// 2. 确认可读阶段、有效期限和已绑定的存储会话。
-	if task.UploadMode != "MULTIPART" || task.Status != domain.UploadStatusUploading || !databaseTime.Before(task.ExpiresAt) ||
+	if task.UploadMode != "MULTIPART" || task.Status != status || !databaseTime.Before(task.ExpiresAt) ||
 		task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) {
 		return domain.ErrUploadTaskNotReady
 	}
