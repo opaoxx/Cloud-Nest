@@ -147,7 +147,7 @@ func testMultipartSessionObservation(t *testing.T, includeObject bool) {
 			wantChecks := fixture.wantChecks
 			var missing bool
 			if includeObject {
-				var observation *MultipartUploadAbortObservation
+				var observation *domain.MultipartUploadAbortObservation
 				observation, err = client.CheckMultipartUploadAfterAbort(ctx, listPartsFixtureKey, listPartsFixtureID, verify)
 				missing = observation != nil && observation.Object == nil
 				if fixture.wantObject {

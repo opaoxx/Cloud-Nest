@@ -20,3 +20,9 @@ type UploadObjectResult struct {
 	// StorageVersionID 是存储返回的版本定位，缺失时为 nil。
 	StorageVersionID *string
 }
+
+// MultipartUploadAbortObservation 保存已关闭原会话后的存储观察。
+// Object 为 nil 表示会话和对象都明确缺失。非空时保留 HEAD 返回的元数据。
+type MultipartUploadAbortObservation struct {
+	Object *UploadObjectResult
+}

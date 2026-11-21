@@ -20,24 +20,18 @@ func (client *Client) ConfirmMultipartSessionAbsence(
 	return observation != nil, err
 }
 
-// MultipartUploadAbortObservation 保存已关闭原会话后的对象观察。
-// Object 为 nil 表示会话和对象都明确缺失。非空时保留 HEAD 返回的原对象大小、ETag 和存储版本。
-type MultipartUploadAbortObservation struct {
-	Object *domain.UploadObjectResult
-}
-
 // CheckMultipartUploadAfterAbort 只读复查中止后的原会话及原对象。
 // 受信实例须保证迟到的分片写回与合并无法重建已关闭的原会话。
 // nil, nil 表示会话仍存在或当前实例无法确认。调用方后续仍须复核任务租约和存储绑定。
 func (client *Client) CheckMultipartUploadAfterAbort(
 	ctx context.Context, objectKey, uploadID string, verifyInstance MultipartSessionLockVerifier,
-) (*MultipartUploadAbortObservation, error) {
+) (*domain.MultipartUploadAbortObservation, error) {
 	return client.checkClosedMultipartSession(ctx, objectKey, uploadID, verifyInstance, true)
 }
 
 func (client *Client) checkClosedMultipartSession(
 	ctx context.Context, objectKey, uploadID string, verifyInstance MultipartSessionLockVerifier, includeObject bool,
-) (*MultipartUploadAbortObservation, error) {
+) (*domain.MultipartUploadAbortObservation, error) {
 	// 1. 向受信调用方核对内部端点对应的实例。
 	if ctx == nil || client == nil || client.sdkClient == nil {
 		return nil, domain.ErrUploadStorageUnavailable
@@ -86,5 +80,5 @@ func (client *Client) checkClosedMultipartSession(
 	if after != before {
 		return nil, nil
 	}
-	return &MultipartUploadAbortObservation{Object: object}, nil
+	return &domain.MultipartUploadAbortObservation{Object: object}, nil
 }
