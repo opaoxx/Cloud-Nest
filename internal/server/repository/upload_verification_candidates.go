@@ -15,6 +15,16 @@ const maxUploadLeaseCandidates = 100
 // ListUploadVerificationCandidates 按数据库时间读取首期单文件校验候选。
 // 结果供内部 worker 使用。领取时在用户事务中重新核对任务和对象。
 func (store *Store) ListUploadVerificationCandidates(ctx context.Context, limit int) ([]domain.UploadVerificationCandidate, error) {
+	return store.listUploadVerificationCandidates(ctx, limit, "upload_mode = 'SINGLE'")
+}
+
+// ListMultipartUploadVerificationCandidates 按数据库时间读取已绑定会话的分片校验候选。
+// 返回扫描时的定位，领取租约时仍须在所属用户事务中复查。
+func (store *Store) ListMultipartUploadVerificationCandidates(ctx context.Context, limit int) ([]domain.UploadVerificationCandidate, error) {
+	return store.listUploadVerificationCandidates(ctx, limit, "upload_mode = 'MULTIPART' AND TRIM(storage_upload_id) <> ''")
+}
+
+func (store *Store) listUploadVerificationCandidates(ctx context.Context, limit int, uploadCondition string) ([]domain.UploadVerificationCandidate, error) {
 	// 1. 校验查询入口、批量上限和上下文。
 	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > maxUploadLeaseCandidates {
 		return nil, fmt.Errorf("扫描待校验上传需要数据入口、上下文和 1～100 条的批量大小")
@@ -28,9 +38,9 @@ func (store *Store) ListUploadVerificationCandidates(ctx context.Context, limit 
 		return nil, err
 	}
 
-	// 2. 用数据库当前时间筛选可领取的任务。
+	// 2. 按固定上传条件和数据库当前时间筛选可领取的待校验任务。
 	candidates := make([]domain.UploadVerificationCandidate, 0, limit)
-	query := store.database.WithContext(queryContext).Where("status = 'VERIFYING' AND upload_mode = 'SINGLE'")
+	query := store.database.WithContext(queryContext).Where("status = 'VERIFYING'").Where(uploadCondition)
 	queryError := availableUploadLeaseCandidates(query, limit).Find(&candidates).Error
 	if err := queryContext.Err(); err != nil {
 		return nil, err
