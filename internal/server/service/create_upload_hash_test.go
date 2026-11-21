@@ -64,6 +64,10 @@ func TestBuildCreateUploadRequestHashVectors(t *testing.T) {
 			if err != nil || hex.EncodeToString(hash[:]) != fixture.wantHex || hash != sha256.Sum256([]byte(fixture.encoded)) {
 				t.Fatal("上传请求固定编码或摘要错误", err)
 			}
+			compatible, err := BuildCreateUploadRequestHashWithMultipart(input)
+			if err != nil || compatible != hash {
+				t.Fatal("两种模式的入口改变了 SINGLE 历史摘要", err)
+			}
 			// 2. 重复计算稳定，返回数组独立，来源声明及摘要保持原值。
 			repeated, err := BuildCreateUploadRequestHash(input)
 			if err != nil || repeated != hash || input != original || (input.ExpectedSHA256 != nil && *input.ExpectedSHA256 != originalDigest) {
@@ -74,6 +78,98 @@ func TestBuildCreateUploadRequestHashVectors(t *testing.T) {
 				t.Fatal("返回摘要相互影响")
 			}
 		})
+	}
+}
+
+func TestBuildCreateUploadRequestHashWithMultipartVector(t *testing.T) {
+	// 1. 锁定字段顺序、操作范围、上传模式、整数格式及 JSON 转义。
+	const wantHex = "23ad2885034aed6f9b9b500a310877aa46a5e62997266198812718e3401bd0cc"
+	encoded := `{"operation":"v1.uploads.create","upload_mode":"MULTIPART","parent_id":"18446744073709551615","name":"A\u0026B.bin","size_bytes":"16777217","sha256":"` +
+		strings.Repeat("ab", sha256.Size) + `"}`
+	var digest [sha256.Size]byte
+	for index := range digest {
+		digest[index] = 0xab
+	}
+	input := domain.CreateUploadInput{
+		ParentID: ^uint64(0), Name: "\u3000 A&B.bin \u00a0", SizeBytes: 16777217, ExpectedSHA256: &digest,
+	}
+	hash, err := BuildCreateUploadRequestHashWithMultipart(input)
+	if err != nil || hex.EncodeToString(hash[:]) != wantHex || hash != sha256.Sum256([]byte(encoded)) {
+		t.Fatalf("Multipart 固定向量不符: %x, %v", hash, err)
+	}
+	if input.Name != "\u3000 A&B.bin \u00a0" || digest[0] != 0xab {
+		t.Fatal("摘要计算修改了来源")
+	}
+
+	// 2. 同一规范化名称与同一文件摘要可以重新计算历史指纹。
+	input.Name = "A&B.bin"
+	repeated, err := BuildCreateUploadRequestHashWithMultipart(input)
+	if err != nil || repeated != hash {
+		t.Fatal("相同 Multipart 声明的摘要不稳定", err)
+	}
+}
+
+func TestBuildCreateUploadRequestHashWithMultipartDifferences(t *testing.T) {
+	digest := sha256.Sum256([]byte("fixture"))
+	otherDigest := sha256.Sum256([]byte("updated fixture"))
+	input := domain.CreateUploadInput{ParentID: 11, Name: "File.bin", SizeBytes: 16777217, ExpectedSHA256: &digest}
+	hash, err := BuildCreateUploadRequestHashWithMultipart(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, now := createUploadReplayFixture(t)
+	record.RequestHash = hash
+	record.ResponseBody = []byte(`{"task":{"id":"42"}}`)
+	if err := ValidateCreateUploadReplay(record, record.UserID, record.IdempotencyKey, hash, now); err != nil {
+		t.Fatal("相同声明不满足已有的幂等比较", err)
+	}
+	for _, testCase := range []struct {
+		name   string
+		change func(*domain.CreateUploadInput)
+	}{
+		{"parent", func(input *domain.CreateUploadInput) { input.ParentID++ }},
+		{"name", func(input *domain.CreateUploadInput) { input.Name = "file.bin" }},
+		{"size", func(input *domain.CreateUploadInput) { input.SizeBytes++ }},
+		{"file digest", func(input *domain.CreateUploadInput) { input.ExpectedSHA256 = &otherDigest }},
+		{"switch to single", func(input *domain.CreateUploadInput) { input.SizeBytes = domain.MaxSingleUploadSizeBytes }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			changed := input
+			testCase.change(&changed)
+			next, err := BuildCreateUploadRequestHashWithMultipart(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateCreateUploadReplay(record, record.UserID, record.IdempotencyKey, next, now); !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+				t.Fatalf("同键不同声明未识别为冲突: %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildCreateUploadRequestHashWithMultipartValidation(t *testing.T) {
+	input := domain.CreateUploadInput{Name: "invalid/path", SizeBytes: 16777217}
+	for _, want := range []error{domain.ErrInvalidUploadParentID, domain.ErrInvalidEntryName, domain.ErrMultipartUploadSHA256Required} {
+		hash, err := BuildCreateUploadRequestHashWithMultipart(input)
+		if hash != [sha256.Size]byte{} || !errors.Is(err, want) {
+			t.Fatalf("无效声明返回 %x, %v，预期 %v", hash, err, want)
+		}
+		switch want {
+		case domain.ErrInvalidUploadParentID:
+			input.ParentID = 11
+		case domain.ErrInvalidEntryName:
+			input.Name = "fixture.bin"
+		}
+	}
+
+	// 历史声明的指纹与当前存储上限无关，超限仍由新建计划检查。
+	input.ExpectedSHA256 = new([sha256.Size]byte)
+	input.SizeBytes = 9007199254740992
+	first, firstErr := BuildCreateUploadRequestHashWithMultipart(input)
+	input.SizeBytes++
+	second, secondErr := BuildCreateUploadRequestHashWithMultipart(input)
+	if firstErr != nil || secondErr != nil || first == second {
+		t.Fatalf("相邻的大尺寸声明无法区分: %v %v", firstErr, secondErr)
 	}
 }
 
