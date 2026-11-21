@@ -38,8 +38,7 @@ func (store *Store) WithMultipartUploadCancellationTransaction(
 		if task.StagedObjectID != candidate.StagedObjectID || task.LeaseVersion != candidate.LeaseVersion {
 			return domain.ErrUploadTaskBusy
 		}
-		if !validMultipartUploadCancellationDeclaration(task) ||
-			task.PublishedObjectID != nil || task.ResultEntryID != nil || task.ResolvedName != nil || task.CompletedAt != nil {
+		if !validPendingMultipartUploadCancellationTask(task) {
 			return domain.ErrInvalidUploadTaskData
 		}
 		var now time.Time
@@ -59,11 +58,20 @@ func (store *Store) WithMultipartUploadCancellationTransaction(
 		if err != nil {
 			return err
 		}
-		if (object.Status != domain.StoredObjectStatusStaging && object.Status != domain.StoredObjectStatusVerifying) ||
-			object.FileSize != task.FileSize || object.VerifiedAt != nil || object.VerifiedSHA256 != nil ||
-			object.DedupHash != nil || object.UnreferencedAt != nil || object.GCAfter != nil {
+		if !validMultipartUploadCancellationObject(task, object) {
 			return domain.ErrInvalidStoredObjectData
 		}
 		return action(txContext, txStore, task, object)
 	})
+}
+
+func validPendingMultipartUploadCancellationTask(task *domain.UploadTask) bool {
+	return validMultipartUploadCancellationDeclaration(task) &&
+		task.PublishedObjectID == nil && task.ResultEntryID == nil && task.ResolvedName == nil && task.CompletedAt == nil
+}
+
+func validMultipartUploadCancellationObject(task *domain.UploadTask, object *domain.StoredObject) bool {
+	return (object.Status == domain.StoredObjectStatusStaging || object.Status == domain.StoredObjectStatusVerifying) &&
+		object.FileSize == task.FileSize && object.VerifiedAt == nil && object.VerifiedSHA256 == nil &&
+		object.DedupHash == nil && object.UnreferencedAt == nil && object.GCAfter == nil
 }

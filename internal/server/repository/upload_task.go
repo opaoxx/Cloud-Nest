@@ -23,6 +23,11 @@ func (store *Store) FindUserUploadTask(ctx context.Context, userID, taskID uint6
 // FindUserUploadTaskForPartSigning 在同一条只读查询中取得任务快照和 MySQL UTC 时间。
 // userID 必须来自可信身份。任务阶段与签发资格由调用方继续判断。
 func (store *Store) FindUserUploadTaskForPartSigning(ctx context.Context, userID, taskID uint64) (*domain.UploadTask, time.Time, error) {
+	return store.findUserUploadTaskWithDatabaseTime(ctx, userID, taskID)
+}
+
+// findUserUploadTaskWithDatabaseTime 为需要按库内时钟判断租约的读取提供同一条查询的时间。
+func (store *Store) findUserUploadTaskWithDatabaseTime(ctx context.Context, userID, taskID uint64) (*domain.UploadTask, time.Time, error) {
 	var databaseTime time.Time
 	task, err := store.findUserUploadTask(ctx, userID, taskID, &databaseTime)
 	if err != nil {

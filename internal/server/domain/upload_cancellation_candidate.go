@@ -12,3 +12,11 @@ type UploadCancellationCandidate struct {
 	StagedObjectID uint64
 	LeaseVersion   uint64
 }
+
+// MultipartUploadCancellationTarget 保存当前取消租约所绑定的存储目标。
+type MultipartUploadCancellationTarget struct {
+	// ObjectKey 是暂存对象的原始不可变键。
+	ObjectKey string
+	// UploadID 原样保存存储会话 ID。nil 表示任务尚未绑定会话。
+	UploadID *string
+}
