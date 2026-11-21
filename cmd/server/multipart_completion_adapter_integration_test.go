@@ -8,12 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
@@ -71,12 +73,33 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 	}
 	stale := []domain.UploadPartReceipt{receipts[0], receipts[1]}
 	stale[0].ETag, stale[0].ChecksumSHA256 = oldETag, multipartProbeSHA256(first)
-	if result, err := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, stale); result != nil ||
-		!errors.Is(err, domain.ErrMultipartUploadPartRejected) {
-		t.Fatal("旧回执应得到明确拒绝", result, err)
+	rejected, partError := client.CompleteMultipartUpload(ctx, key, uploadID, fileSize, partSize, 2, stale)
+	if rejected != nil || !errors.Is(partError, domain.ErrMultipartUploadPartRejected) {
+		t.Fatal("旧回执应得到明确拒绝", rejected, partError)
 	}
 	if result, err := client.StatMultipartUploadObject(ctx, key); result != nil || !errors.Is(err, domain.ErrUploadObjectMissing) {
 		t.Fatal("拒绝后对象应仍缺失", result, err)
+	}
+	// 使用合成租约和冻结回执，通过真实 MinIO 只读核对原对象和原会话。
+	lease := &domain.UploadTask{ID: 19, UserID: 7, StagedObjectID: 23, Status: domain.UploadStatusCompleting, UploadMode: "MULTIPART",
+		StorageUploadID: &uploadID, LeaseVersion: 2, LeaseOwner: new("fixture-repair"), LeaseUntil: new(time.Now().UTC().Add(time.Minute)),
+		PartSize: new(uint64(partSize)), PartCount: new(uint32(2)), FileSize: fileSize, ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	target := service.UploadPartSigningTarget{TaskID: lease.ID, UserID: lease.UserID, StagedObjectID: lease.StagedObjectID,
+		LeaseVersion: lease.LeaseVersion, ObjectKey: key, UploadID: uploadID, FileSizeBytes: fileSize, PartSizeBytes: partSize,
+		PartCount: 2, ExpiresAt: lease.ExpiresAt}
+	getTarget := func(context.Context, *domain.UploadTask) (*service.UploadPartSigningTarget, error) {
+		return &target, nil
+	}
+	recovery := service.NewUploadMergeRecoveryService(getTarget, client.StatMultipartUploadObject)
+	receiptCheck := service.NewUploadMergeReceiptService(getTarget,
+		func(context.Context, *domain.UploadTask) ([]domain.UploadPartReceipt, error) { return stale, nil },
+		func(callContext context.Context, key, session string) ([]domain.UploadPartReceipt, error) {
+			return client.ListUploadParts(callContext, key, session, 1)
+		})
+	preflight := service.NewUploadMergePreflightService(recovery, receiptCheck)
+	evidence, err := preflight.CheckRepair(ctx, lease, partError)
+	if err != nil || evidence == nil || evidence.Target != target || !slices.Equal(evidence.PartNumbers, []uint32{1}) {
+		t.Fatal("原会话的首片变化应得到只读修复依据", evidence, err)
 	}
 
 	// 2. 用同一会话的当前回执执行一次合并，再按返回的精确版本校验内容。
@@ -85,6 +108,9 @@ func TestServerMultipartCompletionAdapterIntegration(t *testing.T) {
 		t.Fatal("当前回执未得到有效的版本化合并确认", result, err)
 	}
 	version := *result.StorageVersionID
+	if evidence, err := preflight.CheckRepair(ctx, lease, partError); evidence != nil || !errors.Is(err, domain.ErrUploadObjectExists) {
+		t.Fatal("已完成对象不应交付修复依据", evidence, err)
+	}
 	reader, info, _, err := core.GetObject(ctx, bucket.name, key, minio.GetObjectOptions{VersionID: version})
 	if err != nil {
 		t.Fatal("未能读回确认的合成版本", minio.ToErrorResponse(err).Code)
