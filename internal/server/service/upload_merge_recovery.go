@@ -53,14 +53,22 @@ func (recovery *UploadMergeRecoveryService) checkTarget(ctx context.Context, cla
 	if statError != nil {
 		return nil, statError
 	}
-	if observed == nil || observed.StorageETag == nil || strings.TrimSpace(*observed.StorageETag) == "" ||
-		(observed.StorageVersionID != nil && *observed.StorageVersionID == "") {
-		return nil, domain.ErrUploadStorageUnavailable
-	}
-	if observed.SizeBytes != target.FileSizeBytes {
-		return nil, domain.ErrUploadBodySizeMismatch
+	if err := validateUploadMergeObjectResult(observed, target.FileSizeBytes); err != nil {
+		return nil, err
 	}
 	return &UploadMergeRecoveryObservation{Target: target, Object: domain.UploadObjectResult{
 		SizeBytes: observed.SizeBytes, StorageETag: copyOptionalValue(observed.StorageETag), StorageVersionID: copyOptionalValue(observed.StorageVersionID),
 	}}, nil
+}
+
+// validateUploadMergeObjectResult 核对可写回的对象元数据和任务大小。
+func validateUploadMergeObjectResult(observed *domain.UploadObjectResult, fileSizeBytes uint64) error {
+	if observed == nil || observed.StorageETag == nil || strings.TrimSpace(*observed.StorageETag) == "" ||
+		(observed.StorageVersionID != nil && *observed.StorageVersionID == "") {
+		return domain.ErrUploadStorageUnavailable
+	}
+	if observed.SizeBytes != fileSizeBytes {
+		return domain.ErrUploadBodySizeMismatch
+	}
+	return nil
 }

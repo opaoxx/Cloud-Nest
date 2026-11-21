@@ -10,10 +10,7 @@ import (
 func loadUploadMergeTarget(
 	ctx context.Context, claimed *domain.UploadTask, getTarget func(context.Context, *domain.UploadTask) (*UploadPartSigningTarget, error),
 ) (UploadPartSigningTarget, error) {
-	if ctx == nil || claimed == nil || claimed.ID == 0 || claimed.UserID == 0 || claimed.StagedObjectID == 0 ||
-		claimed.Status != domain.UploadStatusCompleting || claimed.UploadMode != "MULTIPART" ||
-		claimed.LeaseVersion == 0 || claimed.LeaseOwner == nil || claimed.LeaseUntil == nil ||
-		claimed.StorageUploadID == nil || claimed.PartSize == nil || claimed.PartCount == nil {
+	if ctx == nil || !validUploadMergeClaim(claimed) {
 		return UploadPartSigningTarget{}, domain.ErrInvalidUploadTaskData
 	}
 	if err := ctx.Err(); err != nil {
@@ -32,6 +29,14 @@ func loadUploadMergeTarget(
 	target := *loaded
 	target.ExpiresAt = target.ExpiresAt.UTC()
 	return target, nil
+}
+
+// validUploadMergeClaim 检查用于核对目标所需的领取字段。
+func validUploadMergeClaim(claimed *domain.UploadTask) bool {
+	return claimed != nil && claimed.ID != 0 && claimed.UserID != 0 && claimed.StagedObjectID != 0 &&
+		claimed.Status == domain.UploadStatusCompleting && claimed.UploadMode == "MULTIPART" &&
+		claimed.LeaseVersion != 0 && claimed.LeaseOwner != nil && claimed.LeaseUntil != nil &&
+		claimed.StorageUploadID != nil && claimed.PartSize != nil && claimed.PartCount != nil
 }
 
 // recheckUploadMergeTarget 使用重新读取的租约和位置复核存储查询的原目标。
