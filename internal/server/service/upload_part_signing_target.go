@@ -11,7 +11,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// UploadPartSigningTarget 保存签发和只读核对共用的分片计划及存储位置。
+// UploadPartSigningTarget 保存分片签发及回执核对共用的计划和存储位置。
 type UploadPartSigningTarget struct {
 	TaskID         uint64
 	UserID         uint64
@@ -25,7 +25,7 @@ type UploadPartSigningTarget struct {
 	ExpiresAt      time.Time
 }
 
-// UploadPartSigningTargetService 读取分片签发和只读核对所用的任务和暂存对象。
+// UploadPartSigningTargetService 读取分片签发及回执核对所用的任务和暂存对象。
 type UploadPartSigningTargetService struct {
 	provider, bucket string
 	findTask         func(context.Context, uint64, uint64) (*domain.UploadTask, time.Time, error)
@@ -55,6 +55,47 @@ func (targetService *UploadPartSigningTargetService) Get(ctx context.Context, ac
 func (targetService *UploadPartSigningTargetService) GetForReceipts(ctx context.Context, actor domain.Actor, taskID uint64) (*UploadPartSigningTarget, error) {
 	// 1. 采用只读资格检查，暂存对象不可用时统一判定任务尚不可核对。
 	target, err := targetService.readTarget(ctx, actor, taskID, ValidateUploadPartReceiptState)
+	if errors.Is(err, domain.ErrStoredObjectNotFound) || errors.Is(err, domain.ErrInvalidStoredObjectData) {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	return target, err
+}
+
+// GetForCompletion 根据已提交的核对租约读取本次完成请求的存储目标。
+// 租约以任务查询时的数据库时钟判断。完成快照写入仍须在事务内复查。
+func (targetService *UploadPartSigningTargetService) GetForCompletion(
+	ctx context.Context, actor domain.Actor, claimed *domain.UploadTask,
+) (*UploadPartSigningTarget, error) {
+	// 1. 核对租约快照的归属，按账号重读任务。
+	if claimed == nil || claimed.ID == 0 || claimed.UserID == 0 || claimed.LeaseOwner == nil || claimed.LeaseUntil == nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if claimed.UserID != actor.UserID {
+		return nil, domain.ErrUploadTaskNotFound
+	}
+	target, err := targetService.readTarget(ctx, actor, claimed.ID,
+		func(current *domain.UploadTask, userID, taskID uint64, databaseTime time.Time) error {
+			// 2. 用数据库时间复核租约、会话和分片计划。
+			if err := ValidateUploadPartReceiptState(current, userID, taskID, databaseTime); err != nil {
+				return err
+			}
+			if err := ValidateUploadPartReceiptState(claimed, userID, taskID, databaseTime); err != nil {
+				return err
+			}
+			if current.LeaseOwner == nil || *current.LeaseOwner != *claimed.LeaseOwner || current.LeaseVersion != claimed.LeaseVersion ||
+				!current.LeaseUntil.Equal(*claimed.LeaseUntil) || !databaseTime.Before(*current.LeaseUntil) ||
+				current.StagedObjectID != claimed.StagedObjectID || *current.StorageUploadID != *claimed.StorageUploadID {
+				return domain.ErrUploadTaskBusy
+			}
+			if current.FileSize != claimed.FileSize || *current.PartSize != *claimed.PartSize ||
+				*current.PartCount != *claimed.PartCount || *current.ExpectedSHA256 != *claimed.ExpectedSHA256 ||
+				!current.ExpiresAt.Equal(claimed.ExpiresAt) {
+				return domain.ErrUploadTaskNotReady
+			}
+			return nil
+		})
+
+	// 3. 复用暂存对象检查，返回已确认的存储目标。
 	if errors.Is(err, domain.ErrStoredObjectNotFound) || errors.Is(err, domain.ErrInvalidStoredObjectData) {
 		return nil, domain.ErrUploadTaskNotReady
 	}
