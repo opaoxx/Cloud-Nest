@@ -70,7 +70,7 @@ func webFixtureBrowserCLI(t *testing.T, envKey string) string {
 	return cli
 }
 
-func runWebBrowserProbe(t *testing.T, ctx context.Context, cli, webURL, filename, successMarker string) {
+func runWebBrowserProbe(t *testing.T, ctx context.Context, cli, webURL, filename, successMarker string) string {
 	t.Helper()
 	probe, err := filepath.Abs(filepath.Join("testdata", filename))
 	if err != nil {
@@ -98,6 +98,7 @@ func runWebBrowserProbe(t *testing.T, ctx context.Context, cli, webURL, filename
 	if err != nil || strings.Contains(output, "### Error") || !strings.Contains(output, successMarker) {
 		t.Fatalf("浏览器验收失败，%v\n%s", err, output)
 	}
+	return cliDir
 }
 
 func startIsolatedWebMySQL(t *testing.T, ctx context.Context) {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { MouseEvent } from 'react'
 import { Button, Input, Modal } from 'antd'
 import type { DirectoryCreator, DirectoryEntry, DirectoryPageReader, EntryMover, EntryRenamer, EntryTrasher } from './api/drive'
 import type { PublishedUploadEntryReader, SingleUploadContentSender, SingleUploadTaskCreator, SingleUploadTaskReader } from './api/uploadTask'
@@ -93,6 +94,19 @@ export default function DirectoryBrowser({
     setDownload(null)
   }
 
+  function followDownloadLink(event: MouseEvent<HTMLElement>) {
+    // 1. 下载开始前复查有效期，有效时由浏览器使用原签名链接保存附件。
+    if (download?.phase !== 'ready') {
+      event.preventDefault()
+      return
+    }
+    if (download.grant.expiresAt > Date.now()) return
+
+    // 2. 过期时取消本次导航，保留文件信息供用户重新申请授权。
+    event.preventDefault()
+    setDownload({ entry: download.entry, phase: 'error', message: '下载链接已过期，请重新获取。', revisionChanged: false })
+  }
+
   return (
     <section className="directory-browser" aria-labelledby="directory-browser-title">
       <h2 id="directory-browser-title">目录</h2>
@@ -160,6 +174,10 @@ export default function DirectoryBrowser({
               <Button onClick={closeDownload}>关闭</Button>
               {download.phase === 'error' && !download.revisionChanged && (
                 <Button onClick={() => void requestDownload(download.entry)}>重新获取链接</Button>
+              )}
+              {download.phase === 'ready' && (
+                <Button type="primary" href={download.grant.url} target="_blank" rel="noopener noreferrer"
+                  onClick={followDownloadLink}>下载文件</Button>
               )}
             </>
           )}>

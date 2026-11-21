@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"slices"
 	"testing"
 	"time"
@@ -11,39 +12,15 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+const webDownloadFixtureName = "隔离授权.bin"
+
 func TestServerWebDownloadGrantIntegration(t *testing.T) {
 	cli := webFixtureBrowserCLI(t, "CLOUDNEST_WEB_DOWNLOAD_PLAYWRIGHT_CLI")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
-	// 1. 复用独占数据库和存储，为授权准备一个真实对象、一个仅有记录的对象和一个目录。
-	pool, bucket, webURL := prepareWebSingleUploadFixture(t, ctx)
-	payload := []byte{13, 42, 0, 255}
-	digest := sha256.Sum256(payload)
-	const objectKey = "download-fixture/source.bin"
-	stored, err := bucket.client.PutObject(ctx, bucket.name, objectKey, bytes.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{})
-	if err != nil || stored.VersionID == "" {
-		t.Fatal("无法准备联测对象版本", err)
-	}
-	if _, err := pool.ExecContext(ctx, `INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,storage_version_id,
-		file_size,verified_sha256,status,verified_at) VALUES
-		(41,7,'local_minio',?,?,?,4,?,'READY',UTC_TIMESTAMP(6)),
-		(42,7,'local_minio',?,'download-fixture/missing.bin',NULL,4,UNHEX(REPEAT('23',32)),'READY',UTC_TIMESTAMP(6))`,
-		bucket.name, objectKey, stored.VersionID, digest[:], bucket.name); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size,revision) VALUES
-		(9007199254740993,7,33,'隔离授权.bin',CAST('隔离授权.bin' AS BINARY),'FILE','OTHER',41,4,9007199254740995),
-		(52,7,33,'缺少内容.bin',CAST('缺少内容.bin' AS BINARY),'FILE','OTHER',42,4,1)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type)
-		VALUES(53,7,33,'隔离下载目录',CAST('隔离下载目录' AS BINARY),'DIR')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.ExecContext(ctx, "UPDATE users SET used_storage=8 WHERE id=7"); err != nil {
-		t.Fatal(err)
-	}
+	// 1. 准备独占 MinIO 对象和目录。
+	pool, webURL, _ := prepareWebDownloadFixture(t, ctx)
 	before := readWebPurgePreviewSnapshot(t, ctx, pool)
 
 	// 2. 通过目录页验收真实授权、旧版本重读、目标不可用和短期链接展示。
@@ -60,4 +37,37 @@ func TestServerWebDownloadGrantIntegration(t *testing.T) {
 		t.Fatal("授权的访问记录或文件数据不符")
 	}
 	t.Log("数据库核对通过：仅已授权文件产生最近访问记录，目录、对象和配额保持原样")
+}
+
+// prepareWebDownloadFixture 在独占库和桶创建实际可下载的合成文件及授权错误夹具。
+func prepareWebDownloadFixture(t *testing.T, ctx context.Context) (*sql.DB, string, []byte) {
+	t.Helper()
+	pool, bucket, webURL := prepareWebSingleUploadFixture(t, ctx)
+	payload := []byte{13, 42, 0, 255}
+	digest := sha256.Sum256(payload)
+	const objectKey = "download-fixture/source.bin"
+	stored, err := bucket.client.PutObject(ctx, bucket.name, objectKey, bytes.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{})
+	if err != nil || stored.VersionID == "" {
+		t.Fatal("无法准备联测对象版本", err)
+	}
+	if _, err := pool.ExecContext(ctx, `INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,storage_version_id,
+		file_size,verified_sha256,status,verified_at) VALUES
+		(41,7,'local_minio',?,?,?,4,?,'READY',UTC_TIMESTAMP(6)),
+		(42,7,'local_minio',?,'download-fixture/missing.bin',NULL,4,UNHEX(REPEAT('23',32)),'READY',UTC_TIMESTAMP(6))`,
+		bucket.name, objectKey, stored.VersionID, digest[:], bucket.name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size,revision) VALUES
+		(9007199254740993,7,33,?,?,'FILE','OTHER',41,4,9007199254740995),
+		(52,7,33,'缺少内容.bin',CAST('缺少内容.bin' AS BINARY),'FILE','OTHER',42,4,1)`, webDownloadFixtureName, []byte(webDownloadFixtureName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type)
+		VALUES(53,7,33,'隔离下载目录',CAST('隔离下载目录' AS BINARY),'DIR')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(ctx, "UPDATE users SET used_storage=8 WHERE id=7"); err != nil {
+		t.Fatal(err)
+	}
+	return pool, webURL, payload
 }
