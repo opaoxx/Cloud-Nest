@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -14,8 +13,6 @@ const (
 	maxUploadPartsPageSize = 1000
 	uploadPartsReadTimeout = 5 * time.Second
 )
-
-var uploadPartETagPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
 // ListUploadPartsPage 只读查询当前桶中指定对象和会话的一页分片回执。
 // marker 为零时从头读取。成功结果保留存储报告的片长，供调用方按任务计划核对。
@@ -64,7 +61,7 @@ func (client *Client) ListUploadPartsPage(ctx context.Context, objectKey, upload
 			etag = etag[1 : len(etag)-1]
 		}
 		if part.PartNumber <= lastPartNumber || part.PartNumber > domain.MaxUploadPartCount || part.Size < 0 ||
-			!uploadPartETagPattern.MatchString(etag) || !domain.ValidUploadPartChecksumSHA256(part.ChecksumSHA256) {
+			!domain.ValidUploadPartETag(etag) || !domain.ValidUploadPartChecksumSHA256(part.ChecksumSHA256) {
 			return nil, domain.ErrUploadStorageUnavailable
 		}
 		result.Parts = append(result.Parts, domain.UploadPartReceipt{
