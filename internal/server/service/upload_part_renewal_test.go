@@ -57,11 +57,11 @@ func TestResolveUploadPartRenewalExpiryRejectsConflicts(t *testing.T) {
 		}, want: domain.ErrUploadTaskBusy},
 		{name: "incomplete task reservation", changeTask: func(task *domain.UploadTask) { task.ReservedBytes-- }, want: domain.ErrInvalidUploadTaskData},
 		{name: "incomplete account reservation", changeUser: func(user *domain.UserProfile) { user.ReservedBytes-- }, want: domain.ErrUploadTaskNotReady},
-		{name: "aggregate over quota", changeUser: func(user *domain.UserProfile) { user.UsedBytes++ }, want: domain.ErrUploadTaskNotReady},
-		{name: "used bytes already over quota", changeUser: func(user *domain.UserProfile) { user.UsedBytes = user.QuotaBytes + 1 }, want: domain.ErrUploadTaskNotReady},
+		{name: "aggregate over quota", changeUser: func(user *domain.UserProfile) { user.UsedBytes++ }, want: domain.ErrQuotaExceeded},
+		{name: "used bytes already over quota", changeUser: func(user *domain.UserProfile) { user.UsedBytes = user.QuotaBytes + 1 }, want: domain.ErrQuotaExceeded},
 		{name: "sum would overflow", changeUser: func(user *domain.UserProfile) {
 			user.QuotaBytes, user.UsedBytes = math.MaxUint64, math.MaxUint64
-		}, want: domain.ErrUploadTaskNotReady},
+		}, want: domain.ErrQuotaExceeded},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			task := uploadPartSigningTaskFixture(now.Add(time.Hour))

@@ -99,12 +99,18 @@ func TestUploadPartURLServiceCreate(t *testing.T) {
 					}
 					return &link, nil
 				},
+				func(context.Context, domain.Actor, uint64, time.Time,
+					func(*domain.UploadTask, *domain.UserProfile, time.Time, time.Time) (time.Time, error),
+				) (*domain.UploadTask, error) {
+					t.Fatal("普通签发调用了续期事务")
+					return nil, nil
+				},
 			)
 			declarations := parts
 			if test.invalid {
 				declarations = []UploadPartDeclaration{parts[0], {PartNumber: 1, SHA256: "bad-digest"}}
 			}
-			result, err := urls.Create(ctx, actor, 19, declarations)
+			result, err := urls.Create(ctx, actor, 19, declarations, nil)
 			if !reflect.DeepEqual(calls, test.wantCalls) {
 				t.Fatal("调用顺序不符", calls, test.wantCalls)
 			}
@@ -130,6 +136,114 @@ func TestUploadPartURLServiceCreate(t *testing.T) {
 			}}
 			if !reflect.DeepEqual(result, want) {
 				t.Fatal("签发顺序、片长、摘要或截止时间不符")
+			}
+		})
+	}
+}
+
+func TestUploadPartURLServiceCreateWithRenewal(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	actor := domain.Actor{UserID: 7, DeviceID: 31, SessionID: 41}
+	const objectKey = "users/7/objects/renewal-fixture"
+	for _, test := range []struct {
+		name           string
+		remaining      time.Duration
+		invalidPart    bool
+		staleExpiry    bool
+		changeLease    bool
+		cancelOnCommit bool
+		failSigning    bool
+		want           error
+		wantCalls      []string
+	}{
+		{name: "renew before signing", remaining: time.Hour, wantCalls: []string{"target", "renew", "2", "1", "target"}},
+		{name: "keep later deadline", remaining: 25 * time.Hour, wantCalls: []string{"target", "renew", "2", "1", "target"}},
+		{name: "reject bad second declaration", remaining: time.Hour, invalidPart: true, wantCalls: []string{"target"}},
+		{name: "reject stale expiry before write", remaining: time.Hour, staleExpiry: true, want: domain.ErrUploadTaskNotReady, wantCalls: []string{"target"}},
+		{name: "reject changed binding under lock", remaining: time.Hour, changeLease: true, want: domain.ErrUploadTaskNotReady, wantCalls: []string{"target", "renew"}},
+		{name: "cancelled after commit", remaining: time.Hour, cancelOnCommit: true, want: context.Canceled, wantCalls: []string{"target", "renew"}},
+		{name: "signing fails after commit", remaining: time.Hour, failSigning: true, want: domain.ErrUploadStorageUnavailable, wantCalls: []string{"target", "renew", "2", "1"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			oldExpiry := now.Add(test.remaining)
+			current := uploadPartSigningTaskFixture(oldExpiry)
+			account := domain.UserProfile{ID: current.UserID, Status: "ACTIVE", QuotaBytes: current.FileSize, ReservedBytes: current.FileSize}
+			var calls []string
+			urls := NewUploadPartURLService(
+				func(context.Context, domain.Actor, uint64) (*UploadPartSigningTarget, error) {
+					calls = append(calls, "target")
+					return &UploadPartSigningTarget{TaskID: current.ID, UserID: current.UserID, StagedObjectID: current.StagedObjectID,
+						LeaseVersion: current.LeaseVersion, ObjectKey: objectKey, UploadID: *current.StorageUploadID,
+						FileSizeBytes: current.FileSize, PartSizeBytes: *current.PartSize, PartCount: *current.PartCount, ExpiresAt: current.ExpiresAt}, nil
+				},
+				func(_ context.Context, key, session string, number uint32, _ uint64, _ string, expiresAt time.Time) (*domain.SignedUploadPartURL, error) {
+					calls = append(calls, strconv.FormatUint(uint64(number), 10))
+					if key != objectKey || session != *current.StorageUploadID || !expiresAt.Equal(current.ExpiresAt) {
+						t.Fatal("签名没有使用已提交的绑定和期限")
+					}
+					if test.failSigning && number == 1 {
+						return nil, domain.ErrUploadStorageUnavailable
+					}
+					return &domain.SignedUploadPartURL{URL: "https://objects.example.test/fixture", ExpiresAt: now.Add(time.Minute)}, nil
+				},
+				func(callContext context.Context, currentActor domain.Actor, taskID uint64, expected time.Time,
+					resolve func(*domain.UploadTask, *domain.UserProfile, time.Time, time.Time) (time.Time, error),
+				) (*domain.UploadTask, error) {
+					calls = append(calls, "renew")
+					if callContext != ctx || currentActor != actor || taskID != current.ID || !expected.Equal(oldExpiry) {
+						t.Fatal("续期事务未收到原身份、任务和旧期限")
+					}
+					locked := *current
+					if test.changeLease {
+						locked.LeaseVersion++
+					}
+					expiry, err := resolve(&locked, &account, expected, now)
+					if err != nil {
+						return nil, err
+					}
+					current.ExpiresAt = expiry
+					if test.cancelOnCommit {
+						cancel()
+					}
+					return current, nil
+				},
+			)
+			parts := []UploadPartDeclaration{{PartNumber: 2, SHA256: signingFixtureHex}, {PartNumber: 1, SHA256: signingFixtureHex}}
+			if test.invalidPart {
+				parts[1].SHA256 = "bad-digest"
+			}
+			expected := oldExpiry
+			if test.staleExpiry {
+				expected = expected.Add(-time.Microsecond)
+			}
+			result, err := urls.Create(ctx, actor, current.ID, parts, &expected)
+			if !reflect.DeepEqual(calls, test.wantCalls) {
+				t.Fatal("调用顺序不符", calls, test.wantCalls)
+			}
+			if test.invalidPart {
+				var fieldError *UploadPartDeclarationError
+				if result != nil || !errors.As(err, &fieldError) || fieldError.Field != "parts.1.sha256" || !current.ExpiresAt.Equal(oldExpiry) {
+					t.Fatal("无效分片声明影响了任务期限", err)
+				}
+				return
+			}
+			wantExpiry := oldExpiry
+			if !test.staleExpiry && !test.changeLease && wantExpiry.Before(now.Add(24*time.Hour)) {
+				wantExpiry = now.Add(24 * time.Hour)
+			}
+			if !errors.Is(err, test.want) || !current.ExpiresAt.Equal(wantExpiry) {
+				t.Fatal("签发结果或任务期限不符", err, current.ExpiresAt, wantExpiry)
+			}
+			if test.want != nil {
+				if result != nil {
+					t.Fatal("失败时仍交付了链接")
+				}
+				return
+			}
+			if result == nil || !result.ExpiresAt.Equal(wantExpiry) || len(result.Parts) != 2 {
+				t.Fatal("成功结果缺少提交后的期限或分片")
 			}
 		})
 	}

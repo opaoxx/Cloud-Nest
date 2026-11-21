@@ -31,9 +31,11 @@ func ResolveUploadPartRenewalExpiry(task *domain.UploadTask, account *domain.Use
 	}
 
 	// 2. 确认账号总预占仍覆盖本任务，先比较已用空间再做减法，避免溢出。
-	if account.ReservedBytes < task.ReservedBytes || account.UsedBytes > account.QuotaBytes ||
-		account.ReservedBytes > account.QuotaBytes-account.UsedBytes {
+	if account.ReservedBytes < task.ReservedBytes {
 		return time.Time{}, domain.ErrUploadTaskNotReady
+	}
+	if account.UsedBytes > account.QuotaBytes || account.ReservedBytes > account.QuotaBytes-account.UsedBytes {
+		return time.Time{}, domain.ErrQuotaExceeded
 	}
 
 	// 3. 用数据库时间计算新期限，只延长时才采用新值。

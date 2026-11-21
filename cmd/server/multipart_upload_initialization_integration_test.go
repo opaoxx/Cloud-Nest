@@ -111,11 +111,12 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	// 1. 在专用库登记一份任务及预占，随后每次都通过仓储扫描取候选。
 	execute("INSERT INTO users(id,username,display_name,password_hash,reserved_storage) VALUES(7,'multipart_fixture','分片夹具','fixture_hash',?)", size)
 	execute("INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB')")
+	execute("INSERT INTO auth_sessions(id,user_id,device_id,refresh_token_hash,expires_at) VALUES(41,7,11,UNHEX(REPEAT('41',32)),UTC_TIMESTAMP(6)+INTERVAL 1 DAY)")
 	execute("INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
 	execute("INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(23,7,?,?,?,?)", settings.Provider, bucket.name, key, size)
 	execute(`INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,
 		expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at,attempt_count)
-		VALUES(19,7,11,23,13,'fixture.bin','MULTIPART',UNHEX(REPEAT('ab',32)),?,16777216,2,'CREATING',?,UTC_TIMESTAMP(6)+INTERVAL 1 DAY,5)`, size, size)
+		VALUES(19,7,11,23,13,'fixture.bin','MULTIPART',UNHEX(REPEAT('ab',32)),?,16777216,2,'CREATING',?,UTC_TIMESTAMP(6)+INTERVAL 1 HOUR,5)`, size, size)
 	read := func(callContext context.Context) *domain.UploadTask {
 		t.Helper()
 		task, err := store.FindUserUploadTask(callContext, 7, 19)
@@ -244,20 +245,37 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		t.Fatal("绑定的会话位置或 SHA256 算法不符", minio.ToErrorResponse(err).Code)
 	}
 
-	// 5. 装配正式目标查询和签名方法，复查后使用实际尾片链接。
+	// 5. 普通签发保留原期限，显式续期后使用实际尾片链接。
 	targets := service.NewUploadPartSigningTargetService(settings.Provider, settings.Bucket, store.FindUserUploadTaskForPartSigning, store.FindUserStoredObject)
-	urls := service.NewUploadPartURLService(targets.Get, client.SignUploadPartURL)
-	actor := domain.Actor{UserID: 7, DeviceID: 31, SessionID: 41}
+	urls := service.NewUploadPartURLService(targets.Get, client.SignUploadPartURL, store.RenewUserUploadPartExpiry)
+	actor := domain.Actor{UserID: 7, DeviceID: 11, SessionID: 41}
 	tail := []byte{0x33}
 	declarations := []service.UploadPartDeclaration{
 		{PartNumber: 2, SHA256: fmt.Sprintf("%x", sha256.Sum256(tail))},
 		{PartNumber: 1, SHA256: fmt.Sprintf("%x", *task.ExpectedSHA256)},
 	}
-	signedBatch, err := urls.Create(ctx, actor, task.ID, declarations)
-	if err != nil || signedBatch == nil || len(signedBatch.Parts) != 2 || !signedBatch.ExpiresAt.Equal(task.ExpiresAt) ||
+	oldExpiry := task.ExpiresAt
+	ordinary, err := urls.Create(ctx, actor, task.ID, declarations, nil)
+	afterOrdinary := read(ctx)
+	if err != nil || ordinary == nil || !ordinary.ExpiresAt.Equal(oldExpiry) ||
+		!afterOrdinary.ExpiresAt.Equal(oldExpiry) || !afterOrdinary.UpdatedAt.Equal(task.UpdatedAt) {
+		t.Fatal("普通签发没有保留原任务期限与更新时间", err)
+	}
+	var beforeRenewal time.Time
+	if err := pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&beforeRenewal); err != nil {
+		t.Fatal(err)
+	}
+	signedBatch, err := urls.Create(ctx, actor, task.ID, declarations, &oldExpiry)
+	renewed := read(ctx)
+	checkQuota(renewed)
+	if err != nil || signedBatch == nil || len(signedBatch.Parts) != 2 || !signedBatch.ExpiresAt.Equal(renewed.ExpiresAt) ||
+		renewed.ExpiresAt.Before(beforeRenewal.Add(24*time.Hour)) || renewed.ExpiresAt.After(renewed.UpdatedAt.Add(24*time.Hour)) ||
 		signedBatch.Parts[0].PartNumber != 2 || signedBatch.Parts[0].SizeBytes != 1 ||
 		signedBatch.Parts[1].PartNumber != 1 || signedBatch.Parts[1].SizeBytes != 16777216 {
-		t.Fatal("未按请求顺序交付已复查的两片签名", err)
+		t.Fatal("未按提交后的期限交付已复查的两片签名", err)
+	}
+	if result, err := urls.Create(ctx, actor, task.ID, declarations, &oldExpiry); result != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+		t.Fatal("旧期限被重复续期或签发", err)
 	}
 	tailURL := signedBatch.Parts[0]
 	signed, err := url.Parse(tailURL.URL)
@@ -280,10 +298,33 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 				execute("UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19 AND user_id=7")
 			}
 			return link, err
-		})
-	if result, err := staleURLs.Create(ctx, actor, task.ID, declarations); result != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+		}, store.RenewUserUploadPartExpiry)
+	if result, err := staleURLs.Create(ctx, actor, task.ID, declarations, nil); result != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 		t.Fatal("签发途中租约版本变化仍交付了链接", err)
 	}
-	t.Logf("隔离 MySQL %s %s，MinIO %s %s，绑定后按序签发两片、上传尾片，并拒绝旧租约签名",
+
+	// 7. 在提交续期后模拟第二片签名失败，检查首片未交付且已提交期限仍在。
+	execute("UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE id=19 AND user_id=7")
+	oldExpiry = read(ctx).ExpiresAt
+	failingURLs := service.NewUploadPartURLService(targets.Get,
+		func(callContext context.Context, objectKey, session string, partNumber uint32, sizeBytes uint64, checksum string, expiresAt time.Time) (*domain.SignedUploadPartURL, error) {
+			committed := read(callContext)
+			if !committed.ExpiresAt.Equal(expiresAt) || !expiresAt.After(oldExpiry) {
+				t.Fatal("存储签名之前未提交续期")
+			}
+			if partNumber == 1 {
+				return nil, domain.ErrUploadStorageUnavailable
+			}
+			return client.SignUploadPartURL(callContext, objectKey, session, partNumber, sizeBytes, checksum, expiresAt)
+		}, store.RenewUserUploadPartExpiry)
+	if result, err := failingURLs.Create(ctx, actor, task.ID, declarations, &oldExpiry); result != nil || !errors.Is(err, domain.ErrUploadStorageUnavailable) {
+		t.Fatal("第二片签名失败仍交付了部分链接", err)
+	}
+	afterFailure := read(ctx)
+	if !afterFailure.ExpiresAt.After(oldExpiry) {
+		t.Fatal("第二片签名失败后已提交的期限丢失")
+	}
+	checkQuota(afterFailure)
+	t.Logf("隔离 MySQL %s %s，MinIO %s %s，普通签发、显式续期、尾片 PUT、过期请求与签名失败验收通过",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }
