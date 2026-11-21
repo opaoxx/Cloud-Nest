@@ -58,8 +58,19 @@ func TestServerBackupTargetObjectsIntegration(t *testing.T) {
 	verifyBackupTargetVersions(t, ctx, target, nil)
 
 	// 3. 恢复并读回全部版本，确认重复写入不产生额外版本，再保存映射。
-	objects := make([]backupTargetObjectMapping, 0, len(manifest.Objects))
-	for _, object := range manifest.Objects {
+	objects := restoreAndVerifyBackupTargetObjects(t, ctx, writer, target, root, manifest.Objects)
+	if _, err := restoreBackupObject(ctx, writer, target, root, manifest.Objects[0]); !errors.Is(err, domain.ErrUploadObjectExists) {
+		t.Fatalf("重复对象键应被条件写入拒绝：%v", err)
+	}
+	verifyBackupTargetVersions(t, ctx, target, objects)
+	writeAndVerifyBackupTargetObjectMap(t, root, objects)
+	t.Log("拒绝摘要损坏和重复写入，目标桶恰好包含映射所列的三个版本")
+}
+
+func restoreAndVerifyBackupTargetObjects(t *testing.T, ctx context.Context, writer *storage.Client, target *serverUploadContentBucket, root *os.Root, manifestObjects []backupManifestObject) []backupTargetObjectMapping {
+	t.Helper()
+	objects := make([]backupTargetObjectMapping, 0, len(manifestObjects))
+	for _, object := range manifestObjects {
 		mapping, err := restoreBackupObject(ctx, writer, target, root, object)
 		if err != nil {
 			t.Fatalf("恢复对象 %d 失败：%v", object.ID, err)
@@ -72,12 +83,7 @@ func TestServerBackupTargetObjectsIntegration(t *testing.T) {
 			mapping.ObjectID, mapping.ObjectKey, mapping.SourceBucket, *mapping.SourceVersionID,
 			mapping.TargetBucket, mapping.TargetVersionID, mapping.TargetETag, object.SizeBytes, object.SHA256)
 	}
-	if _, err := restoreBackupObject(ctx, writer, target, root, manifest.Objects[0]); !errors.Is(err, domain.ErrUploadObjectExists) {
-		t.Fatalf("重复对象键应被条件写入拒绝：%v", err)
-	}
-	verifyBackupTargetVersions(t, ctx, target, objects)
-	writeAndVerifyBackupTargetObjectMap(t, root, objects)
-	t.Log("拒绝摘要损坏和重复写入，目标桶恰好包含映射所列的三个版本")
+	return objects
 }
 
 func prepareBackupTargetBucket(t *testing.T, ctx context.Context, source backupSourceFixture) (*serverUploadContentBucket, *storage.Client) {
