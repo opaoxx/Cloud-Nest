@@ -416,22 +416,28 @@ func TestServerMultipartMergeExecutionIntegration(t *testing.T) {
 				}
 				t.Logf("任务 %d 正式领取校验租约，版本 %d → %d", claimed.ID, result.LeaseVersion, claimed.LeaseVersion)
 				digest := verifyMergedMultipartVersion(t, ctx, bucket, client, claimed, object, expectedDigest)
-				reviewed := false
+				// 验收 READY 写入，随后回滚本轮夹具，便于继续验证原合并状态。
+				rollbackSelection := errors.New("fixture rollback after READY object selection")
 				err = store.WithUploadVerificationTransaction(ctx, claimed, object, digest,
-					func(_ context.Context, _ *repository.Store, current *domain.UploadTask, staged *domain.StoredObject) error {
-						reviewed = true
+					func(txContext context.Context, txStore *repository.Store, current *domain.UploadTask, staged *domain.StoredObject) error {
 						if !reflect.DeepEqual(current, claimed) || !reflect.DeepEqual(staged, object) {
 							t.Fatal("事务复核没有交付合并版本的当前任务及对象")
 						}
-						return nil
+						selected, err := txStore.SelectUploadPublicationObject(txContext, current, staged, digest)
+						if err != nil || selected == nil || selected.ID != object.ID || selected.Status != domain.StoredObjectStatusReady ||
+							selected.StorageVersionID == nil || *selected.StorageVersionID != *object.StorageVersionID ||
+							selected.VerifiedSHA256 == nil || *selected.VerifiedSHA256 != digest.SHA256 {
+							t.Fatal("按原版读回的对象未在事务内进入 READY", err)
+						}
+						return rollbackSelection
 					})
-				if err != nil || !reviewed {
-					t.Fatal("已读回的实际摘要没有通过发布前复核", err)
+				if !errors.Is(err, rollbackSelection) {
+					t.Fatal("READY 对象选择未按夹具要求回滚", err)
 				}
-				t.Logf("任务 %d 的实测摘要通过发布前事务复核，租约版本 %d", claimed.ID, claimed.LeaseVersion)
+				t.Logf("任务 %d 的原版本对象在事务内进入 READY，回滚后保留合并状态", claimed.ID)
 				currentObject, err := store.FindUserStoredObject(ctx, actor.UserID, fixture.objectID)
 				if err != nil || !reflect.DeepEqual(currentObject, object) || !reflect.DeepEqual(readTask(), claimed) {
-					t.Fatal("只读校验改变了任务或对象记录", err)
+					t.Fatal("对象选择回滚后任务或对象记录不符", err)
 				}
 			}
 			assertQuota(reservedStorage)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -42,10 +43,20 @@ func (store *Store) validateUploadPublicationInput(ctx context.Context, task *do
 		task.ResolvedName != nil || task.CompletedAt != nil {
 		return domain.ErrInvalidUploadTaskData
 	}
-	if task.Status != domain.UploadStatusVerifying || task.UploadMode != "SINGLE" {
+	multipart := task.UploadMode == "MULTIPART"
+	if task.Status != domain.UploadStatusVerifying || (task.UploadMode != "SINGLE" && !multipart) {
 		return domain.ErrUploadTaskNotReady
 	}
-	if task.FileSize > domain.MaxSingleUploadSizeBytes {
+	maxSize := domain.MaxSingleUploadSizeBytes
+	if multipart {
+		maxSize = math.MaxInt64
+		if task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) ||
+			task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
+			!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) {
+			return domain.ErrInvalidUploadTaskData
+		}
+	}
+	if task.FileSize > maxSize {
 		return domain.ErrUploadFileTooLarge
 	}
 	if digest.SizeBytes != task.FileSize {
@@ -60,6 +71,11 @@ func (store *Store) validateUploadPublicationInput(ctx context.Context, task *do
 		staged.Status != domain.StoredObjectStatusVerifying || staged.FileSize != task.FileSize ||
 		staged.VerifiedSHA256 != nil || staged.DedupHash != nil || staged.VerifiedAt != nil ||
 		staged.UnreferencedAt != nil || staged.GCAfter != nil {
+		return domain.ErrInvalidStoredObjectData
+	}
+	if multipart && (!validMultipartMergeObjectText(staged.ObjectKey) || staged.StorageETag == nil ||
+		!validMultipartMergeObjectText(*staged.StorageETag) ||
+		(staged.StorageVersionID != nil && !validMultipartMergeObjectText(*staged.StorageVersionID))) {
 		return domain.ErrInvalidStoredObjectData
 	}
 	return nil
@@ -82,12 +98,14 @@ func (store *Store) promoteVerifiedUploadObject(ctx context.Context, task *domai
 			"AND CAST(stored_object.storage_etag AS BINARY) <=> ? "+
 			"AND upload_task.id = ? AND CAST(upload_task.lease_owner AS BINARY) = ? AND upload_task.lease_version = ? "+
 			"AND upload_task.lease_until > UTC_TIMESTAMP(6) AND upload_task.expires_at > UTC_TIMESTAMP(6) "+
-			"AND upload_task.status = 'VERIFYING' AND upload_task.upload_mode = 'SINGLE' "+
+			"AND upload_task.status = 'VERIFYING' AND upload_task.upload_mode = ? "+
+			"AND CAST(upload_task.storage_upload_id AS BINARY) <=> ? AND upload_task.part_size <=> ? AND upload_task.part_count <=> ? "+
 			"AND upload_task.reserved_bytes = upload_task.file_size AND upload_task.published_object_id IS NULL "+
 			"AND upload_task.result_entry_id IS NULL AND upload_task.resolved_name IS NULL AND upload_task.completed_at IS NULL "+
-			"AND (upload_task.expected_sha256 IS NULL OR upload_task.expected_sha256 = ?)",
+			"AND (upload_task.expected_sha256 = ? OR (upload_task.upload_mode = 'SINGLE' AND upload_task.expected_sha256 IS NULL))",
 		digest.SHA256[:], task.UserID, staged.ID, digest.SizeBytes, staged.Provider, staged.Bucket, staged.ObjectKey,
-		staged.StorageVersionID, staged.StorageETag, task.ID, *task.LeaseOwner, task.LeaseVersion, digest.SHA256[:])
+		staged.StorageVersionID, staged.StorageETag, task.ID, *task.LeaseOwner, task.LeaseVersion,
+		task.UploadMode, task.StorageUploadID, task.PartSize, task.PartCount, digest.SHA256[:])
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
