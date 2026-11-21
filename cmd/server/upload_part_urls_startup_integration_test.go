@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,6 +54,10 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 	const key = "users/7/objects/part-urls-startup-fixture"
 	const partSize = 16 * 1024 * 1024
 	const fileSize = partSize + 1
+	contents := make([]byte, fileSize)
+	contents[partSize] = 0x33
+	firstBytes, tail := contents[:partSize], contents[partSize:]
+	fileDigest := sha256.Sum256(contents)
 	uploadID, err := storageClient.CreateMultipartUpload(ctx, key)
 	if err != nil {
 		t.Fatal("无法在专用桶创建合成分片会话", err)
@@ -81,8 +86,8 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		settings.Provider, bucket.name, key, fileSize)
 	execute(`INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,
 		expected_sha256,file_size,part_size,part_count,status,storage_upload_id,reserved_bytes,expires_at)
-		VALUES(19,7,11,23,13,'fixture.bin','MULTIPART',UNHEX(REPEAT('ab',32)),?,?,2,'UPLOADING',?,?,UTC_TIMESTAMP(6)+INTERVAL 1 HOUR)`,
-		fileSize, partSize, uploadID, fileSize)
+		VALUES(19,7,11,23,13,'fixture.bin','MULTIPART',?,?,?,2,'UPLOADING',?,?,UTC_TIMESTAMP(6)+INTERVAL 1 HOUR)`,
+		fileDigest[:], fileSize, partSize, uploadID, fileSize)
 
 	// 2. 启动正式 run，使用本轮 JWT 密钥为合成会话签发访问令牌。
 	api, stopServer := startBackupFixtureServer(t, ctx, databaseName)
@@ -118,9 +123,9 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 	}
 	const taskPath = "/api/v1/uploads/19/part-urls"
 	const receiptsPath = "/api/v1/uploads/19/parts"
-	tail := []byte{0x33}
-	bodyStart := fmt.Sprintf(`{"parts":[{"part_number":2,"sha256":"%x"},{"part_number":1,"sha256":"%s"}]`,
-		sha256.Sum256(tail), strings.Repeat("ab", 32))
+	const completionPath = "/api/v1/uploads/19/complete"
+	bodyStart := fmt.Sprintf(`{"parts":[{"part_number":2,"sha256":"%x"},{"part_number":1,"sha256":"%x"}]`,
+		sha256.Sum256(tail), sha256.Sum256(firstBytes))
 	assertRejected := func(client backupSourceClient, method, path, body string, status int, code string) {
 		t.Helper()
 		var result struct {
@@ -138,6 +143,8 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 	assertRejected(api, http.MethodGet, receiptsPath, "", http.StatusUnauthorized, "AUTH_REQUIRED")
 	assertRejected(other, http.MethodGet, receiptsPath, "", http.StatusNotFound, "UPLOAD_NOT_FOUND")
 	assertRejected(owner, http.MethodGet, "/api/v1/uploads/99999/parts", "", http.StatusNotFound, "UPLOAD_NOT_FOUND")
+	assertRejected(api, http.MethodPost, completionPath, "", http.StatusUnauthorized, "AUTH_REQUIRED")
+	assertRejected(other, http.MethodPost, completionPath, "", http.StatusNotFound, "UPLOAD_NOT_FOUND")
 
 	// 3. 查询真实回执，逐次对照任务、配额和完成快照。上传前应返回空数组。
 	readAccounting := func() (used, reserved, completedParts uint64) {
@@ -204,7 +211,55 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		ChecksumSHA256: tailPart.RequiredHeaders.ChecksumSHA256,
 	})
 
-	// 5. 单文件任务拒绝分片签发和回执查询，原上传入口与发布结算照常完成。
+	// 5. 通过正式完成路由核对失败释放、成功受理和无正文重试。
+	firstPart := renewed.Data.Parts[1]
+	firstURL, err := url.Parse(firstPart.URL)
+	if err != nil || firstURL.Host != settings.PublicEndpointURL.Host || firstURL.Scheme != settings.PublicEndpointURL.Scheme ||
+		firstURL.User != nil || firstURL.Path != "/"+bucket.name+"/"+key || firstURL.Query().Get("uploadId") != uploadID ||
+		firstURL.Query().Get("partNumber") != "1" || firstPart.RequiredHeaders.ChecksumSHA256 != multipartProbeSHA256(firstBytes) {
+		t.Fatal("普通分片地址未限定在本轮隔离会话或摘要不符")
+	}
+	firstETag := putMultipartProbePart(t, ctx, owner.httpClient, firstURL, firstPart.RequiredHeaders.ChecksumSHA256, firstBytes, http.StatusOK, "")
+	completeBody := func(firstETag string) io.Reader {
+		return strings.NewReader(fmt.Sprintf(`{"parts":[{"part_number":2,"etag":%q},{"part_number":1,"etag":%q}]}`, etag, firstETag))
+	}
+	var mismatch dto.ErrorResponse
+	owner.request(t, ctx, http.MethodPost, completionPath, "", completeBody("EarlierReceipt"), http.StatusConflict, &mismatch)
+	afterMismatch := readTask()
+	mismatchUsed, mismatchReserved, mismatchRows := readAccounting()
+	if mismatch.Error.Code != "UPLOAD_PARTS_MISMATCH" || mismatch.RequestID == "" ||
+		!reflect.DeepEqual(mismatch.Error.Details, map[string]any{"part_numbers": []any{float64(1)}}) ||
+		afterMismatch.Status != domain.UploadStatusUploading || afterMismatch.LeaseOwner != nil || afterMismatch.LeaseUntil != nil ||
+		mismatchUsed != 0 || mismatchReserved != fileSize || mismatchRows != 0 {
+		t.Fatal("正式完成接口的失配响应、租约或快照不符")
+	}
+
+	var completing, repeated dto.UploadTaskResponse
+	owner.request(t, ctx, http.MethodPost, completionPath, "", completeBody(firstETag), http.StatusAccepted, &completing)
+	acceptedTask := readTask()
+	completeUsed, completeReserved, completeRows := readAccounting()
+	if completing.RequestID == "" || completing.Data.ID != "19" || completing.Data.UploadMode != "MULTIPART" ||
+		completing.Data.Status != "COMPLETING" || completing.Data.ResultEntryID != nil || completing.Data.CompletedAt != nil ||
+		acceptedTask.Status != domain.UploadStatusCompleting || acceptedTask.LeaseOwner != nil || acceptedTask.LeaseUntil != nil ||
+		acceptedTask.LeaseVersion != afterMismatch.LeaseVersion+1 || completeUsed != 0 || completeReserved != fileSize || completeRows != 2 {
+		t.Fatal("正式完成接口未提交快照并交付 COMPLETING")
+	}
+	owner.request(t, ctx, http.MethodPost, completionPath, "", nil, http.StatusAccepted, &repeated)
+	replayUsed, replayReserved, replayRows := readAccounting()
+	if repeated.RequestID == "" || !reflect.DeepEqual(completing.Data, repeated.Data) || !reflect.DeepEqual(acceptedTask, readTask()) ||
+		replayUsed != completeUsed || replayReserved != completeReserved || replayRows != completeRows {
+		t.Fatal("无正文重试未复用同一任务快照和配额")
+	}
+	var matchingRows int
+	err = pool.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_parts WHERE task_id=19 AND checksum_algorithm='SHA256'
+		AND ((part_number=1 AND size=? AND etag=? AND checksum_value=?)
+		OR (part_number=2 AND size=1 AND etag=? AND checksum_value=?))`,
+		partSize, firstETag, firstPart.RequiredHeaders.ChecksumSHA256, etag, tailPart.RequiredHeaders.ChecksumSHA256).Scan(&matchingRows)
+	if err != nil || matchingRows != 2 {
+		t.Fatal("隔离完成快照与实际分片不符", matchingRows, err)
+	}
+
+	// 6. 单文件保持原创建、正文接收、发布和完成确认行为。
 	single := []byte{0x41, 0x42, 0x43}
 	var created dto.CreateUploadResponse
 	owner.request(t, ctx, http.MethodPost, "/api/v1/uploads", "part-urls-single-compatibility",
@@ -214,24 +269,30 @@ func TestServerPartURLsStartupIntegration(t *testing.T) {
 		t.Fatal("单文件创建响应或正文路径变化")
 	}
 	singleTaskID := backupFixtureID(t, created.Data.Task.ID)
+	singleCompletionPath := "/api/v1/uploads/" + created.Data.Task.ID + "/complete"
 	assertRejected(owner, http.MethodPost, "/api/v1/uploads/"+created.Data.Task.ID+"/part-urls", bodyStart+"}", http.StatusConflict, "TASK_NOT_READY")
 	assertRejected(owner, http.MethodGet, "/api/v1/uploads/"+created.Data.Task.ID+"/parts", "", http.StatusConflict, "TASK_NOT_READY")
+	assertRejected(owner, http.MethodPost, singleCompletionPath, "", http.StatusConflict, "TASK_NOT_READY")
 	var accepted dto.UploadContentAcceptedResponse
 	owner.request(t, ctx, http.MethodPut, created.Data.ContentPath, "", bytes.NewReader(single), http.StatusAccepted, &accepted)
 	if accepted.Data.TaskID != created.Data.Task.ID || accepted.Data.Status != "VERIFYING" {
 		t.Fatal("单文件正文接收结果不符")
 	}
 	published := awaitServerUploadPublication(t, ctx, store, 7, singleTaskID)
+	var singleCompleted dto.UploadTaskResponse
+	owner.request(t, ctx, http.MethodPost, singleCompletionPath, "", nil, http.StatusOK, &singleCompleted)
 	var used, reserved uint64
 	if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
-		published.ResultEntryID == nil || used != uint64(len(single)) || reserved != fileSize {
-		t.Fatal("单文件发布或分片任务预占不符", used, reserved, err)
+		published.ResultEntryID == nil || singleCompleted.Data.ResultEntryID == nil ||
+		*singleCompleted.Data.ResultEntryID != fmt.Sprint(*published.ResultEntryID) || singleCompleted.Data.Status != "COMPLETED" ||
+		singleCompleted.Data.UploadMode != "SINGLE" || used != uint64(len(single)) || reserved != fileSize {
+		t.Fatal("单文件发布、完成确认或分片任务预占不符", used, reserved, err)
 	}
 	logs, err := stopServer()
 	if err != nil || strings.Contains(logs, uploadID) || strings.Contains(logs, "X-Amz-Signature") ||
 		strings.Contains(logs, owner.accessToken) || strings.Contains(logs, other.accessToken) {
 		t.Fatal("隔离服务关停或签名日志保护失败", err)
 	}
-	t.Logf("独占 MySQL %s 库 %s，MinIO %s 桶 %s，HTTP %s。前后回执分别为 [] 和 1 字节尾片，已用 0、预占 %d、完成快照 0，认证边界和 SINGLE 发布通过",
+	t.Logf("独占 MySQL %s 库 %s，MinIO %s 桶 %s，HTTP %s。分片失配 409，成功及重试 202，快照 2 行、预占 %d 字节，SINGLE 发布确认 200",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name, api.baseURL, fileSize)
 }

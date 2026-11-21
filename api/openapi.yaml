@@ -316,7 +316,7 @@ paths:
       operationId: completeUpload
       summary: 确认单文件上传状态或受理分片上传完成
       description: |
-        SINGLE 已接入服务。MULTIPART 为 B4 计划契约，等待接入。
+        SINGLE 完成确认和 MULTIPART 完成受理已接入。当前 MULTIPART 受理后进入 COMPLETING，后台合并与发布按第 5 项后续接入。
         1. Bearer 授权后解析路径 id，按当前用户归属读取任务。缺失或跨账号统一返回 UPLOAD_NOT_FOUND，同账号其他设备可以操作。
         2. SINGLE 沿用无正文的状态确认。VERIFYING 返回 202，COMPLETED 返回 200，其余阶段返回 409 TASK_NOT_READY。
         3. MULTIPART 为未到期且已绑定存储会话的 UPLOADING 时，首次受理及修复后再次提交均要求 JSON 分片回执。
