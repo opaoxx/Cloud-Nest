@@ -78,16 +78,28 @@ func newServerUploadVerificationProcessor(
 
 // startServerUploadVerificationWorker 启动一个校验循环，返回取消并等待的方法。
 func startServerUploadVerificationWorker(ctx context.Context, runOnce func(context.Context, int, string) (service.UploadVerificationBatchResult, error), logger *slog.Logger) func() {
+	return startServerVerificationWorker(ctx, runOnce, logger, "上传校验", "upload-verification-")
+}
+
+// startServerMultipartUploadVerificationWorker 启动独立的分片校验循环，返回取消并等待的方法。
+func startServerMultipartUploadVerificationWorker(ctx context.Context, runOnce func(context.Context, int, string) (service.UploadVerificationBatchResult, error), logger *slog.Logger) func() {
+	return startServerVerificationWorker(ctx, runOnce, logger, "分片校验", "multipart-verification-")
+}
+
+func startServerVerificationWorker(
+	ctx context.Context, runOnce func(context.Context, int, string) (service.UploadVerificationBatchResult, error), logger *slog.Logger,
+	operation, leaseOwnerPrefix string,
+) func() {
 	// 1. 创建随服务取消的上下文，为本次运行生成租约持有者标识。
 	workerContext, cancel := context.WithCancel(ctx)
-	leaseOwner := "upload-verification-" + uuid.NewString()
+	leaseOwner := leaseOwnerPrefix + uuid.NewString()
 	done := make(chan struct{})
 
 	// 2. 启动一个后台循环，执行并汇报每轮校验。
-	logger.Info("上传校验 worker 已启动", "interval_ms", uploadVerificationInterval.Milliseconds(), "batch_limit", uploadVerificationBatchLimit)
+	logger.Info(operation+" worker 已启动", "interval_ms", uploadVerificationInterval.Milliseconds(), "batch_limit", uploadVerificationBatchLimit)
 	go func() {
 		defer close(done)
-		defer logger.Info("上传校验 worker 已停止")
+		defer logger.Info(operation + " worker 已停止")
 		err := service.RunUploadVerificationLoop(workerContext, uploadVerificationInterval,
 			func(roundContext context.Context) (service.UploadVerificationBatchResult, error) {
 				return runOnce(roundContext, uploadVerificationBatchLimit, leaseOwner)
@@ -95,7 +107,7 @@ func startServerUploadVerificationWorker(ctx context.Context, runOnce func(conte
 			func(summary service.UploadVerificationBatchResult, roundError error) {
 				stopError := workerContext.Err()
 				if roundError != nil && stopError == nil {
-					logger.Warn("上传校验轮次失败")
+					logger.Warn(operation + "轮次失败")
 				}
 				// 1. 遍历本轮逐条错误，识别服务停止造成的取消。
 				for _, failure := range summary.CandidateErrors {
@@ -105,15 +117,15 @@ func startServerUploadVerificationWorker(ctx context.Context, runOnce func(conte
 					// 2. 根据错误类型和可识别的原因选取固定错误码。
 					code := uploadVerificationErrorCode(failure.Err)
 					// 3. 只将任务 ID 和错误码写入结构化日志。
-					logger.Warn("上传校验任务处理失败", "task_id", failure.TaskID, "error_code", code)
+					logger.Warn(operation+"任务处理失败", "task_id", failure.TaskID, "error_code", code)
 				}
 				if summary.Scanned > 0 {
-					logger.Info("上传校验轮次结束", "scanned", summary.Scanned, "published", summary.Published,
+					logger.Info(operation+"轮次结束", "scanned", summary.Scanned, "published", summary.Published,
 						"retries_scheduled", summary.RetriesScheduled, "candidate_errors", len(summary.CandidateErrors))
 				}
 			})
 		if err != nil && workerContext.Err() == nil {
-			logger.Error("上传校验 worker 异常退出", "error", err)
+			logger.Error(operation+" worker 异常退出", "error", err)
 		}
 	}()
 
