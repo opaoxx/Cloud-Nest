@@ -23,10 +23,7 @@ func (store *Store) FindMultipartUploadCancellationTarget(
 	if _, nested := store.database.Statement.ConnPool.(gorm.TxCommitter); nested {
 		return nil, fmt.Errorf("分片取消目标需要在事务外读取最新租约")
 	}
-	if claimed == nil || claimed.ID == 0 || claimed.UserID == 0 || claimed.StagedObjectID == 0 ||
-		claimed.Status != domain.UploadStatusCancelling || claimed.UploadMode != "MULTIPART" ||
-		claimed.LeaseOwner == nil || *claimed.LeaseOwner == "" || claimed.LeaseUntil == nil ||
-		claimed.LeaseVersion == 0 || !validPendingMultipartUploadCancellationTask(claimed) {
+	if !validMultipartUploadCancellationClaim(claimed) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	queryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -60,18 +57,32 @@ func (store *Store) readMultipartUploadCancellationLease(ctx context.Context, cl
 	if err != nil {
 		return nil, err
 	}
+	if err := validateMultipartUploadCancellationLease(current, claimed, databaseTime); err != nil {
+		return nil, err
+	}
+	return current, nil
+}
+
+func validMultipartUploadCancellationClaim(claimed *domain.UploadTask) bool {
+	return claimed != nil && claimed.ID != 0 && claimed.UserID != 0 && claimed.StagedObjectID != 0 &&
+		claimed.Status == domain.UploadStatusCancelling && claimed.UploadMode == "MULTIPART" &&
+		claimed.LeaseOwner != nil && *claimed.LeaseOwner != "" && claimed.LeaseUntil != nil &&
+		claimed.LeaseVersion != 0 && validPendingMultipartUploadCancellationTask(claimed)
+}
+
+func validateMultipartUploadCancellationLease(current, claimed *domain.UploadTask, databaseTime time.Time) error {
 	if current.Status != domain.UploadStatusCancelling || current.UploadMode != "MULTIPART" {
-		return nil, domain.ErrUploadTaskNotReady
+		return domain.ErrUploadTaskNotReady
 	}
 	if current.StagedObjectID != claimed.StagedObjectID || current.LeaseVersion != claimed.LeaseVersion ||
 		!sameUploadStorageText(current.LeaseOwner, claimed.LeaseOwner) || current.LeaseUntil == nil ||
 		!current.LeaseUntil.Equal(*claimed.LeaseUntil) || !databaseTime.Before(*current.LeaseUntil) ||
 		(current.NextAttemptAt != nil && databaseTime.Before(*current.NextAttemptAt)) ||
 		!sameUploadStorageText(current.StorageUploadID, claimed.StorageUploadID) {
-		return nil, domain.ErrUploadTaskBusy
+		return domain.ErrUploadTaskBusy
 	}
 	if !validPendingMultipartUploadCancellationTask(current) || !sameMultipartUploadDeclaration(claimed, current) {
-		return nil, domain.ErrInvalidUploadTaskData
+		return domain.ErrInvalidUploadTaskData
 	}
-	return current, nil
+	return nil
 }
