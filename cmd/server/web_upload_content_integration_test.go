@@ -96,9 +96,10 @@ func prepareWebSingleUploadFixture(t *testing.T, ctx context.Context) (*sql.DB, 
 	return pool, bucket, startServerWebFixture(t, ctx, databaseName, run)
 }
 
-// startIsolatedWebMinIO 只在 startIsolatedWebMySQL 确认本机 Docker 后调用。
+// startIsolatedWebMinIO 为本轮联测启动只映射回环地址的独占 MinIO。
 func startIsolatedWebMinIO(t *testing.T, ctx context.Context) string {
 	t.Helper()
+	requireLocalWebFixtureDocker(t, ctx)
 	const image = "sha256:7c840b89c21e0af0e824cf57310becadbbd45c7fb407c78cd2ada4b74c76f733"
 	accessKey, secretKey := rand.Text(), rand.Text()
 	output, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--pull", "never",

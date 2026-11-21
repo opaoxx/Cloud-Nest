@@ -101,9 +101,8 @@ func runWebBrowserProbe(t *testing.T, ctx context.Context, cli, webURL, filename
 	return cliDir
 }
 
-func startIsolatedWebMySQL(t *testing.T, ctx context.Context) string {
+func requireLocalWebFixtureDocker(t *testing.T, ctx context.Context) {
 	t.Helper()
-	// 1. 仅允许本机 Docker，数据库地址和凭据由这次启动给出。
 	if os.Getenv("DOCKER_HOST") != "" {
 		t.Fatal("请在未覆盖 DOCKER_HOST 的本机 Docker 上执行此隔离测试")
 	}
@@ -111,6 +110,12 @@ func startIsolatedWebMySQL(t *testing.T, ctx context.Context) string {
 	if err != nil || (!strings.HasPrefix(string(endpoint), "npipe://") && !strings.HasPrefix(string(endpoint), "unix://")) {
 		t.Fatal("未确认 Docker 上下文使用本机套接字", err)
 	}
+}
+
+func startIsolatedWebMySQL(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	// 1. 仅允许本机 Docker，数据库地址和凭据由这次启动给出。
+	requireLocalWebFixtureDocker(t, ctx)
 	const image = "sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902"
 	password := rand.Text()
 	output, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--pull", "never",

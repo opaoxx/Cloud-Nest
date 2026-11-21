@@ -1,5 +1,19 @@
 # CloudNest Bug 修复记录
 
+## 第 550 步——分片探测对 SHA-256 拒绝码的预期不符
+
+### 问题现象
+
+- 首轮隔离探测确认错误长度返回 `403 SignatureDoesNotMatch`。相同长度的正文与签名中的摘要不符时，MinIO 返回 `400 XAmzContentChecksumMismatch`，断言预期 `BadDigest`，测试在浏览器阶段前停止。
+
+### 根因与修复方案
+
+- 固定镜像源码将 `x-amz-checksum-sha256` 的正文校验失败映射为 `XAmzContentChecksumMismatch`。调整探测断言匹配固定错误码，保留对 HTTP 状态和分片列表为空的检查。
+
+### 验证结果
+
+- 三轮隔离复验均拒绝错误长度和摘要，存储端无残留分片。浏览器直传、回执覆盖、版本完成与读回均通过。
+
 ## 第 537 步——SQL 导出行数检查未识别带列清单的 INSERT
 
 ### 问题现象
