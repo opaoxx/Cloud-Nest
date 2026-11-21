@@ -24,25 +24,13 @@ func TestServerBackupTargetStagingIntegration(t *testing.T) {
 	defer cancel()
 
 	// 1. 恢复独占目标环境，完成已发布对象的定位，再从源任务找到暂存对象。
-	fixture := prepareBackupTargetRemap(t, ctx)
+	fixture, beforeTask := prepareBackupTargetPendingUpload(t, ctx)
 	pool, target := fixture.database.pool, fixture.targetBucket
-	updated, err := applyBackupTargetObjectMap(ctx, pool, target.name, fixture.manifest, fixture.mapping)
-	if err != nil || updated != 3 {
-		t.Fatalf("已发布对象定位基线不符，更新 %d 行，错误 %v", updated, err)
-	}
-	userID := backupFixtureID(t, fixture.source.login.User.ID)
-	var taskID uint64
-	if err := fixture.source.pool.QueryRowContext(ctx, "SELECT id FROM upload_tasks WHERE user_id=? AND status='UPLOADING'", userID).
-		Scan(&taskID); err != nil {
-		t.Fatal("查找源端未发送任务失败", err)
-	}
-	sourceTask := readBackupUploadTask(t, ctx, fixture.source.pool, userID, taskID)
-	beforeTask := readBackupUploadTask(t, ctx, pool, userID, taskID)
+	userID, taskID := beforeTask.UserID, beforeTask.ID
 	before := snapshotBackupTargetObjects(t, ctx, pool, userID)
-	staged := before[sourceTask.StagedObjectID]
-	if !reflect.DeepEqual(sourceTask, beforeTask) || staged.ID == 0 || staged.Bucket != fixture.source.bucket.name ||
-		staged.Status != domain.StoredObjectStatusStaging || staged.StorageVersionID != nil || staged.StorageETag != nil ||
-		beforeTask.ReservedBytes != 3 {
+	staged := before[beforeTask.StagedObjectID]
+	if staged.ID == 0 || staged.Bucket != fixture.source.bucket.name || staged.Status != domain.StoredObjectStatusStaging ||
+		staged.StorageVersionID != nil || staged.StorageETag != nil {
 		t.Fatal("目标库没有保留未发送任务及其原暂存定位")
 	}
 
@@ -78,6 +66,28 @@ func TestServerBackupTargetStagingIntegration(t *testing.T) {
 	inspectBackupDatabase(t, ctx, pool, userID)
 	t.Logf("任务 %d 的暂存对象 %d 已由 %s 对齐到 %s，目标无正文版本，空版本和 ETag 保留，配额已用 10 B、预占 3 B",
 		taskID, staged.ID, staged.Bucket, target.name)
+}
+
+func prepareBackupTargetPendingUpload(t *testing.T, ctx context.Context) (backupTargetRemapFixture, *domain.UploadTask) {
+	t.Helper()
+	fixture := prepareBackupTargetRemap(t, ctx)
+	pool := fixture.database.pool
+	updated, err := applyBackupTargetObjectMap(ctx, pool, fixture.targetBucket.name, fixture.manifest, fixture.mapping)
+	if err != nil || updated != 3 {
+		t.Fatalf("已发布对象定位基线不符，更新 %d 行，错误 %v", updated, err)
+	}
+	userID := backupFixtureID(t, fixture.source.login.User.ID)
+	var taskID uint64
+	if err := fixture.source.pool.QueryRowContext(ctx, "SELECT id FROM upload_tasks WHERE user_id=? AND status='UPLOADING'", userID).
+		Scan(&taskID); err != nil {
+		t.Fatal("查找源端未发送任务失败", err)
+	}
+	sourceTask := readBackupUploadTask(t, ctx, fixture.source.pool, userID, taskID)
+	targetTask := readBackupUploadTask(t, ctx, pool, userID, taskID)
+	if !reflect.DeepEqual(sourceTask, targetTask) || targetTask.Status != domain.UploadStatusUploading || targetTask.ReservedBytes != 3 {
+		t.Fatal("目标库没有保留未发送任务及其预占")
+	}
+	return fixture, targetTask
 }
 
 func readBackupUploadTask(t *testing.T, ctx context.Context, pool *sql.DB, userID, taskID uint64) *domain.UploadTask {

@@ -193,6 +193,20 @@ func prepareBackupSource(t *testing.T, ctx context.Context) backupSourceFixture 
 	bucket := prepareServerUploadContentBucket(t, ctx)
 
 	// 2. 使用回环地址运行生产后端，退出时等待 HTTP 与后台任务关停。
+	source, stop := startBackupFixtureServer(t, ctx, databaseName)
+
+	// 3. 登录正式接口取得令牌和根目录 ID，后续通过 HTTP 生成业务数据。
+	login := loginBackupFixture(t, ctx, &source, password)
+	if login.UsedBytes != 0 || login.ReservedBytes != 0 {
+		t.Fatal("合成账号未从空配额开始")
+	}
+	t.Logf("隔离源端 MySQL 库 %s，MinIO 桶 %s，后端 %s，迁移 SHA-256 %s", databaseName, bucket.name, strings.TrimPrefix(source.baseURL, "http://"), checksum)
+	return backupSourceFixture{api: source, pool: pool, bucket: bucket, login: login, databaseName: databaseName,
+		mysqlContainer: mysqlContainer, minioContainer: minioContainer, stop: stop}
+}
+
+func startBackupFixtureServer(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error)) {
+	t.Helper()
 	address := reserveWebLoginAddress(t)
 	secret := sha256.Sum256([]byte(rand.Text()))
 	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
@@ -213,35 +227,37 @@ func prepareBackupSource(t *testing.T, ctx context.Context) backupSourceFixture 
 		case <-done:
 			return serverLogs.String(), runError
 		case <-time.After(35 * time.Second):
-			return "", fmt.Errorf("隔离备份源服务未在期限内退出")
+			return "", fmt.Errorf("隔离备份服务未在期限内退出")
 		}
 	}
 	t.Cleanup(func() {
 		if _, err := stop(); err != nil {
-			t.Error("隔离备份源服务退出失败", err)
+			t.Error("隔离备份服务退出失败", err)
 		}
 	})
 	waitForServerIntegrationHTTP(t, ctx, address)
 
-	// 3. 登录正式接口取得令牌和根目录 ID，后续通过 HTTP 生成业务数据。
-	source := backupSourceClient{baseURL: "http://" + address, httpClient: &http.Client{
+	client := backupSourceClient{baseURL: "http://" + address, httpClient: &http.Client{
 		Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	t.Cleanup(source.httpClient.CloseIdleConnections)
+	t.Cleanup(client.httpClient.CloseIdleConnections)
+	return client, stop
+}
+
+func loginBackupFixture(t *testing.T, ctx context.Context, client *backupSourceClient, password string) dto.LoginData {
+	t.Helper()
 	body, err := json.Marshal(dto.LoginRequest{Username: "root", Password: password, DeviceName: "隔离备份夹具",
 		InstallationID: uuid.NewString(), ClientType: "native", Platform: "WINDOWS"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var login dto.LoginResponse
-	source.request(t, ctx, http.MethodPost, "/api/v1/auth/login", "", bytes.NewReader(body), http.StatusOK, &login)
-	if login.Data.AccessToken == "" || login.Data.UsedBytes != 0 || login.Data.ReservedBytes != 0 {
-		t.Fatal("合成账号未从空配额开始")
+	client.request(t, ctx, http.MethodPost, "/api/v1/auth/login", "", bytes.NewReader(body), http.StatusOK, &login)
+	if login.Data.AccessToken == "" {
+		t.Fatal("合成账号登录没有返回访问令牌")
 	}
-	source.accessToken = login.Data.AccessToken
-	t.Logf("隔离源端 MySQL 库 %s，MinIO 桶 %s，后端 %s，迁移 SHA-256 %s", databaseName, bucket.name, address, checksum)
-	return backupSourceFixture{api: source, pool: pool, bucket: bucket, login: login.Data, databaseName: databaseName,
-		mysqlContainer: mysqlContainer, minioContainer: minioContainer, stop: stop}
+	client.accessToken = login.Data.AccessToken
+	return login.Data
 }
 
 func publishBackupSourceFile(t *testing.T, ctx context.Context, source backupSourceClient, store *repository.Store,
