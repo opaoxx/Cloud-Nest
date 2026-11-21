@@ -36,30 +36,62 @@ interface TrashPage {
 
 export type TrashPageReader = (cursor: string | null, signal: AbortSignal) => Promise<TrashPage>
 
-export interface PurgePreviewScope {
+export interface PurgePreview {
+  entryId: string
+  revision: string
+  digest: string
+  expiresAt: number
   fileCount: number
   directoryCount: number
   logicalBytes: string
 }
 
-export type PurgePreviewReader = (entryId: string, signal: AbortSignal) => Promise<PurgePreviewScope>
+export type PurgePreviewReader = (entryId: string, signal: AbortSignal) => Promise<PurgePreview>
+export type PurgeConfirmer = (preview: PurgePreview, idempotencyKey: string) => Promise<void>
 
-export async function readPurgePreview(accessToken: string, entryId: string, signal: AbortSignal): Promise<PurgePreviewScope> {
-  // 1. 使用现有 GET 读取范围。
+export async function readPurgePreview(accessToken: string, entryId: string, signal: AbortSignal): Promise<PurgePreview> {
+  // 1. 使用现有 GET 同时读取范围和确认凭证。
   const data = await requestData(`/api/v1/trash/${encodeURIComponent(entryId)}/purge-preview`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${accessToken}` },
     signal,
   })
 
-  // 2. 只交付展示字段，逻辑字节按字符串保留精度。
+  // 2. 检查展示字段及凭证，保留十进制版本和逻辑字节的精度。
   const { file_count: fileCount, directory_count: directoryCount, logical_bytes: logicalBytes } = data
+  const { revision, preview_digest: digest, expires_at: expiresAtText } = data
+  const expiresAt = typeof expiresAtText === 'string' ? Date.parse(expiresAtText) : NaN
   if (data.entry_id !== entryId || !isByteCount(fileCount) || !isByteCount(directoryCount) ||
       fileCount + directoryCount < 1 || fileCount + directoryCount > 10000 ||
       typeof logicalBytes !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(logicalBytes)) {
     throw new ApiError(200, '服务返回的清理预检范围有误。')
   }
-  return { fileCount, directoryCount, logicalBytes }
+  if (typeof revision !== 'string' || !/^[1-9][0-9]{0,19}$/.test(revision) ||
+      typeof digest !== 'string' || digest.length > 1024 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(digest) ||
+      !Number.isFinite(expiresAt)) {
+    throw new ApiError(200, '服务返回的清理预检凭证有误。')
+  }
+  return { entryId, revision, digest, expiresAt, fileCount, directoryCount, logicalBytes }
+}
+
+export async function confirmPurge(accessToken: string, preview: PurgePreview, idempotencyKey: string): Promise<void> {
+  // 1. 原样提交用户看过的预检版本和凭证。
+  const path = `/api/v1/trash/${encodeURIComponent(preview.entryId)}`
+  const data = await requestData(path, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Idempotency-Key': idempotencyKey,
+      'X-CloudNest-Expected-Revision': preview.revision,
+      'X-CloudNest-Purge-Preview': preview.digest,
+    },
+    redirect: 'error',
+  }, 202)
+
+  // 2. 核对受理的是同一目标，进度地址留给后续只读查询。
+  if (data.entry_id !== preview.entryId || data.status !== 'PURGING' || data.progress_url !== `${path}/purge`) {
+    throw new ApiError(202, '服务返回的清理受理结果有误。')
+  }
 }
 
 interface EntryRestore {
