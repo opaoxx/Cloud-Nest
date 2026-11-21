@@ -50,27 +50,18 @@ func (store *Store) CreatePublishedFileEntry(ctx context.Context, task *domain.U
 		ObjectID: input.ObjectID, FileSize: input.SizeBytes, SourceDeviceID: input.SourceDeviceID, SourceDeviceName: input.SourceDeviceName,
 	}
 
-	// 2. 复查当前任务、父目录、对象和来源设备。
+	// 2. 复查当前任务、分片会话和租约，再核对父目录、对象和来源设备。
+	if task.UploadMode != "SINGLE" && task.UploadMode != "MULTIPART" {
+		return nil, domain.ErrUploadTaskNotReady
+	}
 	lockedStore := *store
 	lockedStore.database = store.database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"})
-	current, err := lockedStore.FindUserUploadTask(ctx, userID, task.ID)
+	current, err := lockedStore.findVerifyingUploadWithFullReservation(ctx, task, task.UploadMode)
 	if err != nil {
 		return nil, err
 	}
-	if current.Status != domain.UploadStatusVerifying || current.UploadMode != "SINGLE" {
-		return nil, domain.ErrUploadTaskNotReady
-	}
-	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
-		current.LeaseUntil == nil || current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner {
-		return nil, domain.ErrUploadTaskBusy
-	}
-	if current.TargetParentID != record.ParentID || current.DeviceID != record.SourceDeviceID || current.FileSize != record.FileSize ||
-		current.ReservedBytes != current.FileSize || current.PublishedObjectID != nil || current.ResultEntryID != nil ||
-		current.ResolvedName != nil || current.CompletedAt != nil {
+	if current.TargetParentID != record.ParentID || current.DeviceID != record.SourceDeviceID || current.FileSize != record.FileSize {
 		return nil, domain.ErrInvalidUploadTaskData
-	}
-	if current.FileSize > domain.MaxSingleUploadSizeBytes {
-		return nil, domain.ErrUploadFileTooLarge
 	}
 	parent, err := store.FindUserFileEntry(ctx, userID, record.ParentID)
 	if err != nil {
@@ -89,7 +80,7 @@ func (store *Store) CreatePublishedFileEntry(ctx context.Context, task *domain.U
 	if err != nil {
 		return nil, err
 	}
-	if object.Status != domain.StoredObjectStatusReady || object.FileSize != record.FileSize {
+	if object.Status != domain.StoredObjectStatusReady || object.FileSize != record.FileSize || object.VerifiedSHA256 == nil {
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 	if current.ExpectedSHA256 != nil && *object.VerifiedSHA256 != *current.ExpectedSHA256 {
