@@ -110,8 +110,8 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	execute("INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
 	execute("INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(23,7,?,?,?,?)", settings.Provider, bucket.name, key, size)
 	execute(`INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,
-		expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at)
-		VALUES(19,7,11,23,13,'fixture.bin','MULTIPART',UNHEX(REPEAT('ab',32)),?,16777216,2,'CREATING',?,UTC_TIMESTAMP(6)+INTERVAL 1 DAY)`, size, size)
+		expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at,attempt_count)
+		VALUES(19,7,11,23,13,'fixture.bin','MULTIPART',UNHEX(REPEAT('ab',32)),?,16777216,2,'CREATING',?,UTC_TIMESTAMP(6)+INTERVAL 1 DAY,5)`, size, size)
 	read := func(callContext context.Context) *domain.UploadTask {
 		t.Helper()
 		task, err := store.FindUserUploadTask(callContext, 7, 19)
@@ -152,7 +152,8 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	}
 	newProcessor := func(createSession func(context.Context, string) (string, error)) *service.MultipartUploadInitializationProcessor {
 		return service.NewMultipartUploadInitializationProcessor(settings.Provider, settings.Bucket,
-			store.ClaimMultipartUploadInitializationLease, store.FindUserStoredObject, createSession, store.BindMultipartUploadSession)
+			store.ClaimMultipartUploadInitializationLease, store.FindUserStoredObject, createSession,
+			store.BindMultipartUploadSession, store.ScheduleMultipartUploadInitializationRetry)
 	}
 	checkQuota := func(task *domain.UploadTask) {
 		t.Helper()
@@ -166,7 +167,7 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		t.Helper()
 		task := read(ctx)
 		checkQuota(task)
-		if task.Status != domain.UploadStatusCreating || task.StorageUploadID != nil || task.LeaseVersion != version ||
+		if task.Status != domain.UploadStatusCreating || task.StorageUploadID != nil || task.LeaseVersion != version || task.AttemptCount != 6 ||
 			task.LeaseOwner == nil || *task.LeaseOwner != worker {
 			t.Fatal("失败后未保留可恢复的初始化任务")
 		}
@@ -174,18 +175,30 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		execute("UPDATE upload_tasks SET lease_until=UTC_TIMESTAMP(6) WHERE user_id=7 AND id=19")
 	}
 
-	// 2. 分别模拟存储端已创建但响应超时，以及会话绑定事务回滚。
+	// 2. 存储端已创建但响应超时，登记重试并检查等待期间跳过扫描。
 	timeoutProcessor := newProcessor(func(callContext context.Context, objectKey string) (string, error) {
 		if _, err := create(callContext, objectKey); err != nil {
 			return "", err
 		}
 		return "", context.DeadlineExceeded
 	})
-	if result, err := timeoutProcessor.Process(ctx, scan(1)[0], worker); result != nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal("存储超时未按预期中断初始化", err)
+	scheduled, err := timeoutProcessor.Process(ctx, scan(1)[0], worker)
+	if err != nil || scheduled == nil || scheduled.Status != domain.UploadStatusCreating || scheduled.StorageUploadID != nil ||
+		scheduled.LeaseVersion != 1 || scheduled.LeaseOwner != nil || scheduled.LeaseUntil != nil || scheduled.AttemptCount != 6 ||
+		scheduled.NextAttemptAt == nil || !scheduled.NextAttemptAt.Equal(scheduled.UpdatedAt.Add(30*time.Second)) ||
+		scheduled.LastErrorCode == nil || *scheduled.LastErrorCode != "STORAGE_UNAVAILABLE" {
+		t.Fatal("存储超时未提交当前任务的重试安排", err)
 	}
-	checkRecoverable(1)
+	current := read(ctx)
+	if current.NextAttemptAt == nil || !current.NextAttemptAt.Equal(*scheduled.NextAttemptAt) ||
+		current.LeaseOwner != nil || current.LeaseUntil != nil || current.AttemptCount != 6 || current.StorageUploadID != nil {
+		t.Fatal("独立读回与已提交的重试安排不符")
+	}
+	checkQuota(current)
+	scan(0)
+	execute("UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6) WHERE user_id=7 AND id=19")
 
+	// 3. 模拟绑定事务回滚，存储重试次数保持本轮已登记的值。
 	processor := newProcessor(create)
 	execute("CREATE TRIGGER fixture_fail_bind BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.part_count=IF(NEW.status='UPLOADING',3,NEW.part_count)")
 	if result, err := processor.Process(ctx, scan(1)[0], worker); result != nil || !errors.Is(err, domain.ErrInvalidUploadTaskData) {
@@ -194,11 +207,12 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	execute("DROP TRIGGER fixture_fail_bind")
 	checkRecoverable(2)
 
-	// 3. 原任务重新领租并完成绑定，核对已提交任务与 MinIO 会话。
+	// 4. 原任务重新领租并完成绑定，核对已提交任务与 MinIO 会话。
 	candidate := scan(1)[0]
 	task, err := processor.Process(ctx, candidate, worker)
 	if err != nil || task == nil || task.ID != 19 || task.Status != domain.UploadStatusUploading || task.StorageUploadID == nil ||
-		len(createdIDs) != 3 || *task.StorageUploadID != createdIDs[2] || task.LeaseVersion != 3 || task.LeaseOwner != nil {
+		len(createdIDs) != 3 || *task.StorageUploadID != createdIDs[2] || task.LeaseVersion != 3 || task.LeaseOwner != nil ||
+		task.NextAttemptAt != nil || task.LastErrorCode != nil || task.AttemptCount != 6 {
 		t.Fatal("重新初始化未返回本轮绑定的已提交任务", err)
 	}
 	checkQuota(task)
@@ -218,6 +232,6 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	if err != nil || page.Key != key || page.UploadID != *task.StorageUploadID || len(page.ObjectParts) != 0 || page.ChecksumAlgorithm != "SHA256" {
 		t.Fatal("绑定的会话位置或 SHA256 算法不符", minio.ToErrorResponse(err).Code)
 	}
-	t.Logf("隔离 MySQL %s %s，MinIO %s %s，确认同一任务恢复、绑定 1 个会话并保留 2 个待核对会话",
+	t.Logf("隔离 MySQL %s %s，MinIO %s %s，确认 30 秒重试，同一任务最终绑定 1 个会话并保留 2 个待核对会话",
 		mysqlContainer[:12], databaseName, minioContainer[:12], bucket.name)
 }
