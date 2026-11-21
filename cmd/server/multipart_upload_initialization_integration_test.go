@@ -130,6 +130,16 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	}
 	core := minio.Core{Client: bucket.client}
 	var createdIDs []string
+	rememberSession := func(id string) {
+		createdIDs = append(createdIDs, id)
+		t.Cleanup(func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+			defer stop()
+			if err := core.AbortMultipartUpload(cleanup, bucket.name, key, id); err != nil {
+				t.Error("清理本轮隔离会话失败", minio.ToErrorResponse(err).Code)
+			}
+		})
+	}
 	create := func(callContext context.Context, objectKey string) (string, error) {
 		// 存储调用前，从独立连接读到已提交的租约和未绑定的任务。
 		task := read(callContext)
@@ -139,14 +149,7 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 		}
 		id, err := client.CreateMultipartUpload(callContext, objectKey)
 		if err == nil {
-			createdIDs = append(createdIDs, id)
-			t.Cleanup(func() {
-				cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-				defer stop()
-				if err := core.AbortMultipartUpload(cleanup, bucket.name, key, id); err != nil {
-					t.Error("清理本轮隔离会话失败", minio.ToErrorResponse(err).Code)
-				}
-			})
+			rememberSession(id)
 		}
 		return id, err
 	}
@@ -207,16 +210,19 @@ func TestServerMultipartUploadInitializationProcessIntegration(t *testing.T) {
 	execute("DROP TRIGGER fixture_fail_bind")
 	checkRecoverable(2)
 
-	// 4. 原任务重新领租并完成绑定，核对已提交任务与 MinIO 会话。
+	// 4. 使用正式服务装配完成绑定，核对已提交任务与 MinIO 会话。
 	candidate := scan(1)[0]
-	batch := service.NewMultipartUploadInitializationBatch(store.ListMultipartUploadInitializationCandidates, processor.Process)
-	summary, err = batch.RunOnce(ctx, 1, worker)
+	batch := newServerMultipartUploadInitializationBatch(store, client, settings)
+	summary, err = batch.RunOnce(ctx, multipartUploadInitializationBatchLimit, worker)
 	if err != nil || summary.Scanned != 1 || summary.Bound != 1 || summary.RetriesScheduled != 0 || len(summary.CandidateErrors) != 0 {
 		t.Fatal("本轮未汇总已提交的会话绑定", summary, err)
 	}
 	task := read(ctx)
-	if task.ID != 19 || task.Status != domain.UploadStatusUploading || task.StorageUploadID == nil ||
-		len(createdIDs) != 3 || *task.StorageUploadID != createdIDs[2] || task.LeaseVersion != 3 || task.LeaseOwner != nil ||
+	if task.StorageUploadID == nil || len(createdIDs) != 2 || *task.StorageUploadID == createdIDs[0] || *task.StorageUploadID == createdIDs[1] {
+		t.Fatal("服务装配未绑定本轮创建的新会话")
+	}
+	rememberSession(*task.StorageUploadID)
+	if task.ID != 19 || task.Status != domain.UploadStatusUploading || task.LeaseVersion != 3 || task.LeaseOwner != nil ||
 		task.NextAttemptAt != nil || task.LastErrorCode != nil || task.AttemptCount != 6 {
 		t.Fatal("重新初始化未提交本轮绑定的任务")
 	}
