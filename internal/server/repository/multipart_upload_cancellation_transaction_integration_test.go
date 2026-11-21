@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"testing"
@@ -11,10 +12,37 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
+const (
+	multipartCancellationFixtureSize    = domain.MaxSingleUploadSizeBytes + 1
+	multipartCancellationFixtureSession = "Fixture+A/= "
+)
+
+func resetMultipartUploadCancellationFixture(t *testing.T, ctx context.Context, pool *sql.DB) {
+	t.Helper()
+	const fileSize = multipartCancellationFixtureSize
+	// 1. 准备原任务期限已过但仍保有会话、对象和预占的已受理取消。
+	for _, setup := range []struct {
+		statement string
+		arguments []any
+	}{
+		{`UPDATE stored_objects SET status='STAGING',file_size=?,storage_etag=NULL,storage_version_id=NULL,
+			verified_at=NULL,verified_sha256=NULL,unreferenced_at=NULL,gc_after=NULL WHERE id=23`, []any{uint64(fileSize)}},
+		{`UPDATE users SET status='ACTIVE',used_storage=1024,reserved_storage=? WHERE id=7`, []any{uint64(fileSize + 512)}},
+		{`UPDATE upload_tasks SET status='CANCELLING',upload_mode='MULTIPART',staged_object_id=23,storage_upload_id=?,
+			file_size=?,part_size=?,part_count=2,expected_sha256=UNHEX(REPEAT('ab',32)),reserved_bytes=?,
+			published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
+			lease_owner=NULL,lease_until=NULL,lease_version=4,next_attempt_at=NULL,
+			expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND,updated_at=UTC_TIMESTAMP(6) WHERE id=19`,
+			[]any{multipartCancellationFixtureSession, uint64(fileSize), uint64(fileSize - 1), uint64(fileSize)}},
+	} {
+		if _, err := pool.ExecContext(ctx, setup.statement, setup.arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestWithMultipartUploadCancellationTransactionIntegration(t *testing.T) {
 	ctx, pool, store := prepareMultipartCompletionDatabase(t)
-	const fileSize = domain.MaxSingleUploadSizeBytes + 1
-	const rawSession = "Fixture+A/= "
 	execute := func(t *testing.T, statement string, arguments ...any) {
 		t.Helper()
 		if _, err := pool.ExecContext(ctx, statement, arguments...); err != nil {
@@ -23,15 +51,7 @@ func TestWithMultipartUploadCancellationTransactionIntegration(t *testing.T) {
 	}
 	reset := func(t *testing.T) {
 		t.Helper()
-		// 1. 构造已受理的分片任务，原任务期限已过，但仍保留会话、对象和预占。
-		execute(t, `UPDATE stored_objects SET status='STAGING',file_size=?,storage_etag=NULL,storage_version_id=NULL,
-			verified_at=NULL,verified_sha256=NULL,unreferenced_at=NULL,gc_after=NULL WHERE id=23`, fileSize)
-		execute(t, `UPDATE users SET status='ACTIVE',used_storage=1024,reserved_storage=? WHERE id=7`, fileSize+512)
-		execute(t, `UPDATE upload_tasks SET status='CANCELLING',upload_mode='MULTIPART',staged_object_id=23,storage_upload_id=?,
-			file_size=?,part_size=?,part_count=2,expected_sha256=UNHEX(REPEAT('ab',32)),reserved_bytes=?,
-			published_object_id=NULL,resolved_name=NULL,result_entry_id=NULL,completed_at=NULL,
-			lease_owner=NULL,lease_until=NULL,lease_version=4,next_attempt_at=NULL,
-			expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND,updated_at=UTC_TIMESTAMP(6) WHERE id=19`, rawSession, fileSize, fileSize-1, fileSize)
+		resetMultipartUploadCancellationFixture(t, ctx, pool)
 	}
 	scan := func(t *testing.T) domain.UploadCancellationCandidate {
 		t.Helper()
