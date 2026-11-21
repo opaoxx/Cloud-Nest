@@ -7,7 +7,6 @@ import (
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/repository/models"
-	"gorm.io/gorm/clause"
 )
 
 // ReadMultipartCompletionReceipts 返回当前合并租约对应的完整冻结回执。
@@ -17,31 +16,14 @@ func (store *Store) ReadMultipartCompletionReceipts(ctx context.Context, claimed
 	if store == nil || store.database == nil || ctx == nil {
 		return nil, fmt.Errorf("读取分片完成快照需要数据入口和上下文")
 	}
-	if !validMultipartCompletionLeaseSnapshot(claimed, domain.UploadStatusCompleting) || claimed.ExpectedSHA256 == nil ||
-		claimed.PartSize == nil || claimed.PartCount == nil || claimed.ReservedBytes != claimed.FileSize ||
-		!domain.ValidMultipartUploadLayout(claimed.FileSize, *claimed.PartSize, *claimed.PartCount) {
+	if !validMultipartMergeClaim(claimed) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	var receipts []domain.UploadPartReceipt
 	err := store.withActiveUserTransaction(ctx, claimed.UserID, func(txContext context.Context, txStore *Store) error {
-		lockedStore := *txStore
-		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
-		current, err := lockedStore.FindUserUploadTask(txContext, claimed.UserID, claimed.ID)
+		current, err := txStore.lockMultipartMergeTask(txContext, claimed)
 		if err != nil {
 			return err
-		}
-		if current.Status != domain.UploadStatusCompleting || current.UploadMode != "MULTIPART" {
-			return domain.ErrUploadTaskNotReady
-		}
-		if current.StagedObjectID != claimed.StagedObjectID || !sameUploadStorageText(current.StorageUploadID, claimed.StorageUploadID) ||
-			current.LeaseVersion != claimed.LeaseVersion || !sameUploadStorageText(current.LeaseOwner, claimed.LeaseOwner) || current.LeaseUntil == nil {
-			return domain.ErrUploadTaskBusy
-		}
-		if err := txStore.checkMultipartCompletionDeadlines(txContext, current); err != nil {
-			return err
-		}
-		if !sameMultipartUploadDeclaration(claimed, current) {
-			return domain.ErrInvalidUploadTaskData
 		}
 
 		// 2. 按分片编号读取回执，多读至多一条用于识别超出计划的记录。
@@ -88,7 +70,7 @@ func (store *Store) checkMultipartCompletionDeadlines(ctx context.Context, task 
 		return err
 	}
 	if queryError != nil {
-		return fmt.Errorf("读取分片完成快照的数据库时间失败: %w", queryError)
+		return fmt.Errorf("读取分片合并租约的数据库时间失败: %w", queryError)
 	}
 	if now.Year() < 1000 || now.Year() > 9999 || now.Nanosecond()%1000 != 0 {
 		return domain.ErrInvalidUploadTaskData
