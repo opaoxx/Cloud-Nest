@@ -138,12 +138,17 @@ func (lockedStore *Store) findCreatingMultipartWithLease(ctx context.Context, cl
 
 // sameMultipartUploadDeclaration 核对已具备分片计划的任务及其写回保留原声明、预占和未发布事实。
 func sameMultipartUploadDeclaration(before, after *domain.UploadTask) bool {
-	return after.FileSize == before.FileSize && after.ReservedBytes == before.ReservedBytes &&
+	return sameMultipartUploadPlan(before, after) && after.ReservedBytes == before.ReservedBytes &&
+		after.PublishedObjectID == nil && after.ResolvedName == nil && after.ResultEntryID == nil && after.CompletedAt == nil
+}
+
+// sameMultipartUploadPlan 核对分片计划、文件声明及任务原有目标。
+func sameMultipartUploadPlan(before, after *domain.UploadTask) bool {
+	return after.FileSize == before.FileSize &&
 		after.PartSize != nil && *after.PartSize == *before.PartSize &&
 		after.PartCount != nil && *after.PartCount == *before.PartCount &&
 		after.ExpectedSHA256 != nil && *after.ExpectedSHA256 == *before.ExpectedSHA256 &&
 		after.DeviceID == before.DeviceID && after.TargetParentID == before.TargetParentID &&
-		after.RequestedName == before.RequestedName && after.PublishedObjectID == nil &&
-		after.ResolvedName == nil && after.ResultEntryID == nil && after.CompletedAt == nil &&
+		after.RequestedName == before.RequestedName &&
 		after.CreatedAt.Equal(before.CreatedAt) && after.ExpiresAt.Equal(before.ExpiresAt)
 }

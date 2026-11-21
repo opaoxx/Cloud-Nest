@@ -7,17 +7,10 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// UploadMergeMissingSessionObservation 记录同一租约下原会话和对象均未查到。
-// 后续处理还须确认存储合并已结束，并按当前租约复核写回资格。
-type UploadMergeMissingSessionObservation struct {
-	Task      domain.UploadTask
-	ObjectKey string
-}
-
 // UploadMergeMissingSessionResult 只读结果中恰有一项，原对象已完成或本轮观察到两者均缺失。
 type UploadMergeMissingSessionResult struct {
 	Recovered *UploadMergeRecoveryObservation
-	Missing   *UploadMergeMissingSessionObservation
+	Missing   *domain.UploadMergeMissingSessionObservation
 }
 
 // CheckMissingSession 在存储报告会话缺失后，复核原会话、对象和当前租约。
@@ -62,6 +55,6 @@ func (preflight *UploadMergePreflightService) CheckMissingSession(ctx context.Co
 		return nil, err
 	}
 	return &UploadMergeMissingSessionResult{
-		Missing: &UploadMergeMissingSessionObservation{Task: *copyUploadTask(claimed), ObjectKey: target.ObjectKey},
+		Missing: &domain.UploadMergeMissingSessionObservation{Task: *copyUploadTask(claimed), ObjectKey: target.ObjectKey},
 	}, nil
 }
