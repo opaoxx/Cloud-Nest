@@ -18,8 +18,8 @@ import (
 type Client struct {
 	// sdkClient 承载签名请求，SDK 类型不向 HTTP 层暴露。
 	sdkClient *minio.Client
-	// downloadSigner 使用客户端可访问的地址生成短期 GET 签名。
-	downloadSigner *minio.Client
+	// publicSigner 使用客户端可访问的地址生成下载和分片上传签名。
+	publicSigner *minio.Client
 	// transport 由本客户端独占，供失败和退出时清理空闲连接。
 	transport *http.Transport
 	// bucket 是已经过配置校验的目标桶名。
@@ -81,7 +81,7 @@ func NewClient(ctx context.Context, storageConfig config.StorageConfig) (*Client
 	if publicEndpoint == nil {
 		publicEndpoint = storageConfig.EndpointURL
 	}
-	client.downloadSigner, err = minio.New(publicEndpoint.Host, &minio.Options{
+	client.publicSigner, err = minio.New(publicEndpoint.Host, &minio.Options{
 		Creds:        identity,
 		Secure:       publicEndpoint.Scheme == "https",
 		Transport:    transport,
@@ -91,7 +91,7 @@ func NewClient(ctx context.Context, storageConfig config.StorageConfig) (*Client
 	})
 	if err != nil {
 		client.Close()
-		return nil, fmt.Errorf("创建 MinIO 下载签名客户端失败，请检查客户端访问地址")
+		return nil, fmt.Errorf("创建 MinIO 公开地址签名客户端失败，请检查客户端访问地址")
 	}
 	return client, nil
 }
