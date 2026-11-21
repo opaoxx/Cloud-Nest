@@ -47,8 +47,7 @@ func (store *Store) withUploadVerificationResultTransaction(
 		return domain.ErrInvalidUploadTaskData
 	}
 	uploadMode := verifiedTask.UploadMode
-	// Multipart 复核校验通过和已确认的大小失配两种结果。
-	multipart := uploadMode == "MULTIPART" && !expectChecksumMismatch
+	multipart := uploadMode == "MULTIPART"
 	if verifiedTask.Status != domain.UploadStatusVerifying || (uploadMode != "SINGLE" && !multipart) {
 		return domain.ErrUploadTaskNotReady
 	}

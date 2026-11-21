@@ -29,10 +29,11 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 		return err
 	}
 	userID := store.loginUserID
-	// Multipart 的大小失配与目标不可用共用这条失败写回路径。
+	// 两种上传模式共用这三类已确认失败的写回路径。
 	uploadMode := "SINGLE"
 	if task != nil && task.UploadMode == "MULTIPART" &&
-		(errorCode == domain.UploadTargetUnavailableCode || errorCode == domain.UploadBodySizeMismatchCode) {
+		(errorCode == domain.UploadTargetUnavailableCode || errorCode == domain.UploadBodySizeMismatchCode ||
+			errorCode == domain.UploadChecksumMismatchCode) {
 		uploadMode = "MULTIPART"
 	}
 	lockedStore := *store
