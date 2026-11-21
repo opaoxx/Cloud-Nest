@@ -1,4 +1,4 @@
-// Command database applies the reviewed initial schema and optionally seeds a local account.
+// Command database applies the reviewed schema migrations and optionally seeds a local account.
 package main
 
 import (
@@ -82,25 +82,39 @@ func run(databaseName string, seed bool) error {
 			return err
 		}
 	}
-	fmt.Printf("Database %s is at schema version %d.\n", databaseName, expectedMigrations[0].Version)
+	fmt.Printf("Database %s is at schema version %d.\n", databaseName, expectedMigrations[len(expectedMigrations)-1].Version)
 	return nil
 }
 
 func migrate(ctx context.Context, connection *sql.Conn, expectedMigrations []migrations.Migration) error {
-	// 1. 在写入或执行 DDL 前，核对已应用记录是否与清单开头连续匹配。
+	// 1. 核对历史，确定第一个待执行版本的位置。
 	appliedCount, err := readAppliedMigrationCount(ctx, connection, expectedMigrations)
 	if err != nil {
 		return err
 	}
-
-	// 2. 当前命令只执行首期迁移。历史已覆盖该版本时直接返回。
-	initialMigration := expectedMigrations[0]
-	if appliedCount > 0 {
-		fmt.Printf("Migration %d already applied; checksum verified.\n", initialMigration.Version)
+	if appliedCount == len(expectedMigrations) {
+		fmt.Printf("Migration %d already applied; checksum verified.\n", expectedMigrations[appliedCount-1].Version)
 		return nil
 	}
 
-	// 3. 业务库为空时才准备迁移表，按 dirty → 执行 SQL → 完成的顺序初始化。
+	// 2. 仅首次迁移需要校验空业务库并准备迁移表。
+	if appliedCount == 0 {
+		if err := prepareInitialSchema(ctx, connection); err != nil {
+			return err
+		}
+	}
+
+	// 3. 沿清单顺序执行剩余迁移，首个错误会阻止后续版本。
+	for _, migration := range expectedMigrations[appliedCount:] {
+		if err := applyMigration(ctx, connection, migration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// prepareInitialSchema 确认业务库为空后准备迁移表，避免在未登记的已有结构上初始化。
+func prepareInitialSchema(ctx context.Context, connection *sql.Conn) error {
 	var otherTables int
 	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name <> 'schema_migrations'").Scan(&otherTables); err != nil {
 		return err
@@ -108,26 +122,34 @@ func migrate(ctx context.Context, connection *sql.Conn, expectedMigrations []mig
 	if otherTables != 0 {
 		return errors.New("initial migration requires an empty business schema; existing tables need explicit reconciliation")
 	}
-	if _, err := connection.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	_, err := connection.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
  version BIGINT UNSIGNED NOT NULL PRIMARY KEY COMMENT '迁移版本',
  name VARCHAR(255) NOT NULL COMMENT '迁移文件',
  checksum CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '迁移内容SHA256',
  dirty BOOLEAN NOT NULL COMMENT '部分执行标记',
  started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '开始时间UTC',
  applied_at DATETIME(6) NULL COMMENT '成功时间UTC'
- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据库结构迁移记录'`); err != nil {
-		return err
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据库结构迁移记录'`)
+	return err
+}
+
+// applyMigration 执行一项迁移，开始和完成分别记录，保留失败时已提交的 DDL 边界。
+func applyMigration(ctx context.Context, connection *sql.Conn, migration migrations.Migration) error {
+	// 1. 先持久化 dirty 标记，以便进程中断后识别未完成版本。
+	if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,checksum,dirty) VALUES(?,?,?,true)", migration.Version, migration.Name, migration.Checksum()); err != nil {
+		return fmt.Errorf("record start of migration %d: %w", migration.Version, err)
 	}
-	if _, err := connection.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,checksum,dirty) VALUES(?,?,?,true)", initialMigration.Version, initialMigration.Name, initialMigration.Checksum()); err != nil {
-		return err
+
+	// 2. 执行该版本的内嵌 SQL，出错即保留现场。
+	if _, err := connection.ExecContext(ctx, migration.SQL); err != nil {
+		return fmt.Errorf("migration %d failed and is marked dirty: %w", migration.Version, err)
 	}
-	if _, err := connection.ExecContext(ctx, initialMigration.SQL); err != nil {
-		return fmt.Errorf("migration failed and is marked dirty: %w", err)
+
+	// 3. 全部语句成功后才清除 dirty，并记录完成时间。
+	if _, err := connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false, applied_at=UTC_TIMESTAMP(6) WHERE version=?", migration.Version); err != nil {
+		return fmt.Errorf("record completion of migration %d: %w", migration.Version, err)
 	}
-	if _, err := connection.ExecContext(ctx, "UPDATE schema_migrations SET dirty=false, applied_at=UTC_TIMESTAMP(6) WHERE version=?", initialMigration.Version); err != nil {
-		return err
-	}
-	fmt.Printf("Migration %d applied successfully.\n", initialMigration.Version)
+	fmt.Printf("Migration %d applied successfully.\n", migration.Version)
 	return nil
 }
 

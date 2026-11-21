@@ -33,6 +33,7 @@ func verificationDB(t *testing.T) *sql.DB {
 	config.Net = "tcp"
 	config.Addr = envOrDefault("CLOUDNEST_DB_ADDRESS", "127.0.0.1:13309")
 	config.DBName = name
+	config.MultiStatements = true
 	config.ParseTime = true
 	config.Params = map[string]string{"charset": "utf8mb4", "time_zone": "'+00:00'"}
 	database, err := sql.Open("mysql", config.FormatDSN())
