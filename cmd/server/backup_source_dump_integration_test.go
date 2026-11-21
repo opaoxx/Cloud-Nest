@@ -38,7 +38,7 @@ func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture bac
 	}
 	verifyBackupSourceStopped(t, fixture.api.baseURL, logs)
 	stoppedAt := time.Now().UTC()
-	t.Logf("停写确认：UTC %s 至 %s，HTTP 及六个 worker 已停止，连接池在 worker 后关闭",
+	t.Logf("停写确认：UTC %s 至 %s，HTTP 及所有 worker 已停止，连接池在 worker 后关闭",
 		startedAt.Format(time.RFC3339Nano), stoppedAt.Format(time.RFC3339Nano))
 
 	// 2. 从停止写入的专用库记录基线，再导出全部结构和数据。
@@ -66,7 +66,7 @@ func verifyBackupSourceStopped(t *testing.T, baseURL, logs string) {
 	if httpStopped < 0 || storageClosed <= httpStopped || databaseClosed <= storageClosed {
 		t.Fatal("源端 HTTP 和连接资源未按顺序关闭")
 	}
-	for _, worker := range []string{"上传校验", "上传过期", "上传取消", "永久清理", "对象回收", "回收站到期标记"} {
+	for _, worker := range []string{"上传校验", "上传过期", "上传取消", "永久清理", "对象回收", "回收站到期标记", "分片上传初始化"} {
 		workerStopped := strings.Index(logs, worker+" worker 已停止")
 		if workerStopped < 0 || workerStopped >= storageClosed {
 			t.Fatal("源端 worker 未在依赖关闭前退出", worker)

@@ -671,7 +671,12 @@ func runWithPurgeRootWorker(
 	stopExpiredTrashRoots := startServerExpiredTrashRootWorker(ctx, expiredTrashRoots.RunOnce, logger)
 	defer stopExpiredTrashRoots()
 
-	// 37. 启动 HTTP 并处理退出通知。
+	// 37. 启动分片初始化，退出时先等待 worker，再清理 MinIO 和 MySQL 连接。
+	multipartInitialization := newServerMultipartUploadInitializationBatch(store, storageClient, storageConfig)
+	stopMultipartInitialization := startServerMultipartUploadInitializationWorker(ctx, multipartInitialization.RunOnce, logger)
+	defer stopMultipartInitialization()
+
+	// 38. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
