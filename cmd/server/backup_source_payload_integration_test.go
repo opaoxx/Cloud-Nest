@@ -24,9 +24,19 @@ func TestServerBackupSourcePayloadIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	fixture := prepareBackupSource(t, ctx)
-	verifyBackupSourceBaseline(t, ctx, fixture)
+	root, manifest := prepareBackupSourceBundle(t, ctx, fixture)
 
-	// 1. 在同一停写窗口准备 SQL 和清单，在它们旁边创建正文目录。
+	// 1. 用清单的副本模拟异常，确认失败没有留下可用的正文文件。
+	verifyBackupPayloadRejections(t, ctx, fixture.bucket, root, manifest.Objects[0])
+
+	// 2. 按正确版本保存全部正文，再从磁盘读取并核对清单。
+	saveAndVerifyBackupSourcePayloads(t, ctx, fixture.bucket, root, manifest.Objects)
+}
+
+func prepareBackupSourceBundle(t *testing.T, ctx context.Context, fixture backupSourceFixture) (*os.Root, backupSourceManifest) {
+	t.Helper()
+	// 在同一停写窗口准备 SQL 和清单，在它们旁边创建正文目录。
+	verifyBackupSourceBaseline(t, ctx, fixture)
 	backupDir := t.TempDir()
 	dump := stopAndExportBackupSourceSQL(t, ctx, fixture, backupDir)
 	manifest := writeAndVerifyBackupSourceManifest(t, ctx, fixture, backupDir, dump)
@@ -34,21 +44,25 @@ func TestServerBackupSourcePayloadIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Error("关闭临时备份目录失败", err)
+		}
+	})
 	if err := root.Mkdir("objects", 0o700); err != nil {
 		t.Fatal(err)
 	}
+	return root, manifest
+}
 
-	// 2. 用清单的副本模拟异常，确认失败没有留下可用的正文文件。
-	verifyBackupPayloadRejections(t, ctx, fixture.bucket, root, manifest.Objects[0])
-
-	// 3. 按正确版本保存全部正文，再从磁盘读取并核对清单。
-	for _, object := range manifest.Objects {
-		if err := saveBackupObjectPayload(ctx, fixture.bucket, root, object); err != nil {
+func saveAndVerifyBackupSourcePayloads(t *testing.T, ctx context.Context, bucket *serverUploadContentBucket, root *os.Root, objects []backupManifestObject) {
+	t.Helper()
+	for _, object := range objects {
+		if err := saveBackupObjectPayload(ctx, bucket, root, object); err != nil {
 			t.Fatalf("保存对象 %d 的正文失败：%v", object.ID, err)
 		}
 	}
-	verifySavedBackupPayloads(t, root, manifest.Objects)
+	verifySavedBackupPayloads(t, root, objects)
 }
 
 func saveBackupObjectPayload(ctx context.Context, source *serverUploadContentBucket, root *os.Root, object backupManifestObject) (returnErr error) {
