@@ -24,10 +24,13 @@ type MultipartUploadCleanupTarget struct {
 	UploadID *string
 }
 
-// MultipartUploadCancellationObservation 保存与任务、租约及原存储绑定匹配的观察。
+// MultipartUploadCancellationObservation 是取消收尾使用的存储观察。
+type MultipartUploadCancellationObservation = MultipartUploadCleanupObservation
+
+// MultipartUploadCleanupObservation 保存与任务、租约及原存储绑定匹配的观察。
 // Object 为 nil 表示原对象明确缺失；若 Task 已绑定会话，也已确认该会话缺失。
 // Task 尚未绑定时，可能存在未关联会话，由独立的孤儿会话流程处理。
-type MultipartUploadCancellationObservation struct {
+type MultipartUploadCleanupObservation struct {
 	Task      UploadTask
 	ObjectKey string
 	Object    *UploadObjectResult

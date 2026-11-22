@@ -23,6 +23,18 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_MULTIPART_CANCEL_STORAGE_TEST") != "1" {
 		t.Skip("显式启用后创建本轮专用 MySQL、MinIO 和合成数据")
 	}
+	verifyServerMultipartBoundCleanupStorage(t, domain.UploadStatusCancelling)
+}
+
+func TestServerMultipartExpirationStorageIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_MULTIPART_EXPIRATION_STORAGE_TEST") != "1" {
+		t.Skip("显式启用后验证专用桶中的分片到期存储复查")
+	}
+	verifyServerMultipartBoundCleanupStorage(t, domain.UploadStatusExpiring)
+}
+
+func verifyServerMultipartBoundCleanupStorage(t *testing.T, pendingStatus domain.UploadStatus) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	mysqlID := startIsolatedWebMySQL(t, ctx)
@@ -48,7 +60,7 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 	t.Cleanup(httpClient.CloseIdleConnections)
 	core := minio.Core{Client: bucket.client}
 
-	// 1. 创建合成账号、暂存对象及已受理的取消，用正式仓储领取处理租约。
+	// 1. 创建合成账号、暂存对象及待处理的分片任务，用正式仓储领取租约。
 	const userID, usedBytes = 7, 1024
 	const partSize, fileSize = 16 << 20, (16 << 20) + 1
 	const reservedBytes = 4 * fileSize
@@ -105,15 +117,28 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 			}
 			execute(t, "INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(?,7,?,?,?,?)",
 				fixture.stagedObjectID, settings.Provider, bucket.name, fixture.key, fileSize)
+			initialStatus := pendingStatus
+			if pendingStatus == domain.UploadStatusExpiring {
+				initialStatus = domain.UploadStatusCompleting
+			}
 			execute(t, `INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,storage_upload_id,
 				expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at)
-				VALUES(?,7,11,?,13,'fixture.bin','MULTIPART',?,?,?,?,2,'CANCELLING',?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
-				fixture.taskID, fixture.stagedObjectID, uploadID, expectedSHA256[:], fileSize, partSize, fileSize)
-			candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
-			if err != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
-				t.Fatal("没有获取本项取消候选", candidates, err)
+				VALUES(?,7,11,?,13,'fixture.bin','MULTIPART',?,?,?,?,2,?,?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
+				fixture.taskID, fixture.stagedObjectID, uploadID, expectedSHA256[:], fileSize, partSize, initialStatus, fileSize)
+			var claimed *domain.UploadTask
+			if pendingStatus == domain.UploadStatusExpiring {
+				candidates, scanError := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+				if scanError != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
+					t.Fatal("没有获取本项到期候选", candidates, scanError)
+				}
+				claimed, err = store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-expiration-observer")
+			} else {
+				candidates, scanError := store.ListMultipartUploadCancellationCandidates(ctx, 1)
+				if scanError != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
+					t.Fatal("没有获取本项取消候选", candidates, scanError)
+				}
+				claimed, err = store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-cancel-observer")
 			}
-			claimed, err := store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-abort-observer")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -128,22 +153,30 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 				verify = nil
 			}
 			var aborts int
-			execution := service.NewMultipartUploadCancellationStorageService(
-				func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
-					return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
-				},
-				func(callContext context.Context, objectKey, uploadID string) error {
-					aborts++
-					return client.AbortMultipartUpload(callContext, objectKey, uploadID)
-				},
-				func(callContext context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
-					observed, err := client.CheckMultipartUploadAfterAbort(callContext, objectKey, uploadID, verify)
-					if err == nil && observed != nil && fixture.replaceLease {
-						execute(t, "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE user_id=7 AND id=?", fixture.taskID)
-					}
-					return observed, err
-				}, client.StatMultipartUploadObject)
-			observed, err := execution.ObserveBoundSession(ctx, claimed)
+			abort := func(callContext context.Context, objectKey, uploadID string) error {
+				aborts++
+				return client.AbortMultipartUpload(callContext, objectKey, uploadID)
+			}
+			check := func(callContext context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
+				observed, err := client.CheckMultipartUploadAfterAbort(callContext, objectKey, uploadID, verify)
+				if err == nil && observed != nil && fixture.replaceLease {
+					execute(t, "UPDATE upload_tasks SET lease_version=lease_version+1 WHERE user_id=7 AND id=?", fixture.taskID)
+				}
+				return observed, err
+			}
+			var observe func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCleanupObservation, error)
+			if pendingStatus == domain.UploadStatusExpiring {
+				observe = service.NewMultipartUploadExpirationStorageService(
+					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+						return store.FindMultipartUploadExpirationTarget(callContext, task, settings.Provider, settings.Bucket)
+					}, abort, check).ObserveBoundSession
+			} else {
+				observe = service.NewMultipartUploadCancellationStorageService(
+					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
+						return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
+					}, abort, check, client.StatMultipartUploadObject).ObserveBoundSession
+			}
+			observed, err := observe(ctx, claimed)
 			if aborts != 1 {
 				t.Fatal("单次执行的中止请求次数错误", aborts)
 			}
@@ -168,6 +201,12 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 			if _, err := client.ListUploadPartsPage(ctx, fixture.key, uploadID, 0, 1); !errors.Is(err, domain.ErrUploadPartSessionMissing) {
 				t.Fatal("原合成会话仍可读取或结果不明", err)
 			}
+			if fixture.completed {
+				object, err := bucket.client.StatObject(ctx, bucket.name, fixture.key, minio.StatObjectOptions{VersionID: existing.VersionID})
+				if err != nil || object.VersionID != existing.VersionID || object.ETag != existing.ETag || object.Size != fileSize {
+					t.Fatal("原合成对象版本未保留", err)
+				}
+			}
 			taskAfter, err := store.FindUserUploadTask(ctx, userID, fixture.taskID)
 			want := *claimed
 			if fixture.replaceLease {
@@ -186,5 +225,5 @@ func TestServerMultipartCancellationStorageIntegration(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("四种合成场景各中止一次，账目保持已用 %d B、预占 %d B", usedBytes, reservedBytes)
+	t.Logf("%s 四种合成场景各中止一次，账目保持已用 %d B、预占 %d B", pendingStatus, usedBytes, reservedBytes)
 }

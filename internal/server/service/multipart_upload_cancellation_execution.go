@@ -92,5 +92,5 @@ func sameMultipartCancellationTaskBinding(current, claimed *domain.UploadTask) b
 	return current.ID == claimed.ID && current.UserID == claimed.UserID && current.StagedObjectID == claimed.StagedObjectID &&
 		current.UploadMode == claimed.UploadMode && current.LeaseVersion == claimed.LeaseVersion &&
 		current.FileSize == claimed.FileSize && current.ExpiresAt.Equal(claimed.ExpiresAt) &&
-		sameMultipartCancellationSession(current.StorageUploadID, claimed.StorageUploadID)
+		sameMultipartCleanupSession(current.StorageUploadID, claimed.StorageUploadID)
 }

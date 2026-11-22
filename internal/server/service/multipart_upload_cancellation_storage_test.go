@@ -13,11 +13,24 @@ import (
 )
 
 func TestObserveBoundMultipartUploadCancellationSession(t *testing.T) {
+	testObserveBoundMultipartUploadCleanupSession(t, domain.UploadStatusCancelling)
+}
+
+func TestObserveBoundMultipartUploadExpirationSession(t *testing.T) {
+	testObserveBoundMultipartUploadCleanupSession(t, domain.UploadStatusExpiring)
+}
+
+func testObserveBoundMultipartUploadCleanupSession(t *testing.T, pendingStatus domain.UploadStatus) {
+	t.Helper()
 	const key, session = "fixture/original +%.bin", "Opaque+A/= "
 	const version, etag = "Version+A/=", "observed-etag"
 	const fullFlow = "target abort check target"
 	unknown := domain.ErrUploadStorageUnavailable
 	busy := domain.ErrUploadTaskBusy
+	otherCleanupPhase := domain.UploadStatusExpiring
+	if pendingStatus == domain.UploadStatusExpiring {
+		otherCleanupPhase = domain.UploadStatusCancelling
+	}
 	for _, fixture := range []struct {
 		name, calls, cancelAt        string
 		firstError, recheckError     error
@@ -52,11 +65,12 @@ func TestObserveBoundMultipartUploadCancellationSession(t *testing.T) {
 		{name: "unbound session", changeTask: func(task *domain.UploadTask) { task.StorageUploadID = nil }, want: domain.ErrUploadTaskNotReady},
 		{name: "invalid session", changeTask: func(task *domain.UploadTask) { task.StorageUploadID = new(" ") }, want: domain.ErrInvalidUploadTaskData},
 		{name: "other phase", changeTask: func(task *domain.UploadTask) { task.Status = domain.UploadStatusUploading }, want: domain.ErrInvalidUploadTaskData},
+		{name: "other cleanup phase", changeTask: func(task *domain.UploadTask) { task.Status = otherCleanupPhase }, want: domain.ErrInvalidUploadTaskData},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			task := &domain.UploadTask{ID: 19, UserID: 7, StagedObjectID: 23, Status: domain.UploadStatusCancelling,
+			task := &domain.UploadTask{ID: 19, UserID: 7, StagedObjectID: 23, Status: pendingStatus,
 				UploadMode: "MULTIPART", StorageUploadID: new(session), LeaseOwner: new("fixture-worker"), LeaseVersion: 5,
 				LeaseUntil: new(time.Now().UTC().Add(time.Minute)), FileSize: 16777217}
 			if fixture.changeTask != nil {
@@ -69,70 +83,74 @@ func TestObserveBoundMultipartUploadCancellationSession(t *testing.T) {
 			var calls []string
 			var lookups int
 			stored := &domain.UploadObjectResult{SizeBytes: 29, StorageETag: new(etag), StorageVersionID: new(version)}
-			execution := NewMultipartUploadCancellationStorageService(
-				func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
-					calls = append(calls, "target")
-					lookups++
-					if callContext != ctx || !reflect.DeepEqual(claimed, task) {
-						t.Fatal("目标查询没有使用原租约或上下文")
-					}
-					if (lookups == 1 && fixture.cancelAt == "target") || (lookups == 2 && fixture.cancelAt == "final") {
-						cancel()
-					}
-					if lookups == 1 && fixture.firstError != nil {
-						return nil, fixture.firstError
-					}
-					if lookups == 2 && fixture.recheckError != nil {
-						return nil, fixture.recheckError
-					}
-					if fixture.noTarget {
-						return nil, nil
-					}
-					target := &domain.MultipartUploadCancellationTarget{ObjectKey: key, UploadID: new(session)}
-					if lookups == 2 && fixture.changeKey {
-						target.ObjectKey = "fixture/replacement"
-					}
-					if lookups == fixture.changeSessionAt {
-						target.UploadID = new(strings.TrimSpace(session))
-					}
-					return target, nil
-				},
-				func(callContext context.Context, objectKey, uploadID string) error {
-					calls = append(calls, "abort")
-					if callContext != ctx || objectKey != key || uploadID != session {
-						t.Fatal("中止未保留原始对象键或会话 ID")
-					}
-					if fixture.cancelAt == "abort" {
-						cancel()
-					}
-					return fixture.abortError
-				},
-				func(callContext context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
-					calls = append(calls, "check")
-					if callContext != ctx || objectKey != key || uploadID != session {
-						t.Fatal("复查没有沿用本轮目标")
-					}
-					if fixture.cancelAt == "check" {
-						cancel()
-					}
-					if fixture.checkError != nil || fixture.pending {
-						return nil, fixture.checkError
-					}
-					checked := &domain.MultipartUploadAbortObservation{}
-					if fixture.withObject {
-						checked.Object = stored
-					}
-					return checked, nil
-				},
-				func(context.Context, string) (*domain.UploadObjectResult, error) {
+			findTarget := func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+				calls = append(calls, "target")
+				lookups++
+				if callContext != ctx || !reflect.DeepEqual(claimed, task) {
+					t.Fatal("目标查询没有使用原租约或上下文")
+				}
+				if (lookups == 1 && fixture.cancelAt == "target") || (lookups == 2 && fixture.cancelAt == "final") {
+					cancel()
+				}
+				if lookups == 1 && fixture.firstError != nil {
+					return nil, fixture.firstError
+				}
+				if lookups == 2 && fixture.recheckError != nil {
+					return nil, fixture.recheckError
+				}
+				if fixture.noTarget {
+					return nil, nil
+				}
+				target := &domain.MultipartUploadCancellationTarget{ObjectKey: key, UploadID: new(session)}
+				if lookups == 2 && fixture.changeKey {
+					target.ObjectKey = "fixture/replacement"
+				}
+				if lookups == fixture.changeSessionAt {
+					target.UploadID = new(strings.TrimSpace(session))
+				}
+				return target, nil
+			}
+			abort := func(callContext context.Context, objectKey, uploadID string) error {
+				calls = append(calls, "abort")
+				if callContext != ctx || objectKey != key || uploadID != session {
+					t.Fatal("中止未保留原始对象键或会话 ID")
+				}
+				if fixture.cancelAt == "abort" {
+					cancel()
+				}
+				return fixture.abortError
+			}
+			check := func(callContext context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
+				calls = append(calls, "check")
+				if callContext != ctx || objectKey != key || uploadID != session {
+					t.Fatal("复查没有沿用本轮目标")
+				}
+				if fixture.cancelAt == "check" {
+					cancel()
+				}
+				if fixture.checkError != nil || fixture.pending {
+					return nil, fixture.checkError
+				}
+				checked := &domain.MultipartUploadAbortObservation{}
+				if fixture.withObject {
+					checked.Object = stored
+				}
+				return checked, nil
+			}
+			var observe func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCleanupObservation, error)
+			if pendingStatus == domain.UploadStatusExpiring {
+				observe = NewMultipartUploadExpirationStorageService(findTarget, abort, check).ObserveBoundSession
+			} else {
+				observe = NewMultipartUploadCancellationStorageService(findTarget, abort, check, func(context.Context, string) (*domain.UploadObjectResult, error) {
 					t.Fatal("已绑定分支应通过会话复查读取对象")
 					return nil, nil
-				})
+				}).ObserveBoundSession
+			}
 			// 2. 核对调用顺序、中止次数及证据。粘连的可空字段不能影响原记录。
-			observed, err := execution.ObserveBoundSession(ctx, task)
+			observed, err := observe(ctx, task)
 			if got := strings.Join(calls, " "); got != fixture.calls || !errors.Is(err, fixture.want) ||
 				(observed != nil) != fixture.wantObservation {
-				t.Fatal("取消观察、调用顺序或错误不符", got, observed, err)
+				t.Fatal("存储观察、调用顺序或错误不符", got, observed, err)
 			}
 			if errors.Is(err, context.DeadlineExceeded) && errors.Is(err, domain.ErrUploadStorageUnavailable) != (fixture.firstError == nil) {
 				t.Fatal("未区分存储操作和目标查询的超时", err)
