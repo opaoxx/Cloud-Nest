@@ -251,21 +251,31 @@ func readServerMultipartPartTarget(t *testing.T, ctx context.Context, fixture ba
 
 func (target serverMultipartPartTarget) signPart(t *testing.T, ctx context.Context, api backupSourceClient, number uint32, contents []byte) (*url.URL, string) {
 	t.Helper()
+	uploadURL, checksum := requestMultipartFixturePartURL(t, ctx, api, target.taskPath, target.taskExpiration, number, contents)
+	if uploadURL.Path != "/"+target.bucket+"/"+target.objectKey || uploadURL.Query().Get("uploadId") != target.uploadID {
+		t.Fatal("签名没有绑定原会话和对象键", number)
+	}
+	return uploadURL, checksum
+}
+
+func requestMultipartFixturePartURL(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string,
+	taskExpiration time.Time, number uint32, contents []byte) (*url.URL, string) {
+	t.Helper()
 	// 1. 通过正式接口请求绑定完整正文摘要的单片签名。
 	checksum := multipartProbeSHA256(contents)
 	var signed dto.UploadPartURLsResponse
-	api.request(t, ctx, http.MethodPost, target.taskPath+"/part-urls", "",
+	api.request(t, ctx, http.MethodPost, taskPath+"/part-urls", "",
 		strings.NewReader(fmt.Sprintf(`{"parts":[{"part_number":%d,"sha256":"%x"}]}`, number, sha256.Sum256(contents))),
 		http.StatusOK, &signed)
-	if signed.RequestID == "" || len(signed.Data.Parts) != 1 || !signed.Data.ExpiresAt.Equal(target.taskExpiration) {
+	if signed.RequestID == "" || len(signed.Data.Parts) != 1 || !signed.Data.ExpiresAt.Equal(taskExpiration) {
 		t.Fatal("分片签发范围或任务期限不符", number)
 	}
 
-	// 2. 校验链接只能写入本轮回环存储中指定会话的预期分片。
+	// 2. 校验回环端点、分片编号、长度和必需校验头。
 	part := signed.Data.Parts[0]
 	uploadURL, err := url.Parse(part.URL)
 	if err != nil || uploadURL.Scheme+"://"+uploadURL.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") || uploadURL.User != nil ||
-		uploadURL.Path != "/"+target.bucket+"/"+target.objectKey || uploadURL.Query().Get("uploadId") != target.uploadID ||
+		uploadURL.Fragment != "" ||
 		uploadURL.Query().Get("partNumber") != fmt.Sprint(number) || part.PartNumber != number ||
 		part.SizeBytes != uint64(len(contents)) || part.RequiredHeaders.ChecksumSHA256 != checksum {
 		t.Fatal("签名没有限定在本轮隔离会话的预期分片", number)
