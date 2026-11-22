@@ -2234,3 +2234,17 @@ Trae 打开 cmd/database/main.go 时提示 could not import github.com/go-sql-dr
 ### 验证结果
 
 - 创建回执查找、复核和摘要专项重新编译并通过 20 轮。
+
+## 2026-11-23 · 快照首页单连接联测未能编译
+
+### 问题现象
+
+- 第 886 步首次联测编译在新增的空条目 JSON 夹具处报告 `undefined: json`。
+
+### 根因与修复
+
+- 联测使用 `json.RawMessage` 表示空条目数组，补齐 `encoding/json` 导入。
+
+### 验证结果
+
+- 联测重新编译并通过 3 轮，服务专项通过 20 轮。

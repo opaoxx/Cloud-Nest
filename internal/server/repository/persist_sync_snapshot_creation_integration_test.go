@@ -1,8 +1,10 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -173,5 +175,45 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	}
 	if actual := readDeviceState(); actual != committed {
 		t.Fatal("查找回执改变了同步设备的状态")
+	}
+
+	// 4. 单连接条件下，先释放查回执的事务，再读取已提交代次和原页。
+	clock := func() time.Time { return now }
+	cache := service.NewSyncSnapshotCache(clock)
+	reservation, err := cache.ReserveBuild(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt, err := cache.Put(ctx, reservation, binding, &service.BuiltSyncSnapshot{
+		Header:  domain.SyncSnapshotHeader{RootEntryID: 11, HighWaterSequence: 35},
+		Entries: domain.SyncSnapshotEntriesJSON{Items: []json.RawMessage{}, SizeBytes: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingKey := bytes.Repeat([]byte{0x65}, sha256.Size)
+	cursorSigner, err := service.NewSyncSnapshotCursorSigner(signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineSigner, err := service.NewSyncSnapshotBaselineSigner(signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageReader := service.NewSyncSnapshotReplayService(store.FindSyncDeviceGeneration, cache.Get,
+		service.NewSyncSnapshotPageDelivery(cursorSigner.Sign, baselineSigner.Sign))
+	replay := service.NewSyncSnapshotCreationReplay(
+		func(ctx context.Context, identity domain.Actor, action func(context.Context, service.SyncSnapshotReceiptReader) error) error {
+			return store.WithUserTransaction(ctx, identity, func(txContext context.Context, txStore *Store) error {
+				return action(txContext, txStore)
+			})
+		}, dto.DecodeCreateSyncSnapshotReceipt, pageReader, clock)
+	page, err := replay.ReadExistingFirstPage(ctx, actor, key, binding.PageSize)
+	if err != nil || page == nil || page.SnapshotID != binding.SnapshotID || page.Header.HighWaterSequence != 35 ||
+		page.ExpiresAt != expiresAt || page.BaselineToken == nil || page.NextCursor != nil {
+		t.Fatalf("单连接下同键重读返回 %+v，错误 %v", page, err)
+	}
+	if page, err := replay.ReadExistingFirstPage(ctx, actor, "Fresh-Snapshot-Request", binding.PageSize); page != nil || err != nil {
+		t.Fatalf("首次创建判断返回 %+v，错误 %v", page, err)
 	}
 }
