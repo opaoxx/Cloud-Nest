@@ -704,7 +704,13 @@ func runWithPurgeRootWorker(
 	stopMultipartVerification := startServerMultipartUploadVerificationWorker(ctx, multipartVerification.RunOnce, logger)
 	defer stopMultipartVerification()
 
-	// 40. 启动 HTTP 并处理退出通知。
+	// 40. 装配并启动分片取消；无受信实例证明时，已绑定任务保留预占并重试。
+	multipartCancellation := newServerMultipartUploadCancellationBatch(store, storageClient, storageConfig, nil)
+	stopMultipartCancellation := startServerMultipartUploadCancellationWorker(ctx, multipartCancellation.RunOnce, logger)
+	// 41. 登记关停等待，使分片取消 worker 先于连接释放退出。
+	defer stopMultipartCancellation()
+
+	// 42. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
