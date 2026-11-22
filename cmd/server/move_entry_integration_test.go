@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -19,6 +20,131 @@ import (
 
 const serverMoveEntryBody = `{"target_parent_id":"70003","expected_revision":"1"}`
 const serverMoveEntryKey = "server-move-007"
+
+func TestServerMoveChangeEventIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_MOVE_CHANGE_EVENT_TEST") != "1" {
+		t.Skip("设置 CLOUDNEST_MOVE_CHANGE_EVENT_TEST=1 后启动独占 MySQL、MinIO 和服务")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	fixture := prepareBackupSource(t, ctx)
+	t.Logf("移动事件专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
+	userID := backupFixtureID(t, fixture.login.User.ID)
+	rootID := backupFixtureID(t, fixture.login.RootEntryID)
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type)
+			VALUES(11,?,?,'源目录',CAST('源目录' AS BINARY),'DIR'),(12,?,?,'目标目录',CAST('目标目录' AS BINARY),'DIR')`, []any{userID, rootID, userID, rootID}},
+		{`INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type)
+			VALUES(14,?,11,'待移动目录',CAST('待移动目录' AS BINARY),'DIR'),(15,?,14,'后代目录',CAST('后代目录' AS BINARY),'DIR')`, []any{userID, userID}},
+	} {
+		if _, err := fixture.pool.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal("准备隔离目录树失败", err)
+		}
+	}
+
+	request := func(key, body string, status int, code string) dto.MoveEntryResponse {
+		t.Helper()
+		return requestServerMoveEntry(t, fixture.api.baseURL, fixture.api.accessToken, "14", key, body, status, code, "")
+	}
+	type moveFacts struct {
+		parentID, revision, childParentID, childRevision, snapshots, events, sequence uint64
+	}
+	readFacts := func() moveFacts {
+		t.Helper()
+		var facts moveFacts
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT e.parent_id,e.revision,c.parent_id,c.revision,
+			(SELECT COUNT(*) FROM idempotency_records WHERE user_id=u.id AND operation=?),
+			(SELECT COUNT(*) FROM change_events WHERE user_id=u.id),u.change_seq
+			FROM users u JOIN file_entries e ON e.user_id=u.id JOIN file_entries c ON c.user_id=u.id
+			WHERE u.id=? AND e.id=14 AND c.id=15`, domain.MoveEntryOperation, userID).
+			Scan(&facts.parentID, &facts.revision, &facts.childParentID, &facts.childRevision, &facts.snapshots, &facts.events, &facts.sequence); err != nil {
+			t.Fatal(err)
+		}
+		return facts
+	}
+	verifyEvent := func(sequence uint64, entry dto.EntryDetailData, parentID string) {
+		t.Helper()
+		var entryID, revision uint64
+		var eventType string
+		var payload []byte
+		if err := fixture.pool.QueryRowContext(ctx, "SELECT entry_id,revision,event_type,payload FROM change_events WHERE user_id=? AND `sequence`=?",
+			userID, sequence).Scan(&entryID, &revision, &eventType, &payload); err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]string
+		want := map[string]string{"entry_id": "14", "parent_id": parentID, "name": "待移动目录", "revision": entry.Revision}
+		if err := json.Unmarshal(payload, &fields); err != nil || !reflect.DeepEqual(fields, want) ||
+			eventType != "ENTRY_MOVED" || entryID != 14 || strconv.FormatUint(revision, 10) != entry.Revision ||
+			entry.ID != "14" || entry.ParentID == nil || *entry.ParentID != parentID || entry.Name != "待移动目录" {
+			t.Fatal("移动事件表列或载荷和事务结果不一致", string(payload), err)
+		}
+	}
+
+	// 1. 实际移动只写被移动的目录，后代仍引用原父项。
+	initial := moveFacts{parentID: 11, revision: 1, childParentID: 14, childRevision: 1}
+	if readFacts() != initial {
+		t.Fatal("合成目录树初始状态不符")
+	}
+	const moveBody = `{"target_parent_id":"12","expected_revision":"1"}`
+	first := request("move-event-first", moveBody, http.StatusOK, "")
+	afterMove := moveFacts{parentID: 12, revision: 2, childParentID: 14, childRevision: 1, snapshots: 1, events: 1, sequence: 1}
+	if first.Data.Entry.Revision != "2" || readFacts() != afterMove {
+		t.Fatal("实际移动未保存预期父目录、版本和单条事件")
+	}
+	verifyEvent(1, first.Data.Entry, "12")
+
+	// 2. 同键重放、版本冲突和同位置请求保持原日志。
+	replay := request("move-event-first", moveBody, http.StatusOK, "")
+	request("move-event-stale", `{"target_parent_id":"11","expected_revision":"1"}`, http.StatusConflict, "REVISION_CONFLICT")
+	if !reflect.DeepEqual(replay.Data, first.Data) || replay.RequestID == first.RequestID || readFacts() != afterMove {
+		t.Fatal("重放或版本冲突改变了已提交事实")
+	}
+	samePosition := request("move-event-same-position", `{"target_parent_id":"12","expected_revision":"2"}`, http.StatusOK, "")
+	beforeFailure := afterMove
+	beforeFailure.snapshots++
+	if !reflect.DeepEqual(samePosition.Data, first.Data) || readFacts() != beforeFailure {
+		t.Fatal("移到当前父目录改变了条目或日志")
+	}
+
+	// 3. 在移动、幂等快照和序号写入后注入事件故障，验证回滚与原键重试。
+	if _, err := fixture.pool.ExecContext(ctx, `CREATE TRIGGER fixture_move_event_failure
+		BEFORE INSERT ON change_events FOR EACH ROW
+		BEGIN
+			IF NEW.event_type='ENTRY_MOVED'
+				AND EXISTS (SELECT 1 FROM file_entries WHERE user_id=NEW.user_id AND id=NEW.entry_id AND parent_id=11 AND revision=3)
+				AND EXISTS (SELECT 1 FROM idempotency_records WHERE user_id=NEW.user_id AND resource_id=NEW.entry_id
+					AND idempotency_key='move-event-rollback')
+				AND EXISTS (SELECT 1 FROM users WHERE id=NEW.user_id AND change_seq=2) THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture move event insert failure';
+			END IF;
+		END`); err != nil {
+		t.Fatal("无法安装移动事件隔离故障", err)
+	}
+	const backBody = `{"target_parent_id":"11","expected_revision":"2"}`
+	request("move-event-rollback", backBody, http.StatusInternalServerError, "INTERNAL_ERROR")
+	if readFacts() != beforeFailure {
+		t.Fatal("事件失败后目录位置、版本、快照或序号未全部回滚")
+	}
+	if _, err := fixture.pool.ExecContext(ctx, "DROP TRIGGER fixture_move_event_failure"); err != nil {
+		t.Fatal(err)
+	}
+	recovered := request("move-event-rollback", backBody, http.StatusOK, "")
+	if recovered.Data.Entry.Revision != "3" ||
+		readFacts() != (moveFacts{parentID: 11, revision: 3, childParentID: 14, childRevision: 1, snapshots: 3, events: 2, sequence: 2}) {
+		t.Fatal("原键重试未保存预期位置和连续序号")
+	}
+	verifyEvent(1, first.Data.Entry, "12")
+	verifyEvent(2, recovered.Data.Entry, "11")
+	logs, err := fixture.stop()
+	if err != nil {
+		t.Fatal("隔离服务停机失败", err)
+	}
+	verifyBackupSourceStopped(t, fixture.api.baseURL, logs)
+	t.Log("目录 14 的父目录 11→12 写事件 1，后代父项仍为 14。同键、同位置和版本冲突保持日志，回滚后用原键移回 11 写事件 2")
+}
 
 // requestServerMoveEntry 验证真实启动后的正式 POST 响应与当前请求 ID。
 func requestServerMoveEntry(t *testing.T, baseURL, token, id, key, body string, status int, code, field string) dto.MoveEntryResponse {

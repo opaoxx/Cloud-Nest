@@ -19,6 +19,8 @@ type IdempotentMoveEntryTransaction interface {
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	// CreateUserIdempotencyRecord 在当前事务保存稳定结果并读回。
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	// AppendUserChangeEvent 在当前事务内追加一次业务变更。
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentMoveEntryService 组合首次移动和同键结果复用。
@@ -136,9 +138,20 @@ func (moveService *IdempotentMoveEntryService) Move(ctx context.Context, actor d
 			if err != nil {
 				return fmt.Errorf("保存移动幂等结果失败: %w", err)
 			}
+
+			// 5. 版本递增表明父目录发生变化，事件和移动结果一同提交。
+			if entry.Revision > expectedRevision {
+				event, err := newEntryChangeEvent("ENTRY_MOVED", entry)
+				if err != nil {
+					return fmt.Errorf("编码移动变更事件失败: %w", err)
+				}
+				if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
+					return fmt.Errorf("追加移动变更事件失败: %w", err)
+				}
+			}
 		}
 
-		// 5. 校验复用条件及完整快照，准备独立正文。
+		// 6. 首次移动和重放都校验完整快照，准备独立正文。
 		if err := ValidateMoveEntryReplay(record, actor.UserID, entryID, targetParentID, key, requestHash, moveService.now()); err != nil {
 			return err
 		}
@@ -152,7 +165,7 @@ func (moveService *IdempotentMoveEntryService) Move(ctx context.Context, actor d
 		return nil
 	})
 
-	// 6. 确认外层事务提交，返回稳定结果。
+	// 7. 确认外层事务提交，返回稳定结果。
 	if transactionError != nil {
 		return nil, fmt.Errorf("幂等移动事务失败: %w", transactionError)
 	}

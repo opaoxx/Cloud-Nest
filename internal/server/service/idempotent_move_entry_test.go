@@ -45,6 +45,10 @@ func (transaction *idempotentMoveTransactionStub) CreateUserIdempotencyRecord(ct
 	return transaction.records.CreateUserIdempotencyRecord(ctx, input)
 }
 
+func (transaction *idempotentMoveTransactionStub) AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error) {
+	return transaction.records.AppendUserChangeEvent(ctx, input)
+}
+
 func encodeIdempotentMoveTestResult(detail *domain.EntryDetail) (json.RawMessage, error) {
 	data, err := dto.NewMoveEntryData(detail)
 	if err != nil {
@@ -127,11 +131,26 @@ func TestIdempotentMoveEntryServiceMoveAndReplay(t *testing.T) {
 			if err != nil || first.Entry.ParentID == nil || *first.Entry.ParentID != strconv.FormatUint(targetID, 10) || first.Entry.Revision != strconv.FormatUint(transaction.writer.result.Revision, 10) {
 				t.Fatal("稳定移动结果错误", err)
 			}
+			wantEvents := 1
+			if mode == "same position" {
+				wantEvents = 0
+			}
+			if transaction.records.appendCalls != wantEvents {
+				t.Fatal("实际移动和同位置请求的事件数量不符")
+			}
+			if wantEvents == 1 {
+				event := transaction.records.event
+				if transaction.records.appendContext != txContext || event.EntryID != 13 || event.Revision != 4 ||
+					event.EventType != "ENTRY_MOVED" || string(event.Payload) != `{"entry_id":"13","parent_id":"14","name":"学习笔记.md","revision":"4"}` {
+					t.Fatal("移动事件未记录同一事务的新父目录和版本", event)
+				}
+			}
 			transaction.records.record, transaction.records.findError = transaction.records.saved, nil
 			queryCount := len(transaction.contexts)
 			transaction.entries, transaction.display, transaction.preference = nil, nil, nil
 			replayed, err := mover.Move(requestContext, actor, 13, 3, targetID, "request-007")
-			if err != nil || !bytes.Equal(body, replayed) || calls != 2 || transaction.writer.writeCalls != 1 || transaction.records.saveCalls != 1 || encodeCalls != 1 || len(transaction.contexts) != queryCount {
+			if err != nil || !bytes.Equal(body, replayed) || calls != 2 || transaction.writer.writeCalls != 1 || transaction.records.saveCalls != 1 ||
+				transaction.records.appendCalls != wantEvents || encodeCalls != 1 || len(transaction.contexts) != queryCount {
 				t.Fatal("重试未复用原始快照", err)
 			}
 			original := bytes.Clone(transaction.records.saved.ResponseBody)
@@ -146,7 +165,7 @@ func TestIdempotentMoveEntryServiceMoveAndReplay(t *testing.T) {
 func TestIdempotentMoveEntryServiceFailures(t *testing.T) {
 	failure := errors.New("fixture move dependency")
 	for _, mode := range []string{
-		"query", "nil query", "record with missing error", "move", "stats", "display", "preference", "stale detail", "encode", "validate encoded", "save", "duplicate save", "bad saved target", "bad saved parent", "bad saved body", "nil saved record",
+		"query", "nil query", "record with missing error", "move", "stats", "display", "preference", "stale detail", "encode", "validate encoded", "save", "duplicate save", "append event", "bad saved target", "bad saved parent", "bad saved body", "nil saved record",
 		"conflict", "expired", "bad replay body", "bad replay parent", "transaction entry", "commit", "no callback", "nil tx context", "nil store", "zero clock", "cancel before query", "cancel after query", "cancel after move", "cancel after display", "cancel after encode", "cancel after save", "cancel after validation",
 	} {
 		t.Run(mode, func(t *testing.T) {
@@ -180,6 +199,8 @@ func TestIdempotentMoveEntryServiceFailures(t *testing.T) {
 				transaction.records.saveError = failure
 			case "duplicate save":
 				transaction.records.saveError, want = domain.ErrIdempotencyRecordAlreadyExists, domain.ErrIdempotencyRecordAlreadyExists
+			case "append event":
+				transaction.records.appendError = failure
 			case "bad saved target":
 				transaction.records.afterSave = func(record *domain.IdempotencyRecord) { *record.ResourceID = 99 }
 				want = domain.ErrInvalidIdempotencyRecordData
