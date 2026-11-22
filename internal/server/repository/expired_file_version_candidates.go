@@ -41,8 +41,7 @@ func (store *Store) ListExpiredFileVersionCandidates(ctx context.Context, limit 
 		candidate := &candidates[index]
 		candidate.CreatedAt = candidate.CreatedAt.UTC()
 		candidate.RetainedUntil = candidate.RetainedUntil.UTC()
-		if candidate.ID == 0 || candidate.UserID == 0 || candidate.EntryID == 0 || candidate.Revision == 0 ||
-			candidate.ObjectID == 0 || candidate.CreatedAt.Year() < 1000 || !candidate.RetainedUntil.After(candidate.CreatedAt) {
+		if !candidate.IsValid() {
 			return nil, domain.ErrInvalidFileVersionData
 		}
 		if index > 0 {
