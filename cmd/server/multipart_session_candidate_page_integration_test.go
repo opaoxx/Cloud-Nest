@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
@@ -25,7 +25,7 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	t.Logf("专用 MySQL %s，回环地址 %s", mysqlID[:12], os.Getenv("CLOUDNEST_DB_ADDRESS"))
 	minioID := startIsolatedWebMinIO(t, ctx)
 	t.Logf("专用 MinIO %s，回环地址 %s", minioID[:12], os.Getenv("CLOUDNEST_S3_ENDPOINT"))
-	bucket := prepareServerUploadContentBucket(t, ctx)
+	prepareServerUploadContentBucket(t, ctx)
 	pool, _ := prepareServerIntegrationDatabase(t, ctx)
 	pool.SetMaxOpenConns(1)
 	store, err := repository.NewStore(pool)
@@ -45,7 +45,6 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	core := minio.Core{Client: bucket.client}
 
 	// 1. 同一键下创建三条会话，只有第一条写为任务当前绑定。
 	createSession := func(objectKey string) string {
@@ -57,8 +56,8 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		t.Cleanup(func() {
 			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
-			if err := core.AbortMultipartUpload(cleanup, bucket.name, objectKey, uploadID); err != nil {
-				t.Error("合成会话清理失败", minio.ToErrorResponse(err).Code)
+			if err := client.AbortMultipartUpload(cleanup, objectKey, uploadID); err != nil && !errors.Is(err, domain.ErrUploadPartSessionMissing) {
+				t.Error("合成会话清理失败", err)
 			}
 		})
 		return uploadID
@@ -225,4 +224,39 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	}
 	t.Log("两个对象共享会话页数上限，断点续读分组正确，五个合成会话仍可读")
 	t.Log("探测先于账号事务，期间提交的真实绑定被锁内复核识别，五个合成会话仍可读")
+
+	// 7. 只允许实际中止命中测试选定的原键与会话，确认同键绑定没有受到影响。
+	abortCalls := 0
+	aborter := service.NewMultipartUploadSessionCandidateAborter(rechecker, func(callContext context.Context, objectKey, uploadID string) error {
+		abortCalls++
+		if objectKey != secondKey || uploadID != secondCandidate {
+			t.Fatal("实际中止范围偏离隔离夹具的目标会话")
+		}
+		return client.AbortMultipartUpload(callContext, objectKey, uploadID)
+	})
+	skipped, err := aborter.AbortCandidate(ctx, target, first.Candidates[0], grace)
+	if err != nil || skipped != service.MultipartUploadSessionAbortSkipped || abortCalls != 0 {
+		t.Fatal("已绑定会话未跳过", skipped, err)
+	}
+	accepted, err := aborter.AbortCandidate(ctx, secondObject.Target, candidate, grace)
+	if err != nil || accepted != service.MultipartUploadSessionAbortAccepted || abortCalls != 1 {
+		t.Fatal("孤儿会话中止未取得存储确认", accepted, err)
+	}
+	gone, err := aborter.AbortCandidate(ctx, secondObject.Target, candidate, grace)
+	if err != nil || gone != service.MultipartUploadSessionAbortMissing || abortCalls != 1 {
+		t.Fatal("再次检查缺失会话触发了额外中止", gone, err)
+	}
+	for _, uploadID := range sessions {
+		if _, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1); err != nil {
+			t.Fatal("另一个原对象的会话受到了影响", err)
+		}
+	}
+	if _, err := client.ListUploadPartsPage(ctx, secondKey, secondBound, 0, 1); err != nil {
+		t.Fatal("同键的绑定会话受到了影响", err)
+	}
+	afterAbort, err := store.FindUserUploadTask(ctx, 7, 28)
+	if err != nil || !reflect.DeepEqual(beforeSecond, afterAbort) {
+		t.Fatal("中止会话改变了当前绑定任务记录", err)
+	}
+	t.Log("合成孤儿会话中止获受理，再读确认缺失，同键绑定会话和另三个合成会话仍可读")
 }

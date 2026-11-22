@@ -11,7 +11,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// AbortMultipartUpload 向当前桶中原对象键的已绑定会话发送中止请求。
+// AbortMultipartUpload 向当前桶中指定原对象键和会话 ID 发送中止请求。
 // nil 表示收到存储确认，ErrUploadPartSessionMissing 表示存储明确报告会话缺失。
 // 两种结果均需由调用方在事务外复查原会话和原对象，再判断收尾条件。
 func (client *Client) AbortMultipartUpload(ctx context.Context, objectKey, uploadID string) error {
