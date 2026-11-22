@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/requestcontext"
 )
@@ -34,31 +35,40 @@ func CreateUploadReplacementSuccess(requestContext *gin.Context, stableBody []by
 	}
 
 	// 2. 按保存的模式严格恢复快照。
-	var snapshot struct {
-		UploadMode string `json:"upload_mode"`
-	}
-	if err := json.Unmarshal(stableBody, &snapshot); err != nil {
-		InternalError(requestContext, nil)
-		return
-	}
-	var data any
-	var restoreError error
-	switch snapshot.UploadMode {
-	case "SINGLE":
-		data, restoreError = dto.RestoreCreateUploadReplacementData(stableBody)
-	case "MULTIPART":
-		data, restoreError = dto.RestoreCreateMultipartUploadReplacementData(stableBody)
-	default:
-		InternalError(requestContext, nil)
-		return
-	}
-	if restoreError != nil {
+	data, _, err := restoreCreateUploadReplacementResponse(stableBody)
+	if err != nil {
 		InternalError(requestContext, nil)
 		return
 	}
 
 	// 3. 关联当前请求 ID，交付 HTTP 201。
 	writeCreateUploadSuccess(requestContext, data)
+}
+
+// restoreCreateUploadReplacementResponse 恢复完整响应，同时交付供请求关联核对的任务。
+func restoreCreateUploadReplacementResponse(stableBody []byte) (any, *dto.UploadTaskData, error) {
+	var snapshot struct {
+		UploadMode string `json:"upload_mode"`
+	}
+	if err := json.Unmarshal(stableBody, &snapshot); err != nil {
+		return nil, nil, domain.ErrInvalidIdempotencyRecordData
+	}
+	switch snapshot.UploadMode {
+	case "SINGLE":
+		data, err := dto.RestoreCreateUploadReplacementData(stableBody)
+		if err != nil {
+			return nil, nil, err
+		}
+		return data, &data.Task, nil
+	case "MULTIPART":
+		data, err := dto.RestoreCreateMultipartUploadReplacementData(stableBody)
+		if err != nil {
+			return nil, nil, err
+		}
+		return data, &data.Task, nil
+	default:
+		return nil, nil, domain.ErrInvalidIdempotencyRecordData
+	}
 }
 
 func prepareCreateUploadSuccess(requestContext *gin.Context) bool {
