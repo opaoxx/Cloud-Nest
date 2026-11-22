@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// MaxMultipartUploadSessionsPageSize 是存储支持的会话单页上限。
+const MaxMultipartUploadSessionsPageSize = 1000
+
 // MultipartUploadSession 记录存储端仍可列出的会话及其原对象定位。
 type MultipartUploadSession struct {
 	ObjectKey   string

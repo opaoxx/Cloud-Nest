@@ -10,8 +10,6 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-const maxMultipartUploadSessionsPageSize = 1000
-
 // ListMultipartUploadSessionsPage 只读查询当前桶中指定应用对象键的一页会话。
 // 固定 MinIO 以完整对象键处理非空 prefix。空 marker 表示从头读取。
 func (client *Client) ListMultipartUploadSessionsPage(
@@ -30,7 +28,7 @@ func (client *Client) ListMultipartUploadSessionsPage(
 	if marker != "" && !domain.ValidMultipartUploadID(marker) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if limit < 1 || limit > maxMultipartUploadSessionsPageSize {
+	if limit < 1 || limit > domain.MaxMultipartUploadSessionsPageSize {
 		return nil, fmt.Errorf("分片会话每页数量超出范围")
 	}
 
