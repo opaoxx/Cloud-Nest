@@ -8,6 +8,9 @@ import (
 // DefaultFileVersionRetentionDays 是旧内容的默认保留天数。
 const DefaultFileVersionRetentionDays = 30
 
+// MaxExpiredFileVersionCandidates 是单次历史到期扫描允许返回的最大条数。
+const MaxExpiredFileVersionCandidates = 100
+
 // ErrFileVersionConflict 表示条目原版本已经存在历史记录。
 var ErrFileVersionConflict = errors.New("文件历史版本已存在")
 
