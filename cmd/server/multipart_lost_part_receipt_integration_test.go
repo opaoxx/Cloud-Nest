@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -30,13 +31,19 @@ func TestServerMultipartLostPartReceiptIntegration(t *testing.T) {
 	const fileSize = partSize + 1
 	payload := make([]byte, fileSize)
 	payload[0], payload[partSize] = 0x31, 0x32
+	sourceDigest := sha256.Sum256(payload)
+	const filename = "multipart-lost-receipt-fixture.bin"
+	sourcePath := filepath.Join(t.TempDir(), filename)
+	if err := os.WriteFile(sourcePath, payload, 0600); err != nil {
+		t.Fatal("保存合成源文件失败", err)
+	}
 	api := fixture.api
 	var created struct {
 		Data      dto.CreateMultipartUploadData `json:"data"`
 		RequestID string                        `json:"request_id"`
 	}
-	body := fmt.Sprintf(`{"parent_id":%q,"name":"multipart-lost-receipt-fixture.bin","size_bytes":%d,"sha256":"%x"}`,
-		fixture.login.RootEntryID, fileSize, sha256.Sum256(payload))
+	body := fmt.Sprintf(`{"parent_id":%q,"name":%q,"size_bytes":%d,"sha256":"%x"}`,
+		fixture.login.RootEntryID, filename, fileSize, sourceDigest)
 	api.request(t, ctx, http.MethodPost, "/api/v1/uploads", "multipart-lost-receipt-fixture", strings.NewReader(body), http.StatusCreated, &created)
 	if created.RequestID == "" || created.Data.UploadMode != "MULTIPART" || created.Data.Task.Status != "CREATING" ||
 		created.Data.PartSizeBytes != partSize || created.Data.PartCount != 2 {
@@ -79,19 +86,58 @@ func TestServerMultipartLostPartReceiptIntegration(t *testing.T) {
 	if !slices.Equal(unconfirmed, []uint32{2}) {
 		t.Fatal("应只有第 2 片待确认", unconfirmed)
 	}
-	var task dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &task)
-	var profile dto.UserProfileResponse
-	api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
-	if task.RequestID == "" || profile.RequestID == "" || !reflect.DeepEqual(task.Data, readyTask) ||
-		profile.Data.User.ID != fixture.login.User.ID || profile.Data.UsedBytes != 0 || profile.Data.ReservedBytes != fileSize {
+	readTaskAndProfile := func() (dto.UploadTaskData, dto.UserProfileData) {
+		t.Helper()
+		var task dto.UploadTaskResponse
+		api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &task)
+		var profile dto.UserProfileResponse
+		api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
+		if task.RequestID == "" || profile.RequestID == "" {
+			t.Fatal("任务或资料响应缺少请求 ID")
+		}
+		return task.Data, profile.Data
+	}
+	task, profile := readTaskAndProfile()
+	if !reflect.DeepEqual(task, readyTask) || profile.User.ID != fixture.login.User.ID ||
+		profile.UsedBytes != 0 || profile.ReservedBytes != fileSize {
 		t.Fatal("回执核对改变了原任务或预占配额")
 	}
+	t.Logf("原任务 %s 的本地回执仅第 1 片，存储回执有第 1、2 片，尾片 %d B，ETag %s，SHA-256 %s，待确认分片 %v，已用 %d B、预占 %d B",
+		task.ID, remoteTail.SizeBytes, remoteTail.ETag, remoteTail.ChecksumSHA256, unconfirmed, profile.UsedBytes, profile.ReservedBytes)
+
+	// 4. 重读合成源，按原计划重传待确认的尾片，并保存本次 PUT 回执。
+	reopened, err := os.ReadFile(sourcePath)
+	if err != nil || uint64(len(reopened)) != task.SizeBytes || sha256.Sum256(reopened) != sourceDigest {
+		t.Fatal("重传前无法核对合成源", err)
+	}
+	retryNumber := unconfirmed[0]
+	retrySize, err := domain.ExpectedMultipartUploadPartSize(task.SizeBytes, remote.Data.PartSizeBytes, remote.Data.PartCount, retryNumber)
+	if err != nil || retrySize != remoteTail.SizeBytes {
+		t.Fatal("原计划的待确认分片长度不符", retrySize, err)
+	}
+	offset := uint64(retryNumber-1) * remote.Data.PartSizeBytes
+	retryPart := reopened[offset : offset+retrySize]
+	retryURL, retryChecksum := target.signPart(t, ctx, api, retryNumber, retryPart)
+	retryETag := putMultipartProbePart(t, ctx, api.httpClient, retryURL, retryChecksum, retryPart, http.StatusOK, "")
+	localReceipts = append(localReceipts, dto.UploadPartReceiptData{
+		PartNumber: retryNumber, SizeBytes: retrySize, ETag: retryETag, ChecksumSHA256: retryChecksum,
+	})
+
+	// 5. 读取原任务的最新回执，核对本地两片、任务和配额。
+	var reconciled dto.UploadPartsResponse
+	api.request(t, ctx, http.MethodGet, taskPath+"/parts", "", nil, http.StatusOK, &reconciled)
+	resumedTask, resumedProfile := readTaskAndProfile()
+	if reconciled.RequestID == "" || reconciled.Data.PartSizeBytes != partSize || reconciled.Data.PartCount != 2 ||
+		!slices.Equal(reconciled.Data.Parts, localReceipts) || !reflect.DeepEqual(resumedTask, task) ||
+		!reflect.DeepEqual(resumedProfile, profile) {
+		t.Fatal("重传后本地回执、存储回执、任务或配额不符", reconciled.Data)
+	}
+	t.Logf("原任务 %s 仅重传待确认的第 %d 片 %d B，保存 PUT 回执 ETag %s，两片本地回执与存储一致，已用 %d B、预占 %d B",
+		resumedTask.ID, retryNumber, retrySize, retryETag, resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
+
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("原任务 %s 的本地回执仅第 1 片，存储回执有第 1、2 片，尾片 %d B，ETag %s，SHA-256 %s，待确认分片 %v，已用 %d B、预占 %d B",
-		task.Data.ID, remoteTail.SizeBytes, remoteTail.ETag, remoteTail.ChecksumSHA256, unconfirmed, profile.Data.UsedBytes, profile.Data.ReservedBytes)
 }
