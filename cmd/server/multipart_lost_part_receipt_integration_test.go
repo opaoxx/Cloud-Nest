@@ -135,6 +135,12 @@ func TestServerMultipartLostPartReceiptIntegration(t *testing.T) {
 	t.Logf("原任务 %s 仅重传待确认的第 %d 片 %d B，保存 PUT 回执 ETag %s，两片本地回执与存储一致，已用 %d B、预占 %d B",
 		resumedTask.ID, retryNumber, retrySize, retryETag, resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 
+	// 6. 提交已核对的本地回执，等待后台发布并验证唯一条目和配额结算。
+	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, localReceipts[0], localReceipts[1])
+	t.Logf("回执丢失重传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
+	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
+	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
