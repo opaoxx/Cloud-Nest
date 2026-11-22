@@ -45,6 +45,7 @@ func NewUploadPublicationService(
 // Publish 使用事务外已读回校验的任务、暂存对象和实测摘要发布文件。
 // 对象、文件、配额、完成结果及同步事件由外层事务一起确认。
 // 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
+// 替换任务需要专用发布事务，在普通发布入口返回 ErrUploadTaskNotReady。
 func (publication *UploadPublicationService) Publish(
 	ctx context.Context,
 	verifiedTask *domain.UploadTask,
@@ -62,6 +63,7 @@ func (publication *UploadPublicationService) Publish(
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	taskID, userID := verifiedTask.ID, verifiedTask.UserID
+	verifiedAsReplacement := verifiedTask.ReplacementEntryID != nil
 
 	var prepared *domain.UploadTask
 	var targetUnavailable bool
@@ -73,7 +75,12 @@ func (publication *UploadPublicationService) Publish(
 			return domain.ErrInvalidUploadTaskData
 		}
 
-		// 2. 复核目标目录，选定对象、文件名和来源设备。
+		// 2. 拒绝任一快照中已绑定原文件的任务，避免进入普通上传写入。
+		if verifiedAsReplacement || task.ReplacementEntryID != nil {
+			return fmt.Errorf("内容替换需要专用发布事务: %w", domain.ErrUploadTaskNotReady)
+		}
+
+		// 3. 复核目标目录，选定对象、文件名和来源设备。
 		if _, err := ValidateUploadPublicationTarget(txContext, task, txn); err != nil {
 			if !errors.Is(err, domain.ErrUploadTargetUnavailable) {
 				return err
@@ -102,7 +109,7 @@ func (publication *UploadPublicationService) Publish(
 			return err
 		}
 
-		// 3. 将校验得到的可选 MIME 随文件目录项写入，再结算配额并记录完成。
+		// 4. 将校验得到的可选 MIME 随文件目录项写入，再结算配额并记录完成。
 		if digest.DetectedMIMEType != "" {
 			input.MIMEType = &digest.DetectedMIMEType
 		}
@@ -126,7 +133,7 @@ func (publication *UploadPublicationService) Publish(
 			return domain.ErrInvalidUploadTaskData
 		}
 
-		// 4. 清除发布对象的计时，并处理冗余暂存副本。
+		// 5. 清除发布对象的计时，并处理冗余暂存副本。
 		if _, err := txn.ClearPublishedObjectGCTimer(txContext, selected.ID, entry.ID); err != nil {
 			return err
 		}
@@ -136,7 +143,7 @@ func (publication *UploadPublicationService) Publish(
 			}
 		}
 
-		// 5. SINGLE 和 Multipart 共用发布事件，追加失败交给外层一起回滚。
+		// 6. SINGLE 和 Multipart 共用发布事件，追加失败交给外层一起回滚。
 		event, err := domain.NewFilePublishedChangeEvent(entry, digest.SHA256)
 		if err != nil {
 			return err
@@ -148,7 +155,7 @@ func (publication *UploadPublicationService) Publish(
 		return nil
 	})
 
-	// 6. 等待事务提交后返回完成任务。
+	// 7. 等待事务提交后返回完成任务。
 	if err != nil {
 		return nil, err
 	}
