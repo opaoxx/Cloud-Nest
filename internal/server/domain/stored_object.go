@@ -9,6 +9,9 @@ import (
 // ErrStoredObjectNotFound 表示在指定用户范围内未找到存储对象。
 var ErrStoredObjectNotFound = errors.New("存储对象不存在")
 
+// ErrReusableContentNotFound 表示当前账号没有仍可复用的已验证内容。
+var ErrReusableContentNotFound = errors.New("没有可复用的内容")
+
 // ErrInvalidStoredObjectData 表示存储对象的归属、位置或生命周期事实异常。
 var ErrInvalidStoredObjectData = errors.New("存储对象数据异常")
 
