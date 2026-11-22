@@ -31,6 +31,7 @@ func TestCreateDirectoryHandlerIntegration(t *testing.T) {
 	pool := userProfileDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	installDirectoryChangeEventTable(t, ctx, pool)
 	sessionStart := strings.Index(migrations.InitialSQL, "CREATE TABLE auth_sessions (")
 	sessionEnd := strings.Index(migrations.InitialSQL, "CREATE TABLE stored_objects (")
 	idempotencyStart := strings.Index(migrations.InitialSQL, "CREATE TABLE idempotency_records (")

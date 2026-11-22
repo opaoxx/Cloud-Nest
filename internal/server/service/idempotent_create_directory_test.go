@@ -18,16 +18,29 @@ type idempotentDirectoryTransactionStub struct {
 	record         *domain.IdempotencyRecord
 	findError      error
 	saveError      error
+	appendError    error
 	saved          *domain.IdempotencyRecord
 	saveInput      domain.IdempotencyResultInput
 	findCalls      int
 	saveCalls      int
+	appendCalls    int
 	findContext    context.Context
 	saveContext    context.Context
+	appendContext  context.Context
+	event          domain.ChangeEventInput
 	userID         uint64
 	operation, key string
 	afterFind      func()
 	afterSave      func(*domain.IdempotencyRecord)
+}
+
+func (transaction *idempotentDirectoryTransactionStub) AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error) {
+	transaction.appendCalls++
+	transaction.appendContext, transaction.event = ctx, input
+	if transaction.appendError != nil {
+		return 0, transaction.appendError
+	}
+	return 1, nil
 }
 
 func (transaction *idempotentDirectoryTransactionStub) FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error) {
@@ -102,7 +115,7 @@ func TestIdempotentCreateDirectoryServiceCreateAndReplay(t *testing.T) {
 			return encodeIdempotentDirectoryTestResult(entry, actualColor)
 		}
 		body, err := creator.Create(requestContext, actor, 12, "  Cafe\u0301  ", color, "request-007")
-		if err != nil || body == nil || transactionCalls != 1 || transaction.createCalls != 1 || transaction.saveCalls != 1 || encodeCalls != 1 {
+		if err != nil || body == nil || transactionCalls != 1 || transaction.createCalls != 1 || transaction.saveCalls != 1 || transaction.appendCalls != 1 || encodeCalls != 1 {
 			t.Fatal("首次创建未在一次事务内完成", err)
 		}
 		hash, err := BuildCreateDirectoryRequestHash(12, "Cafe\u0301", color)
@@ -111,8 +124,13 @@ func TestIdempotentCreateDirectoryServiceCreateAndReplay(t *testing.T) {
 			!transaction.saved.ExpiresAt.Equal(creator.now().UTC().Truncate(time.Microsecond).Add(8*24*time.Hour)) {
 			t.Fatal("幂等保存参数、规范化摘要或八天保留期错误", err)
 		}
-		if transaction.findContext != txContext || transaction.createContext != txContext || transaction.saveContext != txContext || transaction.userID != actor.UserID || transaction.operation != domain.CreateDirectoryOperation || transaction.key != "request-007" {
+		if transaction.findContext != txContext || transaction.createContext != txContext || transaction.saveContext != txContext ||
+			transaction.appendContext != txContext || transaction.userID != actor.UserID || transaction.operation != domain.CreateDirectoryOperation || transaction.key != "request-007" {
 			t.Fatal("查询、创建及保存未复用事务上下文或范围")
+		}
+		if event := transaction.event; event.EntryID != 23 || event.Revision != 1 || event.EventType != "DIRECTORY_CREATED" ||
+			string(event.Payload) != "{\"entry_id\":\"23\",\"parent_id\":\"12\",\"name\":\"Cafe\u0301\",\"revision\":\"1\"}" {
+			t.Fatal("新建目录事件未采用已确认目录的标识、展示名和版本", event)
 		}
 		first, err := dto.RestoreCreateDirectoryData(body)
 		if err != nil || first.Entry.Name != "Cafe\u0301" || !reflect.DeepEqual(first.Entry.ColorKey, color) {
@@ -122,7 +140,8 @@ func TestIdempotentCreateDirectoryServiceCreateAndReplay(t *testing.T) {
 		transaction.entries = nil
 		queryCount := len(transaction.contexts)
 		replayed, err := creator.Create(requestContext, actor, 12, "Cafe\u0301", color, "request-007")
-		if err != nil || !bytes.Equal(body, replayed) || transactionCalls != 2 || transaction.createCalls != 1 || transaction.saveCalls != 1 || encodeCalls != 1 || len(transaction.contexts) != queryCount {
+		if err != nil || !bytes.Equal(body, replayed) || transactionCalls != 2 || transaction.createCalls != 1 || transaction.saveCalls != 1 ||
+			transaction.appendCalls != 1 || encodeCalls != 1 || len(transaction.contexts) != queryCount {
 			t.Fatal("重试未复用原始快照或重复进入创建流程", err)
 		}
 		body[0], replayed[0] = 'x', 'y'
@@ -135,7 +154,7 @@ func TestIdempotentCreateDirectoryServiceCreateAndReplay(t *testing.T) {
 func TestIdempotentCreateDirectoryServiceFailures(t *testing.T) {
 	failure := errors.New("fixture dependency failure")
 	for _, mode := range []string{
-		"query", "nil query result", "record with missing error", "create", "encode", "validate encoded", "save", "duplicate save",
+		"query", "nil query result", "record with missing error", "create", "encode", "validate encoded", "save", "duplicate save", "append event",
 		"bad saved resource", "bad saved body", "nil saved result", "conflict", "expired", "bad replay snapshot",
 		"transaction entry", "commit", "missing callback", "nil transaction context", "nil transaction",
 		"cancel before query", "cancel after query", "cancel after create", "cancel after encode", "cancel after save", "cancel after validation",
@@ -162,6 +181,8 @@ func TestIdempotentCreateDirectoryServiceFailures(t *testing.T) {
 				transaction.saveError = failure
 			case "duplicate save":
 				transaction.saveError, want = domain.ErrIdempotencyRecordAlreadyExists, domain.ErrIdempotencyRecordAlreadyExists
+			case "append event":
+				transaction.appendError = failure
 			case "bad saved resource":
 				transaction.afterSave = func(record *domain.IdempotencyRecord) { *record.ResourceID = 99 }
 				want = domain.ErrInvalidIdempotencyRecordData

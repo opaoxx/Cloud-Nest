@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -18,6 +19,8 @@ type IdempotentCreateDirectoryTransaction interface {
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	// CreateUserIdempotencyRecord 在当前事务保存稳定结果并读回。
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	// AppendUserChangeEvent 在当前事务内追加一次业务变更。
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentCreateDirectoryService 组合首次创建和同键结果复用。
@@ -120,9 +123,28 @@ func (createService *IdempotentCreateDirectoryService) Create(ctx context.Contex
 			if err != nil {
 				return fmt.Errorf("保存创建文件夹幂等结果失败: %w", err)
 			}
+
+			// 5. 从已核对的新目录构造事件，和目录、幂等快照一同提交。
+			payload, err := json.Marshal(struct {
+				EntryID  string `json:"entry_id"`
+				ParentID string `json:"parent_id"`
+				Name     string `json:"name"`
+				Revision string `json:"revision"`
+			}{
+				EntryID: strconv.FormatUint(entry.ID, 10), ParentID: strconv.FormatUint(*entry.ParentID, 10),
+				Name: entry.Name, Revision: strconv.FormatUint(entry.Revision, 10),
+			})
+			if err != nil {
+				return fmt.Errorf("编码创建文件夹变更事件失败: %w", err)
+			}
+			if _, err := txStore.AppendUserChangeEvent(txContext, domain.ChangeEventInput{
+				EntryID: entry.ID, Revision: entry.Revision, EventType: "DIRECTORY_CREATED", Payload: payload,
+			}); err != nil {
+				return fmt.Errorf("追加创建文件夹变更事件失败: %w", err)
+			}
 		}
 
-		// 5. 校验复用条件及完整快照，准备独立正文。
+		// 6. 首次创建和重放都校验完整快照，准备独立正文。
 		if err := ValidateCreateDirectoryReplay(record, actor.UserID, key, requestHash, createService.now()); err != nil {
 			return err
 		}
@@ -136,7 +158,7 @@ func (createService *IdempotentCreateDirectoryService) Create(ctx context.Contex
 		return nil
 	})
 
-	// 6. 确认外层事务提交，返回稳定结果。
+	// 7. 确认外层事务提交，返回稳定结果。
 	if transactionError != nil {
 		return nil, fmt.Errorf("幂等创建文件夹事务失败: %w", transactionError)
 	}

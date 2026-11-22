@@ -3,6 +3,7 @@ package repository
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,12 +29,25 @@ func (store *idempotentDirectorySaveFailureStore) CreateUserIdempotencyRecord(ct
 	return nil, store.failure
 }
 
+func installDirectoryChangeEventTable(t *testing.T, ctx context.Context, pool *sql.DB) {
+	t.Helper()
+	// 与现有部分迁移夹具一致，只安装本用例直接使用的正式表。
+	changeEventsSQL, _, found := strings.Cut(migrations.Ordered()[2].SQL, ";\n")
+	if !found || !strings.Contains(changeEventsSQL, "CREATE TABLE change_events (") {
+		t.Fatal("正式变更事件表边界错误")
+	}
+	if _, err := pool.ExecContext(ctx, changeEventsSQL); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIdempotentCreateDirectoryServiceIntegration(t *testing.T) {
 	// 1. 使用正式表独占库和实际用户事务，绑定既有 DTO 编解码。
 	pool := userProfileDatabase(t)
 	pool.SetMaxOpenConns(3)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	installDirectoryChangeEventTable(t, ctx, pool)
 	sessionStart := strings.Index(migrations.InitialSQL, "CREATE TABLE auth_sessions (")
 	sessionEnd := strings.Index(migrations.InitialSQL, "CREATE TABLE stored_objects (")
 	idempotencyStart := strings.Index(migrations.InitialSQL, "CREATE TABLE idempotency_records (")
@@ -68,10 +82,12 @@ func TestIdempotentCreateDirectoryServiceIntegration(t *testing.T) {
 	}
 	validate := func(body json.RawMessage) error { _, err := dto.RestoreCreateDirectoryData(body); return err }
 	creator := service.NewIdempotentCreateDirectoryService(withTransaction, encode, validate)
-	counts := func() [2]int {
+	counts := func() [4]int {
 		t.Helper()
-		var result [2]int
-		if err := pool.QueryRowContext(ctx, "SELECT (SELECT COUNT(*) FROM file_entries),(SELECT COUNT(*) FROM idempotency_records)").Scan(&result[0], &result[1]); err != nil {
+		var result [4]int
+		if err := pool.QueryRowContext(ctx, "SELECT (SELECT COUNT(*) FROM file_entries),(SELECT COUNT(*) FROM idempotency_records),"+
+			"(SELECT COUNT(*) FROM change_events WHERE user_id=1),change_seq FROM users WHERE id=1").
+			Scan(&result[0], &result[1], &result[2], &result[3]); err != nil {
 			t.Fatal(err)
 		}
 		return result
@@ -182,7 +198,7 @@ func TestIdempotentCreateDirectoryServiceIntegration(t *testing.T) {
 				want = context.Canceled
 			}
 			if body != nil || !errors.Is(err, want) || counts() != before {
-				t.Fatal("失败未回滚双表或未保留原因", mode, err)
+				t.Fatal("失败未回滚目录、幂等快照、事件或序号，或未保留原因", mode, err)
 			}
 		}
 	})
@@ -239,7 +255,7 @@ func TestIdempotentCreateDirectoryServiceIntegration(t *testing.T) {
 				t.Fatal("同键不同参数并发未得到一次成功和一次冲突", first.err, second.err)
 			}
 			after := counts()
-			if after != [2]int{before[0] + 1, before[1] + 1} {
+			if after != [4]int{before[0] + 1, before[1] + 1, before[2] + 1, before[3] + 1} {
 				t.Fatal("并发写入数量错误", before, after)
 			}
 		}

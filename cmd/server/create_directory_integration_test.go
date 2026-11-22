@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -20,6 +22,108 @@ import (
 
 const serverCreateDirectoryBody = `{"parent_id":"15","name":"正式创建 🌱","color_key":"green"}`
 const serverCreateDirectoryKey = "server-create-007"
+
+func TestServerDirectoryChangeEventIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_DIRECTORY_CHANGE_EVENT_TEST") != "1" {
+		t.Skip("设置 CLOUDNEST_DIRECTORY_CHANGE_EVENT_TEST=1 后启动独占 MySQL、MinIO 和服务")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	fixture := prepareBackupSource(t, ctx)
+	t.Logf("目录事件专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
+	userID := backupFixtureID(t, fixture.login.User.ID)
+
+	type directoryFacts struct {
+		directories, snapshots, events, sequence uint64
+	}
+	readFacts := func() directoryFacts {
+		t.Helper()
+		var facts directoryFacts
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM file_entries WHERE user_id=users.id AND parent_id IS NOT NULL),
+			(SELECT COUNT(*) FROM idempotency_records WHERE user_id=users.id AND operation=?),
+			(SELECT COUNT(*) FROM change_events WHERE user_id=users.id), change_seq FROM users WHERE id=?`,
+			domain.CreateDirectoryOperation, userID).Scan(&facts.directories, &facts.snapshots, &facts.events, &facts.sequence); err != nil {
+			t.Fatal(err)
+		}
+		return facts
+	}
+	verifyEvent := func(sequence uint64, entry dto.CreatedDirectorySummary) {
+		t.Helper()
+		var savedEntryID, revision uint64
+		var eventType string
+		var payload []byte
+		if err := fixture.pool.QueryRowContext(ctx, "SELECT entry_id,revision,event_type,payload FROM change_events WHERE user_id=? AND `sequence`=?",
+			userID, sequence).Scan(&savedEntryID, &revision, &eventType, &payload); err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]string
+		want := map[string]string{"entry_id": entry.ID, "parent_id": entry.ParentID, "name": entry.Name, "revision": entry.Revision}
+		if err := json.Unmarshal(payload, &fields); err != nil || !reflect.DeepEqual(fields, want) ||
+			eventType != "DIRECTORY_CREATED" || strconv.FormatUint(savedEntryID, 10) != entry.ID ||
+			strconv.FormatUint(revision, 10) != entry.Revision {
+			t.Fatal("目录事件表列或载荷与已创建目录不符", string(payload), err)
+		}
+	}
+	const path = "/api/v1/directories"
+
+	// 1. 通过正式入口创建，再用相同幂等键重放，核对只有一条变更事件。
+	if facts := readFacts(); facts != (directoryFacts{}) {
+		t.Fatal("合成账号应从空目录事件和幂等记录开始", facts)
+	}
+	body := fmt.Sprintf(`{"parent_id":%q,"name":"  同步 Cafe\u0301 🌱  ","color_key":"green"}`, fixture.login.RootEntryID)
+	var first, replay dto.CreateDirectoryResponse
+	fixture.api.request(t, ctx, http.MethodPost, path, "directory-event-first", strings.NewReader(body), http.StatusCreated, &first)
+	if first.RequestID == "" || first.Data.Entry.ParentID != fixture.login.RootEntryID ||
+		first.Data.Entry.Name != "同步 Cafe\u0301 🌱" || first.Data.Entry.Revision != "1" {
+		t.Fatal("新建目录响应与预期不符", first.Data)
+	}
+	verifyEvent(1, first.Data.Entry)
+	fixture.api.request(t, ctx, http.MethodPost, path, "directory-event-first", strings.NewReader(body), http.StatusCreated, &replay)
+	if !reflect.DeepEqual(first.Data, replay.Data) || replay.RequestID == "" || first.RequestID == replay.RequestID ||
+		readFacts() != (directoryFacts{directories: 1, snapshots: 1, events: 1, sequence: 1}) {
+		t.Fatal("重复请求改写了快照或产生了第二次业务写入")
+	}
+
+	// 2. 仅在新目录、幂等记录和序号都已经写入的事务中注入事件失败。
+	if _, err := fixture.pool.ExecContext(ctx, `CREATE TRIGGER fixture_directory_event_failure
+		BEFORE INSERT ON change_events FOR EACH ROW
+		BEGIN
+			IF EXISTS (SELECT 1 FROM file_entries WHERE user_id=NEW.user_id AND id=NEW.entry_id AND name='同步回滚目录')
+				AND EXISTS (SELECT 1 FROM idempotency_records WHERE user_id=NEW.user_id AND resource_id=NEW.entry_id
+					AND idempotency_key='directory-event-rollback')
+				AND EXISTS (SELECT 1 FROM users WHERE id=NEW.user_id AND change_seq=2) THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture directory event insert failure';
+			END IF;
+		END`); err != nil {
+		t.Fatal("无法安装目录事件隔离故障", err)
+	}
+	rollbackBody := fmt.Sprintf(`{"parent_id":%q,"name":"同步回滚目录"}`, fixture.login.RootEntryID)
+	var failure dto.ErrorResponse
+	fixture.api.request(t, ctx, http.MethodPost, path, "directory-event-rollback", strings.NewReader(rollbackBody), http.StatusInternalServerError, &failure)
+	if failure.Error.Code != "INTERNAL_ERROR" || readFacts() != (directoryFacts{directories: 1, snapshots: 1, events: 1, sequence: 1}) {
+		t.Fatal("追加失败未回滚目录、幂等快照、事件和序号", failure.Error.Code)
+	}
+
+	// 3. 解除隔离故障，用原请求重试，核对连续序号和最终事件。
+	if _, err := fixture.pool.ExecContext(ctx, "DROP TRIGGER fixture_directory_event_failure"); err != nil {
+		t.Fatal(err)
+	}
+	var recovered dto.CreateDirectoryResponse
+	fixture.api.request(t, ctx, http.MethodPost, path, "directory-event-rollback", strings.NewReader(rollbackBody), http.StatusCreated, &recovered)
+	if recovered.Data.Entry.Name != "同步回滚目录" ||
+		readFacts() != (directoryFacts{directories: 2, snapshots: 2, events: 2, sequence: 2}) {
+		t.Fatal("故障解除后重试未形成预期目录、快照和事件")
+	}
+	verifyEvent(2, recovered.Data.Entry)
+	logs, err := fixture.stop()
+	if err != nil {
+		t.Fatal("隔离服务停机失败", err)
+	}
+	verifyBackupSourceStopped(t, fixture.api.baseURL, logs)
+	t.Logf("首次目录 %s 写 DIRECTORY_CREATED 序号 1，同键重放仍为一条；写入故障回滚，原键重试目录 %s 使用序号 2",
+		first.Data.Entry.ID, recovered.Data.Entry.ID)
+}
 
 // requestServerCreateDirectory 验证生产启动后的正式创建接口及统一响应。
 func requestServerCreateDirectory(t *testing.T, baseURL, token, key, body string, status int, code, field string) dto.CreateDirectoryResponse {
