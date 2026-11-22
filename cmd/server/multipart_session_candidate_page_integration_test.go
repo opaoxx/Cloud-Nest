@@ -88,20 +88,22 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	scanner := service.NewMultipartUploadSessionCandidateScanner(settings.Provider, settings.Bucket, client.ListMultipartUploadSessionsPage,
 		store.ReadMultipartUploadSessionCleanupFacts)
 
-	// 2. 实际串联存储一页及仓储复核，保留原分页游标和不同跳过原因。
+	// 2. 用一页预算暂停，再从保存的游标继续读到末页。
 	const grace = 15 * time.Minute
-	first, err := scanner.ScanPage(ctx, target, "", 2, grace)
-	if err != nil || first.Scanned != 2 || first.SkippedBound != 1 || len(first.Failures) != 0 || len(first.Candidates) != 1 ||
+	first, err := scanner.ScanPages(ctx, target, "", 2, 1, grace)
+	if err != nil || first.PagesScanned != 1 || first.Scanned != 2 || first.SkippedBound != 1 || len(first.Failures) != 0 || len(first.Candidates) != 1 ||
 		first.Candidates[0].UploadID != sessions[1] || first.NextUploadID != sessions[1] {
 		t.Fatal("第一页绑定或超期结果不符", err)
 	}
-	second, err := scanner.ScanPage(ctx, target, first.NextUploadID, 2, grace)
-	if err != nil || second.Scanned != 1 || len(second.Failures) != 0 || len(second.Candidates) != 1 ||
+	second, err := scanner.ScanPages(ctx, target, first.NextUploadID, 2, 2, grace)
+	if err != nil || second.PagesScanned != 1 || second.Scanned != 1 || len(second.Failures) != 0 || len(second.Candidates) != 1 ||
 		second.Candidates[0].UploadID != sessions[2] || second.NextUploadID != "" {
 		t.Fatal("第二页未按原游标续读", err)
 	}
-	fresh, err := scanner.ScanPage(ctx, target, "", 3, 2*time.Hour)
-	if err != nil || fresh.Scanned != 3 || fresh.SkippedBound != 1 || fresh.SkippedWithinGrace != 2 || len(fresh.Candidates) != 0 || len(fresh.Failures) != 0 {
+	// 3. 在同一轮跨页汇总不同保护，再确认任务与会话仍可读取。
+	fresh, err := scanner.ScanPages(ctx, target, "", 2, 2, 2*time.Hour)
+	if err != nil || fresh.PagesScanned != 2 || fresh.Scanned != 3 || fresh.NextUploadID != "" || fresh.SkippedBound != 1 ||
+		fresh.SkippedWithinGrace != 2 || len(fresh.Candidates) != 0 || len(fresh.Failures) != 0 {
 		t.Fatal("仍在宽限期的会话未正确跳过", err)
 	}
 	execute("UPDATE upload_tasks SET status='CREATING',storage_upload_id=NULL,lease_owner='fixture-creator',lease_version=1,lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE WHERE id=19")
@@ -109,8 +111,9 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	protected, err := scanner.ScanPage(ctx, target, "", 3, grace)
-	if err != nil || protected.Scanned != 3 || protected.SkippedCreation != 3 || len(protected.Candidates) != 0 || len(protected.Failures) != 0 {
+	protected, err := scanner.ScanPages(ctx, target, "", 2, 2, grace)
+	if err != nil || protected.PagesScanned != 2 || protected.Scanned != 3 || protected.NextUploadID != "" ||
+		protected.SkippedCreation != 3 || len(protected.Candidates) != 0 || len(protected.Failures) != 0 {
 		t.Fatal("有效创建租约未保护原键下的会话", err)
 	}
 	after, err := store.FindUserUploadTask(ctx, 7, 19)
@@ -122,5 +125,5 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 			t.Fatal("只读复核后未能读到原会话", err)
 		}
 	}
-	t.Log("原游标连读两页，绑定、宽限及创建租约均能跳过，三个合成会话仍可读")
+	t.Log("一页预算后按原游标续扫，同轮两页汇总保护，三个合成会话仍可读")
 }
