@@ -13,6 +13,19 @@ import (
 )
 
 func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *testing.T) {
+	testMultipartUploadCleanupObservationTransaction(t, domain.UploadStatusCancelling, (*Store).WithMultipartUploadCancellationObservationTransaction)
+}
+
+func TestWithMultipartUploadExpirationObservationTransactionIntegration(t *testing.T) {
+	testMultipartUploadCleanupObservationTransaction(t, domain.UploadStatusExpiring, (*Store).WithMultipartUploadExpirationObservationTransaction)
+}
+
+func testMultipartUploadCleanupObservationTransaction(
+	t *testing.T, pendingStatus domain.UploadStatus,
+	withObservation func(*Store, context.Context, string, string, *domain.MultipartUploadCleanupObservation,
+		func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error) error,
+) {
+	t.Helper()
 	ctx, pool, store := prepareMultipartCompletionDatabase(t)
 	const provider, bucket, key = "local_minio", "fixture-bucket", "fixture/cancel +%.bin"
 	const etag, version = "cancel-etag", "Version+A/="
@@ -22,13 +35,25 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 			t.Fatal(err)
 		}
 	}
-	claim := func(t *testing.T, unbound bool) *domain.MultipartUploadCancellationObservation {
+	claim := func(t *testing.T, unbound bool) *domain.MultipartUploadCleanupObservation {
 		t.Helper()
 		resetMultipartUploadCancellationFixture(t, ctx, pool)
 		execute(t, "UPDATE stored_objects SET provider=?,bucket=?,object_key=? WHERE id=23", provider, bucket, key)
 		if unbound {
 			execute(t, "UPDATE upload_tasks SET storage_upload_id=NULL WHERE id=19")
 			execute(t, "UPDATE users SET status='DISABLED' WHERE id=7")
+		}
+		if pendingStatus == domain.UploadStatusExpiring {
+			execute(t, "UPDATE upload_tasks SET status='UPLOADING' WHERE id=19")
+			candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+			if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
+				t.Fatal("未取得观察复核的合成到期候选", candidates, err)
+			}
+			task, err := store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-observation")
+			if err != nil {
+				t.Fatal("未领取合成到期租约", err)
+			}
+			return &domain.MultipartUploadCleanupObservation{Task: *task, ObjectKey: key}
 		}
 		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
 		if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
@@ -38,7 +63,7 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 		if err != nil {
 			t.Fatal("未领取合成租约", err)
 		}
-		return &domain.MultipartUploadCancellationObservation{Task: *task, ObjectKey: key}
+		return &domain.MultipartUploadCleanupObservation{Task: *task, ObjectKey: key}
 	}
 	type facts struct {
 		task           *domain.UploadTask
@@ -75,7 +100,7 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 		observed.Object = objectResult(new(version), multipartCancellationFixtureSize)
 		before := read(t)
 		calls := 0
-		err := store.WithMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observed,
+		err := withObservation(store, ctx, provider, bucket, observed,
 			func(txContext context.Context, txStore *Store, task *domain.UploadTask, object *domain.StoredObject) error {
 				calls++
 				if txStore.loginUserID != 7 || !reflect.DeepEqual(task, before.task) || !reflect.DeepEqual(object, before.object) {
@@ -115,7 +140,7 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 		observed := claim(t, true)
 		before := read(t)
 		advanceTime := false
-		const callback = "fixture:expire_multipart_cancellation_lease_after_object_lock"
+		const callback = "fixture:expire_multipart_cleanup_lease_after_object_lock"
 		queries := store.database.Callback().Query()
 		if err := queries.After("gorm:query").Register(callback, func(query *gorm.DB) {
 			if query.Error == nil && query.Statement.Table == "stored_objects" && !advanceTime {
@@ -131,7 +156,7 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 				t.Error(err)
 			}
 		})
-		err := store.WithMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observed,
+		err := withObservation(store, ctx, provider, bucket, observed,
 			func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error {
 				t.Error("到期的租约进入了事务回调")
 				return nil
@@ -142,12 +167,42 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 		t.Log("拿到对象锁后推进 MySQL 时钟至租约截止，复核返回 UPLOAD_BUSY")
 	})
 
+	if pendingStatus == domain.UploadStatusExpiring {
+		t.Run("upload expiration boundary", func(t *testing.T) {
+			pool.SetMaxOpenConns(1)
+			defer pool.SetMaxOpenConns(3)
+			now := time.Now().UTC().Truncate(time.Second)
+			execute(t, "SET timestamp = ?", now.Unix())
+			defer execute(t, "SET timestamp = DEFAULT")
+			observed := claim(t, false)
+			before := read(t)
+			calls := 0
+			action := func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error {
+				calls++
+				return nil
+			}
+			execute(t, "SET timestamp = ?", observed.Task.ExpiresAt.Add(-time.Second).Unix())
+			if err := withObservation(store, ctx, provider, bucket, observed, action); !errors.Is(err, domain.ErrUploadTaskNotReady) || calls != 0 {
+				t.Fatal("任务到期前不应接受观察", calls, err)
+			}
+			execute(t, "SET timestamp = ?", observed.Task.ExpiresAt.Unix())
+			if err := withObservation(store, ctx, provider, bucket, observed, action); err != nil || calls != 1 || !reflect.DeepEqual(read(t), before) {
+				t.Fatal("任务正式到期时未接受观察或改变了原数据", calls, err)
+			}
+			t.Log("任务到期前拒绝观察，恰好到期接受观察")
+		})
+	}
+
 	// 3. 用已绑定和未绑定观察覆盖当前状态、原定位、版本以及记录差异。
+	otherPendingStatus := domain.UploadStatusExpiring
+	if pendingStatus == domain.UploadStatusExpiring {
+		otherPendingStatus = domain.UploadStatusCancelling
+	}
 	for _, fixture := range []struct {
 		name, change string
 		unbound      bool
 		object       *domain.UploadObjectResult
-		edit         func(*domain.MultipartUploadCancellationObservation)
+		edit         func(*domain.MultipartUploadCleanupObservation)
 		want         error
 	}{
 		{name: "bound observation without object"},
@@ -166,11 +221,14 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 		{name: "raw session replaced", change: "UPDATE upload_tasks SET storage_upload_id=RTRIM(storage_upload_id) WHERE id=19", want: domain.ErrUploadTaskBusy},
 		{name: "formerly unbound session now bound", unbound: true, change: "UPDATE upload_tasks SET storage_upload_id='later-session' WHERE id=19", want: domain.ErrUploadTaskBusy},
 		{name: "retry moved forward", change: "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE WHERE id=19", want: domain.ErrUploadTaskBusy},
-		{name: "different task state", change: "UPDATE upload_tasks SET status='EXPIRING' WHERE id=19", want: domain.ErrUploadTaskNotReady},
+		{name: "different task state", change: "UPDATE upload_tasks SET status='" + string(otherPendingStatus) + "' WHERE id=19", want: domain.ErrUploadTaskNotReady},
+		{name: "different observation phase", edit: func(observed *domain.MultipartUploadCleanupObservation) { observed.Task.Status = otherPendingStatus }, want: domain.ErrInvalidUploadTaskData},
+		{name: "reservation changed", change: "UPDATE upload_tasks SET reserved_bytes=reserved_bytes-1 WHERE id=19", want: domain.ErrInvalidUploadTaskData},
 		{name: "object reference changed", change: "UPDATE upload_tasks SET staged_object_id=29 WHERE id=19", want: domain.ErrUploadTaskBusy},
 		{name: "object key changed", change: "UPDATE stored_objects SET object_key='fixture/replaced' WHERE id=23", want: domain.ErrInvalidStoredObjectData},
 		{name: "bucket changed", change: "UPDATE stored_objects SET bucket='different-bucket' WHERE id=23", want: domain.ErrInvalidStoredObjectData},
-		{name: "cross account", edit: func(observed *domain.MultipartUploadCancellationObservation) { observed.Task.UserID = 8 }, want: domain.ErrUploadTaskNotFound},
+		{name: "provider changed", change: "UPDATE stored_objects SET provider='different-provider' WHERE id=23", want: domain.ErrInvalidStoredObjectData},
+		{name: "cross account", edit: func(observed *domain.MultipartUploadCleanupObservation) { observed.Task.UserID = 8 }, want: domain.ErrUploadTaskNotFound},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			observed := claim(t, fixture.unbound)
@@ -183,7 +241,7 @@ func TestWithMultipartUploadCancellationObservationTransactionIntegration(t *tes
 			}
 			before := read(t)
 			called := false
-			err := store.WithMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observed,
+			err := withObservation(store, ctx, provider, bucket, observed,
 				func(_ context.Context, _ *Store, task *domain.UploadTask, object *domain.StoredObject) error {
 					called = true
 					if !reflect.DeepEqual(task, before.task) || !reflect.DeepEqual(object, before.object) {

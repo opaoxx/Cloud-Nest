@@ -18,16 +18,33 @@ func (store *Store) WithMultipartUploadCancellationObservationTransaction(
 	return store.withMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observation, action, nil)
 }
 
+// WithMultipartUploadExpirationObservationTransaction 锁定并复核到期租约及其存储观察。
+// 回调使用事务内的任务和暂存对象。存储访问在事务外完成。
+func (store *Store) WithMultipartUploadExpirationObservationTransaction(
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation,
+	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
+) error {
+	return store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation, domain.UploadStatusExpiring, action, nil)
+}
+
 func (store *Store) withMultipartUploadCancellationObservationTransaction(
 	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 	replay func(*domain.UploadTask, *domain.StoredObject) error,
 ) error {
+	return store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation, domain.UploadStatusCancelling, action, replay)
+}
+
+func (store *Store) withMultipartUploadCleanupObservationTransaction(
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation, pendingStatus domain.UploadStatus,
+	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
+	replayCancellation func(*domain.UploadTask, *domain.StoredObject) error,
+) error {
 	// 1. 校验观察，按归属锁定账号、任务和暂存对象。
 	if store == nil || store.database == nil || ctx == nil || action == nil {
-		return fmt.Errorf("复核分片取消观察需要数据入口、上下文和事务回调")
+		return fmt.Errorf("复核分片收尾观察需要数据入口、上下文和事务回调")
 	}
-	if observation == nil || !validMultipartUploadCancellationClaim(&observation.Task) {
+	if observation == nil || !validMultipartUploadCleanupClaim(&observation.Task, pendingStatus) {
 		return domain.ErrInvalidUploadTaskData
 	}
 	claimed := &observation.Task
@@ -54,11 +71,11 @@ func (store *Store) withMultipartUploadCancellationObservationTransaction(
 			return err
 		}
 		matchesLocation := staged.Provider == location.Provider && staged.Bucket == location.Bucket && staged.ObjectKey == location.ObjectKey
-		if current.Status == domain.UploadStatusCancelled && replay != nil {
+		if current.Status == domain.UploadStatusCancelled && replayCancellation != nil {
 			if !matchesLocation {
 				return domain.ErrInvalidStoredObjectData
 			}
-			return replay(current, staged)
+			return replayCancellation(current, staged)
 		}
 
 		// 2. 拿齐行锁后读取数据库时间，复核租约、原会话绑定和对象位置。
@@ -68,24 +85,24 @@ func (store *Store) withMultipartUploadCancellationObservationTransaction(
 			return err
 		}
 		if clockError != nil {
-			return fmt.Errorf("读取分片取消观察复核时间失败: %w", clockError)
+			return fmt.Errorf("读取分片收尾观察复核时间失败: %w", clockError)
 		}
-		if err := validateMultipartUploadCancellationLease(current, claimed, databaseTime); err != nil {
+		if err := validateMultipartUploadCleanupLease(current, claimed, databaseTime, pendingStatus); err != nil {
 			return err
 		}
 		if !validMultipartUploadCleanupObject(current, staged) || !matchesLocation {
 			return domain.ErrInvalidStoredObjectData
 		}
 
-		// 3. 核对对象观察与已记录的事实，相符时进入事务回调。
-		if !matchesMultipartUploadCancellationObservation(staged, observed) {
+		// 3. 核对对象观察与已记录的版本、ETag 和大小，相符时进入事务回调。
+		if !matchesMultipartUploadCleanupObservation(staged, observed) {
 			return domain.ErrInvalidStoredObjectData
 		}
 		return action(txContext, txStore, current, staged)
 	})
 }
 
-func matchesMultipartUploadCancellationObservation(staged *domain.StoredObject, observed *domain.UploadObjectResult) bool {
+func matchesMultipartUploadCleanupObservation(staged *domain.StoredObject, observed *domain.UploadObjectResult) bool {
 	// 未记录存储结果时，观察提供对象的实际大小或明确缺失。
 	if staged.Status == domain.StoredObjectStatusStaging && staged.StorageETag == nil && staged.StorageVersionID == nil {
 		return true

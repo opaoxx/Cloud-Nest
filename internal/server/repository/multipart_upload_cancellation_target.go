@@ -92,10 +92,6 @@ func validMultipartUploadCleanupClaim(claimed *domain.UploadTask, pendingStatus 
 		claimed.LeaseVersion != 0 && validPendingMultipartUploadCleanupTask(claimed)
 }
 
-func validateMultipartUploadCancellationLease(current, claimed *domain.UploadTask, databaseTime time.Time) error {
-	return validateMultipartUploadCleanupLease(current, claimed, databaseTime, domain.UploadStatusCancelling)
-}
-
 func validateMultipartUploadCleanupLease(current, claimed *domain.UploadTask, databaseTime time.Time, pendingStatus domain.UploadStatus) error {
 	if current.Status != pendingStatus || current.UploadMode != "MULTIPART" {
 		return domain.ErrUploadTaskNotReady
