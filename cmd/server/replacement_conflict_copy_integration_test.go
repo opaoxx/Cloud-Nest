@@ -67,7 +67,7 @@ func TestServerReplacementConflictCopyIntegration(t *testing.T) {
 	}
 
 	// 2. 第一台设备发布后，第二台设备查询冲突并重新读取远端摘要。
-	sendReplacementConflictCopyContent(t, ctx, fixture.api, winningTask, winningBytes)
+	sendSingleReplacementContent(t, ctx, fixture.api, winningTask, winningBytes)
 	waitContext, stopWait := context.WithTimeout(ctx, 20*time.Second)
 	defer stopWait()
 	winner := awaitServerUploadPublication(t, waitContext, fixture.store, fixture.userID, backupFixtureID(t, winningTask.Task.ID))
@@ -75,8 +75,8 @@ func TestServerReplacementConflictCopyIntegration(t *testing.T) {
 	if winner.ReplacementPublishedRevision == nil || *winner.ReplacementPublishedRevision != currentRevision || winner.PublishedObjectID == nil {
 		t.Fatal("获胜任务没有发布目标文件的新版本")
 	}
-	sendReplacementConflictCopyContent(t, ctx, losingDevice.api, losingTask, losingBytes)
-	failure := awaitReplacementConflictCopyFailure(t, ctx, losingDevice.api, losingTask.Task.ID)
+	sendSingleReplacementContent(t, ctx, losingDevice.api, losingTask, losingBytes)
+	failure := awaitSingleReplacementFailure(t, ctx, losingDevice.api, losingTask.Task.ID)
 	if failure.LastError == nil || failure.LastError.Code != domain.UploadRevisionConflictCode || failure.ResultEntryID != nil ||
 		failure.Replacement == nil || failure.Replacement.ConflictingRevision == nil || *failure.Replacement.ConflictingRevision != fmt.Sprint(currentRevision) {
 		t.Fatal("失败设备未收到最新冲突版本和未发布结果", failure)
@@ -142,7 +142,7 @@ func TestServerReplacementConflictCopyIntegration(t *testing.T) {
 	t.Logf("已用 %d B，预占 0 B，历史、替换事件、副本发布事件各一条，账号游标 %d", totalUsed, sequence)
 }
 
-func sendReplacementConflictCopyContent(t *testing.T, ctx context.Context, api backupSourceClient, task dto.CreateUploadData, body []byte) {
+func sendSingleReplacementContent(t *testing.T, ctx context.Context, api backupSourceClient, task dto.CreateUploadData, body []byte) {
 	t.Helper()
 	var accepted dto.UploadContentAcceptedResponse
 	api.request(t, ctx, http.MethodPut, task.ContentPath, "", bytes.NewReader(body), http.StatusAccepted, &accepted)
@@ -151,14 +151,14 @@ func sendReplacementConflictCopyContent(t *testing.T, ctx context.Context, api b
 	}
 }
 
-func awaitReplacementConflictCopyFailure(t *testing.T, ctx context.Context, api backupSourceClient, taskID string) dto.UploadTaskData {
+func awaitSingleReplacementFailure(t *testing.T, ctx context.Context, api backupSourceClient, taskID string) dto.UploadTaskData {
 	t.Helper()
 	waitContext, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	poll := time.NewTicker(200 * time.Millisecond)
 	defer poll.Stop()
 
-	// 从失败设备的正式任务接口等到终态，发现其他状态则立即报告。
+	// 通过正式任务接口等到失败终态，出现意外状态则立即报告。
 	for {
 		var response dto.UploadTaskResponse
 		api.request(t, waitContext, http.MethodGet, "/api/v1/uploads/"+taskID, "", nil, http.StatusOK, &response)
@@ -174,7 +174,7 @@ func awaitReplacementConflictCopyFailure(t *testing.T, ctx context.Context, api 
 		}
 		select {
 		case <-waitContext.Done():
-			t.Fatal("未在期限内收到替换任务的冲突终态")
+			t.Fatal("未在期限内收到替换任务的失败终态")
 		case <-poll.C:
 		}
 	}
