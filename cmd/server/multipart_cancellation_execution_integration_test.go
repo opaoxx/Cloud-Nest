@@ -78,6 +78,10 @@ func testServerMultipartCleanupExecution(t *testing.T, pendingStatus, terminalSt
 	content := bytes.Repeat([]byte{0x42}, fileSize)
 	digest := sha256.Sum256(content)
 	start := time.Now().UTC().Truncate(time.Second)
+	writeRetryMarker := domain.ErrUploadCancellationRetryable
+	if pendingStatus == domain.UploadStatusExpiring {
+		writeRetryMarker = domain.ErrUploadExpirationRetryable
+	}
 	claim := func(t *testing.T, taskID uint64) (*domain.UploadTask, error) {
 		t.Helper()
 		if pendingStatus == domain.UploadStatusExpiring {
@@ -92,6 +96,18 @@ func testServerMultipartCleanupExecution(t *testing.T, pendingStatus, terminalSt
 			t.Fatal("未定位本项取消候选", candidates, err)
 		}
 		return store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-cancel-execution")
+	}
+	assertNoCandidate := func(t *testing.T) {
+		t.Helper()
+		if pendingStatus == domain.UploadStatusExpiring {
+			if candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1); err != nil || len(candidates) != 0 {
+				t.Fatal("等待期间出现了到期候选", candidates, err)
+			}
+			return
+		}
+		if candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1); err != nil || len(candidates) != 0 {
+			t.Fatal("等待期间出现了取消候选", candidates, err)
+		}
 	}
 	for _, fixture := range []struct {
 		name, key         string
@@ -218,71 +234,50 @@ func testServerMultipartCleanupExecution(t *testing.T, pendingStatus, terminalSt
 					t.Fatal("会话中止或未关联会话保留结果不符", err)
 				}
 			}
+			var executeTask func(context.Context, *domain.UploadTask) (*domain.UploadTask, error)
 			if pendingStatus == domain.UploadStatusExpiring {
 				observations := service.NewMultipartUploadExpirationStorageService(
 					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
 						return store.FindMultipartUploadExpirationTarget(callContext, task, settings.Provider, settings.Bucket)
 					}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
-				execution := service.NewMultipartUploadExpirationExecutionService(settings.Provider, settings.Bucket,
+				executeTask = service.NewMultipartUploadExpirationExecutionService(settings.Provider, settings.Bucket,
 					observations.ObserveBoundSession, observations.ObserveUnboundSession,
-					store.CompleteMissingMultipartUploadExpiration, store.CompleteExistingMultipartUploadExpiration)
-				if fixture.retryReason != "" {
-					before, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
-					if err != nil {
-						t.Fatal(err)
-					}
-					finished, err := execution.Execute(ctx, task)
-					if finished != nil {
-						t.Fatal("未确认或回滚的到期任务交付了终态")
-					}
-					if fixture.retryReason == domain.MultipartCancellationRetryDatabase {
-						var databaseError *mysql.MySQLError
-						if !errors.Is(err, domain.ErrUploadExpirationRetryable) || !errors.As(err, &databaseError) || databaseError.Number != 1205 {
-							t.Fatal("到期收尾未保留原数据库错误", err)
-						}
-					} else if err != nil {
-						t.Fatal("待确认的存储观察应保持等待", err)
-					}
-					afterTask, err := store.FindUserUploadTask(ctx, userID, fixture.taskID)
-					if err != nil || !reflect.DeepEqual(afterTask, task) {
-						t.Fatal("到期任务的租约或重试字段发生变化", err)
-					}
-					afterObject, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
-					if err != nil || !reflect.DeepEqual(afterObject, before) {
-						t.Fatal("暂存对象记录发生变化", err)
-					}
-					var used, reserved uint64
-					if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
-						used != usedBytes || reserved != remainingReserved {
-						t.Fatal("到期收尾待确认或失败改变了账目", used, reserved, err)
-					}
-					t.Logf("%s 保留 EXPIRING 任务、原租约和完整预占", fixture.retryReason)
-					return
-				}
-				finished, err := execution.Execute(ctx, task)
-				if err != nil || finished == nil {
-					t.Fatal("未交付确认到期结果", err)
-				}
-				verifyCommitted(finished)
-				return
+					store.CompleteMissingMultipartUploadExpiration, store.CompleteExistingMultipartUploadExpiration,
+					store.ScheduleMultipartUploadExpirationRetry).Execute
+			} else {
+				observations := service.NewMultipartUploadCancellationStorageService(
+					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
+						return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
+					}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
+				executeTask = service.NewMultipartUploadCancellationExecutionService(settings.Provider, settings.Bucket,
+					observations.ObserveBoundSession, observations.ObserveUnboundSession,
+					store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
+					store.ScheduleMultipartUploadCancellationRetry).Execute
 			}
-			observations := service.NewMultipartUploadCancellationStorageService(
-				func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
-					return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
-				}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
-			execution := service.NewMultipartUploadCancellationExecutionService(settings.Provider, settings.Bucket,
-				observations.ObserveBoundSession, observations.ObserveUnboundSession,
-				store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
-				store.ScheduleMultipartUploadCancellationRetry)
-			finished, err := execution.Execute(ctx, task)
+			beforeObject, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finished, err := executeTask(ctx, task)
 			if fixture.retryReason != "" {
-				var scheduled *service.MultipartUploadCancellationRetryScheduledError
-				if finished != nil || !errors.As(err, &scheduled) || scheduled == nil || !scheduled.NextAttemptAt.Equal(*task.LeaseUntil) {
+				var nextAttemptAt time.Time
+				if pendingStatus == domain.UploadStatusExpiring {
+					var scheduled *service.MultipartUploadExpirationRetryScheduledError
+					if errors.As(err, &scheduled) {
+						nextAttemptAt = scheduled.NextAttemptAt
+					}
+				} else {
+					var scheduled *service.MultipartUploadCancellationRetryScheduledError
+					if errors.As(err, &scheduled) {
+						nextAttemptAt = scheduled.NextAttemptAt
+					}
+				}
+				if finished != nil || !nextAttemptAt.Equal(*task.LeaseUntil) {
 					t.Fatal("未收到原租约窗口内的登记结果", err)
 				}
 				if fixture.retryReason == domain.MultipartCancellationRetryDatabase {
 					var databaseError *mysql.MySQLError
-					if !errors.Is(err, domain.ErrUploadCancellationRetryable) || !errors.As(err, &databaseError) || databaseError.Number != 1205 {
+					if !errors.Is(err, writeRetryMarker) || !errors.As(err, &databaseError) || databaseError.Number != 1205 {
 						t.Fatal("数据库重试未保留锁等待原因", err)
 					}
 					execute(t, "DROP TRIGGER fixture_cancel_execution_retry")
@@ -290,46 +285,38 @@ func testServerMultipartCleanupExecution(t *testing.T, pendingStatus, terminalSt
 					t.Fatal("存储待确认未保留原因", err)
 				}
 				retryTask, readError := store.FindUserUploadTask(ctx, userID, fixture.taskID)
-				if readError != nil || retryTask.Status != domain.UploadStatusCancelling || retryTask.ReservedBytes != task.ReservedBytes ||
+				if readError != nil || retryTask.Status != pendingStatus || retryTask.ReservedBytes != task.ReservedBytes ||
+					!reflect.DeepEqual(retryTask.StorageUploadID, task.StorageUploadID) || retryTask.LeaseVersion != task.LeaseVersion ||
+					retryTask.NextAttemptAt == nil || !retryTask.NextAttemptAt.Equal(nextAttemptAt) ||
 					retryTask.AttemptCount != task.AttemptCount+1 || retryTask.LeaseOwner != nil || retryTask.LeaseUntil != nil ||
 					retryTask.LastErrorCode == nil || *retryTask.LastErrorCode != string(fixture.retryReason) {
 					t.Fatal("持久化重试结果不符", readError)
 				}
 				retryObject, readError := store.FindUserStoredObject(ctx, userID, fixture.objectID)
-				if readError != nil || retryObject.Status != domain.StoredObjectStatusStaging || retryObject.GCAfter != nil {
+				if readError != nil || !reflect.DeepEqual(retryObject, beforeObject) {
 					t.Fatal("重试登记改变了暂存对象", readError)
 				}
 				var held uint64
 				if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=7").Scan(&held); err != nil || held != remainingReserved {
 					t.Fatal("确认前预占被释放", held, err)
 				}
-				execute(t, "SET timestamp = ?", scheduled.NextAttemptAt.Add(-time.Second).Unix())
-				if candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1); err != nil || len(candidates) != 0 {
-					t.Fatal("等待期间取消任务已可领取", candidates, err)
-				}
-				execute(t, "SET timestamp = ?", scheduled.NextAttemptAt.Unix())
-				candidates, scanError := store.ListMultipartUploadCancellationCandidates(ctx, 1)
-				if scanError != nil || len(candidates) != 1 || candidates[0].TaskID != task.ID {
-					t.Fatal("重试到点后未找到原任务", candidates, scanError)
-				}
-				reclaimed, claimError := store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-cancel-retry")
+				execute(t, "SET timestamp = ?", nextAttemptAt.Add(-time.Second).Unix())
+				assertNoCandidate(t)
+				execute(t, "SET timestamp = ?", nextAttemptAt.Unix())
+				reclaimed, claimError := claim(t, task.ID)
 				if claimError != nil || reclaimed == nil || reclaimed.LeaseVersion != task.LeaseVersion+1 {
 					t.Fatal("重试到点未领取新租约", claimError)
 				}
 				verify = isolatedMinIOVerifier(minioID)
-				finished, err = execution.Execute(ctx, reclaimed)
-				t.Logf("%s 按原租约截止时间登记，重领版本 %d 后执行原取消", fixture.retryReason, reclaimed.LeaseVersion)
+				finished, err = executeTask(ctx, reclaimed)
+				t.Logf("%s 按原租约截止时间登记，重领版本 %d 后继续 %s", fixture.retryReason, reclaimed.LeaseVersion, pendingStatus)
 			}
 			if err != nil || finished == nil {
-				t.Fatal("未交付确认取消结果", err)
+				t.Fatal("未交付确认收尾结果", err)
 			}
 
 			verifyCommitted(finished)
 		})
 	}
-	if pendingStatus == domain.UploadStatusExpiring {
-		t.Logf("四条确认路径提交 EXPIRED，两条未确认或失败路径保留 EXPIRING。已用 %d B、预占 %d B", usedBytes, remainingReserved)
-	} else {
-		t.Logf("四条确认路径和两条重试路径均提交 CANCELLED。已用 %d B、预占 %d B", usedBytes, remainingReserved)
-	}
+	t.Logf("四条确认路径和两条重试路径均提交 %s。已用 %d B、预占 %d B", terminalStatus, usedBytes, remainingReserved)
 }

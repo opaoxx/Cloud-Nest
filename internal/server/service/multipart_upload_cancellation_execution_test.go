@@ -30,7 +30,7 @@ func testMultipartUploadCleanupExecution(t *testing.T, pendingStatus, terminalSt
 	}
 	type executionFixture struct {
 		name, calls, cancelAt             string
-		bound, withObject, pending        bool
+		bound, withObject                 bool
 		observeError, completeError, want error
 		wantTask, missingResult           bool
 		editClaim, editResult             func(*domain.UploadTask)
@@ -74,11 +74,6 @@ func testMultipartUploadCleanupExecution(t *testing.T, pendingStatus, terminalSt
 	}
 	if pendingStatus == domain.UploadStatusExpiring {
 		fixtures = append(fixtures,
-			executionFixture{name: "storage cannot confirm", bound: true, pending: true, calls: "bound"},
-			executionFixture{name: "storage error is returned", bound: true, calls: "bound",
-				observeError: domain.ErrUploadStorageUnavailable, want: domain.ErrUploadStorageUnavailable},
-			executionFixture{name: "database retry marker is returned", calls: "unbound missing",
-				completeError: domain.ErrUploadExpirationRetryable, want: domain.ErrUploadExpirationRetryable},
 			executionFixture{name: "completion at upload deadline", calls: "unbound missing", wantTask: true,
 				editClaim: func(task *domain.UploadTask) { task.ExpiresAt = task.UpdatedAt.Add(time.Second) }},
 			executionFixture{name: "completion before upload deadline", calls: "unbound missing", want: invalid,
@@ -111,7 +106,7 @@ func testMultipartUploadCleanupExecution(t *testing.T, pendingStatus, terminalSt
 				if fixture.cancelAt == "observe" {
 					cancel()
 				}
-				if fixture.observeError != nil || fixture.pending {
+				if fixture.observeError != nil {
 					return nil, fixture.observeError
 				}
 				observation = &domain.MultipartUploadCleanupObservation{Task: *copyUploadTask(claimed), ObjectKey: key}
@@ -157,14 +152,16 @@ func testMultipartUploadCleanupExecution(t *testing.T, pendingStatus, terminalSt
 				return complete("existing", callContext, provider, bucket, observed)
 			}
 			var execute func(context.Context, *domain.UploadTask) (*domain.UploadTask, error)
+			unexpectedRetry := func(context.Context, *domain.UploadTask, int, domain.MultipartUploadCleanupRetryReason) (*domain.UploadTask, error) {
+				t.Fatal("确认路径或不可重试错误调用了重试登记")
+				return nil, nil
+			}
 			if pendingStatus == domain.UploadStatusExpiring {
-				execute = NewMultipartUploadExpirationExecutionService(provider, bucket, observeBound, observeUnbound, completeMissing, completeExisting).Execute
+				execute = NewMultipartUploadExpirationExecutionService(provider, bucket, observeBound, observeUnbound, completeMissing, completeExisting,
+					unexpectedRetry).Execute
 			} else {
 				execute = NewMultipartUploadCancellationExecutionService(provider, bucket, observeBound, observeUnbound, completeMissing, completeExisting,
-					func(context.Context, *domain.UploadTask, int, domain.MultipartUploadCancellationRetryReason) (*domain.UploadTask, error) {
-						t.Fatal("确认路径或不可重试错误调用了重试登记")
-						return nil, nil
-					}).Execute
+					unexpectedRetry).Execute
 			}
 
 			// 2. 核对实际路径和返回值，确保错误与待确认结果没有被当作终态。
