@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // MaxSyncSnapshotEntries 限定一份同步快照的条目数，不计独立返回的根目录。
@@ -39,6 +42,17 @@ type SyncSnapshotHeader struct {
 	RootEntryID uint64
 	// HighWaterSequence 是同一读取视图中的 users.change_seq，允许为零。
 	HighWaterSequence uint64
+}
+
+// SyncSnapshotPageResult 保存快照页面及本页应交付的凭据。
+type SyncSnapshotPageResult struct {
+	SnapshotID uuid.UUID
+	Header     SyncSnapshotHeader
+	ExpiresAt  time.Time
+	Items      []json.RawMessage
+	// NextCursor 与 BaselineToken 中恰好一个非空。
+	NextCursor    *string
+	BaselineToken *string
 }
 
 // SyncSnapshotEntriesJSON 保存可按位置分页的条目 JSON 和整份数组的字节数。
