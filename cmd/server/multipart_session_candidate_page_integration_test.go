@@ -47,20 +47,24 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	core := minio.Core{Client: bucket.client}
 
 	// 1. 同一键下创建三条会话，只有第一条写为任务当前绑定。
-	var sessions []string
-	for range 3 {
-		uploadID, err := client.CreateMultipartUpload(ctx, key)
+	createSession := func(objectKey string) string {
+		t.Helper()
+		uploadID, err := client.CreateMultipartUpload(ctx, objectKey)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sessions = append(sessions, uploadID)
 		t.Cleanup(func() {
 			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
-			if err := core.AbortMultipartUpload(cleanup, bucket.name, key, uploadID); err != nil {
+			if err := core.AbortMultipartUpload(cleanup, bucket.name, objectKey, uploadID); err != nil {
 				t.Error("合成会话清理失败", minio.ToErrorResponse(err).Code)
 			}
 		})
+		return uploadID
+	}
+	var sessions []string
+	for range 3 {
+		sessions = append(sessions, createSession(key))
 	}
 	execute := func(statement string, args ...any) {
 		t.Helper()
@@ -120,10 +124,56 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatal("只读扫描改变了任务记录", err)
 	}
+
+	// 4. 加入第二个原对象，续扫共享剩余页数，两项任务的扫描结果按原对象分组。
+	secondKey, err := service.GenerateUploadObjectKey(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBound := createSession(secondKey)
+	secondCandidate := createSession(secondKey)
+	execute("UPDATE users SET reserved_storage=reserved_storage+? WHERE id=7", fileSize)
+	execute("INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(27,7,?,?,?,?)",
+		settings.Provider, settings.Bucket, secondKey, fileSize)
+	execute(`INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,storage_upload_id,
+		expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at)
+		VALUES(28,7,11,27,13,'fixture-second.bin','MULTIPART',?,UNHEX(REPEAT('cd',32)),?,?,2,'UPLOADING',?,UTC_TIMESTAMP(6)+INTERVAL 1 DAY)`,
+		secondBound, fileSize, partSize, fileSize)
+	beforeSecond, err := store.FindUserUploadTask(ctx, 7, 28)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := service.NewMultipartUploadSessionCandidateBatchScanner(scanner, store.ListMultipartUploadSessionScanTargets)
+	paused, err := batch.ScanObjectPage(ctx, service.MultipartUploadSessionCandidateCursor{}, 2, 2, 1, grace)
+	if err != nil || paused.Done || paused.PagesScanned != 1 || len(paused.Objects) != 1 ||
+		paused.Objects[0].Scan.SkippedCreation != 2 ||
+		paused.Next != (service.MultipartUploadSessionCandidateCursor{ObjectID: 23, UploadID: sessions[1]}) {
+		t.Fatal("跨对象扫描未在第一个对象中暂停", err)
+	}
+	resumed, err := batch.ScanObjectPage(ctx, paused.Next, 2, 2, 2, grace)
+	if err != nil || !resumed.Done || resumed.PagesScanned != 2 || len(resumed.Objects) != 2 ||
+		resumed.Objects[0].Target != target || resumed.Objects[0].Scan.Scanned != 1 || resumed.Objects[0].Scan.SkippedCreation != 1 ||
+		resumed.Objects[1].Target.ObjectID != 27 || resumed.Objects[1].Scan.SkippedBound != 1 ||
+		len(resumed.Objects[1].Scan.Candidates) != 1 || resumed.Objects[1].Scan.Candidates[0].UploadID != secondCandidate {
+		t.Fatal("跨对象扫描未正确续读并共享剩余预算", err)
+	}
+	afterFirst, err := store.FindUserUploadTask(ctx, 7, 19)
+	if err != nil || !reflect.DeepEqual(before, afterFirst) {
+		t.Fatal("跨对象扫描改变了第一个任务", err)
+	}
+	afterSecond, err := store.FindUserUploadTask(ctx, 7, 28)
+	if err != nil || !reflect.DeepEqual(beforeSecond, afterSecond) {
+		t.Fatal("跨对象扫描改变了第二个任务", err)
+	}
 	for _, uploadID := range sessions {
 		if _, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1); err != nil {
 			t.Fatal("只读复核后未能读到原会话", err)
 		}
 	}
-	t.Log("一页预算后按原游标续扫，同轮两页汇总保护，三个合成会话仍可读")
+	for _, uploadID := range []string{secondBound, secondCandidate} {
+		if _, err := client.ListUploadPartsPage(ctx, secondKey, uploadID, 0, 1); err != nil {
+			t.Fatal("跨对象扫描后未能读到第二个对象的会话", err)
+		}
+	}
+	t.Log("两个对象共享会话页数上限，断点续读分组正确，五个合成会话仍可读")
 }
