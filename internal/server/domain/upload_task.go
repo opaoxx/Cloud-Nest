@@ -115,3 +115,28 @@ type UploadTask struct {
 	// ReplacementConflictingRevision 是发布冲突时锁读到的文件版本。
 	ReplacementConflictingRevision *uint64
 }
+
+// HasValidReplacementState 核对替换绑定与结果。普通任务的四个替换字段均为空。
+func (task *UploadTask) HasValidReplacementState() bool {
+	// 1. 普通任务的替换字段全空，替换任务必须绑定有效目标、版本和摘要。
+	target, expected := task.ReplacementEntryID, task.ReplacementExpectedRevision
+	published, conflicting := task.ReplacementPublishedRevision, task.ReplacementConflictingRevision
+	if target == nil {
+		return expected == nil && published == nil && conflicting == nil
+	}
+	if *target == 0 || expected == nil || *expected == 0 || task.ExpectedSHA256 == nil {
+		return false
+	}
+
+	// 2. 成功时核对结果指向原文件且版本恰好递增一次。
+	if task.Status == UploadStatusCompleted {
+		return task.ResultEntryID != nil && *task.ResultEntryID == *target &&
+			published != nil && *published > *expected && *published-*expected == 1 && conflicting == nil
+	}
+
+	// 3. 仅发布冲突可保存不同的冲突版本，其余状态没有结果。
+	if task.Status == UploadStatusFailed && task.LastErrorCode != nil && *task.LastErrorCode == UploadRevisionConflictCode {
+		return task.ResultEntryID == nil && published == nil && conflicting != nil && *conflicting != 0 && *conflicting != *expected
+	}
+	return task.ResultEntryID == nil && published == nil && conflicting == nil
+}

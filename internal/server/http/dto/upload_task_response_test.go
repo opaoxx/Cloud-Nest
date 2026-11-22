@@ -59,6 +59,83 @@ func TestNewUploadTaskDataJSON(t *testing.T) {
 	}
 }
 
+func TestNewUploadTaskDataReplacement(t *testing.T) {
+	const maximum = ^uint64(0)
+	for _, sample := range []struct {
+		name                   string
+		status                 domain.UploadStatus
+		published, conflicting string
+	}{
+		{"pending", domain.UploadStatusVerifying, "null", "null"},
+		{"completed", domain.UploadStatusCompleted, `"18446744073709551615"`, "null"},
+		{"conflict", domain.UploadStatusFailed, "null", `"18446744073709551615"`},
+		{"cancelled", domain.UploadStatusCancelled, "null", "null"},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			// 1. 使用边界版本构造替换快照，各场景只设置对应的结果字段。
+			source := uploadTaskDataFixture()
+			source.Status = sample.status
+			source.ReplacementEntryID, source.ReplacementExpectedRevision = new(maximum), new(maximum-1)
+			if sample.status.IsTerminal() {
+				source.ReservedBytes, source.CompletedAt = 0, &source.UpdatedAt
+			}
+			switch sample.status {
+			case domain.UploadStatusCompleted:
+				source.ResultEntryID, source.ReplacementPublishedRevision = new(maximum), new(maximum)
+			case domain.UploadStatusFailed:
+				source.ReplacementConflictingRevision = new(maximum)
+				source.LastErrorCode = new(domain.UploadRevisionConflictCode)
+			}
+			data, err := NewUploadTaskData(&source)
+			if err != nil || data.Replacement == nil {
+				t.Fatal("未转换替换任务响应", err)
+			}
+
+			// 2. 核对字符串边界、明确的 null，以及固定的公开冲突说明。
+			encoded, err := json.Marshal(data.Replacement)
+			want := `{"entry_id":"18446744073709551615","expected_revision":"18446744073709551614","published_revision":` +
+				sample.published + `,"conflicting_revision":` + sample.conflicting + `}`
+			if err != nil || string(encoded) != want {
+				t.Fatal("替换任务 JSON 版本不符", string(encoded), err)
+			}
+			if sample.status == domain.UploadStatusFailed {
+				if data.LastError == nil || data.LastError.Code != domain.UploadRevisionConflictCode ||
+					data.LastError.Message != domain.ErrEntryRevisionConflict.Error() {
+					t.Fatal("冲突摘要未使用固定公开结果", data.LastError)
+				}
+			} else if data.LastError != nil {
+				t.Fatal("无错误的任务交付了错误摘要", data.LastError)
+			}
+		})
+	}
+}
+
+func TestNewUploadTaskDataRejectsInconsistentReplacement(t *testing.T) {
+	for _, sample := range []struct {
+		name string
+		edit func(*domain.UploadTask)
+	}{
+		{"partial binding", func(task *domain.UploadTask) { task.ReplacementExpectedRevision = nil }},
+		{"pending has published revision", func(task *domain.UploadTask) { task.ReplacementPublishedRevision = new(uint64(7)) }},
+		{"conflict without revision", func(task *domain.UploadTask) {
+			task.Status, task.LastErrorCode = domain.UploadStatusFailed, new(domain.UploadRevisionConflictCode)
+		}},
+		{"conflict equals expected revision", func(task *domain.UploadTask) {
+			task.Status, task.LastErrorCode = domain.UploadStatusFailed, new(domain.UploadRevisionConflictCode)
+			task.ReplacementConflictingRevision = new(uint64(6))
+		}},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			source := uploadTaskDataFixture()
+			source.ReplacementEntryID, source.ReplacementExpectedRevision = new(uint64(31)), new(uint64(6))
+			sample.edit(&source)
+			if data, err := NewUploadTaskData(&source); data != nil || !errors.Is(err, domain.ErrInvalidUploadTaskData) {
+				t.Fatal("不一致的替换事实被公开", data, err)
+			}
+		})
+	}
+}
+
 func TestNewUploadTaskDataResults(t *testing.T) {
 	modes := []string{"zero bytes", "maximum JSON safe size", "full unsigned IDs", "unicode name", "MULTIPART", "expired retained", "time boundaries"}
 	for _, status := range []string{"CREATING", "UPLOADING", "COMPLETING", "VERIFYING", "COMPLETED", "CANCELLING", "CANCELLED", "EXPIRING", "EXPIRED", "FAILED"} {
@@ -215,6 +292,7 @@ func TestNewUploadTaskDataErrorSummaries(t *testing.T) {
 		{"STORAGE_UNAVAILABLE", "STORAGE_UNAVAILABLE", "存储服务暂时不可用"},
 		{"DATABASE_UNAVAILABLE", "DATABASE_UNAVAILABLE", "数据服务暂时不可用"},
 		{"INTERNAL_ERROR", "INTERNAL_ERROR", "上传任务处理异常"},
+		{domain.UploadRevisionConflictCode, "INTERNAL_ERROR", "上传任务处理异常"},
 		{"STORAGE_RETRY", "INTERNAL_ERROR", "上传任务处理异常"},
 		{"", "INTERNAL_ERROR", "上传任务处理异常"},
 		{"private-upload-code /object?token=fixture", "INTERNAL_ERROR", "上传任务处理异常"},

@@ -120,7 +120,7 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 	if status == domain.UploadStatusCompleted && (record.PublishedObjectID == nil || record.ResultEntryID == nil || record.CompletedAt == nil) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if (record.LeaseOwner == nil) != (record.LeaseUntil == nil) || !validUploadTaskReplacement(&record.UploadTask, status) {
+	if (record.LeaseOwner == nil) != (record.LeaseUntil == nil) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
@@ -170,6 +170,9 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 		ReplacementPublishedRevision:   copyUploadTaskValue(record.ReplacementPublishedRevision),
 		ReplacementConflictingRevision: copyUploadTaskValue(record.ReplacementConflictingRevision),
 	}
+	if !result.HasValidReplacementState() {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
 	for _, stamp := range []*time.Time{result.LeaseUntil, result.NextAttemptAt, result.CompletedAt} {
 		if stamp != nil {
 			*stamp = stamp.UTC()
@@ -184,31 +187,6 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 		*databaseTime = record.DatabaseTime
 	}
 	return result, nil
-}
-
-// validUploadTaskReplacement 核对 v5 任务绑定与结果，调用方已检查通用任务状态和摘要长度。
-func validUploadTaskReplacement(record *models.UploadTask, status domain.UploadStatus) bool {
-	// 1. 普通任务的替换字段全空，替换任务必须绑定有效目标、版本和摘要。
-	target, expected := record.ReplacementEntryID, record.ReplacementExpectedRevision
-	published, conflicting := record.ReplacementPublishedRevision, record.ReplacementConflictingRevision
-	if target == nil {
-		return expected == nil && published == nil && conflicting == nil
-	}
-	if *target == 0 || expected == nil || *expected == 0 || record.ExpectedSHA256 == nil {
-		return false
-	}
-
-	// 2. 成功时核对结果指向原文件且版本恰好递增一次。
-	if status == domain.UploadStatusCompleted {
-		return record.ResultEntryID != nil && *record.ResultEntryID == *target &&
-			published != nil && *published > *expected && *published-*expected == 1 && conflicting == nil
-	}
-
-	// 3. 仅发布冲突可保存不同的冲突版本，其余状态没有结果。
-	if status == domain.UploadStatusFailed && record.LastErrorCode != nil && *record.LastErrorCode == domain.UploadRevisionConflictCode {
-		return record.ResultEntryID == nil && published == nil && conflicting != nil && *conflicting != 0 && *conflicting != *expected
-	}
-	return record.ResultEntryID == nil && published == nil && conflicting == nil
 }
 
 // copyUploadTaskValue 为任务中的可空标量生成独立副本，nil 保留为空。

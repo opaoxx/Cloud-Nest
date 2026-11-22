@@ -276,6 +276,51 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 		request(t, ownerToken, "19", "", 500, 1, "INTERNAL_ERROR", "")
 	})
 
+	t.Run("replacement results on existing task endpoints", func(t *testing.T) {
+		execute := func(statement string, arguments ...any) {
+			t.Helper()
+			if _, err := pool.ExecContext(ctx, statement, arguments...); err != nil {
+				t.Fatal("准备替换查询夹具失败", err)
+			}
+		}
+		// 1. 任务查询交付原文件绑定和两个未产生的结果版本。
+		execute(`UPDATE upload_tasks SET status='VERIFYING',file_size=16777216,reserved_bytes=16777216,published_object_id=NULL,
+			result_entry_id=NULL,resolved_name=NULL,completed_at=NULL,replacement_entry_id=31,replacement_expected_revision=6 WHERE id=19`)
+		pending := request(t, ownerToken, "19", "", http.StatusOK, 1, "", "").Data.Replacement
+		if pending == nil || pending.EntryID != "31" || pending.ExpectedRevision != "6" ||
+			pending.PublishedRevision != nil || pending.ConflictingRevision != nil {
+			t.Fatal("查询未返回原文件绑定", pending)
+		}
+
+		// 2. 完成确认和稍后查询都交付已保存的版本，而非文件的当前版本。
+		execute(`UPDATE upload_tasks SET status='COMPLETED',reserved_bytes=0,published_object_id=29,result_entry_id=31,
+			resolved_name=?,completed_at=UTC_TIMESTAMP(6),replacement_published_revision=7 WHERE id=19`, *want.ResolvedName)
+		execute("UPDATE file_entries SET revision=8 WHERE id=31")
+		path := strings.Replace(completionPath, ":id", "19", 1)
+		completed := requestTask(t, http.MethodPost, path, otherDeviceToken, "", http.StatusOK, 1, "", "").Data
+		saved := request(t, ownerToken, "19", "", http.StatusOK, 1, "", "").Data
+		if completed.Replacement == nil || completed.Replacement.PublishedRevision == nil ||
+			*completed.Replacement.PublishedRevision != "7" || completed.Replacement.ConflictingRevision != nil ||
+			completed.ResultEntryID == nil || *completed.ResultEntryID != "31" ||
+			saved.Replacement == nil || saved.Replacement.PublishedRevision == nil || *saved.Replacement.PublishedRevision != "7" {
+			t.Fatal("完成或查询未返回持久化发布版本", completed, saved)
+		}
+
+		// 3. 冲突查询只交付公开原因和保存的版本，其他账号仍看不到任务。
+		execute(`UPDATE upload_tasks SET status='FAILED',published_object_id=NULL,result_entry_id=NULL,resolved_name=NULL,
+			replacement_published_revision=NULL,replacement_conflicting_revision=8,last_error_code='REVISION_CONFLICT',
+			last_error_message='private-replacement-diagnostic' WHERE id=19`)
+		execute("UPDATE file_entries SET revision=9 WHERE id=31")
+		failed := request(t, otherDeviceToken, "19", "", http.StatusOK, 1, "", "").Data
+		if failed.LastError == nil || failed.LastError.Code != domain.UploadRevisionConflictCode ||
+			failed.LastError.Message != domain.ErrEntryRevisionConflict.Error() || failed.Replacement == nil ||
+			failed.Replacement.PublishedRevision != nil || failed.Replacement.ConflictingRevision == nil ||
+			*failed.Replacement.ConflictingRevision != "8" || failed.ResultEntryID != nil {
+			t.Fatal("查询未正确交付版本冲突", failed)
+		}
+		request(t, foreignToken, "19", "", http.StatusNotFound, 1, "UPLOAD_NOT_FOUND", "")
+	})
+
 	// 4. 最大标识最后写入，贯穿 JWT、数据库授权、路径解析及任务响应。
 	t.Run("full unsigned identity and task", func(t *testing.T) {
 		maximum := ^uint64(0)
@@ -301,7 +346,7 @@ func TestUploadTaskHandlerIntegration(t *testing.T) {
 		}
 	})
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != sequence || sequence != 28+8 {
+	if len(lines) != sequence || sequence != 28+8+5 {
 		t.Fatal("真实任务查询次数或完成日志数错误", sequence)
 	}
 	for _, marker := range append(secrets, "private-", "学习笔记", "发布笔记", "曾经重试") {

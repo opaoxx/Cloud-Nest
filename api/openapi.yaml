@@ -217,7 +217,7 @@ paths:
         任务、目录和结果 ID 使用十进制字符串，大小遵守 JSON 安全整数，时间采用 UTC 微秒。
         last_error 采用固定公开业务码和提示。缺失或跨账号目标统一返回 UPLOAD_NOT_FOUND。
         每次请求复查账号、会话及设备的授权状态，格式错误定位 id，响应使用 no-store。
-        B5 计划：替换任务另返回 replacement。COMPLETED 交付已提交的目标及版本，FAILED 的 REVISION_CONFLICT 交付判定冲突时的版本。
+        替换任务另返回 replacement。COMPLETED 交付已提交的目标及版本，FAILED 的 REVISION_CONFLICT 交付判定冲突时的版本。
       security:
         - BearerAuth: []
       parameters:
@@ -331,7 +331,7 @@ paths:
         5. 后台完成存储对象并校验整文件大小及 SHA-256，普通上传的发布事务一次性创建目录项并结算配额。202 后通过 GET /api/v1/uploads/{id} 查询进度。
            旧回执在后台被确认失配且原会话还能继续上传时，任务回到 UPLOADING，客户端补传后携带新回执提交。
            存储完成结果不明时沿原任务核对，保留 COMPLETING，后续查询交付实际阶段。重复完成请求以任务 ID 复用进度和已发布的同一结果。
-           B5 计划：替换任务复用此流程，发布时条件更新原文件。失败时用任务查询读取终态原因。
+           替换任务复用此流程，成功响应附带 replacement。后台版本冲突通过任务查询交付。
         请求无需 Idempotency-Key。服务端依靠任务状态、租约及提交的完成快照约束重复操作。
       security:
         - BearerAuth: []
@@ -2666,7 +2666,7 @@ components:
         code:
           type: string
           enum: [TARGET_UNAVAILABLE, BODY_SIZE_MISMATCH, FILE_TOO_LARGE, CHECKSUM_MISMATCH, QUOTA_EXCEEDED, TEMP_SPACE_EXHAUSTED, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, INTERNAL_ERROR, UPLOAD_PARTS_MISMATCH, UPLOAD_SESSION_LOST, REVISION_CONFLICT]
-          description: 未知或空的内部错误码统一转换为 INTERNAL_ERROR。REVISION_CONFLICT 为 B5 计划中替换任务发布时的终态错误。
+          description: 未知或空的内部错误码统一转换为 INTERNAL_ERROR。仅确认发布冲突的替换任务交付 REVISION_CONFLICT。
         message:
           type: string
           enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常', '分片回执不一致，请核对后补传', '存储上传会话已失效，请重新创建任务', '文件已发生变化，请刷新后重试', '目标文件已不可用']
@@ -2675,7 +2675,7 @@ components:
       type: object
       additionalProperties: false
       required: [entry_id, expected_revision, published_revision, conflicting_revision]
-      description: B5 计划。仅替换任务返回此对象。两个结果版本均为发布事务记下的事实，后续查询及重试沿用原值。
+      description: 仅替换任务返回此对象。两个结果版本均为发布事务记下的事实，后续查询及重试沿用原值。
       properties:
         entry_id:
           $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
@@ -2695,7 +2695,7 @@ components:
       type: object
       additionalProperties: false
       required: [id, parent_id, requested_name, resolved_name, size_bytes, upload_mode, status, result_entry_id, created_at, updated_at, expires_at, completed_at, last_error]
-      description: 已通过用户归属检查的任务查询数据，保留到期和终态事实，可空字段明确返回 null。
+      description: 已通过用户归属检查的任务查询数据，保留到期和终态事实。普通任务省略 replacement，替换任务的可空版本字段明确返回 null。
       properties:
         id:
           $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'

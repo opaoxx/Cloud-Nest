@@ -17,7 +17,19 @@ type UploadTaskErrorSummary struct {
 	Message string `json:"message"`
 }
 
-// UploadTaskData 保存客户端查询上传任务所需的十三个公开字段。
+// UploadTaskReplacementData 保存替换任务的目标绑定及已持久化的结果版本。
+type UploadTaskReplacementData struct {
+	// EntryID 是原文件 ID 的完整十进制字符串。
+	EntryID string `json:"entry_id"`
+	// ExpectedRevision 是创建替换任务时绑定的版本。
+	ExpectedRevision string `json:"expected_revision"`
+	// PublishedRevision 仅在成功发布后存在。
+	PublishedRevision *string `json:"published_revision"`
+	// ConflictingRevision 仅在发布冲突后存在。
+	ConflictingRevision *string `json:"conflicting_revision"`
+}
+
+// UploadTaskData 保存客户端查询上传任务所需的公开字段。
 type UploadTaskData struct {
 	// ID 是完整上传任务 ID 的十进制字符串。
 	ID string `json:"id"`
@@ -45,6 +57,8 @@ type UploadTaskData struct {
 	CompletedAt *time.Time `json:"completed_at"`
 	// LastError 是可空的最近一次公开错误摘要。
 	LastError *UploadTaskErrorSummary `json:"last_error"`
+	// Replacement 仅随内容替换任务交付。
+	Replacement *UploadTaskReplacementData `json:"replacement,omitempty"`
 }
 
 // UploadTaskResponse 关联上传任务查询数据与本次请求 ID。
@@ -69,7 +83,7 @@ func NewUploadTaskData(result *domain.UploadTask) (*UploadTaskData, error) {
 	if result.FileSize > maxJSONSafeInteger {
 		return nil, fmt.Errorf("上传文件字节数超出 JSON 安全整数范围")
 	}
-	if (result.ResultEntryID != nil && *result.ResultEntryID == 0) ||
+	if !result.HasValidReplacementState() || (result.ResultEntryID != nil && *result.ResultEntryID == 0) ||
 		(result.Status == domain.UploadStatusCompleted && (result.ResultEntryID == nil || result.CompletedAt == nil)) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
@@ -96,17 +110,32 @@ func NewUploadTaskData(result *domain.UploadTask) (*UploadTaskData, error) {
 		UpdatedAt:     *updatedAt,
 		ExpiresAt:     *expiresAt,
 		CompletedAt:   completedAt,
-		LastError:     uploadTaskErrorSummary(result.LastErrorCode),
+		LastError:     uploadTaskErrorSummary(result.LastErrorCode, result.ReplacementConflictingRevision != nil),
 	}
 	if result.ResultEntryID != nil {
 		entryID := strconv.FormatUint(*result.ResultEntryID, 10)
 		data.ResultEntryID = &entryID
 	}
+
+	// 5. 仅在有替换绑定时交付版本快照，尚未产生的版本保留 null。
+	if result.ReplacementEntryID != nil {
+		replacement := &UploadTaskReplacementData{
+			EntryID:          strconv.FormatUint(*result.ReplacementEntryID, 10),
+			ExpectedRevision: strconv.FormatUint(*result.ReplacementExpectedRevision, 10),
+		}
+		if result.ReplacementPublishedRevision != nil {
+			replacement.PublishedRevision = new(strconv.FormatUint(*result.ReplacementPublishedRevision, 10))
+		}
+		if result.ReplacementConflictingRevision != nil {
+			replacement.ConflictingRevision = new(strconv.FormatUint(*result.ReplacementConflictingRevision, 10))
+		}
+		data.Replacement = replacement
+	}
 	return data, nil
 }
 
 // uploadTaskErrorSummary 将内部任务错误码转换为固定的公开提示。
-func uploadTaskErrorSummary(code *string) *UploadTaskErrorSummary {
+func uploadTaskErrorSummary(code *string, confirmedRevisionConflict bool) *UploadTaskErrorSummary {
 	// 1. 未记录错误码时保留 null。
 	if code == nil {
 		return nil
@@ -114,10 +143,15 @@ func uploadTaskErrorSummary(code *string) *UploadTaskErrorSummary {
 
 	// 2. 按已批准的业务码生成提示，未知码使用通用处理异常。
 	publicCode := *code
+	if publicCode == domain.UploadRevisionConflictCode && !confirmedRevisionConflict {
+		publicCode = "INTERNAL_ERROR"
+	}
 	var message string
 	switch publicCode {
 	case domain.UploadTargetUnavailableCode:
 		message = domain.ErrUploadTargetUnavailable.Error()
+	case domain.UploadRevisionConflictCode:
+		message = domain.ErrEntryRevisionConflict.Error()
 	case domain.UploadBodySizeMismatchCode:
 		message = domain.ErrUploadBodySizeMismatch.Error()
 	case "FILE_TOO_LARGE":
