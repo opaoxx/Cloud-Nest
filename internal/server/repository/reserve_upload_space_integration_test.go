@@ -29,6 +29,7 @@ func TestReserveUserUploadSpaceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	installUploadReplacementFixtureColumns(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(1,'quota_owner','配额用户','fixture_hash',100),(3,'quota_other','另一用户','fixture_hash',100)",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(13,1,'28ee758a-0727-42de-ae7d-3bb33155e148','配额设备','WEB'),(31,3,'38ee758a-0727-42de-ae7d-3bb33155e148','另一设备','WINDOWS')",

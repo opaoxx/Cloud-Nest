@@ -14,14 +14,17 @@ const uploadTaskLifetime = 24 * time.Hour
 // CreateUploadTransaction 汇集上传创建所需的事务内读取和写入能力。
 type CreateUploadTransaction interface {
 	FileEntryPathReader
-	// ReserveUserUploadSpace 为当前用户预占声明大小。
-	ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64) error
-	// CreateUserStagedObject 创建本次尝试使用的暂存对象。
-	CreateUserStagedObject(ctx context.Context, input domain.CreateStagedObjectInput) (*domain.StoredObject, error)
+	uploadStagingTransaction
 	// CreateUserUploadTask 引用暂存对象创建 SINGLE 上传任务。
 	CreateUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, expiresAt time.Time) (*domain.UploadTask, error)
 	// CreateUserMultipartUploadTask 引用暂存对象和固定计划创建 Multipart 上传任务。
 	CreateUserMultipartUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error)
+}
+
+// uploadStagingTransaction 提供普通上传和内容替换共同使用的预占与暂存写入。
+type uploadStagingTransaction interface {
+	ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64) error
+	CreateUserStagedObject(ctx context.Context, input domain.CreateStagedObjectInput) (*domain.StoredObject, error)
 }
 
 // CreateUploadService 组合路径校验、空间预占及暂存对象和任务创建。
@@ -113,52 +116,21 @@ func (createService *CreateUploadService) createPreparedUpload(ctx context.Conte
 		if len(path.Entries) > domain.MaxFileEntryDepth {
 			return domain.ErrFileEntryDepthExceeded
 		}
-		objectKey, keyError := createService.generateObjectKey(actor.UserID)
-		if err := txContext.Err(); err != nil {
-			return err
-		}
-		if keyError != nil {
-			return fmt.Errorf("准备上传对象位置失败: %w", keyError)
-		}
 		objectInput := domain.CreateStagedObjectInput{
-			Provider:  createService.provider,
-			Bucket:    createService.bucket,
-			ObjectKey: objectKey,
-			SizeBytes: declaration.SizeBytes,
+			Provider: createService.provider, Bucket: createService.bucket, SizeBytes: declaration.SizeBytes,
 		}
-		if !objectInput.IsValid() {
-			return domain.ErrInvalidStoredObjectData
-		}
-		reserveError := txStore.ReserveUserUploadSpace(txContext, declaration.SizeBytes)
-		if err := txContext.Err(); err != nil {
+		objectID, err := reserveAndStageUpload(txContext, actor.UserID, objectInput, txStore, createService.generateObjectKey)
+		if err != nil {
 			return err
 		}
-		if reserveError != nil {
-			return fmt.Errorf("预占上传空间失败: %w", reserveError)
-		}
 
-		// 3. 创建暂存对象，核对归属和存储位置。
-		staged, createError := txStore.CreateUserStagedObject(txContext, objectInput)
-		if err := txContext.Err(); err != nil {
-			return err
-		}
-		if createError != nil {
-			return fmt.Errorf("创建上传暂存对象失败: %w", createError)
-		}
-		if staged == nil || staged.ID == 0 || staged.OwnerUserID != actor.UserID || staged.Provider != objectInput.Provider ||
-			staged.Bucket != objectInput.Bucket || staged.ObjectKey != objectKey || staged.FileSize != declaration.SizeBytes || staged.Status != domain.StoredObjectStatusStaging {
-			return domain.ErrInvalidStoredObjectData
-		}
-		objectID := staged.ID
-
-		// 4. 按模式创建任务，核对并复制初始结果。
+		// 3. 按模式创建任务，核对并复制初始结果。
 		expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(uploadTaskLifetime)
 		taskInput := declaration
 		taskInput.ExpectedSHA256 = copyOptionalValue(declaration.ExpectedSHA256)
-		status := domain.UploadStatusUploading
 		var task *domain.UploadTask
+		var createError error
 		if plan.Mode == "MULTIPART" {
-			status = domain.UploadStatusCreating
 			task, createError = txStore.CreateUserMultipartUploadTask(txContext, objectID, taskInput, plan, expiresAt)
 		} else {
 			task, createError = txStore.CreateUserUploadTask(txContext, objectID, taskInput, expiresAt)
@@ -169,30 +141,14 @@ func (createService *CreateUploadService) createPreparedUpload(ctx context.Conte
 		if createError != nil {
 			return fmt.Errorf("创建 %s 上传任务失败: %w", plan.Mode, createError)
 		}
-		if task == nil || task.ID == 0 || task.UserID != actor.UserID || task.DeviceID != actor.DeviceID || task.StagedObjectID != objectID ||
-			task.TargetParentID != declaration.ParentID || task.RequestedName != declaration.Name || task.FileSize != declaration.SizeBytes ||
-			task.UploadMode != plan.Mode || task.Status != status || task.ReservedBytes != declaration.SizeBytes ||
-			!task.ExpiresAt.Equal(expiresAt) || task.CreatedAt.IsZero() || task.UpdatedAt.IsZero() ||
-			(task.ExpectedSHA256 == nil) != (declaration.ExpectedSHA256 == nil) || task.StorageUploadID != nil ||
-			task.PublishedObjectID != nil || task.ResolvedName != nil || task.ResultEntryID != nil || task.LeaseOwner != nil || task.LeaseUntil != nil ||
-			task.LeaseVersion != 0 || task.NextAttemptAt != nil || task.AttemptCount != 0 || task.LastErrorCode != nil || task.LastErrorMessage != nil || task.CompletedAt != nil {
-			return domain.ErrInvalidUploadTaskData
-		}
-		if task.ExpectedSHA256 != nil && *task.ExpectedSHA256 != *declaration.ExpectedSHA256 {
-			return domain.ErrInvalidUploadTaskData
-		}
-		if plan.Mode == "MULTIPART" {
-			if task.PartSize == nil || *task.PartSize != plan.PartSizeBytes || task.PartCount == nil || *task.PartCount != plan.PartCount {
-				return domain.ErrInvalidUploadTaskData
-			}
-		} else if task.PartSize != nil || task.PartCount != nil {
-			return domain.ErrInvalidUploadTaskData
+		if err := validateCreatedUploadTask(task, actor, objectID, declaration, plan, expiresAt); err != nil {
+			return err
 		}
 		prepared = copyUploadTask(task)
 		return nil
 	})
 
-	// 5. 确认事务提交成功后返回任务。
+	// 4. 确认事务提交成功后返回任务。
 	if transactionError != nil {
 		return nil, fmt.Errorf("创建上传事务失败: %w", transactionError)
 	}
@@ -203,4 +159,78 @@ func (createService *CreateUploadService) createPreparedUpload(ctx context.Conte
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	return prepared, nil
+}
+
+// reserveAndStageUpload 在同一用户事务内预占完整大小并登记暂存对象。
+func reserveAndStageUpload(ctx context.Context, userID uint64, objectInput domain.CreateStagedObjectInput,
+	transaction uploadStagingTransaction, generateObjectKey func(uint64) (string, error),
+) (uint64, error) {
+	// 1. 为本次尝试生成独立的对象位置。
+	objectKey, keyError := generateObjectKey(userID)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if keyError != nil {
+		return 0, fmt.Errorf("准备上传对象位置失败: %w", keyError)
+	}
+	objectInput.ObjectKey = objectKey
+	if !objectInput.IsValid() {
+		return 0, domain.ErrInvalidStoredObjectData
+	}
+
+	// 2. 预占声明的完整字节数，额度不足时停止创建。
+	reserveError := transaction.ReserveUserUploadSpace(ctx, objectInput.SizeBytes)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if reserveError != nil {
+		return 0, fmt.Errorf("预占上传空间失败: %w", reserveError)
+	}
+
+	// 3. 登记暂存对象并核对归属、位置和初始状态。
+	staged, createError := transaction.CreateUserStagedObject(ctx, objectInput)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if createError != nil {
+		return 0, fmt.Errorf("创建上传暂存对象失败: %w", createError)
+	}
+	if staged == nil || staged.ID == 0 || staged.OwnerUserID != userID || staged.Provider != objectInput.Provider ||
+		staged.Bucket != objectInput.Bucket || staged.ObjectKey != objectKey || staged.FileSize != objectInput.SizeBytes || staged.Status != domain.StoredObjectStatusStaging {
+		return 0, domain.ErrInvalidStoredObjectData
+	}
+	return staged.ID, nil
+}
+
+// validateCreatedUploadTask 核对普通和替换上传共同的初始事实。
+func validateCreatedUploadTask(task *domain.UploadTask, actor domain.Actor, objectID uint64, declaration domain.CreateUploadInput,
+	plan domain.UploadPlan, expiresAt time.Time,
+) error {
+	// 1. 按模式选择初始阶段，核对归属、请求声明、预占及初始字段。
+	status := domain.UploadStatusUploading
+	if plan.Mode == "MULTIPART" {
+		status = domain.UploadStatusCreating
+	}
+	if task == nil || task.ID == 0 || task.UserID != actor.UserID || task.DeviceID != actor.DeviceID || task.StagedObjectID != objectID ||
+		task.TargetParentID != declaration.ParentID || task.RequestedName != declaration.Name || task.FileSize != declaration.SizeBytes ||
+		task.UploadMode != plan.Mode || task.Status != status || task.ReservedBytes != declaration.SizeBytes ||
+		!task.ExpiresAt.Equal(expiresAt) || task.CreatedAt.IsZero() || task.UpdatedAt.IsZero() ||
+		(task.ExpectedSHA256 == nil) != (declaration.ExpectedSHA256 == nil) || task.StorageUploadID != nil ||
+		task.PublishedObjectID != nil || task.ResolvedName != nil || task.ResultEntryID != nil || task.LeaseOwner != nil || task.LeaseUntil != nil ||
+		task.LeaseVersion != 0 || task.NextAttemptAt != nil || task.AttemptCount != 0 || task.LastErrorCode != nil || task.LastErrorMessage != nil || task.CompletedAt != nil {
+		return domain.ErrInvalidUploadTaskData
+	}
+	if task.ExpectedSHA256 != nil && *task.ExpectedSHA256 != *declaration.ExpectedSHA256 {
+		return domain.ErrInvalidUploadTaskData
+	}
+
+	// 2. 核对固定分片布局，SINGLE 的分片字段保持为空。
+	if plan.Mode == "MULTIPART" {
+		if task.PartSize == nil || *task.PartSize != plan.PartSizeBytes || task.PartCount == nil || *task.PartCount != plan.PartCount {
+			return domain.ErrInvalidUploadTaskData
+		}
+	} else if task.PartSize != nil || task.PartCount != nil {
+		return domain.ErrInvalidUploadTaskData
+	}
+	return nil
 }
