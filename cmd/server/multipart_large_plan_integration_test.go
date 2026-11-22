@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +16,23 @@ import (
 )
 
 func TestServerMultipartLargePlanIntegration(t *testing.T) {
-	if os.Getenv("CLOUDNEST_MULTIPART_LARGE_PLAN_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST=1 后启动独占 MySQL、MinIO 和服务")
+	uploadAllParts := os.Getenv("CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST") == "1"
+	if os.Getenv("CLOUDNEST_MULTIPART_LARGE_PLAN_TEST") != "1" && !uploadAllParts {
+		t.Skip("设置 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST=1 验收首片，或设置 CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST=1 验收全部分片")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	timeout := 90 * time.Second
+	startMinIO := startIsolatedWebMinIO
+	if uploadAllParts {
+		timeout = 3 * time.Minute
+		startMinIO = func(t *testing.T, ctx context.Context) string {
+			t.Helper()
+			// 为完整的合成分片及存储元数据留出空间，仅用于本轮专用容器。
+			return startIsolatedWebMinIOWithDataSize(t, ctx, "1536m")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
-	fixture := prepareBackupSource(t, ctx)
+	fixture := prepareBackupSourceWithMinIO(t, ctx, startMinIO)
 	t.Logf("大文件计划专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
 	api := fixture.api
 
@@ -84,6 +96,22 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 		fileSize, sourceSHA256, ready.ID, plan.PartSizeBytes, plan.PartCount, tailSize,
 		len(receipts.Data.Parts), profile.Data.UsedBytes, profile.Data.ReservedBytes)
 
+	readPendingProfile := func(t *testing.T) dto.UserProfileData {
+		t.Helper()
+		var current dto.UploadTaskResponse
+		api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &current)
+		if current.RequestID == "" || current.Data.ID != ready.ID || current.Data.Status != "UPLOADING" ||
+			current.Data.SizeBytes != fileSize || current.Data.ResultEntryID != nil {
+			t.Fatal("分片写入后的原任务状态不符", current.Data)
+		}
+		var profileAfter dto.UserProfileResponse
+		api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profileAfter)
+		if profileAfter.RequestID == "" || profileAfter.Data != profile.Data {
+			t.Fatal("分片写入后账号资料或预占发生变化", profileAfter.Data)
+		}
+		return profileAfter.Data
+	}
+
 	t.Run("upload-first-part", func(t *testing.T) {
 		// 1. 以创建摘要时使用的合成数据块填满第一片，向正式接口申请签名。
 		const firstPartNumber = 1
@@ -106,20 +134,18 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 		}
 
 		// 3. 原任务继续等待其余分片，配额仍维持写入首片前的全额预占。
-		var current dto.UploadTaskResponse
-		api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &current)
-		if current.RequestID == "" || current.Data.ID != ready.ID || current.Data.Status != "UPLOADING" ||
-			current.Data.SizeBytes != fileSize || current.Data.ResultEntryID != nil {
-			t.Fatal("首片写入后的任务状态不符", current.Data)
-		}
-		var profileAfter dto.UserProfileResponse
-		api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profileAfter)
-		if profileAfter.RequestID == "" || profileAfter.Data != profile.Data {
-			t.Fatal("首片写入后账号资料或预占发生变化", profileAfter.Data)
-		}
+		afterFirstPart := readPendingProfile(t)
 		t.Logf("原任务 %s 首片 PUT 200，正式回执仅第 %d 片，%d B，SHA-256（Base64）%s，ETag %s，UPLOADING、已用 %d B、预占 %d B",
-			current.Data.ID, wantPart.PartNumber, wantPart.SizeBytes, wantPart.ChecksumSHA256, wantPart.ETag,
-			profileAfter.Data.UsedBytes, profileAfter.Data.ReservedBytes)
+			ready.ID, wantPart.PartNumber, wantPart.SizeBytes, wantPart.ChecksumSHA256, wantPart.ETag,
+			afterFirstPart.UsedBytes, afterFirstPart.ReservedBytes)
+
+		if uploadAllParts {
+			t.Run("upload-remaining-parts", func(t *testing.T) {
+				verifyLargeMultipartRemainingParts(t, ctx, api, target, plan, firstPart, wantPart)
+				afterAllParts := readPendingProfile(t)
+				t.Logf("原任务 %s UPLOADING、已用 %d B、预占 %d B", ready.ID, afterAllParts.UsedBytes, afterAllParts.ReservedBytes)
+			})
+		}
 	})
 
 	logs, err := fixture.stop()
@@ -127,4 +153,43 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
+}
+
+func verifyLargeMultipartRemainingParts(t *testing.T, ctx context.Context, api backupSourceClient, target serverMultipartPartTarget,
+	plan dto.CreateMultipartUploadData, partBuffer []byte, firstReceipt dto.UploadPartReceiptData) {
+	t.Helper()
+	// 1. 合成源按同一字节块循环，复用首片缓冲区，尾片只取剩余前缀。
+	wantReceipts := make([]dto.UploadPartReceiptData, 0, plan.PartCount)
+	wantReceipts = append(wantReceipts, firstReceipt)
+	remaining := plan.Task.SizeBytes - firstReceipt.SizeBytes
+	for partNumber := firstReceipt.PartNumber + 1; partNumber <= plan.PartCount; partNumber++ {
+		partSize := min(plan.PartSizeBytes, remaining)
+		partBody := partBuffer[:partSize]
+		signedURL, checksum := target.signPart(t, ctx, api, partNumber, partBody)
+		etag := putMultipartProbePart(t, ctx, api.httpClient, signedURL, checksum, partBody, http.StatusOK, "")
+		wantReceipts = append(wantReceipts, dto.UploadPartReceiptData{
+			PartNumber: partNumber, SizeBytes: partSize, ETag: etag, ChecksumSHA256: checksum,
+		})
+		remaining -= partSize
+	}
+
+	// 2. 用正式回执查询比对逐片 PUT 的结果，确保编号、长度及校验值按顺序一致。
+	var uploaded dto.UploadPartsResponse
+	api.request(t, ctx, http.MethodGet, target.taskPath+"/parts", "", nil, http.StatusOK, &uploaded)
+	if uploaded.RequestID == "" || uploaded.Data.PartSizeBytes != plan.PartSizeBytes ||
+		uploaded.Data.PartCount != plan.PartCount || !slices.Equal(uploaded.Data.Parts, wantReceipts) {
+		t.Fatal("正式回执与实际写入的完整分片清单不符", len(uploaded.Data.Parts))
+	}
+
+	// 3. 从服务端回执独立汇总字节数，并核对 1 B 尾片。
+	var totalSize uint64
+	for _, receipt := range uploaded.Data.Parts {
+		totalSize += receipt.SizeBytes
+	}
+	tail := uploaded.Data.Parts[len(uploaded.Data.Parts)-1]
+	if remaining != 0 || totalSize != plan.Task.SizeBytes || tail.SizeBytes != 1 {
+		t.Fatal("完整回执的总字节数或尾片不符", totalSize, tail.SizeBytes, remaining)
+	}
+	t.Logf("全部 %d 片回执合计 %d B，尾片 %d 为 %d B，SHA-256（Base64）%s，ETag %s，复用 %d B 正文缓冲区",
+		len(uploaded.Data.Parts), totalSize, tail.PartNumber, tail.SizeBytes, tail.ChecksumSHA256, tail.ETag, len(partBuffer))
 }

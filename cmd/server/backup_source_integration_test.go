@@ -173,9 +173,14 @@ func verifyBackupSourceBaseline(t *testing.T, ctx context.Context, fixture backu
 
 func prepareBackupSource(t *testing.T, ctx context.Context) backupSourceFixture {
 	t.Helper()
+	return prepareBackupSourceWithMinIO(t, ctx, startIsolatedWebMinIO)
+}
+
+func prepareBackupSourceWithMinIO(t *testing.T, ctx context.Context, startMinIO func(*testing.T, context.Context) string) backupSourceFixture {
+	t.Helper()
 	// 1. 独立启动 MySQL 与 MinIO，使用正式命令初始化空库和合成账号。
 	mysqlContainer := startIsolatedWebMySQL(t, ctx)
-	minioContainer := startIsolatedWebMinIO(t, ctx)
+	minioContainer := startMinIO(t, ctx)
 	t.Setenv("CLOUDNEST_STORAGE_PROVIDER", "local_minio")
 	pool, databaseName := prepareEmptyServerIntegrationDatabase(t, ctx)
 	password := rand.Text()
