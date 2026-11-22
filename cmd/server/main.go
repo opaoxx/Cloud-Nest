@@ -623,7 +623,8 @@ func runWithPurgeRootWorker(
 	serverhttp.RegisterUploadContentRoute(router, authorizationService.Authorize, uploadTaskService.Get, receiveUploadContent.Receive)
 	// 2. 在原完成路径注册双模式入口，复用 Bearer 认证。
 	serverhttp.RegisterUploadCompletionByModeRoute(router, authorizationService.Authorize, uploadTaskService.Get, multipartCompletion.Complete)
-	serverhttp.RegisterUploadCancellationRoute(router, authorizationService.Authorize, store.BeginUserUploadCancellation)
+	// 3. 在原取消路径根据账号事务锁定的任务模式受理，交给对应 worker 收尾。
+	serverhttp.RegisterUploadCancellationRoute(router, authorizationService.Authorize, store.BeginUserUploadCancellationByMode)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)

@@ -103,7 +103,7 @@ info:
     UploadContentAcceptedData/UploadContentAcceptedResponse 定义上传内容接收后的 HTTP 202 响应数据。
     UploadContentAccepted 定义该成功响应的请求 ID 与禁止缓存头，供后续内容接收操作引用。
     POST /api/v1/uploads/{id}/complete 由启动入口绑定共享授权与完成确认服务，确认校验进度或返回已保存的发布结果。
-    POST /api/v1/uploads/{id}/cancel 由启动入口绑定共享授权与取消受理事务，按任务状态返回 HTTP 202 或 HTTP 200。
+    POST /api/v1/uploads/{id}/cancel 由启动入口绑定共享授权与双模式取消受理事务，按任务状态返回 HTTP 202 或 HTTP 200。
     UploadContentTimedOut/UploadContentConflict/UploadContentTooLarge/UploadContentStorageUnavailable 定义内容接收失败时可公开的错误。
     CreateUploadRejected/CreateUploadConflict/CreateUploadTooLarge/CreateUploadQuotaExceeded 定义创建参数、幂等冲突/到期、文件声明上限和配额不足响应。
     CreateDirectoryRequest 定义创建文件夹正文，parent_id 使用字符串 ID，name 保留原始文本，color_key 可省略或为 null。
@@ -398,16 +398,17 @@ paths:
       operationId: cancelUpload
       summary: 取消当前用户的上传任务
       description: |
-        SINGLE 已接入服务。MULTIPART 为 B4 计划契约，等待接入。
+        SINGLE 和 MULTIPART 已接入服务，按所属用户事务内锁定的任务模式受理。
         1. Bearer 授权通过后解析路径 id，按当前用户归属读取任务。同账号其他设备可发起取消。缺失或跨账号统一返回 UPLOAD_NOT_FOUND。
         2. 已是 CANCELLING 时返回 202。已是 CANCELLED、COMPLETED、EXPIRED 或 FAILED 时返回 200 和已记录的终态。
-        3. 所属用户事务内复查授权和其余任务。EXPIRING 或以数据库时间判断已到期且尚未开始取消时返回 TASK_NOT_READY。
+        3. 所属用户事务内复查授权和当前任务。EXPIRING 或以数据库时间判断已到期且尚未开始取消时返回 TASK_NOT_READY。
            CREATING、UPLOADING、COMPLETING、VERIFYING 在期限内且无有效执行租约时进入 CANCELLING。有有效执行租约时返回 UPLOAD_BUSY。
            首次受理以 CANCELLING 提交为准，保留任务预占。此后停止签发该任务的分片 URL 或受理新的完成请求。
         4. MULTIPART 的收尾在后台处理。对已绑定的存储会话执行 AbortMultipartUpload，复查在途分片、原会话及暂存对象的实际完成结果。
            存储返回 NoSuchUpload 时仍需核对暂存对象的完成事实。尚未绑定会话时按实际存储状态核对，未关联会话按孤儿清理规则处理。
            已生成但未发布的对象按其版本登记延迟清理。
-           存储状态未确认或收尾暂时失败时保留 CANCELLING，由后台重试。确认收尾条件后，在一个事务内提交 CANCELLED 并只返还一次预占。
+           已绑定会话的收尾需要受信实例证明。证明缺失、存储状态未确认或收尾暂时失败时保留 CANCELLING，由后台重试。
+           确认收尾条件后，在一个事务内提交 CANCELLED 并只返还一次预占。
         5. 取消和完成以已提交的状态为准。发布先提交时返回 COMPLETED 及原 result_entry_id。取消先提交时，旧执行者不可再写回发布结果。
         请求无需正文或 Idempotency-Key。重复请求沿用同一任务当前状态，已提交的取消由后续流程接续。
         202 后客户端可使用返回的 data.id 调用 GET /api/v1/uploads/{id} 查询。200 时以 data.status 判断实际终态。
