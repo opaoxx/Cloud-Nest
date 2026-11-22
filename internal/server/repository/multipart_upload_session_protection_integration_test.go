@@ -40,6 +40,48 @@ func TestReadMultipartUploadSessionProtectionIntegration(t *testing.T) {
 			t.Fatal("绑定或创建租约保护不符", got, err)
 		}
 	}
+	const fixtureGracePeriod = 15 * time.Minute
+	graceBoundary := now.Add(-fixtureGracePeriod)
+	checkFacts := func(t *testing.T, initiatedAt time.Time, want domain.MultipartUploadSessionCleanupFacts) {
+		t.Helper()
+		observation := session
+		observation.InitiatedAt = initiatedAt
+		got, err := store.ReadMultipartUploadSessionCleanupFacts(ctx, provider, bucket, target, observation, fixtureGracePeriod)
+		if err != nil || got != want {
+			t.Fatal("只读收尾判断不符", got, err)
+		}
+	}
+
+	// 宽限判断以数据库时钟为准，恰好到点仍保留会话。
+	t.Run("grace period at database clock", func(t *testing.T) {
+		for _, fixture := range []struct {
+			name      string
+			initiated time.Time
+			elapsed   bool
+		}{
+			{"older by one microsecond", graceBoundary.Add(-time.Microsecond), true},
+			{"exact deadline", graceBoundary, false},
+			{"newer by one microsecond", graceBoundary.Add(time.Microsecond), false},
+			{"future storage time", now.Add(time.Minute), false},
+			{"same instant in another time zone", graceBoundary.In(time.FixedZone("fixture", 8*60*60)), false},
+		} {
+			t.Run(fixture.name, func(t *testing.T) {
+				checkFacts(t, fixture.initiated, domain.MultipartUploadSessionCleanupFacts{GraceElapsed: fixture.elapsed})
+			})
+		}
+		for _, invalid := range []time.Duration{0, -time.Second} {
+			observation := session
+			observation.InitiatedAt = graceBoundary
+			got, err := store.ReadMultipartUploadSessionCleanupFacts(ctx, provider, bucket, target, observation, invalid)
+			if err == nil || got != (domain.MultipartUploadSessionCleanupFacts{}) {
+				t.Fatal("接受了无效宽限期", invalid, got, err)
+			}
+		}
+		got, err := store.ReadMultipartUploadSessionCleanupFacts(ctx, provider, bucket, target, session, fixtureGracePeriod)
+		if !errors.Is(err, domain.ErrInvalidStoredObjectData) || got != (domain.MultipartUploadSessionCleanupFacts{}) {
+			t.Fatal("接受了缺少发起时间的会话", got, err)
+		}
+	})
 
 	// 1. 使用正式领取入口确认，存储尚未绑定时也有创建保护。
 	check(t, domain.MultipartUploadSessionProtection{})
@@ -52,6 +94,9 @@ func TestReadMultipartUploadSessionProtectionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, domain.MultipartUploadSessionProtection{ActiveCreationLease: true})
+	checkFacts(t, graceBoundary.Add(-time.Microsecond), domain.MultipartUploadSessionCleanupFacts{
+		Protection: domain.MultipartUploadSessionProtection{ActiveCreationLease: true}, GraceElapsed: true,
+	})
 	if bound, err := store.IsMultipartUploadSessionBound(ctx, provider, bucket, target, session); bound || err != nil {
 		t.Fatal("已有绑定入口应继续只报告绑定事实", bound, err)
 	}
@@ -92,6 +137,9 @@ func TestReadMultipartUploadSessionProtectionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, domain.MultipartUploadSessionProtection{Bound: true})
+	checkFacts(t, graceBoundary.Add(-time.Microsecond), domain.MultipartUploadSessionCleanupFacts{
+		Protection: domain.MultipartUploadSessionProtection{Bound: true}, GraceElapsed: true,
+	})
 	afterTask, err := store.FindUserUploadTask(ctx, target.UserID, target.TaskID)
 	if err != nil || !reflect.DeepEqual(bound, afterTask) {
 		t.Fatal("只读复核改变了任务", err)
@@ -106,4 +154,5 @@ func TestReadMultipartUploadSessionProtectionIntegration(t *testing.T) {
 		t.Fatal("取消原因未保留", err)
 	}
 	t.Log("数据库时间距任一截止一微秒时保护仍有效，恰好到期时失效，正式绑定提交后仅保留绑定保护")
+	t.Log("会话宽限恰好到点仍受保护，超过一微秒才报告超期，保留绑定与创建租约事实")
 }

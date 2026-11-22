@@ -27,14 +27,49 @@ func (store *Store) IsMultipartUploadSessionBound(
 func (store *Store) ReadMultipartUploadSessionProtection(
 	ctx context.Context, provider, bucket string, target domain.MultipartUploadSessionScanTarget, session domain.MultipartUploadSession,
 ) (domain.MultipartUploadSessionProtection, error) {
-	// 1. 按同一原对象读取当前绑定、创建租约和数据库时间。
 	row, err := store.readMultipartUploadSessionBinding(ctx, provider, bucket, target, session)
 	if err != nil {
 		return domain.MultipartUploadSessionProtection{}, err
 	}
+	return row.protectionFor(session.UploadID)
+}
 
-	// 2. 保留已绑定的会话，识别仍有效的创建租约。
-	protection := domain.MultipartUploadSessionProtection{Bound: sameUploadStorageText(row.StorageUploadID, &session.UploadID)}
+// ReadMultipartUploadSessionCleanupFacts 一次读取会话保护和宽限期判断所需的事实。
+// 宽限期由调用方提供。处理前仍须重新复核数据库与存储状态。
+func (store *Store) ReadMultipartUploadSessionCleanupFacts(
+	ctx context.Context, provider, bucket string, target domain.MultipartUploadSessionScanTarget, session domain.MultipartUploadSession,
+	gracePeriod time.Duration,
+) (domain.MultipartUploadSessionCleanupFacts, error) {
+	// 1. 校验会话发起时间和调用方传入的宽限期。
+	if gracePeriod <= 0 {
+		return domain.MultipartUploadSessionCleanupFacts{}, fmt.Errorf("复核分片会话需要正数宽限期")
+	}
+	if session.InitiatedAt.IsZero() {
+		return domain.MultipartUploadSessionCleanupFacts{}, domain.ErrInvalidStoredObjectData
+	}
+
+	// 2. 读取同一条查询里的绑定、创建租约和数据库时间。
+	row, err := store.readMultipartUploadSessionBinding(ctx, provider, bucket, target, session)
+	if err != nil {
+		return domain.MultipartUploadSessionCleanupFacts{}, err
+	}
+	if row.DatabaseTime.IsZero() {
+		return domain.MultipartUploadSessionCleanupFacts{}, domain.ErrInvalidUploadTaskData
+	}
+	protection, err := row.protectionFor(session.UploadID)
+	if err != nil {
+		return domain.MultipartUploadSessionCleanupFacts{}, err
+	}
+
+	// 3. 只有严格越过宽限截止点才算超期。
+	return domain.MultipartUploadSessionCleanupFacts{
+		Protection: protection, GraceElapsed: row.DatabaseTime.After(session.InitiatedAt.Add(gracePeriod)),
+	}, nil
+}
+
+func (row *multipartUploadSessionBindingRow) protectionFor(uploadID string) (domain.MultipartUploadSessionProtection, error) {
+	// 1. 保留已绑定的会话，识别仍有效的创建租约。
+	protection := domain.MultipartUploadSessionProtection{Bound: sameUploadStorageText(row.StorageUploadID, &uploadID)}
 	if row.Status != domain.UploadStatusCreating || row.StorageUploadID != nil || (row.LeaseOwner == nil && row.LeaseUntil == nil) {
 		return protection, nil
 	}
@@ -43,7 +78,7 @@ func (store *Store) ReadMultipartUploadSessionProtection(
 		return domain.MultipartUploadSessionProtection{}, domain.ErrInvalidUploadTaskData
 	}
 
-	// 3. 数据库时间到达任一截止点时，创建租约不再提供保护。
+	// 2. 数据库时间到达任一截止点时，创建租约不再提供保护。
 	protection.ActiveCreationLease = row.DatabaseTime.Before(*row.LeaseUntil) && row.DatabaseTime.Before(row.ExpiresAt)
 	return protection, nil
 }

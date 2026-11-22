@@ -22,3 +22,10 @@ type MultipartUploadSessionProtection struct {
 	// ActiveCreationLease 表示原任务仍在持有效租约创建会话。
 	ActiveCreationLease bool
 }
+
+// MultipartUploadSessionCleanupFacts 保存单会话的只读收尾判断依据。
+type MultipartUploadSessionCleanupFacts struct {
+	Protection MultipartUploadSessionProtection
+	// GraceElapsed 表示数据库时间已严格晚于会话发起时间加宽限期的截止点。
+	GraceElapsed bool
+}
