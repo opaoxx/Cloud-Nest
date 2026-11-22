@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -19,6 +20,126 @@ import (
 
 const serverRenameEntryBody = `{"name":"正式笔记.PDF","expected_revision":"1"}`
 const serverRenameEntryKey = "server-rename-007"
+
+func TestServerRenameChangeEventIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_RENAME_CHANGE_EVENT_TEST") != "1" {
+		t.Skip("设置 CLOUDNEST_RENAME_CHANGE_EVENT_TEST=1 后启动独占 MySQL、MinIO 和服务")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	fixture := prepareBackupSource(t, ctx)
+	t.Logf("重命名事件专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
+	userID := backupFixtureID(t, fixture.login.User.ID)
+	parentID := backupFixtureID(t, fixture.login.RootEntryID)
+	result, err := fixture.pool.ExecContext(ctx, `INSERT INTO file_entries(user_id,parent_id,name,name_key,entry_type)
+		VALUES(?,?,'同步原名',CAST('同步原名' AS BINARY),'DIR')`, userID, parentID)
+	if err != nil {
+		t.Fatal("无法准备尚无历史事件的合成目录", err)
+	}
+	entryID, err := result.LastInsertId()
+	if err != nil || entryID <= 0 {
+		t.Fatal("未取得合成目录 ID", err)
+	}
+	entryIDText := strconv.FormatInt(entryID, 10)
+	request := func(key, body string, status int, code string) dto.RenameEntryResponse {
+		t.Helper()
+		return requestServerRenameEntry(t, fixture.api.baseURL, fixture.api.accessToken, entryIDText, key, body, status, code, "")
+	}
+	type renameFacts struct {
+		name                                  string
+		revision, snapshots, events, sequence uint64
+	}
+	readFacts := func() renameFacts {
+		t.Helper()
+		var facts renameFacts
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT e.name,e.revision,
+			(SELECT COUNT(*) FROM idempotency_records WHERE user_id=u.id AND operation=?),
+			(SELECT COUNT(*) FROM change_events WHERE user_id=u.id),u.change_seq
+			FROM users u JOIN file_entries e ON e.user_id=u.id WHERE u.id=? AND e.id=?`,
+			domain.RenameEntryOperation, userID, entryID).Scan(&facts.name, &facts.revision, &facts.snapshots, &facts.events, &facts.sequence); err != nil {
+			t.Fatal(err)
+		}
+		return facts
+	}
+	verifyEvent := func(sequence uint64, entry dto.EntryDetailData) {
+		t.Helper()
+		var savedID, revision uint64
+		var eventType string
+		var payload []byte
+		if err := fixture.pool.QueryRowContext(ctx, "SELECT entry_id,revision,event_type,payload FROM change_events WHERE user_id=? AND `sequence`=?",
+			userID, sequence).Scan(&savedID, &revision, &eventType, &payload); err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]string
+		want := map[string]string{"entry_id": entryIDText, "parent_id": fixture.login.RootEntryID, "name": entry.Name, "revision": entry.Revision}
+		if err := json.Unmarshal(payload, &fields); err != nil || !reflect.DeepEqual(fields, want) ||
+			eventType != "ENTRY_RENAMED" || savedID != uint64(entryID) || strconv.FormatUint(revision, 10) != entry.Revision {
+			t.Fatal("重命名事件表列或载荷和事务结果不一致", string(payload), err)
+		}
+	}
+
+	// 1. 首次改名写入事件，同键重放、版本冲突和同名请求保持原日志。
+	if readFacts() != (renameFacts{name: "同步原名", revision: 1}) {
+		t.Fatal("合成目录初始状态不符")
+	}
+	const firstBody = `{"name":"  同步新名 🌱  ","expected_revision":"1"}`
+	first := request("rename-event-first", firstBody, http.StatusOK, "")
+	if first.Data.Entry.ID != entryIDText || first.Data.Entry.Name != "同步新名 🌱" || first.Data.Entry.Revision != "2" ||
+		first.Data.Entry.ParentID == nil || *first.Data.Entry.ParentID != fixture.login.RootEntryID {
+		t.Fatal("首次改名的目录身份、名称、父目录或版本不符", first.Data)
+	}
+	verifyEvent(1, first.Data.Entry)
+	replay := request("rename-event-first", `{"name":"同步新名 🌱","expected_revision":"1"}`, http.StatusOK, "")
+	request("rename-event-stale", `{"name":"旧版本不改名","expected_revision":"1"}`, http.StatusConflict, "REVISION_CONFLICT")
+	if !reflect.DeepEqual(replay.Data, first.Data) || replay.RequestID == first.RequestID ||
+		readFacts() != (renameFacts{name: "同步新名 🌱", revision: 2, snapshots: 1, events: 1, sequence: 1}) {
+		t.Fatal("重放或版本冲突改变了已提交事实")
+	}
+	unchanged := request("rename-event-unchanged", `{"name":"同步新名 🌱","expected_revision":"2"}`, http.StatusOK, "")
+	beforeFailure := renameFacts{name: "同步新名 🌱", revision: 2, snapshots: 2, events: 1, sequence: 1}
+	if !reflect.DeepEqual(unchanged.Data, first.Data) || readFacts() != beforeFailure {
+		t.Fatal("同名请求改变了目录版本或追加了事件")
+	}
+
+	// 2. 在改名、幂等快照和序号都写入后，触发事件故障，验证整体回滚。
+	if _, err := fixture.pool.ExecContext(ctx, `CREATE TRIGGER fixture_rename_event_failure
+		BEFORE INSERT ON change_events FOR EACH ROW
+		BEGIN
+			IF NEW.event_type='ENTRY_RENAMED'
+				AND EXISTS (SELECT 1 FROM file_entries WHERE user_id=NEW.user_id AND id=NEW.entry_id
+					AND name='同步回滚名' AND revision=3)
+				AND EXISTS (SELECT 1 FROM idempotency_records WHERE user_id=NEW.user_id AND resource_id=NEW.entry_id
+					AND idempotency_key='rename-event-rollback')
+				AND EXISTS (SELECT 1 FROM users WHERE id=NEW.user_id AND change_seq=2) THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture rename event insert failure';
+			END IF;
+		END`); err != nil {
+		t.Fatal("无法安装重命名事件隔离故障", err)
+	}
+	const faultBody = `{"name":"同步回滚名","expected_revision":"2"}`
+	request("rename-event-rollback", faultBody, http.StatusInternalServerError, "INTERNAL_ERROR")
+	if readFacts() != beforeFailure {
+		t.Fatal("事件失败后目录、幂等快照或序号未整体回滚")
+	}
+	if _, err := fixture.pool.ExecContext(ctx, "DROP TRIGGER fixture_rename_event_failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. 解除故障后用原键重试，确认序号连续，历史事件仍保留第一次结果。
+	recovered := request("rename-event-rollback", faultBody, http.StatusOK, "")
+	if recovered.Data.Entry.ID != entryIDText || recovered.Data.Entry.Revision != "3" ||
+		readFacts() != (renameFacts{name: "同步回滚名", revision: 3, snapshots: 3, events: 2, sequence: 2}) {
+		t.Fatal("故障恢复未保存预期的新名称、版本和事件")
+	}
+	verifyEvent(1, first.Data.Entry)
+	verifyEvent(2, recovered.Data.Entry)
+	logs, err := fixture.stop()
+	if err != nil {
+		t.Fatal("隔离服务停机失败", err)
+	}
+	verifyBackupSourceStopped(t, fixture.api.baseURL, logs)
+	t.Logf("目录项 %s 改名版本 1→2 写事件 1；同键、版本冲突及同名请求均保持日志；故障回滚后重试以版本 3 写事件 2", entryIDText)
+}
 
 // requestServerRenameEntry 验证真实启动后的正式 PATCH 响应与当前请求 ID。
 func requestServerRenameEntry(t *testing.T, baseURL, token, id, key, body string, status int, code, field string) dto.RenameEntryResponse {

@@ -19,6 +19,8 @@ type IdempotentRenameEntryTransaction interface {
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	// CreateUserIdempotencyRecord 在当前事务保存稳定结果并读回。
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	// AppendUserChangeEvent 在当前事务内追加一次业务变更。
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentRenameEntryService 组合首次改名和同键结果复用。
@@ -136,9 +138,20 @@ func (renameService *IdempotentRenameEntryService) Rename(ctx context.Context, a
 			if err != nil {
 				return fmt.Errorf("保存重命名幂等结果失败: %w", err)
 			}
+
+			// 5. 版本递增表明名称发生变化，事件和改名结果一同提交。
+			if entry.Revision > expectedRevision {
+				event, err := newEntryChangeEvent("ENTRY_RENAMED", entry)
+				if err != nil {
+					return fmt.Errorf("编码重命名变更事件失败: %w", err)
+				}
+				if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
+					return fmt.Errorf("追加重命名变更事件失败: %w", err)
+				}
+			}
 		}
 
-		// 5. 校验复用条件及完整快照，准备独立正文。
+		// 6. 首次重命名和重放都校验完整快照，准备独立正文。
 		if err := ValidateRenameEntryReplay(record, actor.UserID, entryID, key, requestHash, renameService.now()); err != nil {
 			return err
 		}
@@ -152,7 +165,7 @@ func (renameService *IdempotentRenameEntryService) Rename(ctx context.Context, a
 		return nil
 	})
 
-	// 6. 确认外层事务提交，返回稳定结果。
+	// 7. 确认外层事务提交，返回稳定结果。
 	if transactionError != nil {
 		return nil, fmt.Errorf("幂等重命名事务失败: %w", transactionError)
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -125,21 +124,11 @@ func (createService *IdempotentCreateDirectoryService) Create(ctx context.Contex
 			}
 
 			// 5. 从已核对的新目录构造事件，和目录、幂等快照一同提交。
-			payload, err := json.Marshal(struct {
-				EntryID  string `json:"entry_id"`
-				ParentID string `json:"parent_id"`
-				Name     string `json:"name"`
-				Revision string `json:"revision"`
-			}{
-				EntryID: strconv.FormatUint(entry.ID, 10), ParentID: strconv.FormatUint(*entry.ParentID, 10),
-				Name: entry.Name, Revision: strconv.FormatUint(entry.Revision, 10),
-			})
+			event, err := newEntryChangeEvent("DIRECTORY_CREATED", entry)
 			if err != nil {
 				return fmt.Errorf("编码创建文件夹变更事件失败: %w", err)
 			}
-			if _, err := txStore.AppendUserChangeEvent(txContext, domain.ChangeEventInput{
-				EntryID: entry.ID, Revision: entry.Revision, EventType: "DIRECTORY_CREATED", Payload: payload,
-			}); err != nil {
+			if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
 				return fmt.Errorf("追加创建文件夹变更事件失败: %w", err)
 			}
 		}

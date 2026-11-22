@@ -29,7 +29,7 @@ func (store *idempotentDirectorySaveFailureStore) CreateUserIdempotencyRecord(ct
 	return nil, store.failure
 }
 
-func installDirectoryChangeEventTable(t *testing.T, ctx context.Context, pool *sql.DB) {
+func installChangeEventFixtureTable(t *testing.T, ctx context.Context, pool *sql.DB) {
 	t.Helper()
 	// 与现有部分迁移夹具一致，只安装本用例直接使用的正式表。
 	changeEventsSQL, _, found := strings.Cut(migrations.Ordered()[2].SQL, ";\n")
@@ -47,7 +47,7 @@ func TestIdempotentCreateDirectoryServiceIntegration(t *testing.T) {
 	pool.SetMaxOpenConns(3)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	installDirectoryChangeEventTable(t, ctx, pool)
+	installChangeEventFixtureTable(t, ctx, pool)
 	sessionStart := strings.Index(migrations.InitialSQL, "CREATE TABLE auth_sessions (")
 	sessionEnd := strings.Index(migrations.InitialSQL, "CREATE TABLE stored_objects (")
 	idempotencyStart := strings.Index(migrations.InitialSQL, "CREATE TABLE idempotency_records (")

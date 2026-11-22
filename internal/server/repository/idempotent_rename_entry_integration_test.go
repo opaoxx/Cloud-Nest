@@ -32,6 +32,7 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 	pool.SetMaxOpenConns(3)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	installChangeEventFixtureTable(t, ctx, pool)
 	for _, boundary := range []struct{ table, next string }{{"auth_sessions", "stored_objects"}, {"user_entry_preferences", "upload_tasks"}, {"idempotency_records", ""}} {
 		start := strings.Index(migrations.InitialSQL, "CREATE TABLE "+boundary.table+" (")
 		end := len(migrations.InitialSQL)
@@ -94,6 +95,15 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 		}
 		return count
 	}
+	readLog := func() [2]uint64 {
+		t.Helper()
+		var log [2]uint64
+		if err := pool.QueryRowContext(ctx, "SELECT change_seq,(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=1").
+			Scan(&log[0], &log[1]); err != nil {
+			t.Fatal(err)
+		}
+		return log
+	}
 	call := func(t *testing.T, id, revision uint64, name, key string) *dto.RenameEntryData {
 		t.Helper()
 		body, err := renamer.Rename(ctx, actor, id, revision, name, key)
@@ -120,11 +130,13 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 			t.Fatal("完整文件快照错误")
 		}
 		before := countRecords()
-		if replay := call(t, 14, 3, "Cafe\u0301.PDF", "rename-007"); !reflect.DeepEqual(first, replay) || read(14).Revision != 4 || countRecords() != before {
+		if replay := call(t, 14, 3, "Cafe\u0301.PDF", "rename-007"); !reflect.DeepEqual(first, replay) || read(14).Revision != 4 ||
+			countRecords() != before || readLog() != [2]uint64{1, 1} {
 			t.Fatal("重试重复修改或快照错误")
 		}
 		call(t, 14, 4, "当前名称.ZIP", "rename-later")
-		if replay := call(t, 14, 3, "Cafe\u0301.PDF", "rename-007"); !reflect.DeepEqual(first, replay) || read(14).Name != "当前名称.ZIP" || read(14).Revision != 5 {
+		if replay := call(t, 14, 3, "Cafe\u0301.PDF", "rename-007"); !reflect.DeepEqual(first, replay) || read(14).Name != "当前名称.ZIP" ||
+			read(14).Revision != 5 || readLog() != [2]uint64{2, 2} {
 			t.Fatal("原始快照混入后续状态")
 		}
 	})
@@ -135,12 +147,12 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 		}
 		before := read(14)
 		data := call(t, 14, before.Revision, before.Name, "rename-same-name")
-		if data.Entry.Revision != fmt.Sprint(before.Revision) || !reflect.DeepEqual(before, read(14)) {
-			t.Fatal("同名匹配发生了版本变化")
+		if data.Entry.Revision != fmt.Sprint(before.Revision) || !reflect.DeepEqual(before, read(14)) || readLog() != [2]uint64{3, 3} {
+			t.Fatal("目录改名或同名请求的事件账目错误")
 		}
 	})
 	t.Run("parameter conflict and fresh request errors", func(t *testing.T) {
-		before, count := read(14), countRecords()
+		before, count, log := read(14), countRecords(), readLog()
 		for _, request := range []struct {
 			id, revision uint64
 			name         string
@@ -161,7 +173,7 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 				t.Fatal("新请求规则错误", err)
 			}
 		}
-		if !reflect.DeepEqual(before, read(14)) || countRecords() != count {
+		if !reflect.DeepEqual(before, read(14)) || countRecords() != count || readLog() != log {
 			t.Fatal("失败请求产生了写入")
 		}
 	})
@@ -170,7 +182,7 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 	t.Run("atomic rollback", func(t *testing.T) {
 		failure := errors.New("fixture atomic rename rollback")
 		for _, mode := range []string{"encode", "save after insert", "outer callback", "cancel after encode", "validate after save"} {
-			before, count := read(14), countRecords()
+			before, count, log := read(14), countRecords(), readLog()
 			beforeDisplay, err := store.FindUserFileEntryDisplay(ctx, 1, 14)
 			if err != nil {
 				t.Fatal(err)
@@ -216,7 +228,8 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 				want = context.Canceled
 			}
 			afterDisplay, readError := store.FindUserFileEntryDisplay(ctx, 1, 14)
-			if body != nil || !errors.Is(err, want) || !reflect.DeepEqual(before, read(14)) || countRecords() != count || readError != nil || !reflect.DeepEqual(beforeDisplay, afterDisplay) {
+			if body != nil || !errors.Is(err, want) || !reflect.DeepEqual(before, read(14)) || countRecords() != count ||
+				readLog() != log || readError != nil || !reflect.DeepEqual(beforeDisplay, afterDisplay) {
 				t.Fatal("改名和结果未完整回滚", mode, err, readError)
 			}
 		}
@@ -246,7 +259,7 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 	// 4. 并发请求在用户锁内协调参数、版本及记录唯一性。
 	t.Run("concurrent keys parameters and revisions", func(t *testing.T) {
 		for _, mode := range []string{"same request", "different names", "different keys"} {
-			before, count := read(14), countRecords()
+			before, count, log := read(14), countRecords(), readLog()
 			type outcome struct {
 				body json.RawMessage
 				err  error
@@ -291,7 +304,7 @@ func TestIdempotentRenameEntryServiceIntegration(t *testing.T) {
 			} else if successes != 1 || failures != 1 {
 				t.Fatal("并发成功/失败数量错误")
 			}
-			if read(14).Revision != before.Revision+1 || countRecords() != count+1 {
+			if read(14).Revision != before.Revision+1 || countRecords() != count+1 || readLog() != [2]uint64{log[0] + 1, log[1] + 1} {
 				t.Fatal("并发重复更新或重复保存")
 			}
 		}
