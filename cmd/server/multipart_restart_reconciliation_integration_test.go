@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -153,8 +154,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		afterProfile.Data.UsedBytes, afterProfile.Data.ReservedBytes)
 
 	// 6. 使用补传后查询的编号和 ETag 提交原任务，确认 202 交付已提交的完成意图。
-	firstPart, lastPart := resumedParts.Parts[0], resumedParts.Parts[1]
-	accepted := submitResumedMultipartCompletion(t, ctx, restarted, taskPath, readyTask, firstPart, lastPart)
+	accepted := submitMultipartCompletion(t, ctx, restarted, taskPath, readyTask, resumedParts.Parts...)
 
 	// 7. 等待正式后台任务合并、校验和发布，核对文件与配额并验证下载。
 	completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath, accepted)
@@ -170,14 +170,27 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("重启实例停机失败", err)
 	}
 	verifyBackupSourceStopped(t, restarted.baseURL, logs)
-	rows, err := fixture.pool.QueryContext(ctx, `SELECT part_number,size,etag,checksum_algorithm,checksum_value,observed_at
-		FROM upload_parts WHERE task_id=? ORDER BY part_number`, taskID)
+	observedAt := verifyMultipartCompletionSnapshot(t, ctx, fixture, resumedParts.Parts, afterResume.Data, accepted)
+	t.Logf("原任务 %d 返回 202 COMPLETING，关停后两条完成快照仍匹配，分片编号 1、2，字节数 %d、%d，共用核对时间 %s",
+		taskID, firstReceipt.SizeBytes, tailReceipt.SizeBytes, observedAt.Format(time.RFC3339Nano))
+}
+
+func verifyMultipartCompletionSnapshot(t *testing.T, ctx context.Context, fixture backupSourceFixture,
+	receipts []dto.UploadPartReceiptData, before, accepted dto.UploadTaskData) time.Time {
+	t.Helper()
+	// 1. 按原任务和账号读取经正式完成接口保存的回执。
+	rows, err := fixture.pool.QueryContext(ctx, `SELECT part.part_number,part.size,part.etag,
+		part.checksum_algorithm,part.checksum_value,part.observed_at
+		FROM upload_parts part JOIN upload_tasks task ON task.id=part.task_id
+		WHERE task.id=? AND task.user_id=? ORDER BY part.part_number`, accepted.ID, fixture.login.User.ID)
 	if err != nil {
-		t.Fatal("关停后读取本次完成快照失败", err)
+		t.Fatal("读取本次完成快照失败", err)
 	}
 	defer rows.Close()
+
+	// 2. 按编号比对全部回执与同一批次的核对时间。
 	var firstObservedAt time.Time
-	for _, expected := range resumedParts.Parts {
+	for _, expected := range receipts {
 		if !rows.Next() {
 			t.Fatal("完成快照缺少预期分片", expected.PartNumber, rows.Err())
 		}
@@ -192,15 +205,14 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 			firstObservedAt = observedAt
 		}
 		if persisted != expected || algorithm != "SHA256" || !observedAt.Equal(firstObservedAt) ||
-			observedAt.Before(afterResume.Data.UpdatedAt) || observedAt.After(accepted.UpdatedAt) {
-			t.Fatal("已保存回执与续传查询或本轮核对时间不一致", persisted, algorithm, observedAt)
+			observedAt.Before(before.UpdatedAt) || observedAt.After(accepted.UpdatedAt) {
+			t.Fatal("已保存回执与正式查询或本轮核对时间不一致", persisted, algorithm, observedAt)
 		}
 	}
 	if rows.Next() || rows.Err() != nil {
 		t.Fatal("完成快照包含额外分片或读取失败", rows.Err())
 	}
-	t.Logf("原任务 %d 返回 202 COMPLETING，关停后两条完成快照仍匹配，分片编号 1、2，字节数 %d、%d，共用核对时间 %s",
-		taskID, firstPart.SizeBytes, lastPart.SizeBytes, firstObservedAt.Format(time.RFC3339Nano))
+	return firstObservedAt
 }
 
 type serverMultipartPartTarget struct {
@@ -261,21 +273,33 @@ func (target serverMultipartPartTarget) signPart(t *testing.T, ctx context.Conte
 	return uploadURL, checksum
 }
 
-func submitResumedMultipartCompletion(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string,
-	task dto.UploadTaskData, firstPart, lastPart dto.UploadPartReceiptData) dto.UploadTaskData {
+func submitMultipartCompletion(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string,
+	task dto.UploadTaskData, receipts ...dto.UploadPartReceiptData) dto.UploadTaskData {
 	t.Helper()
 	// 1. 只提交正式查询返回的分片编号和 ETag。
-	completeBody := fmt.Sprintf(`{"parts":[{"part_number":%d,"etag":%q},{"part_number":%d,"etag":%q}]}`,
-		firstPart.PartNumber, firstPart.ETag, lastPart.PartNumber, lastPart.ETag)
+	type partClaim struct {
+		PartNumber uint32 `json:"part_number"`
+		ETag       string `json:"etag"`
+	}
+	claims := make([]partClaim, 0, len(receipts))
+	for _, receipt := range receipts {
+		claims = append(claims, partClaim{PartNumber: receipt.PartNumber, ETag: receipt.ETag})
+	}
+	completeBody, err := json.Marshal(struct {
+		Parts []partClaim `json:"parts"`
+	}{Parts: claims})
+	if err != nil {
+		t.Fatal("构造完成请求失败", err)
+	}
 	var accepted dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodPost, taskPath+"/complete", "", strings.NewReader(completeBody), http.StatusAccepted, &accepted)
+	api.request(t, ctx, http.MethodPost, taskPath+"/complete", "", bytes.NewReader(completeBody), http.StatusAccepted, &accepted)
 
 	// 2. 受理结果使用原任务声明，此时尚没有发布条目。
 	if accepted.RequestID == "" || accepted.Data.ID != task.ID || accepted.Data.UploadMode != "MULTIPART" ||
 		accepted.Data.Status != "COMPLETING" || accepted.Data.ParentID != task.ParentID || accepted.Data.RequestedName != task.RequestedName ||
 		accepted.Data.SizeBytes != task.SizeBytes || !accepted.Data.ExpiresAt.Equal(task.ExpiresAt) ||
 		accepted.Data.ResultEntryID != nil || accepted.Data.CompletedAt != nil {
-		t.Fatal("续传后的完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
+		t.Fatal("完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
 	}
 	return accepted.Data
 }

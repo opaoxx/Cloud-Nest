@@ -136,7 +136,7 @@ func TestServerMultipartLostPartReceiptIntegration(t *testing.T) {
 		resumedTask.ID, retryNumber, retrySize, retryETag, resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 
 	// 6. 提交已核对的本地回执，等待后台发布并验证唯一条目和配额结算。
-	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, localReceipts[0], localReceipts[1])
+	accepted := submitMultipartCompletion(t, ctx, api, taskPath, resumedTask, localReceipts...)
 	t.Logf("回执丢失重传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
 	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)

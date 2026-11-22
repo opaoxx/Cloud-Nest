@@ -16,18 +16,23 @@ import (
 )
 
 func TestServerMultipartLargePlanIntegration(t *testing.T) {
-	uploadAllParts := os.Getenv("CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST") == "1"
+	completeUpload := os.Getenv("CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST") == "1"
+	uploadAllParts := completeUpload || os.Getenv("CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST") == "1"
 	if os.Getenv("CLOUDNEST_MULTIPART_LARGE_PLAN_TEST") != "1" && !uploadAllParts {
-		t.Skip("设置 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST=1 验收首片，或设置 CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST=1 验收全部分片")
+		t.Skip("设置 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST=1 验收首片，CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST=1 验收全部分片，或 CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST=1 验收合并发布")
 	}
 	timeout := 90 * time.Second
 	startMinIO := startIsolatedWebMinIO
 	if uploadAllParts {
 		timeout = 3 * time.Minute
+		dataSize := "1536m"
+		if completeUpload {
+			// 为存储合并期间的分片及目标对象预留空间。
+			dataSize = "2560m"
+		}
 		startMinIO = func(t *testing.T, ctx context.Context) string {
 			t.Helper()
-			// 为完整的合成分片及存储元数据留出空间，仅用于本轮专用容器。
-			return startIsolatedWebMinIOWithDataSize(t, ctx, "1536m")
+			return startIsolatedWebMinIOWithDataSize(t, ctx, dataSize)
 		}
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
@@ -45,7 +50,8 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 		digest.Write(sourceBlock[:chunkSize])
 		remaining -= chunkSize
 	}
-	sourceSHA256 := fmt.Sprintf("%x", digest.Sum(nil))
+	sourceDigest := [sha256.Size]byte(digest.Sum(nil))
+	sourceSHA256 := fmt.Sprintf("%x", sourceDigest)
 
 	// 2. 用正式创建接口核对模式与固定计划，根据响应计算尾片长度。
 	const uploadsPath = "/api/v1/uploads"
@@ -141,9 +147,25 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 
 		if uploadAllParts {
 			t.Run("upload-remaining-parts", func(t *testing.T) {
-				verifyLargeMultipartRemainingParts(t, ctx, api, target, plan, firstPart, wantPart)
+				receipts := verifyLargeMultipartRemainingParts(t, ctx, api, target, plan, firstPart, wantPart)
 				afterAllParts := readPendingProfile(t)
 				t.Logf("原任务 %s UPLOADING、已用 %d B、预占 %d B", ready.ID, afterAllParts.UsedBytes, afterAllParts.ReservedBytes)
+
+				if completeUpload {
+					t.Run("publish", func(t *testing.T) {
+						// 1. 提交正式回执，并核对受理时保存的完成快照。
+						accepted := submitMultipartCompletion(t, ctx, api, taskPath, ready, receipts...)
+						observedAt := verifyMultipartCompletionSnapshot(t, ctx, fixture, receipts, ready, accepted)
+						t.Logf("原任务 %s 返回 202 COMPLETING，%d 条完成快照逐项一致，核对时间 %s",
+							accepted.ID, len(receipts), observedAt.Format(time.RFC3339Nano))
+
+						// 2. 等待真实后台合并、计算整文件摘要并发布原任务。
+						completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
+
+						// 3. 核对唯一文件、已校验的对象版本和预占全额转入已用。
+						verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+					})
+				}
 			})
 		}
 	})
@@ -156,7 +178,7 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 }
 
 func verifyLargeMultipartRemainingParts(t *testing.T, ctx context.Context, api backupSourceClient, target serverMultipartPartTarget,
-	plan dto.CreateMultipartUploadData, partBuffer []byte, firstReceipt dto.UploadPartReceiptData) {
+	plan dto.CreateMultipartUploadData, partBuffer []byte, firstReceipt dto.UploadPartReceiptData) []dto.UploadPartReceiptData {
 	t.Helper()
 	// 1. 合成源按同一字节块循环，复用首片缓冲区，尾片只取剩余前缀。
 	wantReceipts := make([]dto.UploadPartReceiptData, 0, plan.PartCount)
@@ -192,4 +214,5 @@ func verifyLargeMultipartRemainingParts(t *testing.T, ctx context.Context, api b
 	}
 	t.Logf("全部 %d 片回执合计 %d B，尾片 %d 为 %d B，SHA-256（Base64）%s，ETag %s，复用 %d B 正文缓冲区",
 		len(uploaded.Data.Parts), totalSize, tail.PartNumber, tail.SizeBytes, tail.ChecksumSHA256, tail.ETag, len(partBuffer))
+	return uploaded.Data.Parts
 }

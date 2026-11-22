@@ -131,7 +131,7 @@ func TestServerMultipartExpiredPartURLIntegration(t *testing.T) {
 		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 
 	// 6. 提交重签补传后的两片回执，核对正式后台发布结果和配额结算。
-	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts[0], resumed.Parts[1])
+	accepted := submitMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts...)
 	t.Logf("重签补传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
 	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)

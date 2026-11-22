@@ -151,7 +151,7 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 		readyTask.ID, prior.version, after.version, afterTask.Data.Status, after.snapshots, after.files, before.ReservedBytes)
 
 	// 7. 以正式查询的最新回执重新提交原任务，验证后台发布及配额结算。
-	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, afterTask.Data, latest[0], latest[1])
+	accepted := submitMultipartCompletion(t, ctx, api, taskPath, afterTask.Data, latest...)
 	t.Logf("替换尾片后的原任务 %s 使用最新回执返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
 	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)

@@ -72,7 +72,7 @@ func TestServerMultipartChecksumFailureIntegration(t *testing.T) {
 	checkQuota(fileSize)
 
 	// 2. 用正式查询的有效回执提交完成，等待后台实际校验整文件。
-	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, readyTask, receipts.Data.Parts[0], receipts.Data.Parts[1])
+	accepted := submitMultipartCompletion(t, ctx, api, taskPath, readyTask, receipts.Data.Parts...)
 	t.Logf("原任务 %s 两片摘要校验通过，完成接口返回 202 COMPLETING，声明 SHA-256 %x，实际 SHA-256 %x",
 		accepted.ID, declaredDigest, actualDigest)
 	failed := awaitMultipartChecksumFailure(t, ctx, api, taskPath)

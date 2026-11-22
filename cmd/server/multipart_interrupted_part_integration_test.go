@@ -144,7 +144,7 @@ func TestServerMultipartInterruptedPartIntegration(t *testing.T) {
 		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 
 	// 6. 提交补传后的回执，等正式后台任务发布，再核对唯一条目和配额结算。
-	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts[0], resumed.Parts[1])
+	accepted := submitMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts...)
 	t.Logf("断网补传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
 	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, fileDigest)
