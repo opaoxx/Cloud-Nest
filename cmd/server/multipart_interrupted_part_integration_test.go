@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -36,8 +37,14 @@ func TestServerMultipartInterruptedPartIntegration(t *testing.T) {
 	const fileSize = firstSize + tailSize
 	payload := make([]byte, fileSize)
 	payload[0], payload[firstSize], payload[len(payload)-1] = 0x31, 0x32, 0x33
-	body := fmt.Sprintf(`{"parent_id":%q,"name":"multipart-interrupted-fixture.bin","size_bytes":%d,"sha256":"%x"}`,
-		fixture.login.RootEntryID, fileSize, sha256.Sum256(payload))
+	fileDigest := sha256.Sum256(payload)
+	const filename = "multipart-interrupted-fixture.bin"
+	sourcePath := filepath.Join(t.TempDir(), filename)
+	if err := os.WriteFile(sourcePath, payload, 0600); err != nil {
+		t.Fatal("保存合成源文件失败", err)
+	}
+	body := fmt.Sprintf(`{"parent_id":%q,"name":%q,"size_bytes":%d,"sha256":"%x"}`,
+		fixture.login.RootEntryID, filename, fileSize, fileDigest)
 	var created struct {
 		Data      dto.CreateMultipartUploadData `json:"data"`
 		RequestID string                        `json:"request_id"`
@@ -79,13 +86,48 @@ func TestServerMultipartInterruptedPartIntegration(t *testing.T) {
 	if !reflect.DeepEqual(after, before) {
 		t.Fatal("连接中断改变了已确认的回执", before, after)
 	}
-	var current dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &current)
-	var profile dto.UserProfileResponse
-	api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
-	if !reflect.DeepEqual(current.Data, readyTask) || profile.Data.User.ID != fixture.login.User.ID ||
-		profile.Data.UsedBytes != 0 || profile.Data.ReservedBytes != fileSize {
+	readTaskAndProfile := func() (dto.UploadTaskData, dto.UserProfileData) {
+		t.Helper()
+		var task dto.UploadTaskResponse
+		api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &task)
+		var profile dto.UserProfileResponse
+		api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
+		return task.Data, profile.Data
+	}
+	current, profile := readTaskAndProfile()
+	if !reflect.DeepEqual(current, readyTask) || profile.User.ID != fixture.login.User.ID ||
+		profile.UsedBytes != 0 || profile.ReservedBytes != fileSize {
 		t.Fatal("连接中断改变了任务状态或配额")
+	}
+	t.Logf("原任务 %s 中断后仅保留首片 %d B，ETag %s，SHA-256 %s，尾片没有回执，已用 %d B、预占 %d B",
+		readyTask.ID, expected.SizeBytes, expected.ETag, expected.ChecksumSHA256, profile.UsedBytes, profile.ReservedBytes)
+
+	// 4. 重读合成源，确认大小和整文件摘要一致后，只补传计划中缺失的尾片。
+	reopened, err := os.ReadFile(sourcePath)
+	if err != nil || uint64(len(reopened)) != current.SizeBytes || sha256.Sum256(reopened) != fileDigest {
+		t.Fatal("无法核对补传使用的合成源", err)
+	}
+	missingNumber := after.PartCount // 已核对为两片计划，清单中只有第 1 片。
+	missingSize, err := domain.ExpectedMultipartUploadPartSize(current.SizeBytes, after.PartSizeBytes, after.PartCount, missingNumber)
+	if err != nil || missingSize != tailSize {
+		t.Fatal("原计划的缺失尾片长度不符", missingSize, err)
+	}
+	offset := uint64(missingNumber-1) * after.PartSizeBytes
+	fullTail := reopened[offset : offset+missingSize]
+	retryURL, retryChecksum := target.signPart(t, ctx, api, missingNumber, fullTail)
+	retryETag := putMultipartProbePart(t, ctx, api.httpClient, retryURL, retryChecksum, fullTail, http.StatusOK, "")
+
+	// 5. 比对两片回执，确认任务和配额保持在等待完成的状态。
+	tailReceipt := dto.UploadPartReceiptData{
+		PartNumber: missingNumber, SizeBytes: missingSize, ETag: retryETag, ChecksumSHA256: retryChecksum,
+	}
+	resumed := readParts()
+	if !slices.Equal(resumed.Parts, []dto.UploadPartReceiptData{expected, tailReceipt}) {
+		t.Fatal("尾片补传后的回执与原首片或新尾片不符", resumed.Parts)
+	}
+	resumedTask, resumedProfile := readTaskAndProfile()
+	if !reflect.DeepEqual(resumedTask, current) || !reflect.DeepEqual(resumedProfile, profile) {
+		t.Fatal("补传尾片改变了原任务或账号配额")
 	}
 	var sessionID string
 	var completedParts, publishedFiles uint64
@@ -95,15 +137,16 @@ func TestServerMultipartInterruptedPartIntegration(t *testing.T) {
 		FROM upload_tasks task WHERE id=? AND user_id=?`, readyTask.ID, fixture.login.User.ID).
 		Scan(&sessionID, &completedParts, &publishedFiles); err != nil ||
 		sessionID != target.uploadID || completedParts != 0 || publishedFiles != 0 {
-		t.Fatal("连接中断改变了绑定会话、完成快照或发布文件", err, completedParts, publishedFiles)
+		t.Fatal("补传后绑定会话、完成快照或发布文件不符", err, completedParts, publishedFiles)
 	}
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("原任务 %s 中断后仅保留首片 %d B，ETag %s，SHA-256 %s，尾片没有回执，已用 %d B、预占 %d B",
-		readyTask.ID, expected.SizeBytes, expected.ETag, expected.ChecksumSHA256, profile.Data.UsedBytes, profile.Data.ReservedBytes)
+	t.Logf("原任务 %s 恢复后只补传第 %d 片 %d B，ETag %s，SHA-256 %s，两片回执齐备，首片保持原值，已用 %d B、预占 %d B",
+		resumedTask.ID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
+		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 }
 
 func sendInterruptedMultipartPart(t *testing.T, ctx context.Context, signed *url.URL, checksum string, payload []byte) {
