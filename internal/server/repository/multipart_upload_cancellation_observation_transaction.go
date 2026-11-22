@@ -15,7 +15,8 @@ func (store *Store) WithMultipartUploadCancellationObservationTransaction(
 	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 ) error {
-	return store.withMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observation, action, nil)
+	return store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation,
+		domain.UploadStatusCancelling, domain.UploadStatusCancelled, action, nil)
 }
 
 // WithMultipartUploadExpirationObservationTransaction 锁定并复核到期租约及其存储观察。
@@ -24,21 +25,15 @@ func (store *Store) WithMultipartUploadExpirationObservationTransaction(
 	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
 ) error {
-	return store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation, domain.UploadStatusExpiring, action, nil)
-}
-
-func (store *Store) withMultipartUploadCancellationObservationTransaction(
-	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
-	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
-	replay func(*domain.UploadTask, *domain.StoredObject) error,
-) error {
-	return store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation, domain.UploadStatusCancelling, action, replay)
+	return store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation,
+		domain.UploadStatusExpiring, domain.UploadStatusExpired, action, nil)
 }
 
 func (store *Store) withMultipartUploadCleanupObservationTransaction(
-	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation, pendingStatus domain.UploadStatus,
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation,
+	pendingStatus, terminalStatus domain.UploadStatus,
 	action func(context.Context, *Store, *domain.UploadTask, *domain.StoredObject) error,
-	replayCancellation func(*domain.UploadTask, *domain.StoredObject) error,
+	replay func(*domain.UploadTask, *domain.StoredObject) error,
 ) error {
 	// 1. 校验观察，按归属锁定账号、任务和暂存对象。
 	if store == nil || store.database == nil || ctx == nil || action == nil {
@@ -71,11 +66,11 @@ func (store *Store) withMultipartUploadCleanupObservationTransaction(
 			return err
 		}
 		matchesLocation := staged.Provider == location.Provider && staged.Bucket == location.Bucket && staged.ObjectKey == location.ObjectKey
-		if current.Status == domain.UploadStatusCancelled && replayCancellation != nil {
+		if replay != nil && current.Status == terminalStatus {
 			if !matchesLocation {
 				return domain.ErrInvalidStoredObjectData
 			}
-			return replayCancellation(current, staged)
+			return replay(current, staged)
 		}
 
 		// 2. 拿齐行锁后读取数据库时间，复核租约、原会话绑定和对象位置。

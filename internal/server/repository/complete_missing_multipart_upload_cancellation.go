@@ -26,13 +26,22 @@ func (store *Store) CompleteMissingMultipartUploadCancellation(
 func (store *Store) completeMultipartUploadCancellation(
 	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCancellationObservation,
 ) (*domain.UploadTask, error) {
-	// 1. 锁内复核对象观察，识别同一次取消的重复交付。
+	completed, err := store.completeMultipartUploadCleanup(ctx, provider, bucket, observation,
+		domain.UploadStatusCancelling, domain.UploadStatusCancelled)
+	return completed, markUploadTransactionRetryError(ctx, err, domain.ErrUploadCancellationRetryable)
+}
+
+func (store *Store) completeMultipartUploadCleanup(
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation,
+	pendingStatus, terminalStatus domain.UploadStatus,
+) (*domain.UploadTask, error) {
+	// 1. 锁内复核对象观察，识别同一租约已提交的结果。
 	observed := observation.Object
 	var completed *domain.UploadTask
-	err := store.withMultipartUploadCancellationObservationTransaction(ctx, provider, bucket, observation,
+	err := store.withMultipartUploadCleanupObservationTransaction(ctx, provider, bucket, observation, pendingStatus, terminalStatus,
 		func(txContext context.Context, txStore *Store, current *domain.UploadTask, staged *domain.StoredObject) error {
-			// 2. 写入 CANCELLED，返还预占，并补齐尚未登记的对象定位。
-			finished, err := txStore.writeMultipartUploadCancelled(txContext, current)
+			// 2. 按实际写入时间检查任务期限和租约，同时写入终态与返还预占。
+			finished, err := txStore.writeMultipartUploadCleanup(txContext, current, terminalStatus)
 			if err != nil {
 				return err
 			}
@@ -41,35 +50,35 @@ func (store *Store) completeMultipartUploadCancellation(
 					return err
 				}
 			}
-			// 3. 检查有效引用，登记七天回收宽限并统一提交。
+			// 3. 核对对象已无引用，登记七天回收宽限并一起提交。
 			orphaned, err := txStore.markUnreferencedUploadObjectOrphaned(txContext, staged)
 			if err != nil {
 				return err
 			}
-			if !hasCompletedMultipartCancellationObject(orphaned, finished, observed) {
+			if !hasCompletedMultipartCleanupObject(orphaned, finished, observed) {
 				return domain.ErrInvalidStoredObjectData
 			}
 			completed = finished
 			return nil
 		},
 		func(current *domain.UploadTask, staged *domain.StoredObject) error {
-			if err := validateCompletedMultipartCancellationTask(current, &observation.Task); err != nil {
+			if err := validateCompletedMultipartCleanupTask(current, &observation.Task, terminalStatus); err != nil {
 				return err
 			}
-			if !hasCompletedMultipartCancellationObject(staged, current, observed) {
+			if !hasCompletedMultipartCleanupObject(staged, current, observed) {
 				return domain.ErrInvalidStoredObjectData
 			}
 			completed = current
 			return nil
 		})
 	if err != nil {
-		return nil, markUploadTransactionRetryError(ctx, err, domain.ErrUploadCancellationRetryable)
+		return nil, err
 	}
 	return completed, nil
 }
 
-// writeMultipartUploadCancelled 更新已经加锁复核的任务和账号账目。
-func (store *Store) writeMultipartUploadCancelled(ctx context.Context, current *domain.UploadTask) (*domain.UploadTask, error) {
+// writeMultipartUploadCleanup 更新已经加锁复核的任务和账号账目。
+func (store *Store) writeMultipartUploadCleanup(ctx context.Context, current *domain.UploadTask, terminalStatus domain.UploadStatus) (*domain.UploadTask, error) {
 	// 1. 核对账号预占，计算返还后的余额。
 	const allowDisabled = true
 	account, err := store.lockUploadQuota(ctx, current.UserID, allowDisabled)
@@ -81,31 +90,32 @@ func (store *Store) writeMultipartUploadCancelled(ctx context.Context, current *
 	}
 	remainingReserved := account.ReservedBytes - current.ReservedBytes
 
-	// 2. 条件更新两行，以实际写入时的 UTC 时间再次检查租约。
+	// 2. 条件更新两行。租约仍有效，且到期收尾已经达到原任务期限。
 	result := store.database.WithContext(ctx).Exec(`
 		UPDATE users AS quota_user JOIN upload_tasks AS task ON task.user_id = quota_user.id
 		SET quota_user.reserved_storage = ?, quota_user.updated_at = UTC_TIMESTAMP(6),
-		    task.status = 'CANCELLED', task.reserved_bytes = 0,
+		    task.status = ?, task.reserved_bytes = 0,
 		    task.completed_at = UTC_TIMESTAMP(6), task.updated_at = UTC_TIMESTAMP(6),
 		    task.lease_owner = NULL, task.lease_until = NULL, task.next_attempt_at = NULL,
 		    task.last_error_code = NULL, task.last_error_message = NULL
 		WHERE quota_user.id = ? AND quota_user.status = ?
 		  AND quota_user.storage_quota = ? AND quota_user.used_storage = ? AND quota_user.reserved_storage = ?
-		  AND task.id = ? AND task.staged_object_id = ? AND task.status = 'CANCELLING' AND task.upload_mode = 'MULTIPART'
+		  AND task.id = ? AND task.staged_object_id = ? AND task.status = ? AND task.upload_mode = 'MULTIPART'
+		  AND task.expires_at = ? AND (task.status = 'CANCELLING' OR task.expires_at <= UTC_TIMESTAMP(6))
 		  AND CAST(task.storage_upload_id AS BINARY) <=> ? AND CAST(task.lease_owner AS BINARY) = ?
 		  AND task.lease_version = ? AND task.lease_until = ? AND task.lease_until > UTC_TIMESTAMP(6)
 		  AND (task.next_attempt_at IS NULL OR task.next_attempt_at <= UTC_TIMESTAMP(6))
 		  AND task.reserved_bytes = task.file_size AND task.reserved_bytes = ?
 		  AND task.published_object_id IS NULL AND task.result_entry_id IS NULL
 		  AND task.resolved_name IS NULL AND task.completed_at IS NULL`,
-		remainingReserved, current.UserID, account.Status, account.QuotaBytes, account.UsedBytes, account.ReservedBytes,
-		current.ID, current.StagedObjectID, current.StorageUploadID, *current.LeaseOwner,
+		remainingReserved, terminalStatus, current.UserID, account.Status, account.QuotaBytes, account.UsedBytes, account.ReservedBytes,
+		current.ID, current.StagedObjectID, current.Status, current.ExpiresAt, current.StorageUploadID, *current.LeaseOwner,
 		current.LeaseVersion, *current.LeaseUntil, current.ReservedBytes)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if result.Error != nil {
-		return nil, fmt.Errorf("写入分片上传取消终态失败: %w", result.Error)
+		return nil, fmt.Errorf("写入分片上传终态 %s 失败: %w", terminalStatus, result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return nil, domain.ErrUploadTaskBusy
@@ -119,7 +129,7 @@ func (store *Store) writeMultipartUploadCancelled(ctx context.Context, current *
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCompletedMultipartCancellationTask(finished, current); err != nil {
+	if err := validateCompletedMultipartCleanupTask(finished, current, terminalStatus); err != nil {
 		return nil, err
 	}
 	updatedAccount, err := store.lockUploadQuota(ctx, current.UserID, allowDisabled)
@@ -133,12 +143,12 @@ func (store *Store) writeMultipartUploadCancelled(ctx context.Context, current *
 	return finished, nil
 }
 
-func validateCompletedMultipartCancellationTask(finished, claimed *domain.UploadTask) error {
+func validateCompletedMultipartCleanupTask(finished, claimed *domain.UploadTask, terminalStatus domain.UploadStatus) error {
 	if finished.UploadMode != "MULTIPART" || finished.StagedObjectID != claimed.StagedObjectID ||
 		finished.LeaseVersion != claimed.LeaseVersion || !sameUploadStorageText(finished.StorageUploadID, claimed.StorageUploadID) {
 		return domain.ErrUploadTaskBusy
 	}
-	if !hasCompletedUploadCleanup(finished, domain.UploadStatusCancelled) || !sameMultipartUploadPlan(claimed, finished) ||
+	if !hasCompletedUploadCleanup(finished, terminalStatus) || !sameMultipartUploadPlan(claimed, finished) ||
 		finished.AttemptCount != claimed.AttemptCount || finished.PublishedObjectID != nil || finished.ResultEntryID != nil ||
 		finished.ResolvedName != nil || finished.CompletedAt.Before(claimed.UpdatedAt) || !finished.CompletedAt.Before(*claimed.LeaseUntil) {
 		return domain.ErrInvalidUploadTaskData
@@ -146,7 +156,7 @@ func validateCompletedMultipartCancellationTask(finished, claimed *domain.Upload
 	return nil
 }
 
-func hasCompletedMultipartCancellationObject(
+func hasCompletedMultipartCleanupObject(
 	staged *domain.StoredObject, finished *domain.UploadTask, observed *domain.UploadObjectResult,
 ) bool {
 	// 复用终态时兼容已进入回收流程的记录，保留原声明大小及未校验事实。

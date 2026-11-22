@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -12,6 +13,20 @@ import (
 )
 
 func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
+	testCompleteMissingMultipartUploadCleanup(t, domain.UploadStatusCancelled, domain.ErrUploadCancellationRetryable,
+		(*Store).CompleteMissingMultipartUploadCancellation)
+}
+
+func TestCompleteMissingMultipartUploadExpirationIntegration(t *testing.T) {
+	testCompleteMissingMultipartUploadCleanup(t, domain.UploadStatusExpired, domain.ErrUploadExpirationRetryable,
+		(*Store).CompleteMissingMultipartUploadExpiration)
+}
+
+func testCompleteMissingMultipartUploadCleanup(
+	t *testing.T, terminalStatus domain.UploadStatus, retryMarker error,
+	completeMissing func(*Store, context.Context, string, string, *domain.MultipartUploadCleanupObservation) (*domain.UploadTask, error),
+) {
+	t.Helper()
 	ctx, pool, store := prepareMultipartCompletionDatabase(t)
 	const provider, bucket, key = "local_minio", "fixture-bucket", "fixture/missing +%.bin"
 	execute := func(t *testing.T, statement string, args ...any) {
@@ -20,7 +35,7 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	claim := func(t *testing.T, unbound bool) *domain.MultipartUploadCancellationObservation {
+	claim := func(t *testing.T, unbound bool) *domain.MultipartUploadCleanupObservation {
 		t.Helper()
 		resetMultipartUploadCancellationFixture(t, ctx, pool)
 		execute(t, "UPDATE file_entries SET object_id=29 WHERE id=31")
@@ -31,6 +46,19 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 			execute(t, "UPDATE upload_tasks SET storage_upload_id=NULL WHERE id=19")
 			execute(t, "UPDATE users SET status='DISABLED' WHERE id=7")
 		}
+		if terminalStatus == domain.UploadStatusExpired {
+			execute(t, "UPDATE upload_tasks SET status='EXPIRING',expires_at=UTC_TIMESTAMP(6) WHERE id=19")
+			candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+			if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
+				t.Fatal("未取得到期候选", candidates, err)
+			}
+			task, err := store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-expiration-terminal")
+			if err != nil {
+				t.Fatal("未领取到期租约", err)
+			}
+			return &domain.MultipartUploadCleanupObservation{Task: *task, ObjectKey: key}
+		}
+		execute(t, "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY WHERE id=19")
 		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
 		if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
 			t.Fatal("未取得取消候选", candidates, err)
@@ -39,7 +67,7 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal("未领取取消租约", err)
 		}
-		return &domain.MultipartUploadCancellationObservation{Task: *task, ObjectKey: key}
+		return &domain.MultipartUploadCleanupObservation{Task: *task, ObjectKey: key}
 	}
 	type facts struct {
 		task           *domain.UploadTask
@@ -64,18 +92,21 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 		}
 		return result
 	}
-	complete := func(observation *domain.MultipartUploadCancellationObservation) (*domain.UploadTask, error) {
-		return store.CompleteMissingMultipartUploadCancellation(ctx, provider, bucket, observation)
+	complete := func(observation *domain.MultipartUploadCleanupObservation) (*domain.UploadTask, error) {
+		return completeMissing(store, ctx, provider, bucket, observation)
 	}
 	checkCommitted := func(t *testing.T, original facts, result *domain.UploadTask) facts {
 		t.Helper()
 		actual := read(t)
 		if result == nil || !reflect.DeepEqual(actual.task, result) || result.CompletedAt == nil ||
-			result.CompletedAt.Before(original.task.ExpiresAt) || !result.CompletedAt.Before(*original.task.LeaseUntil) {
+			!result.CompletedAt.Before(*original.task.LeaseUntil) {
 			t.Fatal("提交结果与库内时间不符", result)
 		}
+		if result.CompletedAt.Before(original.task.ExpiresAt) != (terminalStatus == domain.UploadStatusCancelled) {
+			t.Fatal("终态与原任务的期限约定不符")
+		}
 		expectedTask := *original.task
-		expectedTask.Status, expectedTask.ReservedBytes = domain.UploadStatusCancelled, 0
+		expectedTask.Status, expectedTask.ReservedBytes = terminalStatus, 0
 		expectedTask.CompletedAt, expectedTask.UpdatedAt = result.CompletedAt, *result.CompletedAt
 		expectedTask.LeaseOwner, expectedTask.LeaseUntil, expectedTask.NextAttemptAt = nil, nil, nil
 		expectedTask.LastErrorCode, expectedTask.LastErrorMessage = nil, nil
@@ -122,7 +153,7 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 			t.Fatal("并发交付未返回同一终态", first.err, second.err)
 		}
 		actual := checkCommitted(t, before, first.task)
-		t.Logf("两个调用返回同一 CANCELLED，已用 %d B，预占 %d B，回收宽限 7 天", actual.used, actual.reserved)
+		t.Logf("两个调用返回同一 %s，已用 %d B，预占 %d B，回收宽限 7 天", terminalStatus, actual.used, actual.reserved)
 	})
 
 	t.Run("unbound disabled account and replay after lease expiry", func(t *testing.T) {
@@ -138,6 +169,9 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		checkCommitted(t, before, result)
+		if terminalStatus == domain.UploadStatusExpired && !result.CompletedAt.Equal(observation.Task.ExpiresAt) {
+			t.Fatal("任务恰好到期时应能提交终态")
+		}
 		execute(t, "SET timestamp = ?", observation.Task.LeaseUntil.Add(8*24*time.Hour).Unix())
 		execute(t, "UPDATE stored_objects SET status='DELETED',updated_at=UTC_TIMESTAMP(6) WHERE id=23")
 		replayBefore := read(t)
@@ -150,10 +184,14 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 		if result, err := complete(&stale); result != nil || !errors.Is(err, domain.ErrUploadTaskBusy) {
 			t.Fatal("其他租约版本复用了本次结果", err)
 		}
+		if !reflect.DeepEqual(replayBefore, read(t)) {
+			t.Fatal("旧租约改变了已经结算的账目或业务记录")
+		}
 	})
 
-	// 2. 锁内复核通过后推进时钟，确认 UPDATE 也会拒绝恰好到期的租约。
-	t.Run("lease expires before conditional update", func(t *testing.T) {
+	// 2. 锁内复核通过后改变时钟，确认 UPDATE 使用写入语句自身的时间。
+	checkWriteTime := func(t *testing.T, writeTime func(domain.UploadTask) time.Time) {
+		t.Helper()
 		pool.SetMaxOpenConns(1)
 		defer pool.SetMaxOpenConns(3)
 		now := time.Now().UTC().Truncate(time.Second)
@@ -162,7 +200,7 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 		observation := claim(t, false)
 		before := read(t)
 		reads := 0
-		const callback = "fixture:expire_multipart_cancellation_at_quota_read"
+		const callback = "fixture:shift_multipart_cleanup_time_at_quota_read"
 		queries := store.database.Callback().Query()
 		if err := queries.After("gorm:query").Register(callback, func(query *gorm.DB) {
 			if query.Error != nil || query.Statement.Table != "users" {
@@ -170,7 +208,7 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 			}
 			reads++
 			if reads == 2 {
-				_, err := query.Statement.ConnPool.ExecContext(query.Statement.Context, "SET timestamp = ?", observation.Task.LeaseUntil.Unix())
+				_, err := query.Statement.ConnPool.ExecContext(query.Statement.Context, "SET timestamp = ?", writeTime(observation.Task).Unix())
 				query.AddError(err)
 			}
 		}); err != nil {
@@ -183,10 +221,18 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 		})
 		if result, err := complete(observation); result != nil || !errors.Is(err, domain.ErrUploadTaskBusy) ||
 			reads != 2 || !reflect.DeepEqual(read(t), before) {
-			t.Fatal("条件更新未拦截恰好到期的租约，或留下写入", reads, err)
+			t.Fatal("条件更新未拒绝写入时间不符合要求的观察，或留下写入", reads, err)
 		}
-		t.Log("读取配额后将数据库时钟推进至租约截止，UPDATE 返回 UPLOAD_BUSY")
+		t.Log("读取配额后改变数据库时钟，写入条件返回 UPLOAD_BUSY，三个记录保持原值")
+	}
+	t.Run("lease expires before conditional update", func(t *testing.T) {
+		checkWriteTime(t, func(task domain.UploadTask) time.Time { return *task.LeaseUntil })
 	})
+	if terminalStatus == domain.UploadStatusExpired {
+		t.Run("clock before upload expiration at conditional update", func(t *testing.T) {
+			checkWriteTime(t, func(task domain.UploadTask) time.Time { return task.ExpiresAt.Add(-time.Second) })
+		})
+	}
 
 	// 3. 资格不符或收尾报错时，三个记录整体保留原值。
 	for _, fixture := range []struct {
@@ -199,9 +245,9 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 		{name: "account reservation insufficient", change: "UPDATE users SET reserved_storage=1 WHERE id=7", want: domain.ErrInvalidAccountData},
 		{name: "recorded object contradicts missing", change: "UPDATE stored_objects SET status='VERIFYING',storage_etag='fixture',storage_version_id='version' WHERE id=23", want: domain.ErrInvalidStoredObjectData},
 		{name: "object still referenced", change: "UPDATE file_entries SET object_id=23 WHERE id=31", want: domain.ErrStoredObjectInUse},
-		{name: "rollback on invalid task readback", trigger: "fixture_cancel_task", change: "CREATE TRIGGER fixture_cancel_task BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.last_error_code='fixture-drift'", want: domain.ErrInvalidUploadTaskData},
-		{name: "rollback on quota drift", trigger: "fixture_cancel_quota", change: "CREATE TRIGGER fixture_cancel_quota BEFORE UPDATE ON users FOR EACH ROW SET NEW.used_storage=OLD.used_storage+1", want: domain.ErrInvalidAccountData},
-		{name: "rollback on object write lock wait", trigger: "fixture_cancel_object", change: "CREATE TRIGGER fixture_cancel_object BEFORE UPDATE ON stored_objects FOR EACH ROW SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'", want: domain.ErrUploadCancellationRetryable},
+		{name: "rollback on invalid task readback", trigger: "fixture_cleanup_task", change: "CREATE TRIGGER fixture_cleanup_task BEFORE UPDATE ON upload_tasks FOR EACH ROW SET NEW.last_error_code='fixture-drift'", want: domain.ErrInvalidUploadTaskData},
+		{name: "rollback on quota drift", trigger: "fixture_cleanup_quota", change: "CREATE TRIGGER fixture_cleanup_quota BEFORE UPDATE ON users FOR EACH ROW SET NEW.used_storage=OLD.used_storage+1", want: domain.ErrInvalidAccountData},
+		{name: "rollback on object write lock wait", trigger: "fixture_cleanup_object", change: "CREATE TRIGGER fixture_cleanup_object BEFORE UPDATE ON stored_objects FOR EACH ROW SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'", want: retryMarker},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			observation := claim(t, false)
@@ -219,7 +265,7 @@ func TestCompleteMissingMultipartUploadCancellationIntegration(t *testing.T) {
 			if result != nil || !errors.Is(err, fixture.want) || !reflect.DeepEqual(read(t), before) {
 				t.Fatal("拒绝或回滚场景修改了数据，或返回错误类别不符", fixture.want, err)
 			}
-			if fixture.want == domain.ErrUploadCancellationRetryable {
+			if fixture.want == retryMarker {
 				var original *mysql.MySQLError
 				if !errors.As(err, &original) || original.Number != 1205 {
 					t.Fatal("临时收尾错误丢失了数据库原因", err)
