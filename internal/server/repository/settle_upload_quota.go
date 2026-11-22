@@ -12,7 +12,7 @@ import (
 )
 
 // SettlePublishedUploadQuota 将本次发布的任务预占等额转为用户已用字节。
-// 在写回复核事务中创建文件后调用，文件写入、配额结算和任务完成由外层一起提交。
+// 在写回复核事务中创建文件或替换当前引用后调用，由外层与任务完成一起提交。
 func (store *Store) SettlePublishedUploadQuota(ctx context.Context, task *domain.UploadTask) error {
 	// 1. 核对发布事务、当前任务的校验租约和原分片会话。
 	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
