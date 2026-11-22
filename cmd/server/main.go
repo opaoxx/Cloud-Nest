@@ -785,7 +785,12 @@ func runWithServerDependencies(
 		defer stopSessionCleanup()
 	}
 
-	// 47. 启动 HTTP 并处理退出通知。
+	// 47. 启动到期历史结算，在释放存储与数据库连接前等待退出。
+	expiredFileVersions := service.NewExpiredFileVersionBatch(store.ListExpiredFileVersionCandidates, store.CompleteExpiredFileVersion)
+	stopExpiredFileVersions := startServerExpiredFileVersionWorker(ctx, expiredFileVersions.RunOnce, logger)
+	defer stopExpiredFileVersions()
+
+	// 48. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {
