@@ -229,9 +229,10 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 
 	// 7. 只允许实际中止命中测试选定的原键与会话，确认同键绑定没有受到影响。
 	abortCalls := 0
+	allowedAborts := map[string]string{secondCandidate: secondKey}
 	aborter := service.NewMultipartUploadSessionCandidateAborter(rechecker, func(callContext context.Context, objectKey, uploadID string) error {
 		abortCalls++
-		if objectKey != secondKey || uploadID != secondCandidate {
+		if allowedKey, allowed := allowedAborts[uploadID]; !allowed || objectKey != allowedKey {
 			t.Fatal("实际中止范围偏离隔离夹具的目标会话")
 		}
 		return client.AbortMultipartUpload(callContext, objectKey, uploadID)
@@ -286,4 +287,49 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		t.Fatal("中止会话改变了当前绑定任务记录", err)
 	}
 	t.Log("受信存储复查确认会话缺失，保留同键合成对象版本，未验证实例仍待确认")
+
+	// 9. 让一轮清理移除自己的页末游标，随后验证回退后仍能找到原对象的后续会话。
+	allowedAborts[sessions[0]] = key
+	allowedAborts[sessions[2]] = key
+	limits := service.MultipartUploadSessionCleanupLimits{Objects: 1, SessionsPerPage: 1, StoragePages: 1, Candidates: 1}
+	round := service.NewMultipartUploadSessionCleanupRound(batch, cleanup)
+	started, err := round.RunOnce(ctx, service.MultipartUploadSessionCleanupPosition{}, limits, grace)
+	if err != nil || started.Done || started.Scan.Next.UploadID != sessions[0] || started.Confirmed != 1 ||
+		len(started.Items) != 1 || started.Items[0].Session.UploadID != sessions[0] || abortCalls != 2 {
+		t.Fatal("首轮未按上限中止页末会话", started, err)
+	}
+	rawClient := minio.Core{Client: bucket.client}
+	empty, err := rawClient.ListMultipartUploads(ctx, bucket.name, key, key, sessions[0], "", 1)
+	if err != nil || empty.IsTruncated || len(empty.Uploads) != 0 {
+		t.Fatal("未复现固定 MinIO 的失效游标空页", empty, err)
+	}
+	if _, err := client.ListUploadPartsPage(ctx, key, sessions[2], 0, 1); err != nil {
+		t.Fatal("复现时后续会话应仍存在", err)
+	}
+	restarted, err := round.RunOnce(ctx, started.Next, limits, grace)
+	if err != nil || !restarted.ScanRestarted || restarted.Done || len(restarted.Items) != 0 || abortCalls != 2 {
+		t.Fatal("游标消失后未回退扫描起点", restarted, err)
+	}
+	protectedPage, err := round.RunOnce(ctx, restarted.Next, limits, grace)
+	if err != nil || protectedPage.ScanRestarted || protectedPage.Done || protectedPage.Scan.Next.UploadID != sessions[1] ||
+		len(protectedPage.Items) != 0 || abortCalls != 2 {
+		t.Fatal("回退后未越过仍受保护的会话", protectedPage, err)
+	}
+	nextPage, err := round.RunOnce(ctx, protectedPage.Next, limits, grace)
+	if err != nil || nextPage.ScanRestarted || nextPage.Done || nextPage.Confirmed != 1 || len(nextPage.Items) != 1 ||
+		nextPage.Items[0].Target != target || nextPage.Items[0].Session.UploadID != sessions[2] || abortCalls != 3 {
+		t.Fatal("原对象的后续候选在游标回退后没有处理", nextPage, err)
+	}
+	lastPage, err := round.RunOnce(ctx, nextPage.Next, limits, grace)
+	if err != nil || !lastPage.Done || len(lastPage.Items) != 0 || abortCalls != 3 {
+		t.Fatal("跨对象扫描未安全收尾", lastPage, err)
+	}
+	if _, err := client.ListUploadPartsPage(ctx, key, sessions[1], 0, 1); err != nil {
+		t.Fatal("游标回退误中止了受保护会话", err)
+	}
+	end, err := client.ListMultipartUploadSessionsPage(ctx, key, sessions[1], 1)
+	if err != nil || end == nil || len(end.Sessions) != 0 || end.NextUploadID != "" {
+		t.Fatal("有效游标之后的真正空末页未被接受", end, err)
+	}
+	t.Log("真实复现失效游标空页，回退后处理后一页候选，两个对象的绑定会话保持可读")
 }

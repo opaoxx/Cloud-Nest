@@ -1,12 +1,16 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"time"
 )
 
 // MaxMultipartUploadSessionsPageSize 是存储支持的会话单页上限。
 const MaxMultipartUploadSessionsPageSize = 1000
+
+// ErrMultipartUploadSessionMarkerMissing 表示续扫游标指向的原会话已消失。
+var ErrMultipartUploadSessionMarkerMissing = errors.New("分片会话分页游标已失效")
 
 // MultipartUploadSession 记录存储端仍可列出的会话及其原对象定位。
 type MultipartUploadSession struct {

@@ -76,6 +76,16 @@ func (client *Client) ListMultipartUploadSessionsPage(
 	if err := readContext.Err(); err != nil {
 		return nil, err
 	}
+	// 4. 固定 MinIO 找不到游标时也会返回空页。确认原会话仍在才接受该末页。
+	if marker != "" && len(result.Sessions) == 0 {
+		exists, err := client.CheckMultipartUploadSessionExists(readContext, objectKey, marker)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, domain.ErrMultipartUploadSessionMarkerMissing
+		}
+	}
 	return result, nil
 }
 
