@@ -19,6 +19,7 @@ import (
 )
 
 const isolatedMultipartBackendArg = "cloudnest-isolated-multipart-backend"
+const releaseMultipartVerificationSignal = "v"
 
 func TestIsolatedMultipartBackendChild(t *testing.T) {
 	// 1. 只从联测启动此入口，启动服务前确认连接指向本轮回环夹具。
@@ -44,25 +45,38 @@ func TestIsolatedMultipartBackendChild(t *testing.T) {
 		}
 	}
 
-	// 2. 父进程关闭专用输入管道后，用与正式服务相同的上下文取消流程关停。
+	// 2. 父进程可放行校验观察点，关闭专用管道时按正式上下文流程关停。
 	serverContext, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		_, _ = io.Copy(io.Discard, os.Stdin)
-		cancel()
-	}()
 	logger := logging.New(os.Stdout)
+	releaseVerification := make(chan struct{})
 	switch os.Args[4] {
 	case "normal":
 	case "hold-verification":
-		// 校验 worker 在同步启动日志后才运行。关停时先取消上下文，再通过观察点。
+		// 校验 worker 等父进程放行。观察结束后直接关停时，由取消通知解除阻塞。
 		logger = slog.New(&serverWorkerReportGate{
 			Handler: logger.Handler(), reportMessage: "分片校验 worker 已启动",
-			reportStarted: make(chan struct{}), httpStopped: make(chan struct{}), deadline: serverContext.Done(),
+			reportStarted: make(chan struct{}), releaseReport: releaseVerification,
+			httpStopped: make(chan struct{}), deadline: serverContext.Done(),
 		})
 	default:
 		t.Fatal("未知的独立服务观察模式")
 	}
+	go func() {
+		defer cancel()
+		if os.Args[4] == "hold-verification" {
+			var signal [1]byte
+			if _, err := io.ReadFull(os.Stdin, signal[:]); err != nil {
+				return
+			}
+			if string(signal[:]) != releaseMultipartVerificationSignal {
+				t.Error("独立后端收到无效的联测放行信号")
+				return
+			}
+			close(releaseVerification)
+		}
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	}()
 	if err := run(serverContext, logger); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal("独立后端运行失败", err)
 	}
@@ -70,13 +84,13 @@ func TestIsolatedMultipartBackendChild(t *testing.T) {
 
 func startIsolatedMultipartBackend(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error), int) {
 	t.Helper()
-	address, stop, pid := launchIsolatedMultipartBackend(t, ctx, databaseName, "normal")
+	address, stop, pid, _ := launchIsolatedMultipartBackend(t, ctx, databaseName, "normal")
 	readyContext, cancelReady := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelReady()
 	return waitForBackupFixtureClient(t, readyContext, address), stop, pid
 }
 
-func launchIsolatedMultipartBackend(t *testing.T, ctx context.Context, databaseName, mode string) (string, func() (string, error), int) {
+func launchIsolatedMultipartBackend(t *testing.T, ctx context.Context, databaseName, mode string) (string, func() (string, error), int, func() error) {
 	t.Helper()
 	// 1. 从当前测试可执行文件启动专用后端进程，继承已建立的隔离连接。
 	address := configureBackupFixtureServer(t, databaseName)
@@ -122,7 +136,11 @@ func launchIsolatedMultipartBackend(t *testing.T, ctx context.Context, databaseN
 			t.Error("独立后端退出失败", err)
 		}
 	})
-	return address, stop, command.Process.Pid
+	release := func() error {
+		_, err := io.WriteString(stopInput, releaseMultipartVerificationSignal)
+		return err
+	}
+	return address, stop, command.Process.Pid, release
 }
 
 type largeMultipartBackendMemory struct {

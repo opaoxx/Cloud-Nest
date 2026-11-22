@@ -17,8 +17,9 @@ import (
 )
 
 func TestServerMultipartMergeRestartIntegration(t *testing.T) {
-	if os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_TEST") != "1" {
-		t.Skip("设置 CLOUDNEST_MULTIPART_MERGE_RESTART_TEST=1 后启动独占 MySQL、MinIO 和两个后端进程")
+	verifyPublication := os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_PUBLICATION_TEST") == "1"
+	if os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_TEST") != "1" && !verifyPublication {
+		t.Skip("启用 CLOUDNEST_MULTIPART_MERGE_RESTART_TEST 观察重启恢复，或启用 CLOUDNEST_MULTIPART_MERGE_RESTART_PUBLICATION_TEST 验收发布")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
@@ -42,13 +43,14 @@ func TestServerMultipartMergeRestartIntegration(t *testing.T) {
 	const fileSize = partSize + 1
 	payload := make([]byte, fileSize)
 	payload[0], payload[partSize] = 0x31, 0x72
+	fileDigest := sha256.Sum256(payload)
 	const uploadsPath = "/api/v1/uploads"
 	var created struct {
 		Data      dto.CreateMultipartUploadData `json:"data"`
 		RequestID string                        `json:"request_id"`
 	}
 	declaration := fmt.Sprintf(`{"parent_id":%q,"name":"merge-restart.bin","size_bytes":%d,"sha256":"%x"}`,
-		fixture.login.RootEntryID, fileSize, sha256.Sum256(payload))
+		fixture.login.RootEntryID, fileSize, fileDigest)
 	api.request(t, ctx, http.MethodPost, uploadsPath, "merge-restart", strings.NewReader(declaration), http.StatusCreated, &created)
 	if created.RequestID == "" || created.Data.UploadMode != "MULTIPART" || created.Data.Task.Status != "CREATING" ||
 		created.Data.PartSizeBytes != partSize || created.Data.PartCount != 2 {
@@ -123,7 +125,7 @@ func TestServerMultipartMergeRestartIntegration(t *testing.T) {
 	if updated, err := update.RowsAffected(); err != nil || updated != 1 {
 		t.Fatal("隔离环境到期模拟未精确命中原任务", updated, err)
 	}
-	_, stopRestarted, restartedPID := launchIsolatedMultipartBackend(t, ctx, fixture.databaseName, "hold-verification")
+	restartedAddress, stopRestarted, restartedPID, releaseVerification := launchIsolatedMultipartBackend(t, ctx, fixture.databaseName, "hold-verification")
 	if restartedPID == firstPID {
 		t.Fatal("恢复未启动新的后端进程")
 	}
@@ -159,12 +161,37 @@ func TestServerMultipartMergeRestartIntegration(t *testing.T) {
 		Scan(&used, &reserved, &entries); err != nil || used != 0 || reserved != fileSize || entries != 0 || versionCount != 1 {
 		t.Fatal("恢复后的配额、条目或存储版本数量不符", err, used, reserved, entries, versionCount)
 	}
+	t.Logf("新后端 PID %d 将任务 %d 恢复至 VERIFYING，原版本 %s、ETag %s，租约版本 %d，存储版本 %d、发布条目 %d、已用 %d B、预占 %d B",
+		restartedPID, taskID, merged.VersionID, merged.ETag, recovered.LeaseVersion, versionCount, entries, used, reserved)
+
+	if verifyPublication {
+		// 4. 放行同一进程的校验及发布，核对文件引用原版本且重试只返回同一结果。
+		if err := releaseVerification(); err != nil {
+			t.Fatal("放行恢复进程校验失败", err)
+		}
+		restarted := waitForBackupFixtureClient(t, ctx, restartedAddress)
+		login := loginBackupFixture(t, ctx, &restarted, os.Getenv("CLOUDNEST_ADMIN_PASSWORD"))
+		if login.User.ID != fixture.login.User.ID || login.RootEntryID != fixture.login.RootEntryID {
+			t.Fatal("恢复进程登录回执未绑定原账号及根目录")
+		}
+		completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath, accepted)
+		publication := verifyResumedMultipartPublication(t, ctx, fixture, restarted, completed, fileDigest)
+		if publication.objectID != pending.StagedObjectID || publication.objectVersion != merged.VersionID ||
+			publication.objectPath != "/"+target.bucket+"/"+target.objectKey {
+			t.Fatal("发布条目未引用故障前合并的原对象版本")
+		}
+		verifyResumedMultipartCompletionReplay(t, ctx, fixture, restarted, taskPath, completed)
+		t.Logf("重启发布保留原合并版本 %s，原任务 %s 只发布条目 %s", publication.objectVersion, completed.ID, publication.entry.ID)
+	}
+
 	restartLogs, err := stopRestarted()
 	if err != nil || !strings.Contains(restartLogs, `"verifying":1`) {
 		t.Fatal("重启进程未正常退出或未汇报恢复结果", err)
 	}
-	t.Logf("新后端 PID %d 已退出，任务 %d 恢复至 VERIFYING，原版本 %s、ETag %s，租约版本 %d，存储版本 %d、发布条目 %d、已用 %d B、预占 %d B",
-		restartedPID, taskID, merged.VersionID, merged.ETag, recovered.LeaseVersion, versionCount, entries, used, reserved)
+	if verifyPublication {
+		verifyBackupSourceStopped(t, "http://"+restartedAddress, restartLogs)
+	}
+	t.Logf("新后端 PID %d 已退出", restartedPID)
 }
 
 func waitForMultipartMergeRestartTask(t *testing.T, ctx context.Context, store *repository.Store, userID, taskID uint64,
