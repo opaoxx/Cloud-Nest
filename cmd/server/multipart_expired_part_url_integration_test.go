@@ -134,7 +134,10 @@ func TestServerMultipartExpiredPartURLIntegration(t *testing.T) {
 	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts[0], resumed.Parts[1])
 	t.Logf("重签补传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
-	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
+	// 7. 经正式授权下载已发布对象，核对版本、实际字节数和整文件摘要。
+	verifyResumedMultipartDownload(t, ctx, api, publication, sourceDigest)
 
 	logs, err := fixture.stop()
 	if err != nil {
