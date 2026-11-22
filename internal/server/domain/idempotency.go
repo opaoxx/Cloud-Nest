@@ -28,6 +28,9 @@ const PurgeEntryOperation = "v1.trash.purge"
 // CreateUploadOperation 是上传创建摘要与幂等记录共用的版本化操作名。
 const CreateUploadOperation = "v1.uploads.create"
 
+// CreateUploadReplacementOperation 是内容替换创建摘要与幂等记录共用的版本化操作名。
+const CreateUploadReplacementOperation = "v1.entries.content-replacement.create"
+
 // FileReuseOperation 是秒传请求摘要与幂等记录共用的版本化操作名。
 const FileReuseOperation = "v1.files.reuse"
 
