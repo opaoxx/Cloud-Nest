@@ -90,7 +90,7 @@ func (batch *UploadMergeBatch) processCandidate(
 	// 1. 领取与候选匹配的新租约，已经被占用或失效的候选计为跳过。
 	claimed, err := batch.claim(ctx, candidate, leaseOwner)
 	if err != nil {
-		if isUploadMergeClaimSkipped(err) {
+		if isUploadCandidateStale(err) {
 			summary.Skipped++
 			return nil
 		}
@@ -136,10 +136,15 @@ func (batch *UploadMergeBatch) processCandidate(
 	return nil
 }
 
-func isUploadMergeClaimSkipped(err error) bool {
+func isUploadCandidateStale(err error) bool {
 	// 只对单一的候选失效原因计跳过，保留可能含回滚错误的合并错误。
+	cause := unwrapSingleUploadError(err)
+	return cause == domain.ErrUploadTaskNotFound || cause == domain.ErrUploadTaskNotReady || cause == domain.ErrUploadTaskBusy
+}
+
+func unwrapSingleUploadError(err error) error {
 	for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(err) {
 		err = cause
 	}
-	return err == domain.ErrUploadTaskNotFound || err == domain.ErrUploadTaskNotReady || err == domain.ErrUploadTaskBusy
+	return err
 }

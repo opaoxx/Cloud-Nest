@@ -72,16 +72,20 @@ func (execution *MultipartUploadCancellationExecutionService) Execute(ctx contex
 	}
 
 	// 3. 确认返回的是同一任务已提交的 CANCELLED 结果。
-	if finished == nil || !sameMultipartCancellationTaskBinding(finished, claimed) ||
-		finished.Status != domain.UploadStatusCancelled || finished.ReservedBytes != 0 || finished.AttemptCount != claimed.AttemptCount ||
-		finished.LeaseOwner != nil || finished.LeaseUntil != nil || finished.NextAttemptAt != nil ||
-		finished.PublishedObjectID != nil || finished.ResultEntryID != nil || finished.ResolvedName != nil ||
-		finished.LastErrorCode != nil || finished.LastErrorMessage != nil ||
-		finished.CompletedAt == nil || !finished.CompletedAt.Equal(finished.UpdatedAt) ||
-		finished.CompletedAt.Before(claimed.UpdatedAt) || !finished.CompletedAt.Before(*claimed.LeaseUntil) {
+	if !validMultipartCancellationCompletion(finished, claimed) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	return finished, nil
+}
+
+func validMultipartCancellationCompletion(finished, claimed *domain.UploadTask) bool {
+	return finished != nil && sameMultipartCancellationTaskBinding(finished, claimed) &&
+		finished.Status == domain.UploadStatusCancelled && finished.ReservedBytes == 0 && finished.AttemptCount == claimed.AttemptCount &&
+		finished.LeaseOwner == nil && finished.LeaseUntil == nil && finished.NextAttemptAt == nil &&
+		finished.PublishedObjectID == nil && finished.ResultEntryID == nil && finished.ResolvedName == nil &&
+		finished.LastErrorCode == nil && finished.LastErrorMessage == nil &&
+		finished.CompletedAt != nil && finished.CompletedAt.Equal(finished.UpdatedAt) &&
+		!finished.CompletedAt.Before(claimed.UpdatedAt) && finished.CompletedAt.Before(*claimed.LeaseUntil)
 }
 
 func sameMultipartCancellationTaskBinding(current, claimed *domain.UploadTask) bool {
