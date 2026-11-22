@@ -72,8 +72,12 @@ type replacementPublicationFixture struct {
 
 func prepareReplacementPublicationFixture(t *testing.T, ctx context.Context) replacementPublicationFixture {
 	t.Helper()
+	return prepareReplacementPublicationFixtureFromSource(t, ctx, prepareBackupSource(t, ctx))
+}
+
+func prepareReplacementPublicationFixtureFromSource(t *testing.T, ctx context.Context, fixture backupSourceFixture) replacementPublicationFixture {
+	t.Helper()
 	// 1. 在独占服务内通过普通上传发布真实的合成原文件。
-	fixture := prepareBackupSource(t, ctx)
 	store, err := repository.NewStore(fixture.pool)
 	if err != nil {
 		t.Fatal(err)
