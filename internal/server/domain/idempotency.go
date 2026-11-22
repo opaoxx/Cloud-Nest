@@ -37,6 +37,9 @@ const FileReuseOperation = "v1.files.reuse"
 // CreateSyncSnapshotOperation 是同步快照创建摘要与幂等记录共用的版本化操作名。
 const CreateSyncSnapshotOperation = "v1.sync.snapshots.create"
 
+// SyncSnapshotResourceType 标记保存快照 UUID 定位数据的幂等回执。
+const SyncSnapshotResourceType = "SYNC_SNAPSHOT"
+
 // ErrIdempotencyRecordNotFound 表示指定用户、操作和键的记录不存在。
 var ErrIdempotencyRecordNotFound = errors.New("幂等记录不存在")
 
