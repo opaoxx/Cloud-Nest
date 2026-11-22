@@ -6,9 +6,37 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
+	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
+
+// newServerMultipartUploadCancellationBatch 使用已连接的仓储、存储及对应配置装配取消批次。
+// verifyInstance 由受信部署侧提供；缺少确认时，已绑定任务保留预占并登记重试。
+func newServerMultipartUploadCancellationBatch(
+	store *repository.Store, storageClient *storage.Client, storageConfig config.StorageConfig, verifyInstance storage.MultipartSessionLockVerifier,
+) *service.MultipartUploadCancellationBatch {
+	// 1. 绑定原存储目标、中止和中止后的复查。
+	observations := service.NewMultipartUploadCancellationStorageService(
+		func(ctx context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
+			return store.FindMultipartUploadCancellationTarget(ctx, task, storageConfig.Provider, storageConfig.Bucket)
+		}, storageClient.AbortMultipartUpload,
+		func(ctx context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
+			return storageClient.CheckMultipartUploadAfterAbort(ctx, objectKey, uploadID, verifyInstance)
+		}, storageClient.StatMultipartUploadObject)
+
+	// 2. 绑定两种确认结果的事务写回，以及待确认时的重试登记。
+	execution := service.NewMultipartUploadCancellationExecutionService(storageConfig.Provider, storageConfig.Bucket,
+		observations.ObserveBoundSession, observations.ObserveUnboundSession,
+		store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
+		store.ScheduleMultipartUploadCancellationRetry)
+
+	// 3. 接入候选扫描和租约领取，返回单轮批次。
+	return service.NewMultipartUploadCancellationBatch(store.ListMultipartUploadCancellationCandidates,
+		store.ClaimMultipartUploadCancellationLease, execution.Execute)
+}
 
 // startServerMultipartUploadCancellationWorker 启动分片取消循环并返回取消且等待退出的方法。
 func startServerMultipartUploadCancellationWorker(
