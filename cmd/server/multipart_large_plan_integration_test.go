@@ -48,7 +48,7 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 	if measureMemory {
 		startServer = func(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error)) {
 			t.Helper()
-			client, stop, pid := startLargeMultipartMemoryBackend(t, ctx, databaseName)
+			client, stop, pid := startIsolatedMultipartBackend(t, ctx, databaseName)
 			backendPID = pid
 			return client, stop
 		}

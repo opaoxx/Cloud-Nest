@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -17,12 +18,12 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 )
 
-const largeMultipartBackendArg = "cloudnest-isolated-multipart-backend"
+const isolatedMultipartBackendArg = "cloudnest-isolated-multipart-backend"
 
-func TestServerLargeMultipartMemoryChild(t *testing.T) {
+func TestIsolatedMultipartBackendChild(t *testing.T) {
 	// 1. 只从联测启动此入口，启动服务前确认连接指向本轮回环夹具。
-	if len(os.Args) != 4 || os.Args[2] != "--" || os.Args[3] != largeMultipartBackendArg {
-		t.Skip("仅由大文件内存验收的父进程启动")
+	if len(os.Args) != 5 || os.Args[2] != "--" || os.Args[3] != isolatedMultipartBackendArg {
+		t.Skip("仅由分片联测的父进程启动")
 	}
 	if !strings.HasPrefix(os.Getenv("CLOUDNEST_DB_NAME"), "cloudnest_server_verify_") ||
 		!strings.HasPrefix(os.Getenv("CLOUDNEST_S3_BUCKET"), "cloudnest-upload-it-") ||
@@ -50,12 +51,32 @@ func TestServerLargeMultipartMemoryChild(t *testing.T) {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		cancel()
 	}()
-	if err := run(serverContext, logging.New(os.Stdout)); err != nil && !errors.Is(err, context.Canceled) {
+	logger := logging.New(os.Stdout)
+	switch os.Args[4] {
+	case "normal":
+	case "hold-verification":
+		// 校验 worker 在同步启动日志后才运行。关停时先取消上下文，再通过观察点。
+		logger = slog.New(&serverWorkerReportGate{
+			Handler: logger.Handler(), reportMessage: "分片校验 worker 已启动",
+			reportStarted: make(chan struct{}), httpStopped: make(chan struct{}), deadline: serverContext.Done(),
+		})
+	default:
+		t.Fatal("未知的独立服务观察模式")
+	}
+	if err := run(serverContext, logger); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal("独立后端运行失败", err)
 	}
 }
 
-func startLargeMultipartMemoryBackend(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error), int) {
+func startIsolatedMultipartBackend(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error), int) {
+	t.Helper()
+	address, stop, pid := launchIsolatedMultipartBackend(t, ctx, databaseName, "normal")
+	readyContext, cancelReady := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelReady()
+	return waitForBackupFixtureClient(t, readyContext, address), stop, pid
+}
+
+func launchIsolatedMultipartBackend(t *testing.T, ctx context.Context, databaseName, mode string) (string, func() (string, error), int) {
 	t.Helper()
 	// 1. 从当前测试可执行文件启动专用后端进程，继承已建立的隔离连接。
 	address := configureBackupFixtureServer(t, databaseName)
@@ -65,7 +86,7 @@ func startLargeMultipartMemoryBackend(t *testing.T, ctx context.Context, databas
 	}
 	processContext, terminate := context.WithCancel(ctx)
 	t.Cleanup(terminate)
-	command := exec.CommandContext(processContext, executable, "-test.run=^TestServerLargeMultipartMemoryChild$", "--", largeMultipartBackendArg)
+	command := exec.CommandContext(processContext, executable, "-test.run=^TestIsolatedMultipartBackendChild$", "--", isolatedMultipartBackendArg, mode)
 	command.WaitDelay = 5 * time.Second
 	stopInput, err := command.StdinPipe()
 	if err != nil {
@@ -101,9 +122,7 @@ func startLargeMultipartMemoryBackend(t *testing.T, ctx context.Context, databas
 			t.Error("独立后端退出失败", err)
 		}
 	})
-	readyContext, cancelReady := context.WithTimeout(ctx, 10*time.Second)
-	defer cancelReady()
-	return waitForBackupFixtureClient(t, readyContext, address), stop, command.Process.Pid
+	return address, stop, command.Process.Pid
 }
 
 type largeMultipartBackendMemory struct {
