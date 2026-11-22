@@ -1,6 +1,9 @@
 package domain
 
-import "errors"
+import (
+	"crypto/sha256"
+	"errors"
+)
 
 // MaxSyncSnapshotEntries 限定一份同步快照的条目数，不计独立返回的根目录。
 const MaxSyncSnapshotEntries = 10000
@@ -16,7 +19,7 @@ type SyncSnapshotHeader struct {
 	HighWaterSequence uint64
 }
 
-// SyncSnapshotEntry 保存当前读取视图中一个可见后代的目录元数据。
+// SyncSnapshotEntry 保存一个可见后代的目录元数据和已验证内容摘要。
 type SyncSnapshotEntry struct {
 	// ID 是条目主键，ParentID 指向根目录或同一快照中的目录。
 	ID       uint64
@@ -27,6 +30,6 @@ type SyncSnapshotEntry struct {
 	// Revision 和 FileSize 保存目录项版本与逻辑字节数。
 	Revision uint64
 	FileSize uint64
-	// ObjectID 是内部内容引用，目录无引用。文件摘要将在同一视图中另行验证。
-	ObjectID *uint64
+	// VerifiedSHA256 是文件的服务端校验摘要，目录为 nil。
+	VerifiedSHA256 *[sha256.Size]byte
 }

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
@@ -27,8 +28,9 @@ func TestListSyncSnapshotEntriesIntegration(t *testing.T) {
 	exec(t, `INSERT INTO users(id,username,display_name,password_hash,change_seq) VALUES
 		(1,'snapshot_tree','Tree','fixture_hash',20),(2,'snapshot_empty','Empty','fixture_hash',0),
 		(3,'snapshot_wide','Wide','fixture_hash',0)`)
-	exec(t, `INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size)
-		VALUES (41,1,'MINIO','fixture-bucket','fixture-snapshot-object',123)`)
+	digest := sha256.Sum256([]byte(strings.Repeat("a", 123)))
+	exec(t, `INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size,status,verified_sha256,verified_at)
+		VALUES (41,1,'MINIO','fixture-bucket','fixture-snapshot-object',123,'READY',?,UTC_TIMESTAMP(6))`, digest[:])
 	exec(t, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES
 		(11,1,NULL,'',X'','DIR'),(21,2,NULL,'',X'','DIR'),(31,3,NULL,'',X'','DIR'),
 		(12,1,11,'active-dir',CAST('active-dir' AS BINARY),'DIR')`)
@@ -56,9 +58,8 @@ func TestListSyncSnapshotEntriesIntegration(t *testing.T) {
 		})
 		return header, entries, err
 	}
-	objectID := uint64(41)
 	want := []domain.SyncSnapshotEntry{
-		{ID: 8, ParentID: 12, Name: "sample.txt", EntryType: "FILE", Revision: 5, FileSize: 123, ObjectID: &objectID},
+		{ID: 8, ParentID: 12, Name: "sample.txt", EntryType: "FILE", Revision: 5, FileSize: 123, VerifiedSHA256: &digest},
 		{ID: 12, ParentID: 11, Name: "active-dir", EntryType: "DIR", Revision: 1},
 	}
 
