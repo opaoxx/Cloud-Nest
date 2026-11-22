@@ -75,6 +75,18 @@ func readFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, 
 	return readActiveFileEntryPath(ctx, reader, userID, entryID, 0)
 }
 
+// validateFileCreationParent 检查已读活动路径能否作为新文件的父目录。
+func validateFileCreationParent(path *domain.FileEntryPath) error {
+	if path.Entries[len(path.Entries)-1].EntryType != "DIR" {
+		return domain.ErrFileEntryNotDirectory
+	}
+	// 根目录计入路径长度，路径长度也正好是新增文件的深度。
+	if len(path.Entries) > domain.MaxFileEntryDepth {
+		return domain.ErrFileEntryDepthExceeded
+	}
+	return nil
+}
+
 // readActiveFileEntryPath 从 entryID 向上检查活动路径。
 // childID 非零表示调用方已持有子项，因此 entryID 必须是存在的父目录。
 func readActiveFileEntryPath(ctx context.Context, reader FileEntryPathReader, userID, entryID, childID uint64) (*domain.FileEntryPath, error) {

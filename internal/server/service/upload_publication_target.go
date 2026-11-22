@@ -40,9 +40,8 @@ func ValidateUploadPublicationTarget(ctx context.Context, task *domain.UploadTas
 		return nil, err
 	}
 
-	// 3. 确认目标是目录，且新增文件符合层级上限。
-	// 根目录计入路径长度，路径长度也正好是新增文件的深度。
-	if path.Entries[len(path.Entries)-1].EntryType != "DIR" || len(path.Entries) > domain.MaxFileEntryDepth {
+	// 3. 检查父目录是否可创建文件，沿用发布任务的目标错误。
+	if err := validateFileCreationParent(path); err != nil {
 		return nil, domain.ErrUploadTargetUnavailable
 	}
 	return path, nil
