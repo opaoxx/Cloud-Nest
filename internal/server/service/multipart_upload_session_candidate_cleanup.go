@@ -48,6 +48,9 @@ func (cleanup *MultipartUploadSessionCandidateCleanup) Execute(
 
 	// 2. 对需要确认的结果只读查询原会话和对象。
 	if stopError := ctx.Err(); stopError != nil {
+		if abortError == nil {
+			return result, stopError
+		}
 		if errors.Is(abortError, stopError) {
 			return result, abortError
 		}
@@ -56,11 +59,21 @@ func (cleanup *MultipartUploadSessionCandidateCleanup) Execute(
 	observation, readError := cleanup.observe(ctx, session.ObjectKey, session.UploadID)
 
 	// 3. 交付有效观察，保留中止和复查阶段各自的错误。
-	if stopError := ctx.Err(); stopError != nil && !errors.Is(readError, stopError) {
-		readError = errors.Join(readError, stopError)
+	if stopError := ctx.Err(); stopError != nil {
+		switch {
+		case readError == nil:
+			readError = stopError
+		case !errors.Is(readError, stopError):
+			readError = errors.Join(readError, stopError)
+		}
+	} else if readError != nil {
+		readError = multipartCleanupStorageFailure(readError)
 	}
 	if readError != nil {
-		return result, errors.Join(abortError, multipartCleanupStorageFailure(readError))
+		if abortError != nil {
+			readError = errors.Join(abortError, readError)
+		}
+		return result, readError
 	}
 	result.Observation = observation
 	return result, abortError

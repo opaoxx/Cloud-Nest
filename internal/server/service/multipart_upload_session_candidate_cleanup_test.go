@@ -44,6 +44,8 @@ func TestMultipartUploadSessionCandidateCleanupObservesOriginalSession(t *testin
 			wantErrors: []error{abortFailure, context.Canceled}, wantCalls: []string{"probe", "lock", "abort"}},
 		{name: "cancel during observation", cancelAt: "observe", readError: readFailure, observation: closed, outcome: MultipartUploadSessionAbortAccepted,
 			wantErrors: []error{readFailure, context.Canceled}, wantCalls: afterAbort},
+		{name: "only cancellation during observation", cancelAt: "observe", outcome: MultipartUploadSessionAbortAccepted,
+			wantErrors: []error{context.Canceled}, wantCalls: afterAbort},
 		{name: "protected", bound: true, outcome: MultipartUploadSessionAbortSkipped, wantCalls: []string{"probe", "lock"}},
 		{name: "probe failed", probeError: probeFailure, wantErrors: []error{probeFailure}, wantCalls: []string{"probe"}},
 	} {
@@ -86,6 +88,9 @@ func TestMultipartUploadSessionCandidateCleanupObservesOriginalSession(t *testin
 				if !errors.Is(err, expectedError) {
 					t.Fatal("未保留失败原因", expectedError, err)
 				}
+			}
+			if fixture.cancelAt == "observe" && fixture.readError == nil && err != context.Canceled {
+				t.Fatal("纯取消信号被包装成合并故障", err)
 			}
 		})
 	}
