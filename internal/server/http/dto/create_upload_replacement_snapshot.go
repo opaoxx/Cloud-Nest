@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strconv"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
@@ -30,6 +31,33 @@ func RestoreCreateUploadReplacementData(body []byte) (*CreateUploadData, error) 
 // RestoreCreateMultipartUploadReplacementData 恢复含原目标绑定的 MULTIPART 创建快照。
 func RestoreCreateMultipartUploadReplacementData(body []byte) (*CreateMultipartUploadData, error) {
 	return restoreCreateMultipartUploadData(body, true)
+}
+
+// ValidateCreateUploadReplacementSnapshot 核对回执快照与保存的任务 ID 及本次替换请求一致。
+func ValidateCreateUploadReplacementSnapshot(body []byte, taskID, entryID, expectedRevision, sizeBytes uint64) error {
+	// 1. 根据原声明的字节数选择恢复方法，核对该模式的完整快照。
+	var task UploadTaskData
+	if sizeBytes <= domain.MaxSingleUploadSizeBytes {
+		data, err := RestoreCreateUploadReplacementData(body)
+		if err != nil {
+			return err
+		}
+		task = data.Task
+	} else {
+		data, err := RestoreCreateMultipartUploadReplacementData(body)
+		if err != nil {
+			return err
+		}
+		task = data.Task
+	}
+
+	// 2. 对照回执任务及原目标、版本和字节数，保留首次保存的计划。
+	if task.ID != strconv.FormatUint(taskID, 10) || task.SizeBytes != sizeBytes || task.Replacement == nil ||
+		task.Replacement.EntryID != strconv.FormatUint(entryID, 10) ||
+		task.Replacement.ExpectedRevision != strconv.FormatUint(expectedRevision, 10) {
+		return domain.ErrInvalidIdempotencyRecordData
+	}
+	return nil
 }
 
 func validCreateUploadReplacementBinding(raw []byte) bool {
