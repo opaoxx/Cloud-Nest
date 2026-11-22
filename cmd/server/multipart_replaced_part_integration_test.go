@@ -91,12 +91,65 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 	if current.RequestID == "" || !reflect.DeepEqual(current.Data, readyTask) || !reflect.DeepEqual(readProfile(), before) {
 		t.Fatal("替换尾片改变了原任务或预占配额")
 	}
+	t.Logf("原任务 %s 的同编号尾片替换后只返回最新回执，长度 %d B，旧 ETag %s，新 ETag %s，旧 SHA-256 %s，新 SHA-256 %s，首片不变，已用 %d B、预占 %d B",
+		readyTask.ID, replacement.SizeBytes, olderTail.ETag, replacement.ETag, olderTail.ChecksumSHA256, replacement.ChecksumSHA256,
+		before.UsedBytes, before.ReservedBytes)
+
+	// 4. 读取本轮完成核对前的账目，保留之后核对租约与写入的依据。
+	type completionState struct {
+		sessionID                 string
+		leaseReleased             bool
+		version, snapshots, files uint64
+	}
+	readCompletionState := func() completionState {
+		t.Helper()
+		var state completionState
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT task.storage_upload_id,
+			task.lease_owner IS NULL AND task.lease_until IS NULL, task.lease_version,
+			(SELECT COUNT(*) FROM upload_parts WHERE task_id=task.id),
+			(SELECT COUNT(*) FROM file_entries WHERE user_id=task.user_id AND entry_type='FILE')
+			FROM upload_tasks task WHERE id=? AND user_id=?`, readyTask.ID, fixture.login.User.ID).
+			Scan(&state.sessionID, &state.leaseReleased, &state.version, &state.snapshots, &state.files); err != nil {
+			t.Fatal("读取本轮完成核对状态失败", err)
+		}
+		return state
+	}
+	prior := readCompletionState()
+	if prior.sessionID != target.uploadID || !prior.leaseReleased || prior.snapshots != 0 || prior.files != 0 {
+		t.Fatal("提交旧回执前的原任务状态不符")
+	}
+
+	// 5. 用未变化的首片和真实被替换的旧尾片请求完成，仅第 2 片应被指出。
+	completeBody := fmt.Sprintf(`{"parts":[{"part_number":1,"etag":%q},{"part_number":2,"etag":%q}]}`,
+		firstReceipt.ETag, olderTail.ETag)
+	var rejected dto.ErrorResponse
+	api.request(t, ctx, http.MethodPost, taskPath+"/complete", "", strings.NewReader(completeBody), http.StatusConflict, &rejected)
+	if rejected.RequestID == "" || rejected.Error.Code != "UPLOAD_PARTS_MISMATCH" ||
+		!reflect.DeepEqual(rejected.Error.Details, map[string]any{"part_numbers": []any{float64(2)}}) {
+		t.Fatal("完成接口未仅指出已替换的尾片", rejected.Error)
+	}
+
+	// 6. 核对本次核对租约已释放，任务仍可上传，回执及配额没有被推进。
+	after := readCompletionState()
+	expected := prior
+	expected.version++ // 领取核对租约会增加版本，释放后避免旧持有者再次写入。
+	if after != expected {
+		t.Fatal("旧尾片回执导致意外的会话、租约或发布状态", after)
+	}
+	var afterTask dto.UploadTaskResponse
+	api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &afterTask)
+	expectedTask := current.Data
+	expectedTask.UpdatedAt = afterTask.Data.UpdatedAt // 领取和释放租约会更新任务时间。
+	if afterTask.RequestID == "" || afterTask.Data.UpdatedAt.Before(current.Data.UpdatedAt) ||
+		!reflect.DeepEqual(afterTask.Data, expectedTask) || !reflect.DeepEqual(readProfile(), before) {
+		t.Fatal("拒绝旧尾片回执改变了原任务或预占配额", afterTask.Data)
+	}
+	readReceipts(firstReceipt, replacement)
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("原任务 %s 的同编号尾片替换后只返回最新回执，长度 %d B，旧 ETag %s，新 ETag %s，旧 SHA-256 %s，新 SHA-256 %s，首片不变，已用 %d B、预占 %d B",
-		readyTask.ID, replacement.SizeBytes, olderTail.ETag, replacement.ETag, olderTail.ChecksumSHA256, replacement.ChecksumSHA256,
-		before.UsedBytes, before.ReservedBytes)
+	t.Logf("原任务 %s 提交旧尾片回执返回 409 UPLOAD_PARTS_MISMATCH，只指出第 2 片，核对租约版本 %d 到 %d 后释放，任务仍为 %s，完成快照 %d、文件 %d、预占 %d B",
+		readyTask.ID, prior.version, after.version, afterTask.Data.Status, after.snapshots, after.files, before.ReservedBytes)
 }
