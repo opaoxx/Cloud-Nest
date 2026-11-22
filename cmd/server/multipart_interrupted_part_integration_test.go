@@ -147,7 +147,10 @@ func TestServerMultipartInterruptedPartIntegration(t *testing.T) {
 	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts[0], resumed.Parts[1])
 	t.Logf("断网补传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
-	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, fileDigest)
+	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, fileDigest)
+
+	// 7. 用原任务发布的条目走正式授权下载，核对对象版本及正文的字节数和摘要。
+	verifyResumedMultipartDownload(t, ctx, api, publication, fileDigest)
 
 	logs, err := fixture.stop()
 	if err != nil {
