@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -31,6 +32,7 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 	t.Logf("专用 MinIO %s，回环地址 %s", minioID[:12], os.Getenv("CLOUDNEST_S3_ENDPOINT"))
 	bucket := prepareServerUploadContentBucket(t, ctx)
 	pool, _ := prepareServerIntegrationDatabase(t, ctx)
+	pool.SetMaxOpenConns(1)
 	store, err := repository.NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +53,7 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 	// 1. 创建合成账号及隔离任务，用正式仓储扫描并领取取消租约。
 	const userID, usedBytes = 7, 1024
 	const partSize, fileSize = 16 << 20, (16 << 20) + 1
-	var remainingReserved uint64 = 5*fileSize + 512
+	var remainingReserved uint64 = 6*fileSize + 512
 	execute := func(t *testing.T, statement string, args ...any) {
 		t.Helper()
 		if _, err := pool.ExecContext(ctx, statement, args...); err != nil {
@@ -63,18 +65,22 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 	execute(t, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
 	content := bytes.Repeat([]byte{0x42}, fileSize)
 	digest := sha256.Sum256(content)
+	start := time.Now().UTC().Truncate(time.Second)
 	for _, fixture := range []struct {
-		name, key                    string
-		taskID, objectID             uint64
-		bound, withObject, untrusted bool
+		name, key         string
+		taskID, objectID  uint64
+		bound, withObject bool
+		retryReason       domain.MultipartUploadCancellationRetryReason
 	}{
 		{name: "bound missing", key: "b4/execute missing +%.bin", taskID: 19, objectID: 23, bound: true},
 		{name: "bound existing", key: "b4/execute-merged.bin", taskID: 20, objectID: 24, bound: true, withObject: true},
 		{name: "unbound missing with a separate session", key: "b4/execute-orphan.bin", taskID: 21, objectID: 25},
 		{name: "unbound existing", key: "b4/execute-found.bin", taskID: 22, objectID: 26, withObject: true},
-		{name: "pending until store is trusted", key: "b4/execute-pending.bin", taskID: 23, objectID: 27, bound: true, untrusted: true},
+		{name: "pending until store is trusted", key: "b4/execute-pending.bin", taskID: 23, objectID: 27, bound: true, retryReason: domain.MultipartCancellationRetryStorage},
+		{name: "retry after database lock wait", key: "b4/execute-db-retry.bin", taskID: 24, objectID: 28, bound: true, retryReason: domain.MultipartCancellationRetryDatabase},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
+			execute(t, "SET timestamp = ?", start.Unix())
 			var session string
 			var binding *string
 			var existing minio.UploadInfo
@@ -143,8 +149,13 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 
 			// 2. 串联正式存储观察和终态事务，选择本项的确认路径。
 			verify := isolatedMinIOVerifier(minioID)
-			if fixture.untrusted {
+			if fixture.retryReason == domain.MultipartCancellationRetryStorage {
 				verify = nil
+			}
+			if fixture.retryReason == domain.MultipartCancellationRetryDatabase {
+				execute(t, `CREATE TRIGGER fixture_cancel_execution_retry BEFORE UPDATE ON stored_objects FOR EACH ROW
+					SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'`)
+				defer execute(t, "DROP TRIGGER IF EXISTS fixture_cancel_execution_retry")
 			}
 			observations := service.NewMultipartUploadCancellationStorageService(
 				func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
@@ -155,10 +166,56 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 				}, client.StatMultipartUploadObject)
 			execution := service.NewMultipartUploadCancellationExecutionService(settings.Provider, settings.Bucket,
 				observations.ObserveBoundSession, observations.ObserveUnboundSession,
-				store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation)
+				store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
+				store.ScheduleMultipartUploadCancellationRetry)
 			finished, err := execution.Execute(ctx, task)
-			if err != nil || (finished == nil) != fixture.untrusted {
-				t.Fatal("确定或待确认的执行结果不符", err)
+			if fixture.retryReason != "" {
+				var scheduled *service.MultipartUploadCancellationRetryScheduledError
+				if finished != nil || !errors.As(err, &scheduled) || scheduled == nil || !scheduled.NextAttemptAt.Equal(*task.LeaseUntil) {
+					t.Fatal("未收到原租约窗口内的登记结果", err)
+				}
+				if fixture.retryReason == domain.MultipartCancellationRetryDatabase {
+					var databaseError *mysql.MySQLError
+					if !errors.Is(err, domain.ErrUploadCancellationRetryable) || !errors.As(err, &databaseError) || databaseError.Number != 1205 {
+						t.Fatal("数据库重试未保留锁等待原因", err)
+					}
+					execute(t, "DROP TRIGGER fixture_cancel_execution_retry")
+				} else if !errors.Is(err, domain.ErrUploadStorageUnavailable) {
+					t.Fatal("存储待确认未保留原因", err)
+				}
+				retryTask, readError := store.FindUserUploadTask(ctx, userID, fixture.taskID)
+				if readError != nil || retryTask.Status != domain.UploadStatusCancelling || retryTask.ReservedBytes != task.ReservedBytes ||
+					retryTask.AttemptCount != task.AttemptCount+1 || retryTask.LeaseOwner != nil || retryTask.LeaseUntil != nil ||
+					retryTask.LastErrorCode == nil || *retryTask.LastErrorCode != string(fixture.retryReason) {
+					t.Fatal("持久化重试结果不符", readError)
+				}
+				retryObject, readError := store.FindUserStoredObject(ctx, userID, fixture.objectID)
+				if readError != nil || retryObject.Status != domain.StoredObjectStatusStaging || retryObject.GCAfter != nil {
+					t.Fatal("重试登记改变了暂存对象", readError)
+				}
+				var held uint64
+				if err := pool.QueryRowContext(ctx, "SELECT reserved_storage FROM users WHERE id=7").Scan(&held); err != nil || held != remainingReserved {
+					t.Fatal("确认前预占被释放", held, err)
+				}
+				execute(t, "SET timestamp = ?", scheduled.NextAttemptAt.Add(-time.Second).Unix())
+				if candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1); err != nil || len(candidates) != 0 {
+					t.Fatal("等待期间取消任务已可领取", candidates, err)
+				}
+				execute(t, "SET timestamp = ?", scheduled.NextAttemptAt.Unix())
+				candidates, scanError := store.ListMultipartUploadCancellationCandidates(ctx, 1)
+				if scanError != nil || len(candidates) != 1 || candidates[0].TaskID != task.ID {
+					t.Fatal("重试到点后未找到原任务", candidates, scanError)
+				}
+				reclaimed, claimError := store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-cancel-retry")
+				if claimError != nil || reclaimed == nil || reclaimed.LeaseVersion != task.LeaseVersion+1 {
+					t.Fatal("重试到点未领取新租约", claimError)
+				}
+				verify = isolatedMinIOVerifier(minioID)
+				finished, err = execution.Execute(ctx, reclaimed)
+				t.Logf("%s 按原租约截止时间登记，重领版本 %d 后执行原取消", fixture.retryReason, reclaimed.LeaseVersion)
+			}
+			if err != nil || finished == nil {
+				t.Fatal("未交付确认取消结果", err)
 			}
 
 			// 3. 读回任务、版本和配额，核对存储中的准确对象。
@@ -170,17 +227,11 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fixture.untrusted {
-				if !reflect.DeepEqual(current, task) || staged.Status != domain.StoredObjectStatusStaging || staged.GCAfter != nil {
-					t.Fatal("未确认时更改了取消任务或对象")
-				}
-			} else {
-				remainingReserved -= fileSize
-				if !reflect.DeepEqual(current, finished) || current.Status != domain.UploadStatusCancelled || current.ReservedBytes != 0 ||
-					staged.Status != domain.StoredObjectStatusOrphaned || staged.UnreferencedAt == nil || staged.GCAfter == nil ||
-					!staged.GCAfter.Equal(staged.UnreferencedAt.Add(7*24*time.Hour)) {
-					t.Fatal("终态、预占或回收登记未随执行提交")
-				}
+			remainingReserved -= fileSize
+			if !reflect.DeepEqual(current, finished) || current.Status != domain.UploadStatusCancelled || current.ReservedBytes != 0 ||
+				staged.Status != domain.StoredObjectStatusOrphaned || staged.UnreferencedAt == nil || staged.GCAfter == nil ||
+				!staged.GCAfter.Equal(staged.UnreferencedAt.Add(7*24*time.Hour)) {
+				t.Fatal("终态、预占或回收登记未随执行提交")
 			}
 			var used, reserved uint64
 			if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
@@ -202,5 +253,5 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("四条确认路径已提交 CANCELLED，一条待确认保留租约与预占。已用 %d B、预占 %d B", usedBytes, remainingReserved)
+	t.Logf("四条确认路径和两条重试路径均提交 CANCELLED。已用 %d B、预占 %d B", usedBytes, remainingReserved)
 }

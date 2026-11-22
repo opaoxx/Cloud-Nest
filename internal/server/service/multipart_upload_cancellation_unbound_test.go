@@ -31,6 +31,7 @@ func TestObserveUnboundMultipartUploadCancellationSession(t *testing.T) {
 		{name: "existing version", calls: flow, withObject: true, wantObservation: true},
 		{name: "storage unavailable", calls: "target head", statError: unavailable, want: unavailable},
 		{name: "storage timeout", calls: "target head", statError: context.DeadlineExceeded, want: context.DeadlineExceeded},
+		{name: "target lookup timeout", calls: "target", firstError: context.DeadlineExceeded, want: context.DeadlineExceeded},
 		{name: "empty success", calls: "target head", want: unavailable},
 		{name: "contradictory missing", calls: "target head", withObject: true, statError: missing, want: unavailable},
 		{name: "initial stale lease", calls: "target", firstError: busy, want: busy},
@@ -112,6 +113,9 @@ func TestObserveUnboundMultipartUploadCancellationSession(t *testing.T) {
 			if got := strings.Join(calls, " "); got != fixture.calls || !errors.Is(err, fixture.want) ||
 				(observed != nil) != fixture.wantObservation {
 				t.Fatal("只读查询顺序、观察或错误不符", got, observed, err)
+			}
+			if errors.Is(err, context.DeadlineExceeded) && errors.Is(err, domain.ErrUploadStorageUnavailable) != (fixture.firstError == nil) {
+				t.Fatal("未区分存储操作和目标查询的超时", err)
 			}
 			if observed == nil {
 				return

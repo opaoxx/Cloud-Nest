@@ -34,6 +34,8 @@ func TestObserveBoundMultipartUploadCancellationSession(t *testing.T) {
 		{name: "pending still rechecks lease", calls: fullFlow, pending: true},
 		{name: "unknown abort stops this attempt", calls: "target abort", abortError: unknown, want: unknown},
 		{name: "transport timeout stops this attempt", calls: "target abort", abortError: context.DeadlineExceeded, want: context.DeadlineExceeded},
+		{name: "storage check timeout", calls: "target abort check", checkError: context.DeadlineExceeded, want: context.DeadlineExceeded},
+		{name: "target lookup timeout", calls: "target", firstError: context.DeadlineExceeded, want: context.DeadlineExceeded},
 		{name: "readback failure", calls: "target abort check", checkError: unknown, want: unknown},
 		{name: "stale initial lease", calls: "target", firstError: busy, want: busy},
 		{name: "missing target", calls: "target", noTarget: true, want: domain.ErrInvalidStoredObjectData},
@@ -131,6 +133,9 @@ func TestObserveBoundMultipartUploadCancellationSession(t *testing.T) {
 			if got := strings.Join(calls, " "); got != fixture.calls || !errors.Is(err, fixture.want) ||
 				(observed != nil) != fixture.wantObservation {
 				t.Fatal("取消观察、调用顺序或错误不符", got, observed, err)
+			}
+			if errors.Is(err, context.DeadlineExceeded) && errors.Is(err, domain.ErrUploadStorageUnavailable) != (fixture.firstError == nil) {
+				t.Fatal("未区分存储操作和目标查询的超时", err)
 			}
 			if observed == nil {
 				return

@@ -56,14 +56,14 @@ func (execution *MultipartUploadCancellationStorageService) ObserveBoundSession(
 		return nil, err
 	}
 	if abortError != nil && !errors.Is(abortError, domain.ErrUploadPartSessionMissing) {
-		return nil, abortError
+		return nil, multipartCancellationStorageFailure(abortError)
 	}
 	checked, err := execution.check(ctx, objectKey, uploadID)
 	if contextError := ctx.Err(); contextError != nil {
 		return nil, contextError
 	}
 	if err != nil {
-		return nil, err
+		return nil, multipartCancellationStorageFailure(err)
 	}
 
 	// 3. 再读任务和原绑定，只有相符且存储已确认时才交付本轮观察。
@@ -100,7 +100,7 @@ func (execution *MultipartUploadCancellationStorageService) ObserveUnboundSessio
 		return nil, err
 	}
 	if statError != nil && !errors.Is(statError, domain.ErrUploadObjectMissing) {
-		return nil, statError
+		return nil, multipartCancellationStorageFailure(statError)
 	}
 	// 成功需要对象元数据，明确缺失时对象元数据应为空。
 	if (statError == nil) != (object != nil) {
@@ -171,4 +171,13 @@ func sameMultipartCancellationSession(left, right *string) bool {
 		return left == right
 	}
 	return *left == *right
+}
+
+// multipartCancellationStorageFailure 标记存储调用自身的超时，保留原始原因。
+// 目标查询等数据库调用的超时由各自入口返回。
+func multipartCancellationStorageFailure(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, domain.ErrUploadStorageUnavailable) {
+		return errors.Join(domain.ErrUploadStorageUnavailable, err)
+	}
+	return err
 }

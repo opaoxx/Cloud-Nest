@@ -17,7 +17,7 @@ func TestMultipartUploadCancellationExecution(t *testing.T) {
 	invalid := domain.ErrInvalidUploadTaskData
 	for _, fixture := range []struct {
 		name, calls, cancelAt             string
-		bound, withObject, pending        bool
+		bound, withObject                 bool
 		observeError, completeError, want error
 		wantTask, missingResult           bool
 		editClaim, editResult             func(*domain.UploadTask)
@@ -27,8 +27,7 @@ func TestMultipartUploadCancellationExecution(t *testing.T) {
 		{name: "bound and existing", bound: true, withObject: true, calls: "bound existing", wantTask: true},
 		{name: "unbound and missing", calls: "unbound missing", wantTask: true},
 		{name: "unbound and existing", withObject: true, calls: "unbound existing", wantTask: true},
-		{name: "pending remains pending", bound: true, pending: true, calls: "bound"},
-		{name: "storage error", calls: "unbound", observeError: domain.ErrUploadStorageUnavailable, want: domain.ErrUploadStorageUnavailable},
+		{name: "unexpected target lookup error", calls: "unbound", observeError: context.DeadlineExceeded, want: context.DeadlineExceeded},
 		{name: "lease changed after observation", bound: true, calls: "bound",
 			editObservation: func(observed *domain.MultipartUploadCancellationObservation) { observed.Task.LeaseVersion++ }, want: invalid},
 		{name: "observation of other account", calls: "unbound",
@@ -44,8 +43,6 @@ func TestMultipartUploadCancellationExecution(t *testing.T) {
 		{name: "empty observation key", calls: "unbound",
 			editObservation: func(observed *domain.MultipartUploadCancellationObservation) { observed.ObjectKey = "" }, want: invalid},
 		{name: "database rejects old lease", calls: "unbound missing", completeError: domain.ErrUploadTaskBusy, want: domain.ErrUploadTaskBusy},
-		{name: "known temporary write failure", bound: true, withObject: true, calls: "bound existing",
-			completeError: domain.ErrUploadCancellationRetryable, want: domain.ErrUploadCancellationRetryable},
 		{name: "canceled before first call", cancelAt: "start", want: context.Canceled},
 		{name: "canceled during observation", cancelAt: "observe", calls: "unbound", want: context.Canceled},
 		{name: "canceled after commit", cancelAt: "complete", calls: "unbound missing", wantTask: true},
@@ -85,7 +82,7 @@ func TestMultipartUploadCancellationExecution(t *testing.T) {
 				if fixture.cancelAt == "observe" {
 					cancel()
 				}
-				if fixture.pending || fixture.observeError != nil {
+				if fixture.observeError != nil {
 					return nil, fixture.observeError
 				}
 				observation = &domain.MultipartUploadCancellationObservation{Task: *copyUploadTask(claimed), ObjectKey: key}
@@ -130,6 +127,10 @@ func TestMultipartUploadCancellationExecution(t *testing.T) {
 				},
 				func(callContext context.Context, provider, bucket string, observed *domain.MultipartUploadCancellationObservation) (*domain.UploadTask, error) {
 					return complete("existing", callContext, provider, bucket, observed)
+				},
+				func(context.Context, *domain.UploadTask, int, domain.MultipartUploadCancellationRetryReason) (*domain.UploadTask, error) {
+					t.Fatal("确认路径或不可重试错误调用了重试登记")
+					return nil, nil
 				})
 
 			// 2. 核对实际路径和返回值，确保错误与待确认结果没有被当作终态。
