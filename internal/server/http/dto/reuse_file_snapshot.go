@@ -13,6 +13,12 @@ type ReuseFileData struct {
 	Entry DirectoryEntrySummary `json:"entry"`
 }
 
+// ReuseFileResponse 关联创建时的公开快照与当前 HTTP 请求 ID。
+type ReuseFileResponse struct {
+	Data      ReuseFileData `json:"data"`
+	RequestID string        `json:"request_id"`
+}
+
 // NewReuseFileData 从已写入的新文件生成稳定的公开快照。
 func NewReuseFileData(result *domain.FileEntry) (*ReuseFileData, error) {
 	// 1. 核对新建文件的类型、版本及展示名。
