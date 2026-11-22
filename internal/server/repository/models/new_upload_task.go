@@ -42,3 +42,13 @@ func (NewUploadTask) TableName() string {
 	// 1. 返回既有上传任务表名。
 	return "upload_tasks"
 }
+
+// NewUploadReplacementTask 在基础创建字段上增加两个必填的替换绑定列。
+// 嵌入的 NewUploadTask 提供共用列和 upload_tasks 表名。
+type NewUploadReplacementTask struct {
+	NewUploadTask
+	// ReplacementEntryID 指向同账号的目标文件。
+	ReplacementEntryID uint64 `gorm:"column:replacement_entry_id;<-:create"`
+	// ReplacementExpectedRevision 保存准备时锁读成功的预期版本。
+	ReplacementExpectedRevision uint64 `gorm:"column:replacement_expected_revision;<-:create"`
+}

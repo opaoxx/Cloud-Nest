@@ -17,7 +17,7 @@ import (
 // 声明名称须已通过统一校验，祖先可见性、配额预占及幂等结果由上层在同一事务编排。
 // 回调须向外返回本方法错误，结果在外层事务提交成功后确认生效。
 func (store *Store) CreateUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, expiresAt time.Time) (*domain.UploadTask, error) {
-	return store.createUserUploadTask(ctx, stagedObjectID, input, domain.UploadPlan{Mode: "SINGLE"}, expiresAt)
+	return store.createUserUploadTask(ctx, stagedObjectID, input, domain.UploadPlan{Mode: "SINGLE"}, expiresAt, nil)
 }
 
 // CreateUserMultipartUploadTask 在 WithUserTransaction 回调中登记当前设备的 CREATING 任务。
@@ -26,10 +26,27 @@ func (store *Store) CreateUserMultipartUploadTask(ctx context.Context, stagedObj
 	if plan.Mode != "MULTIPART" {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	return store.createUserUploadTask(ctx, stagedObjectID, input, plan, expiresAt)
+	return store.createUserUploadTask(ctx, stagedObjectID, input, plan, expiresAt, nil)
 }
 
-func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput, plan domain.UploadPlan, expiresAt time.Time) (*domain.UploadTask, error) {
+// CreateUserUploadReplacementTask 在已认证账号事务内写入带绑定的初始任务。
+// 调用方提供同一事务准备的父目录、名称和固定计划，并在同一事务编排配额预占及回执。
+func (store *Store) CreateUserUploadReplacementTask(ctx context.Context, stagedObjectID uint64,
+	input domain.CreateUploadInput, plan domain.UploadPlan, entryID, expectedRevision uint64, expiresAt time.Time,
+) (*domain.UploadTask, error) {
+	binding := uploadReplacementBinding{entryID: entryID, expectedRevision: expectedRevision}
+	return store.createUserUploadTask(ctx, stagedObjectID, input, plan, expiresAt, &binding)
+}
+
+// uploadReplacementBinding 保存普通任务与替换任务之间唯一额外的创建绑定。
+type uploadReplacementBinding struct {
+	entryID          uint64
+	expectedRevision uint64
+}
+
+func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uint64, input domain.CreateUploadInput,
+	plan domain.UploadPlan, expiresAt time.Time, replacement *uploadReplacementBinding,
+) (*domain.UploadTask, error) {
 	// 1. 检查已认证用户事务和上下文。
 	if ctx == nil || store.authenticatedActor == nil || store.loginUserID == 0 {
 		return nil, fmt.Errorf("创建上传任务需要上下文和已认证用户事务")
@@ -47,7 +64,7 @@ func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, err
 	}
 
-	// 2. 校验声明、对象 ID 及到期时间，按模式准备初始状态和分片参数。
+	// 2. 校验声明、对象 ID 及到期时间，按模式准备初始状态、分片参数及替换绑定。
 	expiry := expiresAt.UTC().Truncate(time.Microsecond)
 	if stagedObjectID == 0 || expiry.Year() < 1000 || expiry.Year() > 9999 || !expiry.After(time.Now()) {
 		return nil, domain.ErrInvalidUploadTaskData
@@ -70,14 +87,26 @@ func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uin
 		}
 		record.Status = string(domain.UploadStatusCreating)
 		record.PartSize, record.PartCount = &plan.PartSizeBytes, &plan.PartCount
-	} else if !input.IsValid() {
+	} else if plan != (domain.UploadPlan{Mode: "SINGLE"}) || !input.IsValid() {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	if input.ExpectedSHA256 != nil {
 		record.ExpectedSHA256 = bytes.Clone(input.ExpectedSHA256[:])
 	}
+	if replacement != nil && (replacement.entryID == 0 || replacement.expectedRevision == 0 || input.ExpectedSHA256 == nil) {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
 
-	// 3. 按用户归属核对目标目录和初始暂存对象。
+	// 3. 复核替换文件及其快照，按用户归属核对目录和初始暂存对象。
+	if replacement != nil {
+		target, err := store.LockUploadReplacementTarget(writeContext, replacement.entryID, replacement.expectedRevision)
+		if err != nil {
+			return nil, err
+		}
+		if target.ParentID == nil || *target.ParentID != input.ParentID || target.Name != input.Name {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	}
 	parent, err := store.FindUserFileEntry(writeContext, actor.UserID, input.ParentID)
 	if err != nil {
 		return nil, err
@@ -104,13 +133,24 @@ func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
-	// 4. 按模式插入任务，分片列只在 Multipart 创建时写入。
+	// 4. 按模式插入任务，按需写入分片列和替换绑定。
 	columns := []string{"user_id", "device_id", "staged_object_id", "target_parent_id", "requested_name", "upload_mode",
 		"expected_sha256", "file_size", "status", "reserved_bytes", "expires_at"}
 	if record.PartSize != nil {
 		columns = append(columns, "part_size", "part_count")
 	}
-	result := store.database.WithContext(writeContext).Select(columns).Create(&record)
+	insert := store.database.WithContext(writeContext)
+	var result *gorm.DB
+	if replacement == nil {
+		result = insert.Select(columns).Create(&record)
+	} else {
+		replacementRecord := models.NewUploadReplacementTask{
+			NewUploadTask:               record,
+			ReplacementEntryID:          replacement.entryID,
+			ReplacementExpectedRevision: replacement.expectedRevision,
+		}
+		result = insert.Select(append(columns, "replacement_entry_id", "replacement_expected_revision")).Create(&replacementRecord)
+	}
 	if err := writeContext.Err(); err != nil {
 		return nil, err
 	}
@@ -142,7 +182,7 @@ func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
-	// 6. 复用任务读取，核对完整初始事实。
+	// 6. 复用任务读取，核对完整初始事实及替换绑定。
 	created, err := store.FindUserUploadTask(writeContext, actor.UserID, identity.ID)
 	if errors.Is(err, domain.ErrUploadTaskNotFound) {
 		return nil, domain.ErrInvalidUploadTaskData
@@ -168,6 +208,14 @@ func (store *Store) createUserUploadTask(ctx context.Context, stagedObjectID uin
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	if created.ExpectedSHA256 != nil && !bytes.Equal(created.ExpectedSHA256[:], record.ExpectedSHA256) {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	if replacement == nil {
+		if created.ReplacementEntryID != nil {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	} else if created.ReplacementEntryID == nil || *created.ReplacementEntryID != replacement.entryID ||
+		created.ReplacementExpectedRevision == nil || *created.ReplacementExpectedRevision != replacement.expectedRevision {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
