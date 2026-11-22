@@ -8,6 +8,9 @@ import (
 // MaxSyncSnapshotEntries 限定一份同步快照的条目数，不计独立返回的根目录。
 const MaxSyncSnapshotEntries = 10000
 
+// MaxSyncSnapshotBytes 限定一份快照的条目 JSON 数组字节数，包含方括号和逗号。
+const MaxSyncSnapshotBytes = 8 * 1024 * 1024
+
 // ErrSyncSnapshotTooLarge 表示完整快照超出允许的大小。
 var ErrSyncSnapshotTooLarge = errors.New("同步快照超过大小上限")
 
