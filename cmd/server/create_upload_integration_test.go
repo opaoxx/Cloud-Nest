@@ -78,7 +78,7 @@ func requestServerCreateUpload(t *testing.T, baseURL, token, key, body string, s
 		t.Fatal("正式上传创建错误结构不符")
 	}
 	if code == "FILE_TOO_LARGE" {
-		if len(failure.Error.Details) != 2 || failure.Error.Details["field"] != "size_bytes" || failure.Error.Details["max_size_bytes"] != float64(domain.MaxSingleUploadSizeBytes) {
+		if len(failure.Error.Details) != 2 || failure.Error.Details["field"] != "size_bytes" || failure.Error.Details["max_size_bytes"] != float64(domain.DefaultMaxUploadSizeBytes) {
 			t.Fatal("正式文件上限详情错误")
 		}
 	} else if field != "" {
@@ -112,7 +112,7 @@ func verifyServerUploadCreation(t *testing.T, ctx context.Context, pool *sql.DB,
 	requestServerCreateUpload(t, baseURL, token, "upload-invalid-name", `{"parent_id":"33","name":"CON.txt","size_bytes":0}`, 400, "INVALID_NAME", "name")
 	requestServerCreateUpload(t, baseURL, token, "upload-foreign-parent", `{"parent_id":"11","name":"scope.bin","size_bytes":0}`, 404, "ENTRY_NOT_FOUND", "")
 	requestServerCreateUpload(t, baseURL, otherUserToken, "upload-file-parent", `{"parent_id":"42","name":"scope.bin","size_bytes":0}`, 400, "INVALID_ARGUMENT", "parent_id")
-	requestServerCreateUpload(t, baseURL, token, "upload-oversize", `{"parent_id":"33","name":"large.bin","size_bytes":16777217}`, 413, "FILE_TOO_LARGE", "size_bytes")
+	requestServerCreateUpload(t, baseURL, token, "upload-oversize", `{"parent_id":"33","name":"large.bin","size_bytes":53687091201,"sha256":"`+strings.Repeat("ab", 32)+`"}`, 413, "FILE_TOO_LARGE", "size_bytes")
 	requestServerCreateUpload(t, baseURL, token, "upload-invalid-sha", `{"parent_id":"33","name":"hash.bin","size_bytes":0,"sha256":"private-invalid-sha"}`, 400, "INVALID_ARGUMENT", "sha256")
 	if readServerUploadCreationState(t, ctx, pool) != before {
 		t.Fatal("正式上传拒绝请求产生了写入")

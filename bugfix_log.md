@@ -1,5 +1,20 @@
 # CloudNest Bug 修复记录
 
+## 第 749 步——正式上传入口拒绝符合 B4 计划的 Multipart 声明
+
+### 问题现象
+
+- 在隔离服务以合成账号向 `POST /api/v1/uploads` 提交 16,777,217 B 的声明，包含合法父目录、幂等键与整文件 SHA-256。预期 `201`，三轮均返回 `413 FILE_TOO_LARGE`，首片上传和重启核对无法开始。
+
+### 根因与修复方案
+
+- `main.run` 把 `POST /api/v1/uploads` 绑定到 `RegisterCreateUploadRoute` 和 `IdempotentCreateUploadService.Create`。路由、声明大小判断和幂等结果编解码仍沿用 SINGLE。先前完成的 `CreateUploadWithMultipart` 和 `CreateWithPlan` 尚未接入正式创建入口。
+- 第 750 步在原路径接通双模式创建、上传计划和两种稳定快照的编解码，沿用 Bearer 认证。SINGLE 保留原有的请求摘要与响应快照编码，已有记录可在新入口重放。
+
+### 验证结果
+
+- 第 749 步复现 3 次。第 750 步隔离联测 3 次均通过，16 MiB 返回 SINGLE，16 MiB 加 1 B 返回 Multipart 两片计划并进入 UPLOADING。旧版 SINGLE 快照及新 Multipart 快照均可按原键重放，超限请求返回含 50 GiB 上限的 413。两轮使用的专用容器均已按 ID 确认移除，复验见开发学习记录第 749、750 步。
+
 ## 第 729 步——Multipart 会话启停联测的时间精度不一致
 
 ### 问题现象

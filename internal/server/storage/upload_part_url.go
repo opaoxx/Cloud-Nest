@@ -14,7 +14,11 @@ import (
 const (
 	uploadPartURLLifetime    = 5 * time.Minute
 	uploadPartChecksumHeader = "x-amz-checksum-sha256"
-	maxMinIOUploadPartBytes  = 5 << 30
+
+	// MaxMinIOUploadPartBytes 是固定 MinIO 版本接受的单片字节上限。
+	MaxMinIOUploadPartBytes = 5 << 30
+	// MaxMinIOUploadObjectBytes 是本项目采用的 MinIO 对象大小兼容上限。
+	MaxMinIOUploadObjectBytes = 5 << 40
 )
 
 // SignUploadPartURL 为当前桶下的一片内容签名。调用方提供已授权任务的固定对象键及会话。
@@ -34,7 +38,7 @@ func (client *Client) SignUploadPartURL(ctx context.Context, objectKey, uploadID
 	if partNumber == 0 || partNumber > domain.MaxUploadPartCount {
 		return nil, domain.ErrInvalidUploadPartNumber
 	}
-	if !domain.ValidMultipartUploadID(uploadID) || sizeBytes == 0 || sizeBytes > maxMinIOUploadPartBytes ||
+	if !domain.ValidMultipartUploadID(uploadID) || sizeBytes == 0 || sizeBytes > MaxMinIOUploadPartBytes ||
 		!domain.ValidUploadPartChecksumSHA256(checksumSHA256) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}

@@ -557,24 +557,20 @@ func runWithPurgeRootWorker(
 	// 24. 绑定已有用户范围查询，装配上传任务读取服务。
 	uploadTaskService := service.NewUploadTaskService(store.FindUserUploadTask)
 
-	// 25. 复用存储配置、用户事务及稳定结果编解码，装配幂等上传创建服务。
+	// 25. 绑定默认文件上限、MinIO 能力和双模式快照，装配幂等上传创建服务。
+	uploadLimits := domain.UploadPlanLimits{
+		MaxFileSizeBytes:   domain.DefaultMaxUploadSizeBytes,
+		MaxObjectSizeBytes: storage.MaxMinIOUploadObjectBytes,
+		MaxPartSizeBytes:   storage.MaxMinIOUploadPartBytes,
+	}
 	createUploadService := service.NewIdempotentCreateUploadService(storageConfig.Provider, storageConfig.Bucket,
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentCreateUploadTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
 				return action(txContext, txStore)
 			})
 		},
-		func(task *domain.UploadTask) (json.RawMessage, error) {
-			data, err := dto.NewCreateUploadData(task)
-			if err != nil {
-				return nil, err
-			}
-			return json.Marshal(data)
-		},
-		func(body json.RawMessage) error {
-			_, err := dto.RestoreCreateUploadData(body)
-			return err
-		},
+		dto.EncodeCreateUploadSnapshot,
+		dto.ValidateCreateUploadSnapshot,
 	)
 
 	// 26. 用已检查的目录创建共享上传临时区。
@@ -637,7 +633,10 @@ func runWithPurgeRootWorker(
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)
-	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize, createUploadService.Create)
+	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize,
+		func(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, key string) (json.RawMessage, error) {
+			return createUploadService.CreateWithPlan(ctx, actor, input, key, uploadLimits)
+		})
 	serverhttp.RegisterUploadPartURLsRoute(router, authorizationService.Authorize, uploadPartURLs.Create)
 	serverhttp.RegisterUploadPartsRoute(router, authorizationService.Authorize, uploadPartReceipts.List)
 	serverhttp.RegisterUploadContentRoute(router, authorizationService.Authorize, uploadTaskService.Get, receiveUploadContent.Receive)
