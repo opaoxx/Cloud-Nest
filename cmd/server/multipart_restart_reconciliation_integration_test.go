@@ -62,44 +62,14 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		readyTask.CompletedAt != nil || !readyTask.ExpiresAt.Equal(created.Data.ExpiresAt) {
 		t.Fatal("就绪任务与原声明不符", readyTask)
 	}
-	var storageUploadID, objectKey string
-	if err := fixture.pool.QueryRowContext(ctx, `SELECT task.storage_upload_id, obj.object_key
-		FROM upload_tasks task JOIN stored_objects obj ON obj.id=task.staged_object_id
-		WHERE task.id=? AND task.user_id=? AND obj.bucket=?`, taskID, fixture.login.User.ID, fixture.bucket.name).
-		Scan(&storageUploadID, &objectKey); err != nil || storageUploadID == "" || objectKey == "" {
-		t.Fatal("专用桶分片会话尚未绑定", err)
-	}
-	core := minio.Core{Client: fixture.bucket.client}
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		if err := core.AbortMultipartUpload(cleanup, fixture.bucket.name, objectKey, storageUploadID); err != nil &&
-			minio.ToErrorResponse(err).Code != "NoSuchUpload" {
-			t.Error("合成分片会话清理失败", minio.ToErrorResponse(err).Code)
-		}
-	})
+	target := readServerMultipartPartTarget(t, ctx, fixture, readyTask)
 
 	// 2. 签发并上传第一片，记录重启前的任务与回执。
 	uploadPart := func(api backupSourceClient, number uint32, contents []byte) dto.UploadPartReceiptData {
 		t.Helper()
-		checksum := multipartProbeSHA256(contents)
-		var signed dto.UploadPartURLsResponse
-		api.request(t, ctx, http.MethodPost, taskPath+"/part-urls", "",
-			strings.NewReader(fmt.Sprintf(`{"parts":[{"part_number":%d,"sha256":"%x"}]}`, number, sha256.Sum256(contents))),
-			http.StatusOK, &signed)
-		if signed.RequestID == "" || len(signed.Data.Parts) != 1 || !signed.Data.ExpiresAt.Equal(readyTask.ExpiresAt) {
-			t.Fatal("分片签发范围或任务期限不符", number)
-		}
-		part := signed.Data.Parts[0]
-		uploadURL, err := url.Parse(part.URL)
-		if err != nil || uploadURL.Scheme+"://"+uploadURL.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") || uploadURL.User != nil ||
-			uploadURL.Path != "/"+fixture.bucket.name+"/"+objectKey || uploadURL.Query().Get("uploadId") != storageUploadID ||
-			uploadURL.Query().Get("partNumber") != fmt.Sprint(number) || part.PartNumber != number ||
-			part.SizeBytes != uint64(len(contents)) || part.RequiredHeaders.ChecksumSHA256 != checksum {
-			t.Fatal("签名没有限定在本轮隔离会话的预期分片", number)
-		}
+		uploadURL, checksum := target.signPart(t, ctx, api, number, contents)
 		etag := putMultipartProbePart(t, ctx, api.httpClient, uploadURL, checksum, contents, http.StatusOK, "")
-		return dto.UploadPartReceiptData{PartNumber: number, SizeBytes: part.SizeBytes, ETag: etag, ChecksumSHA256: checksum}
+		return dto.UploadPartReceiptData{PartNumber: number, SizeBytes: uint64(len(contents)), ETag: etag, ChecksumSHA256: checksum}
 	}
 	firstReceipt := uploadPart(fixture.api, 1, payload[:partSize])
 	readReceipts := func(api backupSourceClient, expected ...dto.UploadPartReceiptData) dto.UploadPartsData {
@@ -183,7 +153,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		(SELECT COUNT(*) FROM file_entries WHERE user_id=task.user_id AND parent_id=task.target_parent_id)
 		FROM upload_tasks task WHERE id=? AND user_id=?`, taskID, login.User.ID).
 		Scan(&boundSession, &completionRows, &childEntries); err != nil ||
-		boundSession != storageUploadID || completionRows != 0 || childEntries != 0 {
+		boundSession != target.uploadID || completionRows != 0 || childEntries != 0 {
 		t.Fatal("分片会话变化，或意外生成完成快照或文件条目", err, completionRows, childEntries)
 	}
 	t.Logf("原任务 %d 只补传第 %d 片 %d B，ETag %s，SHA-256 %s；两片齐备，首片回执保持原值，已用 %d B，预占 %d B，完成回执与发布条目均为 0",
@@ -252,6 +222,64 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	}
 	t.Logf("原任务 %d 返回 202 COMPLETING，关停后两条完成快照仍匹配，分片编号 1、2，字节数 %d、%d，共用核对时间 %s",
 		taskID, firstPart.SizeBytes, lastPart.SizeBytes, firstObservedAt.Format(time.RFC3339Nano))
+}
+
+type serverMultipartPartTarget struct {
+	taskPath       string
+	bucket         string
+	objectKey      string
+	uploadID       string
+	taskExpiration time.Time
+}
+
+func readServerMultipartPartTarget(t *testing.T, ctx context.Context, fixture backupSourceFixture, task dto.UploadTaskData) serverMultipartPartTarget {
+	t.Helper()
+	// 1. 按任务和所有权读取本轮专用桶已绑定的原始会话。
+	target := serverMultipartPartTarget{
+		taskPath: "/api/v1/uploads/" + task.ID, bucket: fixture.bucket.name, taskExpiration: task.ExpiresAt,
+	}
+	if err := fixture.pool.QueryRowContext(ctx, `SELECT task.storage_upload_id, obj.object_key
+		FROM upload_tasks task JOIN stored_objects obj ON obj.id=task.staged_object_id
+		WHERE task.id=? AND task.user_id=? AND obj.bucket=?`, task.ID, fixture.login.User.ID, target.bucket).
+		Scan(&target.uploadID, &target.objectKey); err != nil || target.uploadID == "" || target.objectKey == "" {
+		t.Fatal("专用桶分片会话尚未绑定", err)
+	}
+
+	// 2. 测试结束后只清理这个专用会话，已完成的会话会由存储移除。
+	core := minio.Core{Client: fixture.bucket.client}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if err := core.AbortMultipartUpload(cleanup, target.bucket, target.objectKey, target.uploadID); err != nil &&
+			minio.ToErrorResponse(err).Code != "NoSuchUpload" {
+			t.Error("合成分片会话清理失败", minio.ToErrorResponse(err).Code)
+		}
+	})
+	return target
+}
+
+func (target serverMultipartPartTarget) signPart(t *testing.T, ctx context.Context, api backupSourceClient, number uint32, contents []byte) (*url.URL, string) {
+	t.Helper()
+	// 1. 通过正式接口请求绑定完整正文摘要的单片签名。
+	checksum := multipartProbeSHA256(contents)
+	var signed dto.UploadPartURLsResponse
+	api.request(t, ctx, http.MethodPost, target.taskPath+"/part-urls", "",
+		strings.NewReader(fmt.Sprintf(`{"parts":[{"part_number":%d,"sha256":"%x"}]}`, number, sha256.Sum256(contents))),
+		http.StatusOK, &signed)
+	if signed.RequestID == "" || len(signed.Data.Parts) != 1 || !signed.Data.ExpiresAt.Equal(target.taskExpiration) {
+		t.Fatal("分片签发范围或任务期限不符", number)
+	}
+
+	// 2. 校验链接只能写入本轮回环存储中指定会话的预期分片。
+	part := signed.Data.Parts[0]
+	uploadURL, err := url.Parse(part.URL)
+	if err != nil || uploadURL.Scheme+"://"+uploadURL.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") || uploadURL.User != nil ||
+		uploadURL.Path != "/"+target.bucket+"/"+target.objectKey || uploadURL.Query().Get("uploadId") != target.uploadID ||
+		uploadURL.Query().Get("partNumber") != fmt.Sprint(number) || part.PartNumber != number ||
+		part.SizeBytes != uint64(len(contents)) || part.RequiredHeaders.ChecksumSHA256 != checksum {
+		t.Fatal("签名没有限定在本轮隔离会话的预期分片", number)
+	}
+	return uploadURL, checksum
 }
 
 func awaitResumedMultipartPublication(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string) dto.UploadTaskData {
