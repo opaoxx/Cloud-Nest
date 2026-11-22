@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
-	"gorm.io/gorm/clause"
 )
 
 // WithExpiredTrashRootTransaction 在所属用户事务中锁定并复核一条到期回收站候选。
@@ -52,36 +51,11 @@ func (store *Store) WithExpiredTrashRootTransaction(
 		}
 
 		// 3. 逐层锁读祖先，路径复核通过后才进入回调。
-		if err := txStore.checkExpiredTrashRootAncestors(txContext, current); err != nil {
+		if err := txStore.checkLockedActiveEntryAncestors(txContext, current.UserID, current.ParentID); errors.Is(err, domain.ErrFileEntryNotFound) {
+			return domain.ErrExpiredTrashRootCandidateStale
+		} else if err != nil {
 			return err
 		}
 		return action(txContext, txStore, current)
 	})
-}
-
-// checkExpiredTrashRootAncestors 在同一事务内锁读活动父链。
-func (store *Store) checkExpiredTrashRootAncestors(ctx context.Context, candidate domain.ExpiredTrashRootCandidate) error {
-	// 1. 按所属用户逐层锁读，在目录深度上限内查找真实根目录。
-	lockedStore := *store
-	lockedStore.database = store.database.WithContext(ctx).
-		Table("file_entries FORCE INDEX (uk_entries_owner_id)").
-		Clauses(clause.Locking{Strength: "UPDATE"})
-	parentID := candidate.ParentID
-	for depth := 1; depth <= domain.MaxFileEntryDepth; depth++ {
-		parent, err := lockedStore.FindUserFileEntry(ctx, candidate.UserID, parentID)
-		if errors.Is(err, domain.ErrFileEntryNotFound) {
-			return domain.ErrExpiredTrashRootCandidateStale
-		}
-		if err != nil {
-			return err
-		}
-		if parent.Status != "ACTIVE" || parent.EntryType != "DIR" {
-			return domain.ErrExpiredTrashRootCandidateStale
-		}
-		if parent.ParentID == nil {
-			return nil
-		}
-		parentID = *parent.ParentID
-	}
-	return domain.ErrExpiredTrashRootCandidateStale
 }
