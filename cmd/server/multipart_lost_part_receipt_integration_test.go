@@ -139,7 +139,10 @@ func TestServerMultipartLostPartReceiptIntegration(t *testing.T) {
 	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, localReceipts[0], localReceipts[1])
 	t.Logf("回执丢失重传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
-	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
+	// 7. 用原任务发布的条目走正式下载，核对对象版本、正文长度和整文件摘要。
+	verifyResumedMultipartDownload(t, ctx, api, publication, sourceDigest)
 
 	logs, err := fixture.stop()
 	if err != nil {
