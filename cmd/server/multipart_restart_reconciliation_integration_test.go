@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 )
 
@@ -101,7 +100,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("重启后账号、根目录或预占额度发生变化")
 	}
 
-	// 4. 用原任务 ID 核对已上传首片，再重新读取源文件验证大小和整文件摘要。
+	// 4. 用原任务 ID 核对重启后仍可用的首片。
 	var afterRestart dto.UploadTaskResponse
 	restarted.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &afterRestart)
 	afterRestartParts := readReceipts(restarted, firstReceipt)
@@ -111,15 +110,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	}
 	t.Logf("重启前 %s，重启后 %s；任务 %d 保持 UPLOADING，仅第 1/2 片 %d B，ETag %s，SHA-256 %s",
 		fixture.api.baseURL, restarted.baseURL, taskID, firstReceipt.SizeBytes, firstReceipt.ETag, firstReceipt.ChecksumSHA256)
-	resumedSource, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatal("重读合成源文件失败", err)
-	}
-	if uint64(len(resumedSource)) != afterRestart.Data.SizeBytes || sha256.Sum256(resumedSource) != fileDigest {
-		t.Fatal("合成源大小或整文件摘要已变化，不能续传")
-	}
-
-	// 5. 依据计划找出缺失编号，仅对该片签发并上传，最后比对全部回执。
+	// 5. 按原计划找出缺片，核对源文件身份后仅签发并上传该片。
 	var missingParts []uint32
 	for number := uint32(1); number <= afterRestartParts.PartCount; number++ {
 		if !slices.ContainsFunc(afterRestartParts.Parts, func(receipt dto.UploadPartReceiptData) bool {
@@ -132,12 +123,13 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("缺失分片应只有第二片", missingParts)
 	}
 	number := missingParts[0]
-	tailSize, err := domain.ExpectedMultipartUploadPartSize(fileSize, afterRestartParts.PartSizeBytes, afterRestartParts.PartCount, number)
-	if err != nil || tailSize != 1 {
-		t.Fatal("缺失尾片字节数不符", tailSize, err)
+	tailReceipt, err := resumeMultipartFixturePart(sourcePath, afterRestart.Data.SizeBytes, fileDigest, afterRestartParts, number,
+		func(contents []byte) dto.UploadPartReceiptData {
+			return uploadPart(restarted, number, contents)
+		})
+	if err != nil || tailReceipt.SizeBytes != 1 {
+		t.Fatal("按原源文件和计划补传尾片失败", tailReceipt.SizeBytes, err)
 	}
-	offset := uint64(number-1) * afterRestartParts.PartSizeBytes
-	tailReceipt := uploadPart(restarted, number, resumedSource[offset:offset+tailSize])
 	resumedParts := readReceipts(restarted, firstReceipt, tailReceipt)
 	var afterResume dto.UploadTaskResponse
 	restarted.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &afterResume)
