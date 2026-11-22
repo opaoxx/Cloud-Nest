@@ -178,6 +178,12 @@ func prepareBackupSource(t *testing.T, ctx context.Context) backupSourceFixture 
 
 func prepareBackupSourceWithMinIO(t *testing.T, ctx context.Context, startMinIO func(*testing.T, context.Context) string) backupSourceFixture {
 	t.Helper()
+	return prepareBackupSourceWithServer(t, ctx, startMinIO, startBackupFixtureServer)
+}
+
+func prepareBackupSourceWithServer(t *testing.T, ctx context.Context, startMinIO func(*testing.T, context.Context) string,
+	startServer func(*testing.T, context.Context, string) (backupSourceClient, func() (string, error))) backupSourceFixture {
+	t.Helper()
 	// 1. 独立启动 MySQL 与 MinIO，使用正式命令初始化空库和合成账号。
 	mysqlContainer := startIsolatedWebMySQL(t, ctx)
 	minioContainer := startMinIO(t, ctx)
@@ -198,7 +204,7 @@ func prepareBackupSourceWithMinIO(t *testing.T, ctx context.Context, startMinIO 
 	bucket := prepareServerUploadContentBucket(t, ctx)
 
 	// 2. 使用回环地址运行生产后端，退出时等待 HTTP 与后台任务关停。
-	source, stop := startBackupFixtureServer(t, ctx, databaseName)
+	source, stop := startServer(t, ctx, databaseName)
 
 	// 3. 登录正式接口取得令牌和根目录 ID，后续通过 HTTP 生成业务数据。
 	login := loginBackupFixture(t, ctx, &source, password)
@@ -213,12 +219,7 @@ func prepareBackupSourceWithMinIO(t *testing.T, ctx context.Context, startMinIO 
 
 func startBackupFixtureServer(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error)) {
 	t.Helper()
-	address := reserveWebLoginAddress(t)
-	secret := sha256.Sum256([]byte(rand.Text()))
-	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
-	t.Setenv("CLOUDNEST_HTTP_ADDR", address)
-	t.Setenv("CLOUDNEST_TEMP_DIR", t.TempDir())
-	t.Setenv("CLOUDNEST_JWT_SECRET", base64.RawURLEncoding.EncodeToString(secret[:]))
+	address := configureBackupFixtureServer(t, databaseName)
 	serverContext, cancelServer := context.WithCancel(ctx)
 	done := make(chan struct{})
 	var serverLogs bytes.Buffer
@@ -241,13 +242,28 @@ func startBackupFixtureServer(t *testing.T, ctx context.Context, databaseName st
 			t.Error("隔离备份服务退出失败", err)
 		}
 	})
-	waitForServerIntegrationHTTP(t, ctx, address)
+	return waitForBackupFixtureClient(t, ctx, address), stop
+}
 
+func configureBackupFixtureServer(t *testing.T, databaseName string) string {
+	t.Helper()
+	address := reserveWebLoginAddress(t)
+	secret := sha256.Sum256([]byte(rand.Text()))
+	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
+	t.Setenv("CLOUDNEST_HTTP_ADDR", address)
+	t.Setenv("CLOUDNEST_TEMP_DIR", t.TempDir())
+	t.Setenv("CLOUDNEST_JWT_SECRET", base64.RawURLEncoding.EncodeToString(secret[:]))
+	return address
+}
+
+func waitForBackupFixtureClient(t *testing.T, ctx context.Context, address string) backupSourceClient {
+	t.Helper()
+	waitForServerIntegrationHTTP(t, ctx, address)
 	client := backupSourceClient{baseURL: "http://" + address, httpClient: &http.Client{
 		Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 	t.Cleanup(client.httpClient.CloseIdleConnections)
-	return client, stop
+	return client
 }
 
 func loginBackupFixture(t *testing.T, ctx context.Context, client *backupSourceClient, password string) dto.LoginData {

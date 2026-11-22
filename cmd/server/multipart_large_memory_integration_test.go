@@ -1,0 +1,143 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/url"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/opaoxx/cloud-nest/internal/server/logging"
+)
+
+const largeMultipartBackendArg = "cloudnest-isolated-multipart-backend"
+
+func TestServerLargeMultipartMemoryChild(t *testing.T) {
+	// 1. 只从联测启动此入口，启动服务前确认连接指向本轮回环夹具。
+	if len(os.Args) != 4 || os.Args[2] != "--" || os.Args[3] != largeMultipartBackendArg {
+		t.Skip("仅由大文件内存验收的父进程启动")
+	}
+	if !strings.HasPrefix(os.Getenv("CLOUDNEST_DB_NAME"), "cloudnest_server_verify_") ||
+		!strings.HasPrefix(os.Getenv("CLOUDNEST_S3_BUCKET"), "cloudnest-upload-it-") ||
+		os.Getenv("CLOUDNEST_STORAGE_PROVIDER") != "local_minio" {
+		t.Fatal("独立后端需要本轮专用库和桶")
+	}
+	for _, key := range []string{"CLOUDNEST_DB_ADDRESS", "CLOUDNEST_HTTP_ADDR"} {
+		host, port, err := net.SplitHostPort(os.Getenv(key))
+		if err != nil || host != "127.0.0.1" || port == "" {
+			t.Fatal("独立后端需要回环地址", key)
+		}
+	}
+	for _, key := range []string{"CLOUDNEST_S3_ENDPOINT", "CLOUDNEST_S3_PUBLIC_ENDPOINT"} {
+		endpoint, err := url.Parse(os.Getenv(key))
+		if err != nil || endpoint.Scheme != "http" || endpoint.Hostname() != "127.0.0.1" ||
+			endpoint.Port() == "" || endpoint.User != nil {
+			t.Fatal("独立后端需要回环存储端点", key)
+		}
+	}
+
+	// 2. 父进程关闭专用输入管道后，用与正式服务相同的上下文取消流程关停。
+	serverContext, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		cancel()
+	}()
+	if err := run(serverContext, logging.New(os.Stdout)); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal("独立后端运行失败", err)
+	}
+}
+
+func startLargeMultipartMemoryBackend(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error), int) {
+	t.Helper()
+	// 1. 从当前测试可执行文件启动专用后端进程，继承已建立的隔离连接。
+	address := configureBackupFixtureServer(t, databaseName)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal("无法定位联测可执行文件", err)
+	}
+	processContext, terminate := context.WithCancel(ctx)
+	t.Cleanup(terminate)
+	command := exec.CommandContext(processContext, executable, "-test.run=^TestServerLargeMultipartMemoryChild$", "--", largeMultipartBackendArg)
+	command.WaitDelay = 5 * time.Second
+	stopInput, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal("无法建立独立后端的关闭管道", err)
+	}
+	var logs bytes.Buffer
+	command.Stdout, command.Stderr = &logs, &logs
+	if err := command.Start(); err != nil {
+		_ = stopInput.Close()
+		t.Fatal("无法启动独立后端", err)
+	}
+	done := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = command.Wait()
+		close(done)
+	}()
+
+	// 2. 正常退出先关闭输入并等待，超时才终止本轮创建的进程。
+	stop := func() (string, error) {
+		_ = stopInput.Close()
+		select {
+		case <-done:
+			return logs.String(), waitErr
+		case <-time.After(35 * time.Second):
+			terminate()
+			<-done
+			return logs.String(), fmt.Errorf("独立后端未在期限内正常退出")
+		}
+	}
+	t.Cleanup(func() {
+		if _, err := stop(); err != nil {
+			t.Error("独立后端退出失败", err)
+		}
+	})
+	readyContext, cancelReady := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelReady()
+	return waitForBackupFixtureClient(t, readyContext, address), stop, command.Process.Pid
+}
+
+type largeMultipartBackendMemory struct {
+	workingSet, peakWorkingSet, peakCommit uint64
+}
+
+func readLargeMultipartBackendMemory(t *testing.T, ctx context.Context, pid int) largeMultipartBackendMemory {
+	t.Helper()
+	// Windows 维护进程生命周期的两个高水位，请求之间无需采样即可保留瞬时峰值。
+	script := fmt.Sprintf("$backend = Get-Process -Id %d -ErrorAction Stop\n"+
+		"'{0} {1} {2}' -f $backend.WorkingSet64, $backend.PeakWorkingSet64, $backend.PeakPagedMemorySize64", pid)
+	command := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal("读取独立后端的进程内存失败", pid, err)
+	}
+	var memory largeMultipartBackendMemory
+	if _, err := fmt.Sscan(string(output), &memory.workingSet, &memory.peakWorkingSet, &memory.peakCommit); err != nil ||
+		memory.workingSet == 0 || memory.peakWorkingSet < memory.workingSet || memory.peakCommit == 0 {
+		t.Fatal("独立后端的内存计数无效", pid, err)
+	}
+	return memory
+}
+
+func verifyLargeMultipartBackendMemory(t *testing.T, pid int, before, after largeMultipartBackendMemory) {
+	t.Helper()
+	// 256 MiB 是本夹具用于捕获全文件缓冲回归的阈值。
+	const maxPeakBytes = 256 << 20
+	if after.peakWorkingSet < before.peakWorkingSet || after.peakCommit < before.peakCommit ||
+		after.peakWorkingSet > maxPeakBytes || after.peakCommit > maxPeakBytes {
+		t.Fatalf("原任务校验所处后端进程的内存超出夹具边界，PID %d，提交前 %+v，发布后 %+v，阈值 %d B",
+			pid, before, after, maxPeakBytes)
+	}
+	t.Logf("独立后端内存 PID %d，完成前工作集 %d B、峰值 %d B、提交量峰值 %d B，发布后工作集 %d B、峰值 %d B、提交量峰值 %d B，夹具阈值 %d B",
+		pid, before.workingSet, before.peakWorkingSet, before.peakCommit,
+		after.workingSet, after.peakWorkingSet, after.peakCommit, maxPeakBytes)
+}

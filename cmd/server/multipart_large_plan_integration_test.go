@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -16,11 +17,15 @@ import (
 )
 
 func TestServerMultipartLargePlanIntegration(t *testing.T) {
+	measureMemory := os.Getenv("CLOUDNEST_MULTIPART_LARGE_MEMORY_TEST") == "1"
+	if measureMemory && runtime.GOOS != "windows" {
+		t.Skip("大文件内存验收使用 Windows 进程计数器")
+	}
 	downloadUpload := os.Getenv("CLOUDNEST_MULTIPART_LARGE_DOWNLOAD_TEST") == "1"
-	completeUpload := downloadUpload || os.Getenv("CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST") == "1"
+	completeUpload := measureMemory || downloadUpload || os.Getenv("CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST") == "1"
 	uploadAllParts := completeUpload || os.Getenv("CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST") == "1"
 	if os.Getenv("CLOUDNEST_MULTIPART_LARGE_PLAN_TEST") != "1" && !uploadAllParts {
-		t.Skip("按需启用 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST、CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST、CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST 或 CLOUDNEST_MULTIPART_LARGE_DOWNLOAD_TEST")
+		t.Skip("按需启用 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST、CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST、CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST、CLOUDNEST_MULTIPART_LARGE_DOWNLOAD_TEST 或 CLOUDNEST_MULTIPART_LARGE_MEMORY_TEST")
 	}
 	timeout := 90 * time.Second
 	startMinIO := startIsolatedWebMinIO
@@ -38,7 +43,17 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
-	fixture := prepareBackupSourceWithMinIO(t, ctx, startMinIO)
+	startServer := startBackupFixtureServer
+	var backendPID int
+	if measureMemory {
+		startServer = func(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error)) {
+			t.Helper()
+			client, stop, pid := startLargeMultipartMemoryBackend(t, ctx, databaseName)
+			backendPID = pid
+			return client, stop
+		}
+	}
+	fixture := prepareBackupSourceWithServer(t, ctx, startMinIO, startServer)
 	t.Logf("大文件计划专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
 	api := fixture.api
 
@@ -154,6 +169,10 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 
 				if completeUpload {
 					t.Run("publish", func(t *testing.T) {
+						var memoryBefore largeMultipartBackendMemory
+						if measureMemory {
+							memoryBefore = readLargeMultipartBackendMemory(t, ctx, backendPID)
+						}
 						// 1. 提交正式回执，并核对受理时保存的完成快照。
 						accepted := submitMultipartCompletion(t, ctx, api, taskPath, ready, receipts...)
 						observedAt := verifyMultipartCompletionSnapshot(t, ctx, fixture, receipts, ready, accepted)
@@ -166,6 +185,10 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 						// 3. 核对唯一文件、已校验的对象版本和预占全额转入已用。
 						publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
 
+						if measureMemory {
+							memoryAfter := readLargeMultipartBackendMemory(t, ctx, backendPID)
+							verifyLargeMultipartBackendMemory(t, backendPID, memoryBefore, memoryAfter)
+						}
 						if downloadUpload {
 							t.Run("download", func(t *testing.T) {
 								// 完整读取 1 GiB 正文单独使用更长的请求期限，并沿用隔离客户端的重定向规则。
