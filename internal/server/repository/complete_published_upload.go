@@ -16,58 +16,17 @@ import (
 // 调用方在同一写回复核事务中创建文件、结算配额，并负责传播错误和确认提交。
 func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error) {
 	// 1. 核对当前事务、租约、原分片会话和已结算的任务。
-	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
-		return nil, fmt.Errorf("完成上传发布需要上下文和已锁定用户的事务")
-	}
-	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
-		return nil, fmt.Errorf("完成上传发布必须使用事务 Store")
-	}
-	if err := ctx.Err(); err != nil {
+	if err := store.validateUploadPublicationCompletionInput(ctx, task, objectID, entry); err != nil {
 		return nil, err
 	}
-	userID := store.loginUserID
-	if task == nil || task.ID == 0 || task.UserID != userID || task.StagedObjectID == 0 ||
-		task.LeaseVersion == 0 || task.LeaseOwner == nil || *task.LeaseOwner == "" || task.LeaseUntil == nil {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	if objectID == 0 {
-		return nil, domain.ErrInvalidStoredObjectData
-	}
-	if entry == nil || entry.ID == 0 || entry.UserID != userID || entry.ParentID == nil ||
-		entry.EntryType != "FILE" || entry.Status != "ACTIVE" || entry.Revision != 1 ||
-		entry.Name == "" || !utf8.ValidString(entry.Name) {
+	if entry.Revision != 1 {
 		return nil, domain.ErrInvalidFileEntryData
 	}
 	lockedStore := *store
 	lockedStore.database = store.database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"})
-	current, err := lockedStore.FindUserUploadTask(ctx, userID, task.ID)
+	current, err := lockedStore.findUploadTaskReadyForPublicationCompletion(ctx, task)
 	if err != nil {
 		return nil, err
-	}
-	multipart := task.UploadMode == "MULTIPART"
-	if current.Status != domain.UploadStatusVerifying || current.UploadMode != task.UploadMode || (task.UploadMode != "SINGLE" && !multipart) {
-		return nil, domain.ErrUploadTaskNotReady
-	}
-	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
-		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil ||
-		(multipart && (!sameUploadStorageText(current.StorageUploadID, task.StorageUploadID) || !current.ExpiresAt.Equal(task.ExpiresAt))) {
-		return nil, domain.ErrUploadTaskBusy
-	}
-	if current.FileSize != task.FileSize || current.ReservedBytes != 0 || current.PublishedObjectID != nil ||
-		current.ResultEntryID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	maxSize := domain.MaxSingleUploadSizeBytes
-	if multipart {
-		maxSize = math.MaxInt64
-		if task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) ||
-			task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
-			!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) || !sameMultipartUploadPlan(task, current) {
-			return nil, domain.ErrInvalidUploadTaskData
-		}
-	}
-	if current.FileSize > maxSize {
-		return nil, domain.ErrUploadFileTooLarge
 	}
 	if *entry.ParentID != current.TargetParentID || entry.FileSize != current.FileSize {
 		return nil, domain.ErrInvalidFileEntryData
@@ -96,7 +55,7 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 			"AND result_entry.file_size = upload_task.file_size AND upload_task.file_size = ? "+
 			"AND published_object.id = ? AND published_object.status = 'READY' AND published_object.file_size = upload_task.file_size "+
 			"AND (upload_task.expected_sha256 = published_object.verified_sha256 OR (upload_task.upload_mode = 'SINGLE' AND upload_task.expected_sha256 IS NULL))",
-		entry.ID, userID, current.ID, current.StagedObjectID, *current.LeaseOwner, current.LeaseVersion,
+		entry.ID, current.UserID, current.ID, current.StagedObjectID, *current.LeaseOwner, current.LeaseVersion,
 		current.UploadMode, current.StorageUploadID, entry.Name, current.FileSize, objectID)
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -112,7 +71,71 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 	}
 
 	// 3. 读回完成任务，核对结果、完成时间和租约释放。
-	completed, err := lockedStore.FindUserUploadTask(ctx, userID, current.ID)
+	return lockedStore.readCompletedUploadPublication(ctx, current, objectID, entry)
+}
+
+// validateUploadPublicationCompletionInput 核对普通发布和替换发布共用的事务与结果标识。
+func (store *Store) validateUploadPublicationCompletionInput(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) error {
+	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
+		return fmt.Errorf("完成上传发布需要上下文和已锁定用户的事务")
+	}
+	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
+		return fmt.Errorf("完成上传发布必须使用事务 Store")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if task == nil || task.ID == 0 || task.UserID != store.loginUserID || task.StagedObjectID == 0 ||
+		task.LeaseVersion == 0 || task.LeaseOwner == nil || *task.LeaseOwner == "" || task.LeaseUntil == nil {
+		return domain.ErrInvalidUploadTaskData
+	}
+	if objectID == 0 {
+		return domain.ErrInvalidStoredObjectData
+	}
+	if entry == nil || entry.ID == 0 || entry.UserID != store.loginUserID || entry.ParentID == nil ||
+		entry.EntryType != "FILE" || entry.Status != "ACTIVE" || entry.Name == "" || !utf8.ValidString(entry.Name) {
+		return domain.ErrInvalidFileEntryData
+	}
+	return nil
+}
+
+// findUploadTaskReadyForPublicationCompletion 在持锁读中核对阶段、租约、分片声明与配额结算。
+func (lockedStore *Store) findUploadTaskReadyForPublicationCompletion(ctx context.Context, task *domain.UploadTask) (*domain.UploadTask, error) {
+	current, err := lockedStore.FindUserUploadTask(ctx, lockedStore.loginUserID, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	multipart := task.UploadMode == "MULTIPART"
+	if current.Status != domain.UploadStatusVerifying || current.UploadMode != task.UploadMode || (task.UploadMode != "SINGLE" && !multipart) {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	if current.StagedObjectID != task.StagedObjectID || current.LeaseVersion != task.LeaseVersion ||
+		current.LeaseOwner == nil || *current.LeaseOwner != *task.LeaseOwner || current.LeaseUntil == nil ||
+		(multipart && (!sameUploadStorageText(current.StorageUploadID, task.StorageUploadID) || !current.ExpiresAt.Equal(task.ExpiresAt))) {
+		return nil, domain.ErrUploadTaskBusy
+	}
+	if current.FileSize != task.FileSize || current.ReservedBytes != 0 || current.PublishedObjectID != nil ||
+		current.ResultEntryID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	maxSize := domain.MaxSingleUploadSizeBytes
+	if multipart {
+		maxSize = math.MaxInt64
+		if task.StorageUploadID == nil || !domain.ValidMultipartUploadID(*task.StorageUploadID) ||
+			task.ExpectedSHA256 == nil || task.PartSize == nil || task.PartCount == nil ||
+			!domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) || !sameMultipartUploadPlan(task, current) {
+			return nil, domain.ErrInvalidUploadTaskData
+		}
+	}
+	if current.FileSize > maxSize {
+		return nil, domain.ErrUploadFileTooLarge
+	}
+	return current, nil
+}
+
+// readCompletedUploadPublication 核对持久化完成结果及原上传声明。
+func (lockedStore *Store) readCompletedUploadPublication(ctx context.Context, current *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error) {
+	completed, err := lockedStore.FindUserUploadTask(ctx, current.UserID, current.ID)
 	if errors.Is(err, domain.ErrUploadTaskNotFound) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
@@ -133,7 +156,7 @@ func (store *Store) CompletePublishedUpload(ctx context.Context, task *domain.Up
 		completed.DeviceID != current.DeviceID || completed.FileSize != current.FileSize || completed.AttemptCount != current.AttemptCount {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if multipart && (!sameUploadStorageText(completed.StorageUploadID, current.StorageUploadID) || !sameMultipartUploadPlan(current, completed)) {
+	if current.UploadMode == "MULTIPART" && (!sameUploadStorageText(completed.StorageUploadID, current.StorageUploadID) || !sameMultipartUploadPlan(current, completed)) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	return completed, nil
