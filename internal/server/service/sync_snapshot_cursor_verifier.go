@@ -1,14 +1,11 @@
 package service
 
 import (
-	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,20 +40,11 @@ func (verifier *SyncSnapshotCursorVerifier) Verify(userID, deviceID uint64, snap
 	if verifier == nil || verifier.signer == nil || len(verifier.signer.signingKey) != sha256.Size || now.IsZero() {
 		return nil, fmt.Errorf("同步快照续页校验需要已初始化的密钥和当前时间")
 	}
-	if userID == 0 || deviceID == 0 || snapshotID.Version() != 4 || snapshotID.Variant() != uuid.RFC4122 ||
-		cursor == "" || len(cursor) > domain.MaxSyncSnapshotTokenLength {
+	if userID == 0 || deviceID == 0 || snapshotID.Version() != 4 || snapshotID.Variant() != uuid.RFC4122 {
 		return nil, domain.ErrInvalidSyncSnapshotCursor
 	}
-	encodedPayload, encodedMAC, found := strings.Cut(cursor, ".")
-	if !found || encodedPayload == "" || len(encodedMAC) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
-		return nil, domain.ErrInvalidSyncSnapshotCursor
-	}
-	signature, err := base64.RawURLEncoding.Strict().DecodeString(encodedMAC)
-	if err != nil || !hmac.Equal(signature, verifier.signer.cursorMAC(encodedPayload)) {
-		return nil, domain.ErrInvalidSyncSnapshotCursor
-	}
-	payloadBytes, err := base64.RawURLEncoding.Strict().DecodeString(encodedPayload)
-	if err != nil {
+	payloadBytes, valid := readSyncSnapshotTokenPayload(verifier.signer.signingKey, cursor)
+	if !valid {
 		return nil, domain.ErrInvalidSyncSnapshotCursor
 	}
 

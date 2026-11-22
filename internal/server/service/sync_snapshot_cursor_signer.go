@@ -1,7 +1,6 @@
 package service
 
 import (
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -81,11 +80,4 @@ func (signer *SyncSnapshotCursorSigner) Sign(binding SyncSnapshotCacheBinding, n
 
 func (signer *SyncSnapshotCursorSigner) cursorMAC(encodedPayload string) []byte {
 	return syncSnapshotTokenMAC(signer.signingKey, encodedPayload)
-}
-
-// syncSnapshotTokenMAC 在调用方为各自用途选择的密钥下计算 HMAC-SHA256。
-func syncSnapshotTokenMAC(signingKey []byte, message string) []byte {
-	messageMAC := hmac.New(sha256.New, signingKey)
-	messageMAC.Write([]byte(message))
-	return messageMAC.Sum(nil)
 }
