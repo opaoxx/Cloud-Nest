@@ -29,8 +29,51 @@ func TestServerPublishSingleUploadReplacementIntegration(t *testing.T) {
 	defer cancel()
 
 	// 1. 发布原文件，记录文件 ID、版本、对象和配额基线。
-	fixture := prepareBackupSource(t, ctx)
+	fixture := prepareReplacementPublicationFixture(t, ctx)
 	t.Logf("单次替换发布专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
+	fixture.checkQuota(t, ctx, uint64(len(fixture.original)), 0)
+
+	// 2. 创建 SINGLE 替换任务，发送新内容并等待发布。
+	const block = "CloudNest-B5!\r\n?"
+	replacement := bytes.Repeat([]byte(block), int(domain.MaxSingleUploadSizeBytes)/len(block))
+	digest := sha256.Sum256(replacement)
+	var created dto.CreateUploadResponse
+	fixture.api.request(t, ctx, http.MethodPost, fixture.entryPath+"/content-replacement", "single-replacement",
+		strings.NewReader(fmt.Sprintf(`{"expected_revision":"%d","size_bytes":%d,"sha256":"%x"}`, fixture.target.Revision, len(replacement), digest)), http.StatusCreated, &created)
+	taskID := backupFixtureID(t, created.Data.Task.ID)
+	taskPath := "/api/v1/uploads/" + created.Data.Task.ID
+	if created.Data.Task.SizeBytes != domain.MaxSingleUploadSizeBytes || created.Data.Task.Status != "UPLOADING" || created.Data.ContentPath != taskPath+"/content" {
+		t.Fatal("正式创建没有返回恰好 16 MiB 的 SINGLE 路径")
+	}
+	fixture.checkQuota(t, ctx, uint64(len(fixture.original)), uint64(len(replacement)))
+	var accepted dto.UploadContentAcceptedResponse
+	fixture.api.request(t, ctx, http.MethodPut, created.Data.ContentPath, "", bytes.NewReader(replacement), http.StatusAccepted, &accepted)
+	if accepted.Data.TaskID != created.Data.Task.ID || accepted.Data.Status != "VERIFYING" {
+		t.Fatal("接收未交付替换任务的校验进度", accepted.Data)
+	}
+	waitContext, stopWait := context.WithTimeout(ctx, 25*time.Second)
+	defer stopWait()
+	published := awaitServerUploadPublication(t, waitContext, fixture.store, fixture.userID, taskID)
+
+	// 3. 核对新旧内容、30 天历史留存、配额和变更事件。
+	fixture.verifyPublished(t, ctx, published, replacement)
+}
+
+type replacementPublicationFixture struct {
+	backupSourceFixture
+	store            *repository.Store
+	userID           uint64
+	original         []byte
+	originalObject   *domain.StoredObject
+	target           *domain.FileEntry
+	entryPath        string
+	baselineSequence uint64
+}
+
+func prepareReplacementPublicationFixture(t *testing.T, ctx context.Context) replacementPublicationFixture {
+	t.Helper()
+	// 1. 在独占服务内通过普通上传发布真实的合成原文件。
+	fixture := prepareBackupSource(t, ctx)
 	store, err := repository.NewStore(fixture.pool)
 	if err != nil {
 		t.Fatal(err)
@@ -47,56 +90,47 @@ func TestServerPublishSingleUploadReplacementIntegration(t *testing.T) {
 	if err := fixture.pool.QueryRowContext(ctx, "SELECT change_seq FROM users WHERE id=?", userID).Scan(&baselineSequence); err != nil {
 		t.Fatal("无法读取原变更游标", err)
 	}
-	checkQuota := func(wantUsed, wantReserved uint64) {
-		t.Helper()
-		var used, reserved uint64
-		err := fixture.pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=?", userID).Scan(&used, &reserved)
-		if err != nil || used != wantUsed || reserved != wantReserved {
-			t.Fatalf("配额不符，已用 %d，预占 %d，期望 %d 和 %d，错误 %v", used, reserved, wantUsed, wantReserved, err)
-		}
+	return replacementPublicationFixture{
+		backupSourceFixture: fixture, store: store, userID: userID,
+		original: original, originalObject: originalObject, target: target,
+		entryPath: fmt.Sprintf("/api/v1/entries/%d", entryID), baselineSequence: baselineSequence,
 	}
-	checkQuota(uint64(len(original)), 0)
+}
 
-	// 2. 创建 SINGLE 替换任务，发送新内容并等待发布。
-	const block = "CloudNest-B5!\r\n?"
-	replacement := bytes.Repeat([]byte(block), int(domain.MaxSingleUploadSizeBytes)/len(block))
+func (fixture replacementPublicationFixture) checkQuota(t *testing.T, ctx context.Context, wantUsed, wantReserved uint64) {
+	t.Helper()
+	var used, reserved uint64
+	err := fixture.pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=?", fixture.userID).Scan(&used, &reserved)
+	if err != nil || used != wantUsed || reserved != wantReserved {
+		t.Fatalf("配额不符，已用 %d，预占 %d，期望 %d 和 %d，错误 %v", used, reserved, wantUsed, wantReserved, err)
+	}
+}
+
+func (fixture replacementPublicationFixture) verifyPublished(t *testing.T, ctx context.Context, published *domain.UploadTask, replacement []byte) {
+	t.Helper()
+	// 1. 核对任务终态、同一文件的递增版本和新对象。
+	target, originalObject, original := fixture.target, fixture.originalObject, fixture.original
+	entryID, parentID, userID := target.ID, *target.ParentID, fixture.userID
+	taskPath := fmt.Sprintf("/api/v1/uploads/%d", published.ID)
 	digest := sha256.Sum256(replacement)
-	entryPath := fmt.Sprintf("/api/v1/entries/%d", entryID)
-	var created dto.CreateUploadResponse
-	fixture.api.request(t, ctx, http.MethodPost, entryPath+"/content-replacement", "single-replacement",
-		strings.NewReader(fmt.Sprintf(`{"expected_revision":"%d","size_bytes":%d,"sha256":"%x"}`, target.Revision, len(replacement), digest)), http.StatusCreated, &created)
-	taskID := backupFixtureID(t, created.Data.Task.ID)
-	taskPath := "/api/v1/uploads/" + created.Data.Task.ID
-	if created.Data.Task.SizeBytes != domain.MaxSingleUploadSizeBytes || created.Data.Task.Status != "UPLOADING" || created.Data.ContentPath != taskPath+"/content" {
-		t.Fatal("正式创建没有返回恰好 16 MiB 的 SINGLE 路径")
-	}
-	checkQuota(uint64(len(original)), uint64(len(replacement)))
-	var accepted dto.UploadContentAcceptedResponse
-	fixture.api.request(t, ctx, http.MethodPut, created.Data.ContentPath, "", bytes.NewReader(replacement), http.StatusAccepted, &accepted)
-	if accepted.Data.TaskID != created.Data.Task.ID || accepted.Data.Status != "VERIFYING" {
-		t.Fatal("接收未交付替换任务的校验进度", accepted.Data)
-	}
-	waitContext, stopWait := context.WithTimeout(ctx, 25*time.Second)
-	defer stopWait()
-	published := awaitServerUploadPublication(t, waitContext, store, userID, taskID)
 	revision := target.Revision + 1
 	if published.ResultEntryID == nil || *published.ResultEntryID != entryID || published.PublishedObjectID == nil ||
 		*published.PublishedObjectID == originalObject.ID || published.ReservedBytes != 0 ||
 		published.ReplacementPublishedRevision == nil || *published.ReplacementPublishedRevision != revision {
 		t.Fatal("发布结果未保留原文件标识并交付新版本")
 	}
-	publishedObject, err := store.FindUserStoredObject(ctx, userID, *published.PublishedObjectID)
+	publishedObject, err := fixture.store.FindUserStoredObject(ctx, userID, *published.PublishedObjectID)
 	if err != nil || publishedObject.Status != domain.StoredObjectStatusReady || publishedObject.VerifiedSHA256 == nil ||
 		*publishedObject.VerifiedSHA256 != digest || publishedObject.FileSize != uint64(len(replacement)) {
 		t.Fatal("新对象未保存实测的字节数和摘要", err)
 	}
-	current, err := store.FindUserFileEntry(ctx, userID, entryID)
+	current, err := fixture.store.FindUserFileEntry(ctx, userID, entryID)
 	if err != nil || current.ParentID == nil || *current.ParentID != *target.ParentID || current.ID != target.ID ||
 		current.Name != target.Name || !current.CreatedAt.Equal(target.CreatedAt) || current.Revision != revision || current.FileSize != uint64(len(replacement)) {
 		t.Fatal("替换没有保留文件 ID、位置、名称和创建时间，或新版本不符", err)
 	}
 
-	// 3. 核对新旧内容、30 天历史留存、配额和变更事件。
+	// 2. 按确切版本读回历史与新内容。
 	var history domain.FileVersion
 	err = fixture.pool.QueryRowContext(ctx, `SELECT revision,object_id,file_size,created_at,retained_until FROM file_versions
 		WHERE user_id=? AND entry_id=?`, userID, entryID).
@@ -105,7 +139,7 @@ func TestServerPublishSingleUploadReplacementIntegration(t *testing.T) {
 		!history.RetainedUntil.Equal(history.CreatedAt.AddDate(0, 0, domain.DefaultFileVersionRetentionDays)) {
 		t.Fatal("历史未绑定旧版本或默认保留时间不符", err)
 	}
-	oldStored, err := store.FindUserStoredObject(ctx, userID, history.ObjectID)
+	oldStored, err := fixture.store.FindUserStoredObject(ctx, userID, history.ObjectID)
 	if err != nil || oldStored.Bucket != fixture.bucket.name || oldStored.StorageVersionID == nil ||
 		oldStored.Status != domain.StoredObjectStatusReady || oldStored.GCAfter != nil {
 		t.Fatal("历史引用未保护旧对象版本", err)
@@ -119,8 +153,9 @@ func TestServerPublishSingleUploadReplacementIntegration(t *testing.T) {
 	if readError != nil || closeError != nil || !bytes.Equal(oldBytes, original) {
 		t.Fatal("历史版本读回的字节不符", readError, closeError)
 	}
-	verifySingleReplacementDownload(t, ctx, fixture, entryPath, revision, publishedObject, replacement)
+	verifyReplacementDownload(t, ctx, fixture.backupSourceFixture, fixture.entryPath, revision, publishedObject, replacement)
 
+	// 3. 重复完成确认后核对配额和唯一的内容替换事件。
 	var completion dto.UploadTaskResponse
 	for range 2 {
 		fixture.api.request(t, ctx, http.MethodPost, taskPath+"/complete", "", nil, http.StatusOK, &completion)
@@ -130,14 +165,14 @@ func TestServerPublishSingleUploadReplacementIntegration(t *testing.T) {
 			t.Fatal("重复完成未交付已保存的发布版本", completion.Data)
 		}
 	}
-	checkQuota(uint64(len(original)+len(replacement)), 0)
+	fixture.checkQuota(t, ctx, uint64(len(original)+len(replacement)), 0)
 	var sequence, fileCount, versionCount, eventCount uint64
 	err = fixture.pool.QueryRowContext(ctx, `SELECT change_seq,
 		(SELECT COUNT(*) FROM file_entries WHERE user_id=users.id AND entry_type='FILE'),
 		(SELECT COUNT(*) FROM file_versions WHERE user_id=users.id),
 		(SELECT COUNT(*) FROM change_events WHERE user_id=users.id AND event_type='FILE_CONTENT_REPLACED')
 		FROM users WHERE id=?`, userID).Scan(&sequence, &fileCount, &versionCount, &eventCount)
-	if err != nil || sequence != baselineSequence+1 || fileCount != 1 || versionCount != 1 || eventCount != 1 {
+	if err != nil || sequence != fixture.baselineSequence+1 || fileCount != 1 || versionCount != 1 || eventCount != 1 {
 		t.Fatal("替换的文件、历史或事件数量不符", err)
 	}
 	var eventEntry, eventRevision uint64
@@ -161,7 +196,7 @@ func TestServerPublishSingleUploadReplacementIntegration(t *testing.T) {
 		entryID, target.Revision, revision, len(original), sha256.Sum256(oldBytes), len(replacement), digest, len(original)+len(replacement), sequence)
 }
 
-func verifySingleReplacementDownload(t *testing.T, ctx context.Context, fixture backupSourceFixture, entryPath string,
+func verifyReplacementDownload(t *testing.T, ctx context.Context, fixture backupSourceFixture, entryPath string,
 	revision uint64, object *domain.StoredObject, want []byte,
 ) {
 	t.Helper()
