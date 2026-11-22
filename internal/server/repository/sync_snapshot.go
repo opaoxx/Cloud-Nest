@@ -9,6 +9,11 @@ import (
 	"gorm.io/gorm"
 )
 
+type syncSnapshotScope struct {
+	userID      uint64
+	rootEntryID uint64
+}
+
 // WithUserSyncSnapshot 在同一只读事务中取得快照头部并执行读取回调。
 // userID 须来自认证。回调仅在执行期间使用传入的上下文与 Store。
 func (store *Store) WithUserSyncSnapshot(ctx context.Context, userID uint64, action func(context.Context, *Store, domain.SyncSnapshotHeader) error) error {
@@ -23,7 +28,8 @@ func (store *Store) WithUserSyncSnapshot(ctx context.Context, userID uint64, act
 			return err
 		}
 
-		// 3. 让后续读取继续使用同一事务，统一由外层入口结束事务。
+		// 3. 绑定已核对的归属和根目录，让后续读取复用同一事务。
+		reader.syncSnapshot = &syncSnapshotScope{userID: userID, rootEntryID: header.RootEntryID}
 		return action(readContext, reader, header)
 	})
 }

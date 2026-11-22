@@ -22,6 +22,8 @@ type Store struct {
 	authenticatedActor *domain.Actor
 	// purgeRoot 仅在后台清理事务确认并锁定根项后绑定。
 	purgeRoot *domain.PurgeRootCandidate
+	// syncSnapshot 仅在一致性快照事务读取并核对头部后绑定。
+	syncSnapshot *syncSnapshotScope
 }
 
 // NewStore 用现有连接池装配 GORM，不创建连接池、不执行探测或迁移，也不接管关闭操作。
