@@ -73,7 +73,7 @@ func (store *Store) withMultipartUploadCancellationObservationTransaction(
 		if err := validateMultipartUploadCancellationLease(current, claimed, databaseTime); err != nil {
 			return err
 		}
-		if !validMultipartUploadCancellationObject(current, staged) || !matchesLocation {
+		if !validMultipartUploadCleanupObject(current, staged) || !matchesLocation {
 			return domain.ErrInvalidStoredObjectData
 		}
 

@@ -58,7 +58,7 @@ func (store *Store) WithMultipartUploadCancellationTransaction(
 		if err != nil {
 			return err
 		}
-		if !validMultipartUploadCancellationObject(task, object) {
+		if !validMultipartUploadCleanupObject(task, object) {
 			return domain.ErrInvalidStoredObjectData
 		}
 		return action(txContext, txStore, task, object)
@@ -66,11 +66,11 @@ func (store *Store) WithMultipartUploadCancellationTransaction(
 }
 
 func validPendingMultipartUploadCancellationTask(task *domain.UploadTask) bool {
-	return validMultipartUploadCancellationDeclaration(task) &&
+	return validMultipartUploadCleanupDeclaration(task) &&
 		task.PublishedObjectID == nil && task.ResultEntryID == nil && task.ResolvedName == nil && task.CompletedAt == nil
 }
 
-func validMultipartUploadCancellationObject(task *domain.UploadTask, object *domain.StoredObject) bool {
+func validMultipartUploadCleanupObject(task *domain.UploadTask, object *domain.StoredObject) bool {
 	return (object.Status == domain.StoredObjectStatusStaging || object.Status == domain.StoredObjectStatusVerifying) &&
 		object.FileSize == task.FileSize && object.VerifiedAt == nil && object.VerifiedSHA256 == nil &&
 		object.DedupHash == nil && object.UnreferencedAt == nil && object.GCAfter == nil

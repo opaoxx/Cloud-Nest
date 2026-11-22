@@ -39,7 +39,7 @@ func (store *Store) FindMultipartUploadCancellationTarget(
 		return nil, err
 	}
 	location := domain.CreateStagedObjectInput{Provider: object.Provider, Bucket: object.Bucket, ObjectKey: object.ObjectKey}
-	if !validMultipartUploadCancellationObject(current, object) || object.Provider != provider || object.Bucket != bucket ||
+	if !validMultipartUploadCleanupObject(current, object) || object.Provider != provider || object.Bucket != bucket ||
 		!location.IsValid() || strings.TrimSpace(object.ObjectKey) == "" || strings.ContainsFunc(object.ObjectKey, unicode.IsControl) {
 		return nil, domain.ErrInvalidStoredObjectData
 	}

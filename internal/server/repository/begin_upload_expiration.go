@@ -17,11 +17,7 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 	if store == nil || store.database == nil || ctx == nil {
 		return nil, fmt.Errorf("开始上传过期处理需要数据入口和上下文")
 	}
-	expiry := candidate.ExpiresAt.UTC()
-	if candidate.TaskID == 0 || candidate.UserID == 0 || candidate.StagedObjectID == 0 ||
-		!slices.Contains(uploadExpirationStatuses[:], candidate.Status) ||
-		(candidate.UploadMode != "" && candidate.UploadMode != "SINGLE" && candidate.UploadMode != "MULTIPART") ||
-		expiry.Year() < 1000 || expiry.Year() > 9999 || expiry.Nanosecond()%1000 != 0 {
+	if !validUploadExpirationCandidate(candidate) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
@@ -31,35 +27,13 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 		// 2. 复核当前任务和数据库时间，判断是否仍可处理。
 		lockedStore := *txStore
 		lockedStore.database = txStore.database.WithContext(txContext).Clauses(clause.Locking{Strength: "UPDATE"})
-		current, err := lockedStore.FindUserUploadTask(txContext, candidate.UserID, candidate.TaskID)
+		current, err := lockedStore.readUploadExpirationCandidateTask(txContext, candidate)
 		if err != nil {
 			return err
 		}
-		if !slices.Contains(uploadExpirationStatuses[:], current.Status) {
-			return domain.ErrUploadTaskNotReady
-		}
-		if current.Status != candidate.Status || current.StagedObjectID != candidate.StagedObjectID ||
-			current.LeaseVersion != candidate.LeaseVersion || !current.ExpiresAt.Equal(expiry) ||
-			(candidate.UploadMode != "" && current.UploadMode != candidate.UploadMode) {
-			return domain.ErrUploadTaskBusy
-		}
-		if current.ResultEntryID != nil || current.PublishedObjectID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
-			return domain.ErrInvalidUploadTaskData
-		}
-		var now time.Time
-		clockError := txStore.database.WithContext(txContext).Raw("SELECT UTC_TIMESTAMP(6)").Row().Scan(&now)
-		if err := txContext.Err(); err != nil {
+		now, err := txStore.checkUploadExpirationTime(txContext, current)
+		if err != nil {
 			return err
-		}
-		if clockError != nil {
-			return fmt.Errorf("读取上传过期处理时间失败: %w", clockError)
-		}
-		if now.Before(current.ExpiresAt) || (current.Status == domain.UploadStatusExpiring &&
-			current.NextAttemptAt != nil && now.Before(*current.NextAttemptAt)) {
-			return domain.ErrUploadTaskNotReady
-		}
-		if current.LeaseUntil != nil && now.Before(*current.LeaseUntil) {
-			return domain.ErrUploadTaskBusy
 		}
 		if current.Status == domain.UploadStatusExpiring {
 			expiring = current
@@ -93,7 +67,7 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 		}
 		if updated.Status != domain.UploadStatusExpiring || updated.StagedObjectID != current.StagedObjectID || updated.UploadMode != current.UploadMode ||
 			updated.LeaseOwner != nil || updated.LeaseUntil != nil || updated.LeaseVersion != current.LeaseVersion || updated.NextAttemptAt != nil ||
-			updated.ReservedBytes != current.ReservedBytes || updated.FileSize != current.FileSize || !updated.ExpiresAt.Equal(expiry) ||
+			updated.ReservedBytes != current.ReservedBytes || updated.FileSize != current.FileSize || !updated.ExpiresAt.Equal(candidate.ExpiresAt) ||
 			updated.UpdatedAt.Before(now) || updated.ResultEntryID != nil || updated.PublishedObjectID != nil ||
 			updated.ResolvedName != nil || updated.CompletedAt != nil {
 			return domain.ErrInvalidUploadTaskData
@@ -105,4 +79,51 @@ func (store *Store) BeginUploadExpiration(ctx context.Context, candidate domain.
 		return nil, err
 	}
 	return expiring, nil
+}
+
+func validUploadExpirationCandidate(candidate domain.UploadExpirationCandidate) bool {
+	expiry := candidate.ExpiresAt.UTC()
+	return candidate.TaskID != 0 && candidate.UserID != 0 && candidate.StagedObjectID != 0 &&
+		slices.Contains(uploadExpirationStatuses[:], candidate.Status) &&
+		(candidate.UploadMode == "" || candidate.UploadMode == "SINGLE" || candidate.UploadMode == "MULTIPART") &&
+		expiry.Year() >= 1000 && expiry.Year() <= 9999 && expiry.Nanosecond()%1000 == 0
+}
+
+// readUploadExpirationCandidateTask 复查候选定位与当前任务事实，调用方须使用带行锁的事务 Store。
+func (store *Store) readUploadExpirationCandidateTask(ctx context.Context, candidate domain.UploadExpirationCandidate) (*domain.UploadTask, error) {
+	current, err := store.FindUserUploadTask(ctx, candidate.UserID, candidate.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(uploadExpirationStatuses[:], current.Status) {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	if current.Status != candidate.Status || current.StagedObjectID != candidate.StagedObjectID ||
+		current.LeaseVersion != candidate.LeaseVersion || !current.ExpiresAt.Equal(candidate.ExpiresAt) ||
+		(candidate.UploadMode != "" && current.UploadMode != candidate.UploadMode) {
+		return nil, domain.ErrUploadTaskBusy
+	}
+	if current.ResultEntryID != nil || current.PublishedObjectID != nil || current.ResolvedName != nil || current.CompletedAt != nil {
+		return nil, domain.ErrInvalidUploadTaskData
+	}
+	return current, nil
+}
+
+// checkUploadExpirationTime 用锁内数据库时钟判断任务期限、重试时点及活跃租约。
+func (store *Store) checkUploadExpirationTime(ctx context.Context, task *domain.UploadTask) (time.Time, error) {
+	var now time.Time
+	clockError := store.database.WithContext(ctx).Raw("SELECT UTC_TIMESTAMP(6)").Row().Scan(&now)
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	if clockError != nil {
+		return time.Time{}, fmt.Errorf("读取上传过期处理时间失败: %w", clockError)
+	}
+	if now.Before(task.ExpiresAt) || (task.Status == domain.UploadStatusExpiring && task.NextAttemptAt != nil && now.Before(*task.NextAttemptAt)) {
+		return time.Time{}, domain.ErrUploadTaskNotReady
+	}
+	if task.LeaseUntil != nil && now.Before(*task.LeaseUntil) {
+		return time.Time{}, domain.ErrUploadTaskBusy
+	}
+	return now, nil
 }

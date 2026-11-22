@@ -73,7 +73,7 @@ func (store *Store) beginUserUploadCancellation(
 			return domain.ErrInvalidUploadTaskData
 		}
 		multipart := current.UploadMode == "MULTIPART"
-		if multipart && !validMultipartUploadCancellationDeclaration(current) {
+		if multipart && !validMultipartUploadCleanupDeclaration(current) {
 			return domain.ErrInvalidUploadTaskData
 		}
 
@@ -127,8 +127,8 @@ func (store *Store) beginUserUploadCancellation(
 	return resultTask, nil
 }
 
-// validMultipartUploadCancellationDeclaration 核对受理与收尾共用的分片声明。
-func validMultipartUploadCancellationDeclaration(task *domain.UploadTask) bool {
+// validMultipartUploadCleanupDeclaration 核对取消和到期收尾共用的分片声明。
+func validMultipartUploadCleanupDeclaration(task *domain.UploadTask) bool {
 	return task.ReservedBytes == task.FileSize && task.ExpectedSHA256 != nil && task.PartSize != nil && task.PartCount != nil &&
 		domain.ValidMultipartUploadLayout(task.FileSize, *task.PartSize, *task.PartCount) &&
 		(task.StorageUploadID == nil || domain.ValidMultipartUploadID(*task.StorageUploadID))
