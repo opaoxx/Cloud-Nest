@@ -23,7 +23,7 @@ type IdempotentFileReuseTransaction interface {
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
 }
 
-// IdempotentFileReuseService 在创建条目及结算空间的同一事务保存首次成功结果。
+// IdempotentFileReuseService 保存首次秒传结果，并在同一账号范围重放有效快照。
 type IdempotentFileReuseService struct {
 	withTransaction func(context.Context, domain.Actor, func(context.Context, IdempotentFileReuseTransaction) error) error
 	encodeResult    func(*domain.FileEntry) (json.RawMessage, error)
@@ -44,8 +44,7 @@ func NewIdempotentFileReuseService(
 	}
 }
 
-// Reuse 执行首次秒传，事务提交后返回已保存的公开快照。
-// 已有幂等记录时返回 ErrIdempotencyRecordAlreadyExists。
+// Reuse 首次执行秒传或重放有效的同键同参结果，事务成功后返回公开快照。
 func (reuse *IdempotentFileReuseService) Reuse(
 	ctx context.Context, actor domain.Actor, parentID uint64, requestedName string, sizeBytes uint64, digest [sha256.Size]byte, key string,
 ) (json.RawMessage, error) {
@@ -67,60 +66,38 @@ func (reuse *IdempotentFileReuseService) Reuse(
 			return fmt.Errorf("幂等秒传回调需要事务上下文和仓储能力")
 		}
 
-		// 2. 在账号事务内确认首次执行，复用条目创建和空间结算。
-		existing, err := txn.FindUserIdempotencyRecord(txContext, actor.UserID, domain.FileReuseOperation, key)
-		if err == nil && existing != nil {
-			return domain.ErrIdempotencyRecordAlreadyExists
-		}
-		if err != nil && !errors.Is(err, domain.ErrIdempotencyRecordNotFound) {
+		// 2. 先读幂等记录，只在缺失时进入首次写入流程。
+		record, readError := txn.FindUserIdempotencyRecord(txContext, actor.UserID, domain.FileReuseOperation, key)
+		if err := txContext.Err(); err != nil {
 			return err
 		}
-		if existing != nil || err == nil {
-			return domain.ErrInvalidIdempotencyRecordData
-		}
-		// 把核心服务回调交给当前事务，提交由最外层账号事务统一负责。
-		creator := NewFileReuseService(func(ctx context.Context, _ domain.Actor, action func(context.Context, FileReuseTransaction) error) error {
-			return action(ctx, txn)
-		})
-		entry, err := creator.Reuse(txContext, actor, parentID, requestedName, sizeBytes, digest)
-		if err != nil {
-			return err
+		if readError != nil {
+			if !errors.Is(readError, domain.ErrIdempotencyRecordNotFound) {
+				return readError
+			}
+			if record != nil {
+				return domain.ErrInvalidIdempotencyRecordData
+			}
+			// 核心服务使用当前事务，最外层统一提交条目、配额和快照。
+			creator := NewFileReuseService(func(ctx context.Context, _ domain.Actor, action func(context.Context, FileReuseTransaction) error) error {
+				return action(ctx, txn)
+			})
+			entry, err := creator.Reuse(txContext, actor, parentID, requestedName, sizeBytes, digest)
+			if err != nil {
+				return err
+			}
+			record, err = reuse.saveFirstResult(txContext, txn, entry, key, requestHash)
+			if err != nil {
+				return err
+			}
 		}
 
-		// 3. 编码并保存成功快照，读回校验。
-		body, err := reuse.encodeResult(entry)
-		if err != nil {
+		// 3. 核对记录范围、期限、参数指纹及公开快照，准备原创建结果。
+		if err := validateFileReuseReplay(record, actor.UserID, parentID, sizeBytes, key, requestHash, time.Now()); err != nil {
 			return err
-		}
-		if err := reuse.validateResult(body); err != nil {
-			return err
-		}
-		resourceID := entry.ID
-		expiresAt := entry.CreatedAt.UTC().Truncate(time.Microsecond).Add(fileReuseResultRetention)
-		record, err := txn.CreateUserIdempotencyRecord(txContext, domain.IdempotencyResultInput{
-			Operation: domain.FileReuseOperation, IdempotencyKey: key, RequestHash: requestHash,
-			ResourceType: "ENTRY", ResourceID: &resourceID, ResponseStatus: http.StatusCreated,
-			ResponseBody: bytes.Clone(body), ExpiresAt: expiresAt,
-		})
-		if err != nil {
-			return err
-		}
-		if record == nil || record.ID == 0 || record.UserID != actor.UserID || record.Operation != domain.FileReuseOperation ||
-			record.IdempotencyKey != key || record.RequestHash != requestHash || record.ResourceType != "ENTRY" ||
-			record.ResourceID == nil || *record.ResourceID != resourceID || record.ResponseStatus != http.StatusCreated ||
-			!record.ExpiresAt.Equal(expiresAt) {
-			return domain.ErrInvalidIdempotencyRecordData
 		}
 		if err := reuse.validateResult(record.ResponseBody); err != nil {
 			return err
-		}
-		var snapshot struct {
-			Entry struct {
-				ID string `json:"id"`
-			} `json:"entry"`
-		}
-		if json.Unmarshal(record.ResponseBody, &snapshot) != nil || snapshot.Entry.ID != strconv.FormatUint(resourceID, 10) {
-			return domain.ErrInvalidIdempotencyRecordData
 		}
 		if err := txContext.Err(); err != nil {
 			return err
@@ -137,4 +114,61 @@ func (reuse *IdempotentFileReuseService) Reuse(
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}
 	return prepared, nil
+}
+
+// saveFirstResult 编码并保存首次创建快照，外层继续校验读回结果。
+func (reuse *IdempotentFileReuseService) saveFirstResult(
+	ctx context.Context, txn IdempotentFileReuseTransaction, entry *domain.FileEntry, key string, requestHash [sha256.Size]byte,
+) (*domain.IdempotencyRecord, error) {
+	// 1. 编码公开快照并校验字段。
+	body, err := reuse.encodeResult(entry)
+	if err != nil {
+		return nil, err
+	}
+	if err := reuse.validateResult(body); err != nil {
+		return nil, err
+	}
+
+	// 2. 保存条目关联和八天期限，核对写入结果。
+	resourceID := entry.ID
+	expiresAt := entry.CreatedAt.UTC().Truncate(time.Microsecond).Add(fileReuseResultRetention)
+	record, err := txn.CreateUserIdempotencyRecord(ctx, domain.IdempotencyResultInput{
+		Operation: domain.FileReuseOperation, IdempotencyKey: key, RequestHash: requestHash,
+		ResourceType: "ENTRY", ResourceID: &resourceID, ResponseStatus: http.StatusCreated,
+		ResponseBody: bytes.Clone(body), ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if record == nil || record.ResourceID == nil || *record.ResourceID != entry.ID || !record.ExpiresAt.Equal(expiresAt) {
+		return nil, domain.ErrInvalidIdempotencyRecordData
+	}
+	return record, nil
+}
+
+// validateFileReuseReplay 确认记录在保留期内并关联本次秒传的公开快照。
+func validateFileReuseReplay(
+	record *domain.IdempotencyRecord, userID, parentID, sizeBytes uint64, key string, requestHash [sha256.Size]byte, now time.Time,
+) error {
+	// 1. 复用目录项操作的范围、期限和指纹校验。
+	if err := validateEntryReplayRecord(record, userID, domain.FileReuseOperation, key, requestHash, now); err != nil {
+		return err
+	}
+
+	// 2. 核对 201 记录及快照中的条目关联，完整字段由快照解码器核验。
+	if record.ResourceType != "ENTRY" || record.ResourceID == nil || *record.ResourceID == 0 || record.ResponseStatus != http.StatusCreated {
+		return domain.ErrInvalidIdempotencyRecordData
+	}
+	var snapshot struct {
+		Entry struct {
+			ID        string  `json:"id"`
+			ParentID  string  `json:"parent_id"`
+			SizeBytes *uint64 `json:"size_bytes"`
+		} `json:"entry"`
+	}
+	if json.Unmarshal(record.ResponseBody, &snapshot) != nil || snapshot.Entry.ID != strconv.FormatUint(*record.ResourceID, 10) ||
+		snapshot.Entry.ParentID != strconv.FormatUint(parentID, 10) || snapshot.Entry.SizeBytes == nil || *snapshot.Entry.SizeBytes != sizeBytes {
+		return domain.ErrInvalidIdempotencyRecordData
+	}
+	return nil
 }

@@ -31,7 +31,7 @@ func (probe *fileReuseSaveProbe) CreateUserIdempotencyRecord(ctx context.Context
 	return record, nil
 }
 
-func TestIdempotentFileReuseFirstResultIntegration(t *testing.T) {
+func TestIdempotentFileReuseIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
@@ -139,10 +139,50 @@ func TestIdempotentFileReuseFirstResultIntegration(t *testing.T) {
 		t.Fatal("成功提交未留下三项结果，或改变了已有预占")
 	}
 
-	// 4. 已有同键记录时结束首次路径，保留之前提交的数据。
-	body, err = reuse.Reuse(ctx, actor, parentID, requestedName, sizeBytes, digest, key)
-	if !errors.Is(err, domain.ErrIdempotencyRecordAlreadyExists) || body != nil || readState() != expected {
-		t.Fatal("已占用的键再次走首次路径或改变了数据", err)
+	// 4. 使用正式改名修改当前条目，同键重试继续返回旧名称和初始版本。
+	const changedName = "稍后改名.md"
+	metadata, err := service.BuildEntryNameMetadata("FILE", changedName)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Log("条目、已用空间和 201 快照同事务提交，保存错误时三者同时回滚")
+	nameKey, err := service.BuildEntryNameKey(changedName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+		_, err := txStore.RenameUserFileEntry(txContext, *record.ResourceID, 1, *metadata, nameKey)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err = reuse.Reuse(ctx, actor, parentID, "  "+requestedName+"  ", sizeBytes, digest, key)
+	replayed, restoreError := dto.RestoreReuseFileData(body)
+	if err != nil || restoreError != nil || replayed == nil || *replayed != *result || readState() != expected {
+		t.Fatalf("同键重放未交付创建快照，得到 %+v 和错误 %v、%v", replayed, err, restoreError)
+	}
+	live, err := store.FindUserFileEntry(ctx, actor.UserID, *record.ResourceID)
+	if err != nil || live == nil || live.Name != changedName || live.Revision != 2 {
+		t.Fatalf("重放改变了当前文件事实，得到 %+v 和 %v", live, err)
+	}
+
+	// 5. 参数冲突、快照关联异常和到期都不会回到首次创建。
+	assertRejected := func(name string, wantError error) {
+		t.Helper()
+		body, err := reuse.Reuse(ctx, actor, parentID, name, sizeBytes, digest, key)
+		if !errors.Is(err, wantError) || body != nil || readState() != expected {
+			t.Fatalf("拒绝重放时得到正文 %s 和错误 %v，期望 %v", body, err, wantError)
+		}
+	}
+	assertRejected("不同请求.md", domain.ErrIdempotencyRequestConflict)
+	if _, err := pool.ExecContext(ctx, "UPDATE idempotency_records SET response_body=JSON_SET(response_body,'$.entry.parent_id','11') WHERE id=?", record.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected(requestedName, domain.ErrInvalidIdempotencyRecordData)
+	if _, err := pool.ExecContext(ctx, `UPDATE idempotency_records SET response_body=?, created_at=UTC_TIMESTAMP(6)-INTERVAL 9 DAY,
+		expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 DAY WHERE id=?`, string(record.ResponseBody), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected(requestedName, domain.ErrIdempotencyRecordExpired)
+	assertRejected("不同请求.md", domain.ErrIdempotencyRecordExpired)
+	t.Log("秒传同键重放返回改名前快照，冲突、过期和快照异常均无重复写入")
 }
