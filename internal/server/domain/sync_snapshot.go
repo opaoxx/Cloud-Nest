@@ -36,6 +36,13 @@ var ErrSyncSnapshotExpired = errors.New("同步快照已失效，请重新建立
 // SyncCursorGeneration 是同步设备持久化的 16 字节随机代次，按完整值比较。
 type SyncCursorGeneration [16]byte
 
+// SyncSnapshotReceiptLocator 保存创建回执中用于查找原快照的内部定位数据。
+type SyncSnapshotReceiptLocator struct {
+	SnapshotID uuid.UUID
+	DeviceID   uint64
+	Generation SyncCursorGeneration
+}
+
 // SyncSnapshotHeader 保存账号一致性快照的根目录和变更截止位置。
 type SyncSnapshotHeader struct {
 	// RootEntryID 是账号真实活动根目录的 ID。
