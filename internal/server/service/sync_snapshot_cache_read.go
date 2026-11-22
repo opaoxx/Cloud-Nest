@@ -15,6 +15,7 @@ import (
 type CachedSyncSnapshot struct {
 	Header    domain.SyncSnapshotHeader
 	ExpiresAt time.Time
+	pageSize  int
 	items     []json.RawMessage
 }
 
@@ -71,6 +72,7 @@ func (cache *SyncSnapshotCache) Get(ctx context.Context, binding SyncSnapshotCac
 
 	// 3. 返回固定头部，以只读方式引用条目，取单条时才复制其字节。
 	return &CachedSyncSnapshot{
-		Header: entry.snapshot.Header, ExpiresAt: entry.expiresAt, items: entry.snapshot.Entries.Items,
+		Header: entry.snapshot.Header, ExpiresAt: entry.expiresAt,
+		pageSize: entry.binding.PageSize, items: entry.snapshot.Entries.Items,
 	}, nil
 }
