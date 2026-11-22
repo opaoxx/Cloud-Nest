@@ -117,7 +117,7 @@ func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, user
 	counts := map[string]int{
 		"users": 1, "user_devices": 1, "auth_sessions": 1, "stored_objects": 4,
 		"file_entries": 5, "user_entry_preferences": 0, "upload_tasks": 4, "idempotency_records": 6,
-		"upload_parts": 0, "change_events": 1, "sync_devices": 0, "schema_migrations": len(expectedMigrations),
+		"upload_parts": 0, "change_events": 2, "sync_devices": 0, "schema_migrations": len(expectedMigrations),
 	}
 	for table, expected := range counts {
 		var rows int

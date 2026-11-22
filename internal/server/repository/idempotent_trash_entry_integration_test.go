@@ -31,6 +31,7 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	withTransaction := func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentTrashEntryTransaction) error) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error { return action(txContext, txStore) })
 	}
@@ -61,6 +62,15 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		return record
+	}
+	readLog := func(t *testing.T) [2]uint64 {
+		t.Helper()
+		var log [2]uint64
+		if err := pool.QueryRowContext(ctx, "SELECT change_seq,(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=?",
+			actor.UserID).Scan(&log[0], &log[1]); err != nil {
+			t.Fatal(err)
+		}
+		return log
 	}
 
 	// 2. 通过实际 JWT 和测试 POST 串联请求处理、回收事务和快照交付。
@@ -137,6 +147,9 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		send(11, 1, key, true, 403, "ROOT_OPERATION_FORBIDDEN")
 		send(21, 1, key, true, 404, "ENTRY_NOT_FOUND")
 		send(13, 2, key, true, 409, "REVISION_CONFLICT")
+		if readLog(t) != [2]uint64{} {
+			t.Fatal("拒绝的请求推进了日志")
+		}
 
 		first := send(13, 3, key, true, 200, "")
 		record := readRecord(t, key)
@@ -145,7 +158,7 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		if err != nil || snapshot == nil || snapshot.Entry.ID != "13" || snapshot.Entry.Revision != "4" ||
 			snapshot.Entry.Status != "TRASHED" || entry.Status != "TRASHED" || entry.Revision != 4 ||
 			!entry.ModifiedAt.Equal(snapshot.Entry.DeletedAt) || !reflect.DeepEqual(&first.Data, snapshot) ||
-			record.ExpiresAt.Sub(record.CreatedAt) < 7*24*time.Hour {
+			record.ExpiresAt.Sub(record.CreatedAt) < 7*24*time.Hour || readLog(t) != [2]uint64{1, 1} {
 			t.Fatal("首次回收和稳定结果未一并提交", snapshot, err)
 		}
 		send(13, 4, key, true, 409, "IDEMPOTENCY_CONFLICT")
@@ -158,7 +171,8 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		}
 		before := read(t, 13)
 		replay := send(13, 3, key, true, 200, "")
-		if replay.RequestID == first.RequestID || !reflect.DeepEqual(replay.Data, first.Data) || !reflect.DeepEqual(before, read(t, 13)) {
+		if replay.RequestID == first.RequestID || !reflect.DeepEqual(replay.Data, first.Data) ||
+			!reflect.DeepEqual(before, read(t, 13)) || readLog(t) != [2]uint64{1, 1} {
 			t.Fatal("同键重试未保留原快照或改动了后续状态")
 		}
 		if _, err := pool.ExecContext(ctx, `UPDATE idempotency_records
@@ -173,6 +187,7 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 	t.Run("outer failure after saving rolls back both writes", func(t *testing.T) {
 		const key = "trash-rollback"
 		before := read(t, 12)
+		beforeLog := readLog(t)
 		fixtureError := errors.New("fixture transaction fails after saving")
 		failing := service.NewIdempotentTrashEntryService(
 			func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentTrashEntryTransaction) error) error {
@@ -189,8 +204,8 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		var deletedAt sql.NullTime
 		timeError := pool.QueryRowContext(ctx, "SELECT deleted_at FROM file_entries WHERE user_id=1 AND id=12").Scan(&deletedAt)
 		if body != nil || !errors.Is(err, fixtureError) || record != nil || !errors.Is(readError, domain.ErrIdempotencyRecordNotFound) ||
-			timeError != nil || deletedAt.Valid || !reflect.DeepEqual(read(t, 12), before) {
-			t.Fatal("外层失败后未同时回滚目录项和幂等记录", err, readError, timeError)
+			timeError != nil || deletedAt.Valid || !reflect.DeepEqual(read(t, 12), before) || readLog(t) != beforeLog {
+			t.Fatal("外层失败后未同时回滚目录项、幂等记录和变更日志", err, readError, timeError)
 		}
 	})
 
@@ -226,7 +241,7 @@ func TestIdempotentTrashEntryServiceIntegration(t *testing.T) {
 		}
 		record := readRecord(t, key)
 		entry := read(t, 12)
-		if !bytes.Equal(record.ResponseBody, committed) || entry.Status != "TRASHED" || entry.Revision != 2 {
+		if !bytes.Equal(record.ResponseBody, committed) || entry.Status != "TRASHED" || entry.Revision != 2 || readLog(t) != [2]uint64{2, 2} {
 			t.Fatal("同键并发的保存快照或回收版本不符", entry)
 		}
 	})

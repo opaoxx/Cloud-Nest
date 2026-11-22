@@ -1,5 +1,11 @@
 # CloudNest Bug 修复记录
 
+## 第 799 步——回收事件联测的条目详情字段
+
+首次编译 `cmd/server` 测试包时报 `visible.Data.Entry undefined`。正式回收与备份联测在编译阶段停止，尚未启动其专用容器。
+
+目录详情响应的 `data` 直接是 `EntryDetailData`，测试误用了回收响应的 `data.entry` 结构。断言改读 `visible.Data.ID`。修正后 `go test ./cmd/server`、正式回收事件联测和备份 SQL 导入均通过。
+
 ## 第 785 步——客户端重启联测的子进程输出检查
 
 首次编译报 `undefined: bytes`。隔离用例在编译阶段停止，尚未启动夹具。

@@ -18,6 +18,8 @@ type IdempotentTrashEntryTransaction interface {
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	// CreateUserIdempotencyRecord 保存结果并读回，外层事务决定提交或回滚。
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	// AppendUserChangeEvent 在当前事务内追加一次业务变更。
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentTrashEntryService 组合首次回收和同键结果复用。
@@ -120,9 +122,18 @@ func (trashService *IdempotentTrashEntryService) Trash(ctx context.Context, acto
 			if err != nil {
 				return fmt.Errorf("保存回收幂等结果失败: %w", err)
 			}
+
+			// 4. 只为首次回收写入根项事件，后代的可见性仍由父链决定。
+			event, err := newEntryChangeEvent("ENTRY_TRASHED", &entry.FileEntry)
+			if err != nil {
+				return fmt.Errorf("编码回收变更事件失败: %w", err)
+			}
+			if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
+				return fmt.Errorf("追加回收变更事件失败: %w", err)
+			}
 		}
 
-		// 4. 校验当前记录的复用条件与完整正文，准备独立快照。
+		// 5. 首次回收和重放均校验完整快照，准备独立正文。
 		if err := ValidateTrashEntryReplay(record, actor.UserID, entryID, expectedRevision, key, requestHash, trashService.now()); err != nil {
 			return err
 		}
@@ -136,7 +147,7 @@ func (trashService *IdempotentTrashEntryService) Trash(ctx context.Context, acto
 		return nil
 	})
 
-	// 5. 确认外层事务提交后交付快照。
+	// 6. 确认外层事务提交后交付快照。
 	if transactionError != nil {
 		return nil, fmt.Errorf("幂等回收事务失败: %w", transactionError)
 	}

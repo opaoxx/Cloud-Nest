@@ -25,6 +25,10 @@ func (transaction *idempotentTrashTransactionStub) CreateUserIdempotencyRecord(c
 	return transaction.records.CreateUserIdempotencyRecord(ctx, input)
 }
 
+func (transaction *idempotentTrashTransactionStub) AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error) {
+	return transaction.records.AppendUserChangeEvent(ctx, input)
+}
+
 func idempotentTrashFixture() (domain.Actor, *idempotentTrashTransactionStub, *IdempotentTrashEntryService) {
 	actor, core := trashEntryServiceFixture()
 	transaction := &idempotentTrashTransactionStub{
@@ -67,7 +71,7 @@ func TestIdempotentTrashEntryServiceFirstAndReplay(t *testing.T) {
 	// 1. 核对首次查询、回收和保存共用同一个事务及期限。
 	first, err := trash.Trash(t.Context(), actor, 13, 3, "trash-007")
 	if err != nil || first == nil || transactionCalls != 1 || transaction.writeCalls != 1 ||
-		transaction.records.findCalls != 1 || transaction.records.saveCalls != 1 {
+		transaction.records.findCalls != 1 || transaction.records.saveCalls != 1 || transaction.records.appendCalls != 1 {
 		t.Fatal("首次回收没有在一个事务中保存结果", err)
 	}
 	input := transaction.records.saveInput
@@ -87,6 +91,11 @@ func TestIdempotentTrashEntryServiceFirstAndReplay(t *testing.T) {
 	if err != nil || data.Entry.ID != "13" || data.Entry.Revision != "4" || data.Entry.Status != "TRASHED" {
 		t.Fatal("保存快照与回收结果不符", data, err)
 	}
+	if event := transaction.records.event; transaction.records.appendContext != txContext ||
+		event.EntryID != 13 || event.Revision != 4 || event.EventType != "ENTRY_TRASHED" ||
+		string(event.Payload) != `{"entry_id":"13","parent_id":"12","name":"学习笔记.md","revision":"4"}` {
+		t.Fatal("回收事件未采用同一事务的条目、原位置与回收后版本", event)
+	}
 
 	// 2. 重试直接用已存快照，即使实时目录项不再可读。
 	transaction.records.record, transaction.records.findError = transaction.records.saved, nil
@@ -94,7 +103,7 @@ func TestIdempotentTrashEntryServiceFirstAndReplay(t *testing.T) {
 	transaction.entries = nil
 	replayed, err := trash.Trash(t.Context(), actor, 13, 3, "trash-007")
 	if err != nil || !bytes.Equal(first, replayed) || transactionCalls != 2 || transaction.records.findCalls != 2 ||
-		transaction.writeCalls != 1 || transaction.records.saveCalls != 1 || len(transaction.contexts) != readCount {
+		transaction.writeCalls != 1 || transaction.records.saveCalls != 1 || transaction.records.appendCalls != 1 || len(transaction.contexts) != readCount {
 		t.Fatal("同键重试未直接复用原结果", err)
 	}
 	original := bytes.Clone(transaction.records.saved.ResponseBody)
@@ -118,6 +127,7 @@ func TestIdempotentTrashEntryServiceFailures(t *testing.T) {
 		{"encode failure", failure, 1, 0},
 		{"invalid encoded result", domain.ErrInvalidIdempotencyRecordData, 1, 0},
 		{"save failure", failure, 1, 1},
+		{"append event failure", failure, 1, 1},
 		{"wrong readback revision", domain.ErrInvalidIdempotencyRecordData, 1, 1},
 		{"bad saved result", domain.ErrInvalidIdempotencyRecordData, 0, 0},
 		{"commit failure", failure, 1, 1},
@@ -144,6 +154,8 @@ func TestIdempotentTrashEntryServiceFailures(t *testing.T) {
 				trash.encodeResult = func(*domain.TrashedFileEntry) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
 			case "save failure":
 				tx.records.saveError = failure
+			case "append event failure":
+				tx.records.appendError = failure
 			case "wrong readback revision":
 				tx.records.afterSave = func(record *domain.IdempotencyRecord) {
 					record.ResponseBody = bytes.Replace(record.ResponseBody, []byte(`"revision":"4"`), []byte(`"revision":"5"`), 1)
