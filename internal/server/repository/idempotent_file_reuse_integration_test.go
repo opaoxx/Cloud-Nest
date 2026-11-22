@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
@@ -35,6 +36,7 @@ func TestIdempotentFileReuseIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	const parentID, objectID, sizeBytes = 12, 41, 2048
 	const requestedName, key = "有效.md", "reuse-first-result"
 	digest := sha256.Sum256(make([]byte, sizeBytes))
@@ -50,14 +52,16 @@ func TestIdempotentFileReuseIntegration(t *testing.T) {
 	}
 
 	type persistedState struct {
-		entries, records int
-		used, reserved   uint64
+		entries, records, events       int
+		used, reserved, changeSequence uint64
 	}
 	readState := func() persistedState {
 		t.Helper()
 		var state persistedState
 		err := pool.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM file_entries),(SELECT COUNT(*) FROM idempotency_records),
-			used_storage,reserved_storage FROM users WHERE id=?`, actor.UserID).Scan(&state.entries, &state.records, &state.used, &state.reserved)
+			(SELECT COUNT(*) FROM change_events WHERE user_id=users.id),used_storage,reserved_storage,change_seq
+			FROM users WHERE id=?`, actor.UserID).
+			Scan(&state.entries, &state.records, &state.events, &state.used, &state.reserved, &state.changeSequence)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,8 +111,32 @@ func TestIdempotentFileReuseIntegration(t *testing.T) {
 		t.Fatal("保存失败后仍留下结果、文件或用量", err)
 	}
 
-	// 3. 使用同一键重新执行，验证首次成功快照与业务数据一起提交。
+	// 3. 在事件插入点拒绝写入，确认快照、文件、用量和序号一起回滚。
 	reuse := creator(nil)
+	const eventFailureMessage = "fixture rejected reuse after writes"
+	if _, err := pool.ExecContext(ctx, `CREATE TRIGGER fixture_reject_reuse_event BEFORE INSERT ON change_events FOR EACH ROW
+		BEGIN
+			IF NEW.event_type='FILE_PUBLISHED' AND NEW.sequence=1
+				AND EXISTS (SELECT 1 FROM file_entries WHERE id=NEW.entry_id AND user_id=NEW.user_id AND object_id=41 AND status='ACTIVE')
+				AND EXISTS (SELECT 1 FROM idempotency_records WHERE user_id=NEW.user_id AND operation='v1.files.reuse'
+					AND idempotency_key='reuse-first-result' AND resource_id=NEW.entry_id)
+				AND EXISTS (SELECT 1 FROM users WHERE id=NEW.user_id AND change_seq=1 AND used_storage=6144 AND reserved_storage=32) THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='`+eventFailureMessage+`';
+			END IF;
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	body, err = reuse.Reuse(ctx, actor, parentID, requestedName, sizeBytes, digest, key)
+	var databaseError *mysql.MySQLError
+	if !errors.As(err, &databaseError) || databaseError.Number != 1644 || databaseError.Message != eventFailureMessage ||
+		body != nil || readState() != before {
+		t.Fatal("事件插入失败后未完整回滚", err)
+	}
+	if _, err := pool.ExecContext(ctx, "DROP TRIGGER fixture_reject_reuse_event"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. 用原键重试，确认业务数据、快照与首条事件一起提交。
 	body, err = reuse.Reuse(ctx, actor, parentID, requestedName, sizeBytes, digest, key)
 	if err != nil {
 		t.Fatal(err)
@@ -134,12 +162,15 @@ func TestIdempotentFileReuseIntegration(t *testing.T) {
 	expected := before
 	expected.entries++
 	expected.records++
+	expected.events++
 	expected.used += sizeBytes
+	expected.changeSequence++
 	if readState() != expected {
-		t.Fatal("成功提交未留下三项结果，或改变了已有预占")
+		t.Fatal("成功提交的业务、快照或变更事件数量不符")
 	}
+	t.Log("MySQL 1644 使秒传文件、配额、快照和序号一起回滚，原键重试得到事件序号 1")
 
-	// 4. 使用正式改名修改当前条目，同键重试继续返回旧名称和初始版本。
+	// 5. 使用仓储改名修改当前条目，同键重试继续返回旧名称和初始版本。
 	const changedName = "稍后改名.md"
 	metadata, err := service.BuildEntryNameMetadata("FILE", changedName)
 	if err != nil {
@@ -165,7 +196,7 @@ func TestIdempotentFileReuseIntegration(t *testing.T) {
 		t.Fatalf("重放改变了当前文件事实，得到 %+v 和 %v", live, err)
 	}
 
-	// 5. 参数冲突、快照关联异常和到期都不会回到首次创建。
+	// 6. 参数冲突、快照关联异常和到期都不会回到首次创建。
 	assertRejected := func(name string, wantError error) {
 		t.Helper()
 		body, err := reuse.Reuse(ctx, actor, parentID, name, sizeBytes, digest, key)

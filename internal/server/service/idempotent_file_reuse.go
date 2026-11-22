@@ -16,11 +16,12 @@ import (
 
 const fileReuseResultRetention = 8 * 24 * time.Hour
 
-// IdempotentFileReuseTransaction 汇集秒传和幂等结果使用的同一账号事务能力。
+// IdempotentFileReuseTransaction 汇集秒传、幂等结果和发布事件使用的同一账号事务能力。
 type IdempotentFileReuseTransaction interface {
 	FileReuseTransaction
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentFileReuseService 保存首次秒传结果，并在同一账号范围重放有效快照。
@@ -78,7 +79,7 @@ func (reuse *IdempotentFileReuseService) Reuse(
 			if record != nil {
 				return domain.ErrInvalidIdempotencyRecordData
 			}
-			// 核心服务使用当前事务，最外层统一提交条目、配额和快照。
+			// 3. 在当前事务创建并结算新文件，再保存快照与发布事件。
 			creator := NewFileReuseService(func(ctx context.Context, _ domain.Actor, action func(context.Context, FileReuseTransaction) error) error {
 				return action(ctx, txn)
 			})
@@ -90,9 +91,16 @@ func (reuse *IdempotentFileReuseService) Reuse(
 			if err != nil {
 				return err
 			}
+			event, err := newFilePublishedChangeEvent(entry, digest)
+			if err != nil {
+				return fmt.Errorf("编码秒传发布事件失败: %w", err)
+			}
+			if _, err := txn.AppendUserChangeEvent(txContext, event); err != nil {
+				return fmt.Errorf("追加秒传发布事件失败: %w", err)
+			}
 		}
 
-		// 3. 核对记录范围、期限、参数指纹及公开快照，准备原创建结果。
+		// 4. 核对记录范围、期限、参数指纹及公开快照，准备原创建结果。
 		if err := validateFileReuseReplay(record, actor.UserID, parentID, sizeBytes, key, requestHash, time.Now()); err != nil {
 			return err
 		}
@@ -106,7 +114,7 @@ func (reuse *IdempotentFileReuseService) Reuse(
 		return nil
 	})
 
-	// 4. 确认提交后交付结果，任一步报错则整体回滚。
+	// 5. 确认提交后交付结果，任一步报错则整体回滚。
 	if err != nil {
 		return nil, err
 	}

@@ -137,7 +137,7 @@ func (publication *UploadPublicationService) Publish(
 		}
 
 		// 5. SINGLE 和 Multipart 共用发布事件，追加失败交给外层一起回滚。
-		event, err := newFilePublishedChangeEvent(entry, digest)
+		event, err := newFilePublishedChangeEvent(entry, digest.SHA256)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
@@ -29,16 +30,16 @@ func newEntryChangeEvent(eventType string, entry *domain.FileEntry) (domain.Chan
 	return encodeEntryChangeEvent(eventType, entry, newEntryChangePayload(entry))
 }
 
-// newFilePublishedChangeEvent 使用实际发布条目和读回校验的内容事实。
-func newFilePublishedChangeEvent(entry *domain.FileEntry, digest domain.UploadContentDigest) (domain.ChangeEventInput, error) {
+// newFilePublishedChangeEvent 使用实际发布条目和已核对的内容摘要。
+func newFilePublishedChangeEvent(entry *domain.FileEntry, digest [sha256.Size]byte) (domain.ChangeEventInput, error) {
 	payload := struct {
 		entryChangePayload
 		SizeBytes uint64 `json:"size_bytes"`
 		SHA256    string `json:"sha256"`
 	}{
 		entryChangePayload: newEntryChangePayload(entry),
-		SizeBytes:          digest.SizeBytes,
-		SHA256:             hex.EncodeToString(digest.SHA256[:]),
+		SizeBytes:          entry.FileSize,
+		SHA256:             hex.EncodeToString(digest[:]),
 	}
 	return encodeEntryChangeEvent("FILE_PUBLISHED", entry, payload)
 }

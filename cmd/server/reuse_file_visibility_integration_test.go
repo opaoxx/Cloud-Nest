@@ -45,10 +45,20 @@ func TestServerReuseFileVisibilityIntegration(t *testing.T) {
 	sourceBytes := []byte{0, 19, 42, 128, 255}
 	sourceID, object := publishBackupSourceFile(t, ctx, fixture.api, store, fixture.bucket, ownerID, folderID, 1, "隔离可见性.bin", sourceBytes)
 	sourceDigest := sha256.Sum256(sourceBytes)
+	readEventState := func() [2]uint64 {
+		t.Helper()
+		var state [2]uint64
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT SUM(change_seq),(SELECT COUNT(*) FROM change_events) FROM users`).
+			Scan(&state[0], &state[1]); err != nil {
+			t.Fatal("无法读取隔离库的账号序号与事件数", err)
+		}
+		return state
+	}
 
 	assertUnavailable := func(api backupSourceClient, rootID, key string, digest [sha256.Size]byte) {
 		t.Helper()
 		before := readWebPurgePreviewSnapshot(t, ctx, fixture.pool)
+		beforeEvents := readEventState()
 		body := fmt.Sprintf(`{"parent_id":%q,"name":"复用尝试.bin","size_bytes":%d,"sha256":"%x"}`, rootID, len(sourceBytes), digest)
 		var raw json.RawMessage
 		api.request(t, ctx, http.MethodPost, "/api/v1/files/reuse", key, strings.NewReader(body), http.StatusNotFound, &raw)
@@ -62,8 +72,8 @@ func TestServerReuseFileVisibilityIntegration(t *testing.T) {
 		if err != nil || !bytes.Equal(want, raw) {
 			t.Fatalf("未命中响应未保持固定公开字段，得到 %s 和 %v", raw, err)
 		}
-		if after := readWebPurgePreviewSnapshot(t, ctx, fixture.pool); !reflect.DeepEqual(after, before) {
-			t.Fatal("拒绝秒传后目录项、对象、配额或幂等记录发生变化")
+		if after := readWebPurgePreviewSnapshot(t, ctx, fixture.pool); !reflect.DeepEqual(after, before) || readEventState() != beforeEvents {
+			t.Fatal("拒绝秒传后目录项、对象、配额、幂等记录或变更日志发生变化")
 		}
 	}
 
@@ -88,7 +98,7 @@ func TestServerReuseFileVisibilityIntegration(t *testing.T) {
 		t.Fatal("源对象没有保持 READY", err)
 	}
 	assertUnavailable(fixture.api, fixture.login.RootEntryID, "reuse-visibility-hidden", sourceDigest)
-	t.Log("跨账号、无匹配与回收祖先均统一返回 404，目录项、对象、配额与幂等记录未改变")
+	t.Log("跨账号、无匹配与回收祖先均统一返回 404，目录项、对象、配额、幂等记录与变更日志未改变")
 }
 
 func loginReuseVisibilityAccount(t *testing.T, ctx context.Context, fixture backupSourceFixture) (backupSourceClient, dto.LoginData) {
