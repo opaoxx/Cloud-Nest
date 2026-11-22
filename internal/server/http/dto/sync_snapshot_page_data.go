@@ -49,7 +49,7 @@ func NewSyncSnapshotPageData(result *domain.SyncSnapshotPageResult) (*SyncSnapsh
 		}
 		token = result.NextCursor
 	}
-	if len(*token) > domain.MaxSyncSnapshotTokenLength || !syncSnapshotTokenPattern.MatchString(*token) {
+	if !validSyncSnapshotTokenText(*token) {
 		return nil, domain.ErrInvalidFileEntryData
 	}
 
@@ -68,4 +68,8 @@ func NewSyncSnapshotPageData(result *domain.SyncSnapshotPageResult) (*SyncSnapsh
 		HighWaterSequence: strconv.FormatUint(result.Header.HighWaterSequence, 10), ExpiresAt: expiresAt,
 		Items: items, NextCursor: copyEntryText(result.NextCursor), BaselineToken: copyEntryText(result.BaselineToken),
 	}, nil
+}
+
+func validSyncSnapshotTokenText(token string) bool {
+	return len(token) <= domain.MaxSyncSnapshotTokenLength && syncSnapshotTokenPattern.MatchString(token)
 }
