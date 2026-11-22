@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
@@ -25,7 +27,7 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	t.Logf("专用 MySQL %s，回环地址 %s", mysqlID[:12], os.Getenv("CLOUDNEST_DB_ADDRESS"))
 	minioID := startIsolatedWebMinIO(t, ctx)
 	t.Logf("专用 MinIO %s，回环地址 %s", minioID[:12], os.Getenv("CLOUDNEST_S3_ENDPOINT"))
-	prepareServerUploadContentBucket(t, ctx)
+	bucket := prepareServerUploadContentBucket(t, ctx)
 	pool, _ := prepareServerIntegrationDatabase(t, ctx)
 	pool.SetMaxOpenConns(1)
 	store, err := repository.NewStore(pool)
@@ -234,17 +236,42 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		}
 		return client.AbortMultipartUpload(callContext, objectKey, uploadID)
 	})
-	skipped, err := aborter.AbortCandidate(ctx, target, first.Candidates[0], grace)
-	if err != nil || skipped != service.MultipartUploadSessionAbortSkipped || abortCalls != 0 {
+	verifyInstance := isolatedMinIOVerifier(minioID)
+	cleanup := service.NewMultipartUploadSessionCandidateCleanup(aborter, func(callContext context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
+		return client.CheckMultipartUploadAfterAbort(callContext, objectKey, uploadID, verifyInstance)
+	})
+	skipped, err := cleanup.Execute(ctx, target, first.Candidates[0], grace)
+	if err != nil || skipped.AbortOutcome != service.MultipartUploadSessionAbortSkipped || skipped.Observation != nil || abortCalls != 0 {
 		t.Fatal("已绑定会话未跳过", skipped, err)
 	}
-	accepted, err := aborter.AbortCandidate(ctx, secondObject.Target, candidate, grace)
-	if err != nil || accepted != service.MultipartUploadSessionAbortAccepted || abortCalls != 1 {
-		t.Fatal("孤儿会话中止未取得存储确认", accepted, err)
+	accepted, err := cleanup.Execute(ctx, secondObject.Target, candidate, grace)
+	if err != nil || accepted.AbortOutcome != service.MultipartUploadSessionAbortAccepted || accepted.Observation == nil ||
+		accepted.Observation.Object != nil || abortCalls != 1 {
+		t.Fatal("存储复查未确认原会话和对象均缺失", accepted, err)
 	}
-	gone, err := aborter.AbortCandidate(ctx, secondObject.Target, candidate, grace)
-	if err != nil || gone != service.MultipartUploadSessionAbortMissing || abortCalls != 1 {
-		t.Fatal("再次检查缺失会话触发了额外中止", gone, err)
+
+	// 8. 缺乏实例证明时保持待确认，同键已有合成对象时原样交付其版本信息。
+	untrustedCleanup := service.NewMultipartUploadSessionCandidateCleanup(aborter, func(callContext context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
+		return client.CheckMultipartUploadAfterAbort(callContext, objectKey, uploadID, nil)
+	})
+	pending, err := untrustedCleanup.Execute(ctx, secondObject.Target, candidate, grace)
+	if err != nil || pending.AbortOutcome != service.MultipartUploadSessionAbortMissing || pending.Observation != nil || abortCalls != 1 {
+		t.Fatal("未验证实例仍返回了收尾事实，或触发重复中止", pending, err)
+	}
+	const payload = "synthetic object for orphan session observation"
+	written, err := bucket.client.PutObject(ctx, bucket.name, secondKey, strings.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{})
+	if err != nil || written.VersionID == "" || written.VersionID == "null" {
+		t.Fatal("合成对象版本未创建", err)
+	}
+	existing, err := cleanup.Execute(ctx, secondObject.Target, candidate, grace)
+	if err != nil || existing.AbortOutcome != service.MultipartUploadSessionAbortMissing || existing.Observation == nil ||
+		existing.Observation.Object == nil || abortCalls != 1 {
+		t.Fatal("缺失会话的复查未保留原键已有对象，或重复中止", existing, err)
+	}
+	object := existing.Observation.Object
+	if object.StorageVersionID == nil || *object.StorageVersionID != written.VersionID || object.StorageETag == nil ||
+		*object.StorageETag != written.ETag || object.SizeBytes != uint64(len(payload)) {
+		t.Fatal("复查取得的对象版本、ETag 或大小与合成夹具不一致")
 	}
 	for _, uploadID := range sessions {
 		if _, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1); err != nil {
@@ -258,5 +285,5 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(beforeSecond, afterAbort) {
 		t.Fatal("中止会话改变了当前绑定任务记录", err)
 	}
-	t.Log("合成孤儿会话中止获受理，再读确认缺失，同键绑定会话和另三个合成会话仍可读")
+	t.Log("受信存储复查确认会话缺失，保留同键合成对象版本，未验证实例仍待确认")
 }
