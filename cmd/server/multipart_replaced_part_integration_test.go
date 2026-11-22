@@ -154,7 +154,10 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, afterTask.Data, latest[0], latest[1])
 	t.Logf("替换尾片后的原任务 %s 使用最新回执返回 202 COMPLETING", accepted.ID)
 	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
-	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+	publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
+	// 8. 通过正式授权下载，验证已发布版本的完整正文包含替换后的尾片。
+	verifyResumedMultipartDownload(t, ctx, api, publication, sourceDigest)
 
 	logs, err := fixture.stop()
 	if err != nil {
