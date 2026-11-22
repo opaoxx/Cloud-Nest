@@ -421,15 +421,16 @@ func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backu
 		t.Fatalf("隔离存储返回的版本或长度不符，HTTP %d，长度 %d", response.StatusCode, response.ContentLength)
 	}
 
-	// 3. 流式读取实际正文，多读一字节用于发现超出声明的内容。
+	// 3. 用固定缓冲区读取实际正文，多留一字节的读取额度用于检查超长内容。
 	digest := sha256.New()
-	size, err := io.Copy(digest, io.LimitReader(response.Body, int64(entry.SizeBytes)+1))
+	buffer := make([]byte, 64<<10)
+	size, err := io.CopyBuffer(digest, io.LimitReader(response.Body, int64(entry.SizeBytes)+1), buffer)
 	downloadDigest := digest.Sum(nil)
 	if err != nil || size != int64(entry.SizeBytes) || !bytes.Equal(downloadDigest, fileDigest[:]) {
-		t.Fatal("续传下载正文与合成源不一致", entry.ID, size, err)
+		t.Fatal("下载正文与合成源不一致", entry.ID, size, err)
 	}
-	t.Logf("正式下载条目 %s，签名返回有效对象版本，读取 %d B，下载 SHA-256 %x，与合成源一致",
-		entry.ID, size, downloadDigest)
+	t.Logf("正式下载条目 %s，存储返回 HTTP 200 和已发布版本，用 %d B 缓冲区读取 %d B，下载 SHA-256 %x，与合成源一致",
+		entry.ID, len(buffer), size, downloadDigest)
 }
 
 func verifyResumedMultipartCompletionReplay(t *testing.T, ctx context.Context, fixture backupSourceFixture, api backupSourceClient,

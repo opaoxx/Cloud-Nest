@@ -16,10 +16,11 @@ import (
 )
 
 func TestServerMultipartLargePlanIntegration(t *testing.T) {
-	completeUpload := os.Getenv("CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST") == "1"
+	downloadUpload := os.Getenv("CLOUDNEST_MULTIPART_LARGE_DOWNLOAD_TEST") == "1"
+	completeUpload := downloadUpload || os.Getenv("CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST") == "1"
 	uploadAllParts := completeUpload || os.Getenv("CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST") == "1"
 	if os.Getenv("CLOUDNEST_MULTIPART_LARGE_PLAN_TEST") != "1" && !uploadAllParts {
-		t.Skip("设置 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST=1 验收首片，CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST=1 验收全部分片，或 CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST=1 验收合并发布")
+		t.Skip("按需启用 CLOUDNEST_MULTIPART_LARGE_PLAN_TEST、CLOUDNEST_MULTIPART_LARGE_TRANSFER_TEST、CLOUDNEST_MULTIPART_LARGE_COMPLETION_TEST 或 CLOUDNEST_MULTIPART_LARGE_DOWNLOAD_TEST")
 	}
 	timeout := 90 * time.Second
 	startMinIO := startIsolatedWebMinIO
@@ -163,7 +164,18 @@ func TestServerMultipartLargePlanIntegration(t *testing.T) {
 						completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
 
 						// 3. 核对唯一文件、已校验的对象版本和预占全额转入已用。
-						verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+						publication := verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
+						if downloadUpload {
+							t.Run("download", func(t *testing.T) {
+								// 完整读取 1 GiB 正文单独使用更长的请求期限，并沿用隔离客户端的重定向规则。
+								downloadAPI := api
+								downloadClient := *api.httpClient
+								downloadClient.Timeout = 45 * time.Second
+								downloadAPI.httpClient = &downloadClient
+								verifyResumedMultipartDownload(t, ctx, downloadAPI, publication, sourceDigest)
+							})
+						}
 					})
 				}
 			})
