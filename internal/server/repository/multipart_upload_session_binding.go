@@ -41,11 +41,8 @@ func (store *Store) ReadMultipartUploadSessionCleanupFacts(
 	gracePeriod time.Duration,
 ) (domain.MultipartUploadSessionCleanupFacts, error) {
 	// 1. 校验会话发起时间和调用方传入的宽限期。
-	if gracePeriod <= 0 {
-		return domain.MultipartUploadSessionCleanupFacts{}, fmt.Errorf("复核分片会话需要正数宽限期")
-	}
-	if session.InitiatedAt.IsZero() {
-		return domain.MultipartUploadSessionCleanupFacts{}, domain.ErrInvalidStoredObjectData
+	if err := validateMultipartUploadSessionGrace(session, gracePeriod); err != nil {
+		return domain.MultipartUploadSessionCleanupFacts{}, err
 	}
 
 	// 2. 读取同一条查询里的绑定、创建租约和数据库时间。
@@ -53,6 +50,22 @@ func (store *Store) ReadMultipartUploadSessionCleanupFacts(
 	if err != nil {
 		return domain.MultipartUploadSessionCleanupFacts{}, err
 	}
+	return row.cleanupFactsFor(session, gracePeriod)
+}
+
+func validateMultipartUploadSessionGrace(session domain.MultipartUploadSession, gracePeriod time.Duration) error {
+	if gracePeriod <= 0 {
+		return fmt.Errorf("复核分片会话需要正数宽限期")
+	}
+	if session.InitiatedAt.IsZero() {
+		return domain.ErrInvalidStoredObjectData
+	}
+	return nil
+}
+
+func (row *multipartUploadSessionBindingRow) cleanupFactsFor(
+	session domain.MultipartUploadSession, gracePeriod time.Duration,
+) (domain.MultipartUploadSessionCleanupFacts, error) {
 	if row.DatabaseTime.IsZero() {
 		return domain.MultipartUploadSessionCleanupFacts{}, domain.ErrInvalidUploadTaskData
 	}
@@ -103,24 +116,40 @@ func (store *Store) readMultipartUploadSessionBinding(
 	if _, inTransaction := store.database.Statement.ConnPool.(gorm.TxCommitter); inTransaction {
 		return nil, fmt.Errorf("只读复核分片会话绑定须使用事务外的数据入口")
 	}
+	if err := validateMultipartUploadSessionBindingScope(provider, bucket, target, session); err != nil {
+		return nil, err
+	}
+	queryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return findMultipartUploadSessionBinding(queryContext, store.database, provider, bucket, target)
+}
+
+func validateMultipartUploadSessionBindingScope(
+	provider, bucket string, target domain.MultipartUploadSessionScanTarget, session domain.MultipartUploadSession,
+) error {
 	if target.UserID == 0 || target.TaskID == 0 || target.ObjectID == 0 || !domain.ValidMultipartUploadID(session.UploadID) {
-		return nil, domain.ErrInvalidUploadTaskData
+		return domain.ErrInvalidUploadTaskData
 	}
 	owner, validKey := domain.ParseUploadObjectKey(target.ObjectKey)
 	location := domain.CreateStagedObjectInput{Provider: provider, Bucket: bucket, ObjectKey: target.ObjectKey}
 	if !validKey || owner != target.UserID || session.ObjectKey != target.ObjectKey ||
 		!location.IsValid() || !validMultipartMergeObjectText(provider) || !validMultipartMergeObjectText(bucket) {
-		return nil, domain.ErrInvalidStoredObjectData
+		return domain.ErrInvalidStoredObjectData
 	}
-	queryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := queryContext.Err(); err != nil {
+	return nil
+}
+
+// findMultipartUploadSessionBinding 使用调用方选定的事务和锁读取同一原任务及对象。
+func findMultipartUploadSessionBinding(
+	ctx context.Context, query *gorm.DB, provider, bucket string, target domain.MultipartUploadSessionScanTarget,
+) (*multipartUploadSessionBindingRow, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	// 2. 在同一次只读查询里核对原暂存记录，读取绑定与租约。
 	var row multipartUploadSessionBindingRow
-	queryError := store.database.WithContext(queryContext).Table("upload_tasks AS task").
+	queryError := query.WithContext(ctx).Table("upload_tasks AS task").
 		Select("task.storage_upload_id, task.status, task.lease_owner, task.lease_version, task.lease_until, task.expires_at, UTC_TIMESTAMP(6) AS database_time").
 		Joins("JOIN stored_objects AS original ON original.id = task.staged_object_id AND original.owner_user_id = task.user_id").
 		Where("task.id = ? AND task.user_id = ? AND task.staged_object_id = ? AND task.upload_mode = 'MULTIPART'",
@@ -128,7 +157,7 @@ func (store *Store) readMultipartUploadSessionBinding(
 		Where("CAST(original.provider AS BINARY) = ? AND CAST(original.bucket AS BINARY) = ? AND CAST(original.object_key AS BINARY) = ?",
 			provider, bucket, target.ObjectKey).
 		Take(&row).Error
-	if err := queryContext.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if errors.Is(queryError, gorm.ErrRecordNotFound) {

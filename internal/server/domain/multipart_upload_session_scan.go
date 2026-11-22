@@ -29,3 +29,15 @@ type MultipartUploadSessionCleanupFacts struct {
 	// GraceElapsed 表示数据库时间已严格晚于会话发起时间加宽限期的截止点。
 	GraceElapsed bool
 }
+
+// MultipartUploadSessionLockedCheck 保存账号锁内的收尾复核结果。
+type MultipartUploadSessionLockedCheck struct {
+	TaskStatus UploadStatus
+	Facts      MultipartUploadSessionCleanupFacts
+}
+
+// Eligible 判断候选是否通过数据库侧条件。存储状态由调用方另行确认。
+func (check MultipartUploadSessionLockedCheck) Eligible() bool {
+	return check.TaskStatus.IsValid() && check.TaskStatus != UploadStatusCreating &&
+		check.Facts.GraceElapsed && !check.Facts.Protection.Bound && !check.Facts.Protection.ActiveCreationLease
+}
