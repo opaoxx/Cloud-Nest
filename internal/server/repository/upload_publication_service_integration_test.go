@@ -3,11 +3,15 @@ package repository
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
@@ -15,6 +19,7 @@ import (
 
 func TestUploadPublicationServiceIntegration(t *testing.T) {
 	outerFailure := errors.New("fixture abort after publication callback")
+	const eventFailureMessage = "fixture rejects event after publication writes"
 	for _, scenario := range []struct {
 		name               string
 		multipart          bool
@@ -25,6 +30,7 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 		protectedCopy      bool
 		changedOrphan      bool
 		verificationChange string
+		rejectEvent        bool
 		wantError          error
 	}{
 		{name: "publish newly verified object"},
@@ -57,6 +63,7 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 		{name: "quota mismatch after file creation", shortReserve: true, wantError: domain.ErrInvalidAccountData},
 		{name: "orphaning fails after task completion", reuse: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
 		{name: "outer rollback after cleanup", reuse: true, wantError: outerFailure},
+		{name: "event insert failure rolls back publication and permits retry", rejectEvent: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 建立可校验任务、各自独立的 MySQL 记录及必要的失败条件。
@@ -137,10 +144,31 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			if scenario.changedOrphan {
 				execute("CREATE TRIGGER fixture_orphan_changes_version BEFORE UPDATE ON stored_objects FOR EACH ROW SET NEW.storage_version_id='other-version'")
 			}
+			if scenario.rejectEvent {
+				execute(`CREATE TRIGGER fixture_reject_publication_event BEFORE INSERT ON change_events FOR EACH ROW
+					BEGIN
+						IF NEW.user_id=7 AND NEW.sequence=1 AND NEW.event_type='FILE_PUBLISHED'
+							AND EXISTS (SELECT 1 FROM upload_tasks WHERE id=19 AND status='COMPLETED' AND result_entry_id=NEW.entry_id)
+							AND EXISTS (SELECT 1 FROM file_entries WHERE id=NEW.entry_id AND status='ACTIVE' AND revision=NEW.revision)
+							AND EXISTS (SELECT 1 FROM stored_objects WHERE id=23 AND status='READY')
+							AND EXISTS (SELECT 1 FROM users WHERE id=7 AND change_seq=1 AND reserved_storage=0 AND used_storage>0) THEN
+							SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='` + eventFailureMessage + `';
+						END IF;
+					END`)
+			}
 			task, err := store.FindUserUploadTask(ctx, 7, 19)
 			if err != nil {
 				t.Fatal(err)
 			}
+			checkEvents := func(want uint64) {
+				t.Helper()
+				var sequence, events uint64
+				if err := pool.QueryRowContext(ctx, "SELECT change_seq,(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=7").
+					Scan(&sequence, &events); err != nil || sequence != want || events != want {
+					t.Fatal("发布事件数或账号序号不符", events, sequence, err)
+				}
+			}
+			checkEvents(0)
 			readObject := func(objectID uint64) *domain.StoredObject {
 				t.Helper()
 				object, err := store.FindUserStoredObject(ctx, 7, objectID)
@@ -183,7 +211,12 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 				})
 			})
 			result, err := publisher.Publish(ctx, task, staged, digest)
-			if !errors.Is(err, scenario.wantError) {
+			if scenario.rejectEvent {
+				var databaseError *mysql.MySQLError
+				if !errors.As(err, &databaseError) || databaseError.Number != 1644 || databaseError.Message != eventFailureMessage {
+					t.Fatal("事件插入故障没有发生在发布的各项写入之后", err)
+				}
+			} else if !errors.Is(err, scenario.wantError) {
 				t.Fatal("发布服务结果错误", err)
 			}
 
@@ -198,6 +231,9 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage,updated_at FROM users WHERE id=7").
 				Scan(&savedUsed, &savedReserved, &savedQuotaUpdatedAt); err != nil {
 				t.Fatal(err)
+			}
+			if scenario.wantError != nil || scenario.rejectEvent || scenario.multipart {
+				checkEvents(0)
 			}
 			if scenario.wantError == domain.ErrUploadTargetUnavailable {
 				if result != nil || entry != nil || !errors.Is(entryError, domain.ErrFileEntryNotFound) ||
@@ -236,13 +272,30 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 				}
 				return
 			}
-			if scenario.wantError != nil {
+			if scenario.wantError != nil || scenario.rejectEvent {
 				if result != nil || !reflect.DeepEqual(savedTask, task) || entry != nil || !errors.Is(entryError, domain.ErrFileEntryNotFound) ||
 					savedUsed != used || savedReserved != reserved || !savedQuotaUpdatedAt.Equal(quotaUpdatedAt) ||
 					!reflect.DeepEqual(readObject(23), staged) || !reflect.DeepEqual(readObject(29), reusable) {
 					t.Fatal("失败发布留下了持久化变更", result, savedTask, entry, entryError)
 				}
-				return
+				if !scenario.rejectEvent {
+					return
+				}
+				execute("DROP TRIGGER fixture_reject_publication_event")
+				result, err = publisher.Publish(ctx, task, staged, digest)
+				if err != nil {
+					t.Fatal("事件故障解除后重试失败", err)
+				}
+				savedTask, err = store.FindUserUploadTask(ctx, 7, 19)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry, entryError = store.FindUserActiveFileEntryByName(ctx, 7, 16, nameKey)
+				if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").
+					Scan(&savedUsed, &savedReserved); err != nil {
+					t.Fatal(err)
+				}
+				t.Log("事件被拒绝后，任务、文件、对象、配额和序号一起回滚；原校验快照重试成功")
 			}
 			if result == nil || !reflect.DeepEqual(result, savedTask) || result.Status != domain.UploadStatusCompleted ||
 				result.PublishedObjectID == nil || *result.PublishedObjectID != objectID ||
@@ -265,6 +318,28 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			}
 			if retried, err := publisher.Publish(ctx, task, staged, digest); retried != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 				t.Fatal("旧校验快照重复通过发布", retried, err)
+			}
+			if scenario.multipart {
+				checkEvents(0)
+				return
+			}
+			// 4. 验证事件仅追加一次，使用最终名称及已校验的内容事实。
+			checkEvents(1)
+			var eventEntryID, revision uint64
+			var eventType string
+			var rawPayload []byte
+			if err := pool.QueryRowContext(ctx, "SELECT entry_id,revision,event_type,payload FROM change_events WHERE user_id=7 AND `sequence`=1").
+				Scan(&eventEntryID, &revision, &eventType, &rawPayload); err != nil {
+				t.Fatal(err)
+			}
+			wantPayload := map[string]any{
+				"entry_id": strconv.FormatUint(entry.ID, 10), "parent_id": "16", "name": expectedName, "revision": "1",
+				"size_bytes": float64(digest.SizeBytes), "sha256": fmt.Sprintf("%x", digest.SHA256),
+			}
+			var payload map[string]any
+			if eventEntryID != entry.ID || revision != 1 || eventType != "FILE_PUBLISHED" ||
+				json.Unmarshal(rawPayload, &payload) != nil || !reflect.DeepEqual(payload, wantPayload) {
+				t.Fatal("发布事件事实不符", eventEntryID, revision, eventType, string(rawPayload))
 			}
 		})
 	}

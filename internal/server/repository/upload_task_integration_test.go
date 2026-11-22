@@ -29,6 +29,7 @@ func uploadTaskDatabase(t *testing.T) (*sql.DB, domain.UploadTask) {
 	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:end]); err != nil {
 		t.Fatal(err)
 	}
+	installChangeEventFixtureTable(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,status) VALUES(7,'upload_owner','上传用户','fixture_hash','ACTIVE'),(8,'upload_other','其他用户','fixture_hash','DISABLED')",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB'),(12,8,'38ee758a-0727-42de-ae7d-3bb33155e148','other','ANDROID')",

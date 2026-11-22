@@ -51,6 +51,7 @@ func TestServerSingleUploadLimitChecksumCancellationIntegration(t *testing.T) {
 			serverSingleUploadUserID).Scan(&files); err != nil || files != 0 {
 			t.Fatal("隔离账号出现了已发布文件", files, err)
 		}
+		fixture.checkPublicationEventCount(t, ctx, 0)
 		for object := range fixture.bucket.client.ListObjects(ctx, fixture.bucket.name, minio.ListObjectsOptions{Recursive: true, WithVersions: true}) {
 			if object.Err != nil {
 				t.Fatal("检查独占桶版本失败", object.Err)
@@ -83,23 +84,31 @@ func TestServerSingleUploadLimitChecksumCancellationIntegration(t *testing.T) {
 	checkUnpublished()
 
 	// 3. 经正式接口取消，等后台收尾后核对已用和预占。
-	if afterMismatch.LeaseUntil != nil {
-		var databaseTime time.Time
-		if err := fixture.pool.QueryRowContext(ctx, "SELECT UTC_TIMESTAMP(6)").Scan(&databaseTime); err != nil {
-			t.Fatal("读取上传租约的数据库时钟失败", err)
+	remainingLease := func() time.Duration {
+		t.Helper()
+		var microseconds int64
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT COALESCE(TIMESTAMPDIFF(MICROSECOND, UTC_TIMESTAMP(6), lease_until), 0)
+			FROM upload_tasks WHERE user_id=? AND id=?`, pending.UserID, pending.ID).Scan(&microseconds); err != nil {
+			t.Fatal("读取接收租约相对数据库时钟的剩余时间失败", err)
 		}
-		if remaining := afterMismatch.LeaseUntil.Sub(databaseTime); remaining > 0 {
-			requestServerUploadCancellation(t, ctx, fixture.baseURL, fixture.token, created.Task.ID, http.StatusConflict, "UPLOAD_BUSY")
-			fixture.checkQuota(t, ctx, 0, fileSize)
-			t.Logf("有效接收租约期间取消返回 409 UPLOAD_BUSY，等待租约自然到期（约 %s）", remaining.Round(time.Second))
+		return time.Duration(microseconds) * time.Microsecond
+	}
+	if remaining := remainingLease(); remaining > 0 {
+		requestServerUploadCancellation(t, ctx, fixture.baseURL, fixture.token, created.Task.ID, http.StatusConflict, "UPLOAD_BUSY")
+		fixture.checkQuota(t, ctx, 0, fileSize)
+		t.Logf("有效接收租约期间取消返回 409 UPLOAD_BUSY，等待租约自然到期（约 %s）", remaining.Round(time.Second))
+		// 宿主机的等待只用于安排下一次读取，由 MySQL 确认到期。
+		for remaining > 0 {
 			timer := time.NewTimer(remaining + 20*time.Millisecond)
-			defer timer.Stop()
 			select {
 			case <-timer.C:
 			case <-ctx.Done():
+				timer.Stop()
 				t.Fatal("等待上传租约到期时超时", ctx.Err())
 			}
+			remaining = remainingLease()
 		}
+		t.Log("MySQL 已确认接收租约到期")
 	}
 	accepted := requestServerUploadCancellation(t, ctx, fixture.baseURL, fixture.token, created.Task.ID, http.StatusAccepted, "")
 	if accepted.Data.Status != "CANCELLING" || accepted.Data.ResultEntryID != nil {
@@ -153,7 +162,10 @@ func prepareServerSingleUploadLimitFixture(t *testing.T, ctx context.Context) se
 	if os.Getenv("CLOUDNEST_SERVER_TEST") != "1" || os.Getenv("CLOUDNEST_UPLOAD_STORAGE_TEST") != "1" {
 		t.Skip("同时启用启动和上传存储联测后，用独占库和桶验证 16 MiB 上传")
 	}
-	// 准备独占库、独占桶、测试会话及隔离服务地址。
+	// 准备专用容器、独占库和桶，再装配测试会话及回环服务。
+	mysqlContainer := startIsolatedWebMySQL(t, ctx)
+	minioContainer := startIsolatedWebMinIO(t, ctx)
+	t.Logf("单文件上传专用 MySQL %s，MinIO %s", mysqlContainer, minioContainer)
 	pool, databaseName := prepareServerIntegrationDatabase(t, ctx)
 	bucket := prepareServerUploadContentBucket(t, ctx)
 	t.Setenv("CLOUDNEST_DB_NAME", databaseName)
@@ -256,6 +268,15 @@ func (fixture serverSingleUploadLimitFixture) checkQuota(t *testing.T, ctx conte
 	}
 }
 
+func (fixture serverSingleUploadLimitFixture) checkPublicationEventCount(t *testing.T, ctx context.Context, want uint64) {
+	t.Helper()
+	var events, sequence uint64
+	if err := fixture.pool.QueryRowContext(ctx, "SELECT change_seq,(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=?",
+		serverSingleUploadUserID).Scan(&sequence, &events); err != nil || events != want || sequence != want {
+		t.Fatal("隔离账号的事件数或序号不符", events, sequence, err)
+	}
+}
+
 func newServerSingleUploadLimitPayload() []byte {
 	payload := make([]byte, serverSingleUploadLimitBytes)
 	for index := range payload {
@@ -294,6 +315,7 @@ func TestServerSingleUploadLimitRoundTripIntegration(t *testing.T) {
 	payload := newServerSingleUploadLimitPayload()
 	sourceHash := sha256.Sum256(payload)
 	created, pending := fixture.createTask(t, ctx, "single-limit-round-trip", sourceHash)
+	fixture.checkPublicationEventCount(t, ctx, 0)
 
 	// 2. 上传合成内容，等待后台校验并发布。
 	var accepted dto.UploadContentAcceptedResponse
@@ -313,6 +335,21 @@ func TestServerSingleUploadLimitRoundTripIntegration(t *testing.T) {
 	if confirmed.Data.Status != "COMPLETED" || confirmed.Data.ResultEntryID == nil || *confirmed.Data.ResultEntryID != entryID {
 		t.Fatal("完成确认未返回已发布目录项")
 	}
+	replayed := requestServerUploadCompletion(t, ctx, fixture.baseURL, fixture.token, created.Task.ID, http.StatusOK, "", "")
+	if replayed.Data.Status != "COMPLETED" || replayed.Data.ResultEntryID == nil || *replayed.Data.ResultEntryID != entryID {
+		t.Fatal("重复完成确认未返回原目录项")
+	}
+	fixture.checkPublicationEventCount(t, ctx, 1)
+	var eventEntryID, revision, eventSize uint64
+	var eventType, eventSHA256 string
+	if err := fixture.pool.QueryRowContext(ctx, `SELECT entry_id,revision,event_type,
+		JSON_EXTRACT(payload,'$.size_bytes'),JSON_UNQUOTE(JSON_EXTRACT(payload,'$.sha256'))
+		FROM change_events WHERE user_id=?`, pending.UserID).Scan(&eventEntryID, &revision, &eventType, &eventSize, &eventSHA256); err != nil ||
+		eventEntryID != *finished.ResultEntryID || revision != 1 || eventType != "FILE_PUBLISHED" ||
+		eventSize != fileSize || eventSHA256 != fmt.Sprintf("%x", sourceHash) {
+		t.Fatal("正式上传的发布事件与完成任务及已校验内容不符", err)
+	}
+	t.Logf("FILE_PUBLISHED 序号 1，结果条目 %s，版本 %d，完成接口重复调用后仍为 1 条", entryID, revision)
 	object, err := fixture.store.FindUserStoredObject(ctx, pending.UserID, *finished.PublishedObjectID)
 	if err != nil || object == nil || object.Status != domain.StoredObjectStatusReady || object.Bucket != fixture.bucket.name || object.FileSize != fileSize ||
 		object.VerifiedSHA256 == nil || *object.VerifiedSHA256 != sourceHash || object.StorageVersionID == nil {

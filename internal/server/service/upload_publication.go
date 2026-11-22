@@ -20,9 +20,10 @@ type UploadPublicationTransaction interface {
 	CompletePublishedUpload(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error)
 	ClearPublishedObjectGCTimer(ctx context.Context, objectID, entryID uint64) (*domain.StoredObject, error)
 	MarkDeduplicatedUploadObjectOrphaned(ctx context.Context, taskID uint64) (*domain.StoredObject, error)
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
-// UploadPublicationService 将单文件校验结果写入同一个发布事务。
+// UploadPublicationService 将校验结果写入同一个发布事务。
 type UploadPublicationService struct {
 	// withTransaction 复核当前任务及租约，执行一次回调，确认提交后返回 nil。
 	withTransaction func(context.Context, *domain.UploadTask, *domain.StoredObject, domain.UploadContentDigest,
@@ -42,7 +43,7 @@ func NewUploadPublicationService(
 }
 
 // Publish 使用事务外已读回校验的任务、暂存对象和实测摘要发布文件。
-// 对象、文件、配额、完成结果及计时由外层事务一起确认。
+// 对象、文件、配额、完成结果及适用的同步事件由外层事务一起确认。
 // 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
 func (publication *UploadPublicationService) Publish(
 	ctx context.Context,
@@ -109,7 +110,7 @@ func (publication *UploadPublicationService) Publish(
 		if err != nil {
 			return err
 		}
-		if entry == nil || entry.ID == 0 {
+		if entry == nil || entry.ID == 0 || entry.ParentID == nil {
 			return domain.ErrInvalidFileEntryData
 		}
 		if err := txn.SettlePublishedUploadQuota(txContext, task); err != nil {
@@ -134,11 +135,22 @@ func (publication *UploadPublicationService) Publish(
 				return err
 			}
 		}
+
+		// 5. 在同一账号事务追加 SINGLE 发布事件，失败交给外层回滚。
+		if task.UploadMode == "SINGLE" {
+			event, err := newFilePublishedChangeEvent(entry, digest)
+			if err != nil {
+				return err
+			}
+			if _, err := txn.AppendUserChangeEvent(txContext, event); err != nil {
+				return err
+			}
+		}
 		prepared = copyUploadTask(completed)
 		return nil
 	})
 
-	// 5. 等待事务提交后返回完成任务。
+	// 6. 等待事务提交后返回完成任务。
 	if err != nil {
 		return nil, err
 	}
