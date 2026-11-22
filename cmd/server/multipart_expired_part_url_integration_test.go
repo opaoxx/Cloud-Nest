@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -36,13 +37,18 @@ func TestServerMultipartExpiredPartURLIntegration(t *testing.T) {
 	const fileSize = partSize + 1
 	payload := make([]byte, fileSize)
 	payload[0], payload[partSize] = 0x31, 0x32
+	sourceDigest := sha256.Sum256(payload)
+	sourcePath := filepath.Join(t.TempDir(), "multipart-expired-url-fixture.bin")
+	if err := os.WriteFile(sourcePath, payload, 0600); err != nil {
+		t.Fatal("保存合成源文件失败", err)
+	}
 	api := fixture.api
 	var created struct {
 		Data      dto.CreateMultipartUploadData `json:"data"`
 		RequestID string                        `json:"request_id"`
 	}
 	body := fmt.Sprintf(`{"parent_id":%q,"name":"multipart-expired-url-fixture.bin","size_bytes":%d,"sha256":"%x"}`,
-		fixture.login.RootEntryID, fileSize, sha256.Sum256(payload))
+		fixture.login.RootEntryID, fileSize, sourceDigest)
 	api.request(t, ctx, http.MethodPost, "/api/v1/uploads", "multipart-expired-url-fixture", strings.NewReader(body), http.StatusCreated, &created)
 	if created.RequestID == "" || created.Data.UploadMode != "MULTIPART" || created.Data.Task.Status != "CREATING" ||
 		created.Data.PartSizeBytes != partSize || created.Data.PartCount != 2 {
@@ -75,22 +81,60 @@ func TestServerMultipartExpiredPartURLIntegration(t *testing.T) {
 
 	// 3. 在任务仍有效时回读原分片和配额，确认过期 PUT 未产生尾片。
 	after := readParts()
-	var task dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &task)
-	var profile dto.UserProfileResponse
-	api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
-	if !reflect.DeepEqual(after, before) || task.RequestID == "" || !reflect.DeepEqual(task.Data, readyTask) ||
-		!readyTask.ExpiresAt.After(time.Now()) || profile.Data.User.ID != fixture.login.User.ID ||
-		profile.Data.UsedBytes != 0 || profile.Data.ReservedBytes != fileSize {
+	readTaskAndProfile := func() (dto.UploadTaskData, dto.UserProfileData) {
+		t.Helper()
+		var task dto.UploadTaskResponse
+		api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &task)
+		var profile dto.UserProfileResponse
+		api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
+		if task.RequestID == "" || profile.RequestID == "" {
+			t.Fatal("任务或资料响应缺少请求 ID")
+		}
+		return task.Data, profile.Data
+	}
+	task, profile := readTaskAndProfile()
+	if !reflect.DeepEqual(after, before) || !reflect.DeepEqual(task, readyTask) ||
+		!readyTask.ExpiresAt.After(time.Now()) || profile.User.ID != fixture.login.User.ID ||
+		profile.UsedBytes != 0 || profile.ReservedBytes != fileSize {
 		t.Fatal("链接过期后任务、已确认分片或配额发生变化")
 	}
+	t.Logf("尾片签名到期时间 %s，原任务 %s 仍为 UPLOADING，仅有首片 %d B，已用 %d B、预占 %d B",
+		expiredAt.Format(time.RFC3339), task.ID, firstReceipt.SizeBytes, profile.UsedBytes, profile.ReservedBytes)
+
+	// 4. 核对源身份，用原任务为已确认缺失的尾片重新签发，不申请任务续期。
+	reopened, err := os.ReadFile(sourcePath)
+	if err != nil || uint64(len(reopened)) != task.SizeBytes || sha256.Sum256(reopened) != sourceDigest {
+		t.Fatal("重新签发前无法核对合成源", err)
+	}
+	missingNumber := after.PartCount // 原两片计划中已经确认只有第 1 片。
+	fullTail := reopened[after.PartSizeBytes:]
+	newURL, newChecksum := target.signPart(t, ctx, api, missingNumber, fullTail)
+	query := newURL.Query()
+	signedAt, err := time.Parse("20060102T150405Z", query.Get("X-Amz-Date"))
+	if err != nil || !signedAt.After(expiredAt) || query.Get("X-Amz-Expires") != "300" {
+		t.Fatal("正式签发未在原链接过期后交付新的五分钟地址", err)
+	}
+	newETag := putMultipartProbePart(t, ctx, api.httpClient, newURL, newChecksum, fullTail, http.StatusOK, "")
+
+	// 5. 核对两片回执和原任务期限，预占留待正式完成时结算。
+	tailReceipt := dto.UploadPartReceiptData{
+		PartNumber: missingNumber, SizeBytes: uint64(len(fullTail)), ETag: newETag, ChecksumSHA256: newChecksum,
+	}
+	resumed := readParts()
+	resumedTask, resumedProfile := readTaskAndProfile()
+	if !slices.Equal(resumed.Parts, []dto.UploadPartReceiptData{firstReceipt, tailReceipt}) ||
+		!reflect.DeepEqual(resumedTask, task) || !reflect.DeepEqual(resumedProfile, profile) {
+		t.Fatal("重新签发补传后的回执、任务或配额不符")
+	}
+	t.Logf("原任务 %s 正式重新签发后仅补传第 %d 片 %d B，ETag %s，SHA-256 %s，首片回执和任务期限保持原值，已用 %d B、预占 %d B",
+		resumedTask.ID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
+		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
+
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("尾片签名到期时间 %s，原任务 %s 仍为 UPLOADING，仅有首片 %d B，已用 %d B、预占 %d B",
-		expiredAt.Format(time.RFC3339), readyTask.ID, firstReceipt.SizeBytes, profile.Data.UsedBytes, profile.Data.ReservedBytes)
 }
 
 func verifyExpiredMultipartTailURL(t *testing.T, ctx context.Context, httpClient *http.Client, target serverMultipartPartTarget, tail []byte) time.Time {
