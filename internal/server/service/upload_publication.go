@@ -19,6 +19,7 @@ type UploadPublicationTransaction interface {
 	SettlePublishedUploadQuota(ctx context.Context, task *domain.UploadTask) error
 	CompletePublishedUpload(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error)
 	LockUploadReplacementTarget(ctx context.Context, entryID, expectedRevision uint64) (*domain.FileEntry, error)
+	FailUploadReplacementForRevisionConflict(ctx context.Context, task *domain.UploadTask, currentRevision uint64) error
 	ApplyUploadReplacementContent(ctx context.Context, task *domain.UploadTask, objectID uint64, digest domain.UploadContentDigest, retentionDays int) (*domain.FileEntry, error)
 	CompleteUploadReplacement(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error)
 	ClearPublishedObjectGCTimer(ctx context.Context, objectID, entryID uint64) (*domain.StoredObject, error)
@@ -49,6 +50,7 @@ func NewUploadPublicationService(
 // 对象、文件、配额、完成结果及同步事件由外层事务一起确认。
 // 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
 // 只有校验与写回快照的替换绑定一致时，才发布既有文件的内容更新。
+// 替换版本冲突在失败收尾提交后交付原冲突版本。
 func (publication *UploadPublicationService) Publish(
 	ctx context.Context,
 	verifiedTask *domain.UploadTask,
@@ -70,7 +72,7 @@ func (publication *UploadPublicationService) Publish(
 	verifiedRevision := copyOptionalValue(verifiedTask.ReplacementExpectedRevision)
 
 	var prepared *domain.UploadTask
-	var targetUnavailable bool
+	var rejected error
 	err := publication.withTransaction(ctx, verifiedTask, verifiedObject, digest, func(txContext context.Context, txn UploadPublicationTransaction, task *domain.UploadTask, staged *domain.StoredObject) error {
 		if txContext == nil || txn == nil {
 			return fmt.Errorf("上传发布回调需要事务上下文和写入能力")
@@ -84,6 +86,18 @@ func (publication *UploadPublicationService) Publish(
 			if verifiedTarget == nil || task.ReplacementEntryID == nil || *verifiedTarget != *task.ReplacementEntryID ||
 				verifiedRevision == nil || task.ReplacementExpectedRevision == nil || *verifiedRevision != *task.ReplacementExpectedRevision {
 				return fmt.Errorf("内容替换任务绑定已变化: %w", domain.ErrUploadTaskNotReady)
+			}
+			// 版本冲突在对象选择和替换写入前收尾，后续写入故障仍交给外层回滚。
+			if _, err := txn.LockUploadReplacementTarget(txContext, *verifiedTarget, *verifiedRevision); err != nil {
+				conflict, confirmed := err.(*domain.EntryRevisionConflictError)
+				if !confirmed || conflict == nil {
+					return err
+				}
+				if err := txn.FailUploadReplacementForRevisionConflict(txContext, task, conflict.CurrentRevision); err != nil {
+					return err
+				}
+				rejected = conflict
+				return nil
 			}
 			completed, err := publishUploadReplacement(txContext, txn, task, staged, digest)
 			if err != nil {
@@ -102,7 +116,7 @@ func (publication *UploadPublicationService) Publish(
 				return err
 			}
 			// 回调成功才能提交失败状态。待外层提交后再向调用方交付业务错误。
-			targetUnavailable = true
+			rejected = domain.ErrUploadTargetUnavailable
 			return nil
 		}
 		selected, err := txn.SelectUploadPublicationObject(txContext, task, staged, digest)
@@ -167,8 +181,8 @@ func (publication *UploadPublicationService) Publish(
 	if err != nil {
 		return nil, err
 	}
-	if targetUnavailable {
-		return nil, domain.ErrUploadTargetUnavailable
+	if rejected != nil {
+		return nil, rejected
 	}
 	if prepared == nil {
 		return nil, domain.ErrInvalidUploadTaskData

@@ -2,11 +2,13 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -15,17 +17,23 @@ import (
 
 func TestUploadReplacementPublicationIntegration(t *testing.T) {
 	const eventFailureMessage = "fixture rejects event after replacement writes"
+	const conflictFailureMessage = "fixture rejects orphaning after conflict settlement"
 	const userID, taskID, entryID, stagedID, oldObjectID, reusedObjectID = 7, 19, 31, 23, 29, 25
 	for _, scenario := range []struct {
 		name, mode         string
 		reuse, rejectEvent bool
 		staleTarget        bool
+		zeroBytes          bool
+		rejectConflictGC   bool
 	}{
 		{name: "publish staged object", mode: "SINGLE"},
 		{name: "publish reusable object", mode: "MULTIPART", reuse: true},
 		{name: "failed event rolls back promoted object", mode: "SINGLE", rejectEvent: true},
 		{name: "failed event restores both GC timers", mode: "MULTIPART", reuse: true, rejectEvent: true},
 		{name: "stale target keeps current content", mode: "SINGLE", staleTarget: true},
+		{name: "multipart release preserves unrelated reservation", mode: "MULTIPART", staleTarget: true},
+		{name: "zero byte conflict", mode: "SINGLE", staleTarget: true, zeroBytes: true},
+		{name: "orphan failure rolls back conflict settlement", mode: "MULTIPART", staleTarget: true, rejectConflictGC: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 建立同账号的替换目标、预占、任务和已核对的暂存对象。
@@ -38,6 +46,12 @@ func TestUploadReplacementPublicationIntegration(t *testing.T) {
 				}
 			}
 			execute("UPDATE upload_tasks SET replacement_entry_id=31,replacement_expected_revision=1 WHERE id=19")
+			if scenario.zeroBytes {
+				digest.SizeBytes, digest.SHA256 = 0, sha256.Sum256(nil)
+				execute("UPDATE stored_objects SET file_size=0 WHERE id=23")
+				execute("UPDATE upload_tasks SET file_size=0,reserved_bytes=0,expected_sha256=? WHERE id=19", digest.SHA256[:])
+				execute("UPDATE users SET reserved_storage=0 WHERE id=7")
+			}
 			selectedID := uint64(stagedID)
 			objectIDs := []uint64{stagedID, oldObjectID}
 			if scenario.reuse {
@@ -50,6 +64,18 @@ func TestUploadReplacementPublicationIntegration(t *testing.T) {
 			}
 			if scenario.staleTarget {
 				execute("UPDATE file_entries SET revision=2 WHERE id=31")
+				execute("UPDATE users SET reserved_storage=reserved_storage+9 WHERE id=7")
+			}
+			if scenario.rejectConflictGC {
+				execute(`CREATE TRIGGER fixture_reject_conflict_gc BEFORE UPDATE ON stored_objects FOR EACH ROW
+					BEGIN
+						IF NEW.id=23 AND NEW.status='ORPHANED'
+							AND EXISTS (SELECT 1 FROM upload_tasks WHERE id=19 AND status='FAILED'
+								AND last_error_code='REVISION_CONFLICT' AND replacement_conflicting_revision=2 AND reserved_bytes=0)
+							AND EXISTS (SELECT 1 FROM users WHERE id=7 AND reserved_storage=9) THEN
+							SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='` + conflictFailureMessage + `';
+						END IF;
+					END`)
 			}
 			if scenario.rejectEvent {
 				// 只有历史、文件、配额、任务、序号和对象状态均已改变时才触发。
@@ -108,6 +134,26 @@ func TestUploadReplacementPublicationIntegration(t *testing.T) {
 					t.Fatal("失败发布留下了文件、配额、历史、任务、对象或日志变化")
 				}
 			}
+			if scenario.staleTarget {
+				// 先验证传入错误版本或已失效的租约都不能释放现有预占。
+				for _, lostLease := range []bool{false, true} {
+					err := store.WithUploadVerificationTransaction(ctx, task, objects[0], digest,
+						func(ctx context.Context, txStore *Store, current *domain.UploadTask, _ *domain.StoredObject) error {
+							revision := uint64(3)
+							if lostLease {
+								revision = 2
+								if err := txStore.database.WithContext(ctx).Exec("UPDATE upload_tasks SET lease_version=lease_version+1 WHERE id=19").Error; err != nil {
+									t.Fatal("切换租约夹具失败", err)
+								}
+							}
+							return txStore.FailUploadReplacementForRevisionConflict(ctx, current, revision)
+						})
+					if !errors.Is(err, domain.ErrUploadTaskBusy) {
+						t.Fatal("错误冲突证据或旧租约未被拒绝", err)
+					}
+					checkUnchanged()
+				}
+			}
 
 			// 2. 调用后台共用发布入口，检查业务拒绝或事件写入失败的回滚。
 			publisher := service.NewUploadPublicationService(func(ctx context.Context, task *domain.UploadTask, staged *domain.StoredObject, measured domain.UploadContentDigest,
@@ -118,11 +164,50 @@ func TestUploadReplacementPublicationIntegration(t *testing.T) {
 			})
 			completed, err := publisher.Publish(ctx, task, objects[0], digest)
 			if scenario.staleTarget {
+				if scenario.rejectConflictGC {
+					var databaseError *mysql.MySQLError
+					if completed != nil || !errors.As(err, &databaseError) || databaseError.Number != 1644 || databaseError.Message != conflictFailureMessage {
+						t.Fatal("没有在冲突任务和预占写回之后触发收尾故障", completed, err)
+					}
+					checkUnchanged()
+					execute("DROP TRIGGER fixture_reject_conflict_gc")
+					completed, err = publisher.Publish(ctx, task, objects[0], digest)
+				}
 				var conflict *domain.EntryRevisionConflictError
 				if completed != nil || !errors.As(err, &conflict) || conflict.CurrentRevision != 2 {
 					t.Fatal("旧版本被误发布或没有返回当前版本", completed, err)
 				}
-				checkUnchanged()
+				failed := readTask()
+				if failed.Status != domain.UploadStatusFailed || failed.ReservedBytes != 0 ||
+					failed.LastErrorCode == nil || *failed.LastErrorCode != domain.UploadRevisionConflictCode ||
+					failed.ReplacementConflictingRevision == nil || *failed.ReplacementConflictingRevision != 2 ||
+					failed.ReplacementPublishedRevision != nil || failed.ResultEntryID != nil ||
+					failed.LeaseOwner != nil || failed.LeaseUntil != nil || failed.CompletedAt == nil {
+					t.Fatal("冲突结果未保存为失败终态", failed)
+				}
+				var state string
+				if err := pool.QueryRowContext(ctx, `SELECT CONCAT_WS('|',e.object_id,e.revision,e.file_size,u.used_storage,u.reserved_storage,
+					u.change_seq,(SELECT COUNT(*) FROM file_versions),(SELECT COUNT(*) FROM change_events))
+					FROM users u JOIN file_entries e ON e.user_id=u.id WHERE u.id=7 AND e.id=31`).Scan(&state); err != nil ||
+					state != "29|2|16777216|16777216|9|0|0|0" {
+					t.Fatal("冲突收尾改变了原文件、已用空间或其他预占", state, err)
+				}
+				savedObjects := readObjects()
+				orphaned := savedObjects[0]
+				if orphaned.Status != domain.StoredObjectStatusOrphaned || orphaned.GCAfter == nil || orphaned.UnreferencedAt == nil ||
+					!orphaned.GCAfter.Equal(orphaned.UnreferencedAt.Add(7*24*time.Hour)) || !reflect.DeepEqual(savedObjects[1], objects[1]) {
+					t.Fatal("冲突收尾未保留旧对象或启动暂存宽限期", savedObjects)
+				}
+				after := readState()
+				if repeated, err := publisher.Publish(ctx, task, objects[0], digest); repeated != nil ||
+					!errors.Is(err, domain.ErrUploadTaskNotReady) || readState() != after || !reflect.DeepEqual(readObjects(), savedObjects) ||
+					!reflect.DeepEqual(readTask(), failed) {
+					t.Fatal("重复冲突收尾改写了已保存结果", repeated, err)
+				}
+				execute("UPDATE file_entries SET revision=3 WHERE id=31")
+				if !reflect.DeepEqual(readTask(), failed) {
+					t.Fatal("文件后续升级改变了任务中的冲突版本")
+				}
 				return
 			}
 			if scenario.rejectEvent {

@@ -6,15 +6,12 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// publishUploadReplacement 在已锁定账号和任务的事务内完成一次内容替换。
+// publishUploadReplacement 在已锁定账号、任务及原文件的事务内完成一次内容替换。
 func publishUploadReplacement(
 	ctx context.Context, txn UploadPublicationTransaction, task *domain.UploadTask, staged *domain.StoredObject, digest domain.UploadContentDigest,
 ) (*domain.UploadTask, error) {
-	// 1. 复核原文件及预期版本，随后选定已校验的发布对象。
+	// 1. 选定已校验的发布对象。
 	entryID, expectedRevision := *task.ReplacementEntryID, *task.ReplacementExpectedRevision
-	if _, err := txn.LockUploadReplacementTarget(ctx, entryID, expectedRevision); err != nil {
-		return nil, err
-	}
 	selected, err := txn.SelectUploadPublicationObject(ctx, task, staged, digest)
 	if err != nil {
 		return nil, err

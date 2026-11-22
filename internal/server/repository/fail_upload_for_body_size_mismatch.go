@@ -29,6 +29,6 @@ func (store *Store) FailUploadForBodySizeMismatch(ctx context.Context, task *dom
 	return store.withUploadVerificationResultTransaction(ctx, task, staged, mismatch.ObservedSizeBytes, nil, false,
 		func(txContext context.Context, txStore *Store, current *domain.UploadTask, _ *domain.StoredObject) error {
 			// 3. 写入 BODY_SIZE_MISMATCH，释放预占并开始回收计时。
-			return txStore.failVerifyingUpload(txContext, current, domain.UploadBodySizeMismatchCode, domain.ErrUploadBodySizeMismatch.Error())
+			return txStore.failVerifyingUpload(txContext, current, domain.UploadBodySizeMismatchCode, domain.ErrUploadBodySizeMismatch.Error(), nil)
 		})
 }

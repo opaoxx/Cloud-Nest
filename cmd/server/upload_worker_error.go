@@ -60,6 +60,8 @@ func uploadWorkerErrorCode(err error) string {
 		return "STORED_OBJECT_NOT_FOUND"
 	case errors.Is(err, domain.ErrUploadTargetUnavailable):
 		return domain.UploadTargetUnavailableCode
+	case errors.Is(err, domain.ErrEntryRevisionConflict):
+		return domain.UploadRevisionConflictCode
 	case errors.Is(err, domain.ErrUploadFileTooLarge):
 		return "FILE_TOO_LARGE"
 	case errors.Is(err, domain.ErrUploadStorageUnavailable):

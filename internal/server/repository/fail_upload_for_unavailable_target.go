@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -13,11 +14,17 @@ import (
 // 调用方在同一写回复核事务中完成目标检查，并向外传播收尾错误。
 func (store *Store) FailUploadForUnavailableTarget(ctx context.Context, task *domain.UploadTask) error {
 	// 1. 使用目标不可用的固定原因进入共同的失败收尾。
-	return store.failVerifyingUpload(ctx, task, domain.UploadTargetUnavailableCode, domain.ErrUploadTargetUnavailable.Error())
+	return store.failVerifyingUpload(ctx, task, domain.UploadTargetUnavailableCode, domain.ErrUploadTargetUnavailable.Error(), nil)
+}
+
+// FailUploadReplacementForRevisionConflict 终结仍持有校验租约的替换任务，保存冲突时的版本。
+// 调用方须在替换写入前确认冲突，并将收尾失败交给外层事务回滚。
+func (store *Store) FailUploadReplacementForRevisionConflict(ctx context.Context, task *domain.UploadTask, currentRevision uint64) error {
+	return store.failVerifyingUpload(ctx, task, domain.UploadRevisionConflictCode, domain.ErrEntryRevisionConflict.Error(), &currentRevision)
 }
 
 // failVerifyingUpload 写入已由调用方确认的校验任务失败结果。
-func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.UploadTask, errorCode, errorMessage string) error {
+func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.UploadTask, errorCode, errorMessage string, conflictingRevision *uint64) error {
 	// 1. 核对当前任务、校验租约、预占和暂存对象。
 	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil {
 		return fmt.Errorf("终结校验失败的上传需要上下文和已锁定用户的事务")
@@ -29,11 +36,11 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 		return err
 	}
 	userID := store.loginUserID
-	// 两种上传模式共用这三类已确认失败的写回路径。
+	// 两种上传模式共用已确认失败的写回路径。
 	uploadMode := "SINGLE"
 	if task != nil && task.UploadMode == "MULTIPART" &&
 		(errorCode == domain.UploadTargetUnavailableCode || errorCode == domain.UploadBodySizeMismatchCode ||
-			errorCode == domain.UploadChecksumMismatchCode) {
+			errorCode == domain.UploadChecksumMismatchCode || errorCode == domain.UploadRevisionConflictCode) {
 		uploadMode = "MULTIPART"
 	}
 	lockedStore := *store
@@ -44,6 +51,11 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 	}
 	if current.TargetParentID != task.TargetParentID {
 		return domain.ErrUploadTaskBusy
+	}
+	if conflictingRevision != nil {
+		if err := store.checkUploadReplacementConflict(ctx, task, current, *conflictingRevision); err != nil {
+			return err
+		}
 	}
 	account, err := store.lockUserUploadQuota(ctx, userID)
 	if err != nil {
@@ -74,7 +86,7 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 			"upload_task.status = 'FAILED', upload_task.reserved_bytes = 0, "+
 			"upload_task.completed_at = UTC_TIMESTAMP(6), upload_task.updated_at = UTC_TIMESTAMP(6), "+
 			"upload_task.lease_owner = NULL, upload_task.lease_until = NULL, upload_task.next_attempt_at = NULL, "+
-			"upload_task.last_error_code = ?, upload_task.last_error_message = ? "+
+			"upload_task.last_error_code = ?, upload_task.last_error_message = ?, upload_task.replacement_conflicting_revision = ? "+
 			"WHERE quota_user.id = ? AND quota_user.status = 'ACTIVE' "+
 			"AND quota_user.storage_quota = ? AND quota_user.used_storage = ? AND quota_user.reserved_storage = ? "+
 			"AND upload_task.id = ? AND upload_task.staged_object_id = ? AND upload_task.target_parent_id = ? "+
@@ -85,7 +97,7 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 			"AND upload_task.file_size = ? AND upload_task.reserved_bytes = upload_task.file_size "+
 			"AND upload_task.published_object_id IS NULL AND upload_task.result_entry_id IS NULL "+
 			"AND upload_task.resolved_name IS NULL AND upload_task.completed_at IS NULL",
-		account.ReservedBytes-current.ReservedBytes, current.ReservedBytes, errorCode, errorMessage,
+		account.ReservedBytes-current.ReservedBytes, current.ReservedBytes, errorCode, errorMessage, conflictingRevision,
 		userID, account.QuotaBytes, account.UsedBytes, account.ReservedBytes,
 		current.ID, current.StagedObjectID, current.TargetParentID, *current.LeaseOwner, current.LeaseVersion,
 		current.UploadMode, current.StorageUploadID, current.FileSize)
@@ -124,6 +136,11 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 	if uploadMode == "MULTIPART" && (!sameMultipartUploadPlan(current, failed) || !sameUploadStorageText(failed.StorageUploadID, current.StorageUploadID)) {
 		return domain.ErrInvalidUploadTaskData
 	}
+	if conflictingRevision != nil && (failed.ReplacementEntryID == nil || *failed.ReplacementEntryID != *current.ReplacementEntryID ||
+		failed.ReplacementExpectedRevision == nil || *failed.ReplacementExpectedRevision != *current.ReplacementExpectedRevision ||
+		failed.ReplacementConflictingRevision == nil || *failed.ReplacementConflictingRevision != *conflictingRevision) {
+		return domain.ErrInvalidUploadTaskData
+	}
 	orphaned, err := lockedStore.markUnreferencedUploadObjectOrphaned(ctx, staged)
 	if err != nil {
 		return err
@@ -132,4 +149,29 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 		return domain.ErrInvalidStoredObjectData
 	}
 	return nil
+}
+
+// checkUploadReplacementConflict 确认冲突版本属于当前任务绑定的可见文件。
+func (store *Store) checkUploadReplacementConflict(ctx context.Context, snapshot, current *domain.UploadTask, revision uint64) error {
+	// 1. 核对原绑定以及冲突版本的范围。
+	if revision == 0 || snapshot.ReplacementEntryID == nil || current.ReplacementEntryID == nil ||
+		*snapshot.ReplacementEntryID != *current.ReplacementEntryID ||
+		snapshot.ReplacementExpectedRevision == nil || current.ReplacementExpectedRevision == nil ||
+		*snapshot.ReplacementExpectedRevision != *current.ReplacementExpectedRevision {
+		return domain.ErrInvalidUploadTaskData
+	}
+
+	// 2. 沿用目标的可见性和版本锁读，防止用错误证据结束任务。
+	_, err := store.LockUploadReplacementTarget(ctx, *current.ReplacementEntryID, *current.ReplacementExpectedRevision)
+	var conflict *domain.EntryRevisionConflictError
+	if errors.As(err, &conflict) {
+		if conflict.CurrentRevision == revision {
+			return nil
+		}
+		return domain.ErrUploadTaskBusy
+	}
+	if err != nil {
+		return err
+	}
+	return domain.ErrUploadTaskBusy
 }
