@@ -4,6 +4,8 @@
 
 当前已完成本机开发环境、基础容器及首期八张业务表初始化。后端提供 /ping、/health/live、/health/ready、受保护的 POST /api/v1/uploads、PUT /api/v1/uploads/{id}/content、GET /api/v1/uploads/{id}、POST /api/v1/uploads/{id}/complete、POST /api/v1/uploads/{id}/cancel、GET /api/v1/entries、GET /api/v1/entries/{id}、PATCH /api/v1/entries/{id}、POST /api/v1/entries/{id}/move、POST /api/v1/entries/{id}/trash、PUT /api/v1/entries/{id}/star、POST /api/v1/entries/{id}/access、POST /api/v1/entries/{id}/download、POST /api/v1/directories、GET /api/v1/me、GET /api/v1/sessions、GET /api/v1/devices、PATCH /api/v1/devices/{id}、DELETE /api/v1/devices/{id} 和 DELETE /api/v1/sessions/{id}，以及 POST /api/v1/auth/login、POST /api/v1/auth/refresh 和 POST /api/v1/auth/logout，支持配置及 CORS 白名单放行/预检、JSON 日志、依赖客户端、退出信号处理、请求 ID 和统一错误响应。启动时检查上传临时目录、加载 JWT 配置并检查数据库连接、迁移记录及已有存储桶访问，文件业务按技术方案分阶段实现。
 
+同步快照支持 `POST /api/v1/sync/snapshots` 创建首页和 `GET /api/v1/sync/snapshots/{snapshot_id}` 读取续页。两个端点均需 Bearer 认证。创建需要幂等键，成功后以固定的截止序号与分页凭据读取后续页面。[B5 快照协议](docs/B5-同步与历史协议.md#10-一致性快照的创建与分页)
+
 ## 数据库迁移
 
 开发库 cloudnest 已应用版本 1，包含八张业务表和 schema_migrations。业务账号为 root，开发密码为 root，密码以 bcrypt 存储，配额为 100 GiB，根目录已创建。

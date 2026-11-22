@@ -649,6 +649,10 @@ func runWithServerDependencies(
 	// 28. 注册业务接口，将上传流程及下载授权绑定到正式路由。
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
+	if err := registerServerSyncSnapshotRoutes(router, store, jwtConfig.SigningKey, authorizationService.Authorize); err != nil {
+		logger.Error("装配一致性快照路由失败", "stage", "application", "error", err)
+		return err
+	}
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)
 	serverhttp.RegisterEntryDetailRoute(router, authorizationService.Authorize, entryDetailService.Get)
 	serverhttp.RegisterUploadTaskRoute(router, authorizationService.Authorize, uploadTaskService.Get)

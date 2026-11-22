@@ -153,10 +153,8 @@ paths:
     post:
       tags: [Sync]
       operationId: createSyncSnapshot
-      x-cloudnest-status: planned
       summary: 创建一致性同步快照并读取第一页
       description: |
-        B5 计划契约，服务尚未注册此操作。
         按认证账号的活动目录树构建快照。从同一个只读一致性视图取得条目和账号截止序号，释放数据库事务后固定分页内容。
         创建成功提交同步设备的 RESET_REQUIRED 状态、新代次和幂等回执。新代次使旧快照凭据失效。
         幂等键作用域为账号及创建操作，摘要绑定认证设备和规范化页大小。
@@ -221,10 +219,8 @@ paths:
     get:
       tags: [Sync]
       operationId: getSyncSnapshotPage
-      x-cloudnest-status: planned
       summary: 依固定快照凭据读取下一页
       description: |
-        B5 计划契约，服务尚未注册此操作。
         认证后检查路径、签名用途、账号、设备、快照 ID、代次、页大小、位置及过期时间。
         从创建时固定的元数据读取，同一有效分页凭据可重读同页。缓存缺失、快照到期或代次变化时返回 410。
         末页返回独立用途的 baseline_token，翻页不更新设备的已确认位置。第一页可重试原创建请求读取。
