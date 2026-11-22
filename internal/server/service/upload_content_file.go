@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"syscall"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
@@ -57,7 +59,7 @@ func withUploadContentFile(ctx context.Context, directory string, source io.Read
 	}
 
 	// 4. 受限复制文件并校验预期摘要。
-	digest, err := CopyUploadContent(ctx, file, source, declaredSize)
+	digest, err := CopyUploadContent(ctx, uploadTempFileWriter{file: file}, source, declaredSize)
 	if err != nil {
 		return err
 	}
@@ -70,7 +72,7 @@ func withUploadContentFile(ctx context.Context, directory string, source io.Read
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		return fmt.Errorf("同步上传临时文件失败: %w", err)
+		return fmt.Errorf("同步上传临时文件失败: %w", classifyUploadTempWriteError(err))
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("定位上传临时文件失败: %w", err)
@@ -85,6 +87,30 @@ func withUploadContentFile(ctx context.Context, directory string, source io.Read
 		return errors.Join(useError, err)
 	}
 	return useError
+}
+
+// uploadTempFileWriter 在暂存目标的写入边界识别磁盘满。
+type uploadTempFileWriter struct {
+	file *os.File
+}
+
+func (writer uploadTempFileWriter) Write(content []byte) (int, error) {
+	written, err := writer.file.Write(content)
+	return written, classifyUploadTempWriteError(err)
+}
+
+func classifyUploadTempWriteError(err error) error {
+	// 1. 识别 POSIX ENOSPC 和 Windows 写入 API 的两种磁盘满状态。
+	const (
+		errorHandleDiskFull syscall.Errno = 39  // ERROR_HANDLE_DISK_FULL
+		errorDiskFull       syscall.Errno = 112 // ERROR_DISK_FULL
+	)
+	if errors.Is(err, syscall.ENOSPC) || (runtime.GOOS == "windows" &&
+		(errors.Is(err, errorHandleDiskFull) || errors.Is(err, errorDiskFull))) {
+		// 2. 保留底层写入错误，供公开响应按暂存空间不足处理。
+		return errors.Join(domain.ErrUploadTempSpaceExhausted, err)
+	}
+	return err
 }
 
 // validateUploadContentFileInput 复用接收参数顺序，使预占前和创建前的检查一致。

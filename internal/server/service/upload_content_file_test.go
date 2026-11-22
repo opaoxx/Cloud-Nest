@@ -10,13 +10,52 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
+
+func TestClassifyUploadTempWriteError(t *testing.T) {
+	// 1. 核对写盘错误分类保留原错误，并区分空间不足与其他失败。
+	for _, fixture := range []struct {
+		name      string
+		cause     error
+		exhausted bool
+	}{
+		{"POSIX ENOSPC", syscall.ENOSPC, true},
+		{"Windows ERROR_HANDLE_DISK_FULL", syscall.Errno(39), runtime.GOOS == "windows"},
+		{"Windows ERROR_DISK_FULL", syscall.Errno(112), runtime.GOOS == "windows"},
+		{"permission", os.ErrPermission, false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			writeError := &os.PathError{Op: "write", Path: "fixture.part", Err: fixture.cause}
+			result := classifyUploadTempWriteError(writeError)
+			if !errors.Is(result, writeError) || errors.Is(result, domain.ErrUploadTempSpaceExhausted) != fixture.exhausted {
+				t.Fatal("暂存写入错误分类不符", result)
+			}
+		})
+	}
+	if err := classifyUploadTempWriteError(nil); err != nil {
+		t.Fatal("成功写入被错误分类", err)
+	}
+}
+
+func TestWithUploadContentFileKeepsSourceError(t *testing.T) {
+	// 1. 即使来源返回同名错误，也保持来源失败的原有语义。
+	source := uploadCopyReadFunc(func([]byte) (int, error) { return 0, syscall.ENOSPC })
+	err := WithUploadContentFile(t.Context(), t.TempDir(), source, 1, nil, func(io.ReadSeeker, domain.UploadContentDigest) error {
+		t.Error("来源失败仍交付了临时文件")
+		return nil
+	})
+	if !errors.Is(err, syscall.ENOSPC) || errors.Is(err, domain.ErrUploadTempSpaceExhausted) {
+		t.Fatal("来源读取错误被当成暂存盘写满", err)
+	}
+}
 
 func TestWithUploadContentFileResults(t *testing.T) {
 	for _, fixture := range []struct {

@@ -6450,7 +6450,7 @@ components:
               details: null
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     UploadTempSpaceExhausted:
-      description: 共享上传临时区的剩余预占预算不足以接收本次声明大小时，返回 HTTP 507。容量检查在文件创建及正文读取前完成，使用固定提示。
+      description: 共享上传临时区的预占预算不足，或写入、同步暂存文件时操作系统报告磁盘空间耗尽，返回 HTTP 507 和固定提示。预算检查在文件创建及正文读取前完成。
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
