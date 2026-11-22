@@ -157,6 +157,30 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		len(resumed.Objects[1].Scan.Candidates) != 1 || resumed.Objects[1].Scan.Candidates[0].UploadID != secondCandidate {
 		t.Fatal("跨对象扫描未正确续读并共享剩余预算", err)
 	}
+
+	// 5. 用扫描得到的原会话验证只读复核，覆盖空分片、缺失及保护变化。
+	rechecker := service.NewMultipartUploadSessionCandidateRechecker(settings.Provider, settings.Bucket,
+		client.CheckMultipartUploadSessionExists, store.ReadMultipartUploadSessionCleanupFacts)
+	secondObject := resumed.Objects[1]
+	candidate := secondObject.Scan.Candidates[0]
+	available, err := rechecker.Recheck(ctx, secondObject.Target, candidate, grace)
+	if err != nil || !available.Eligible() {
+		t.Fatal("仍存在且超期的未保护会话未通过复核", err)
+	}
+	withinGrace, err := rechecker.Recheck(ctx, secondObject.Target, candidate, 2*time.Hour)
+	if err != nil || !withinGrace.Exists || withinGrace.Facts.GraceElapsed || withinGrace.Eligible() {
+		t.Fatal("宽限期变化未被重新检查", err)
+	}
+	missing := candidate
+	missing.UploadID = sessions[0]
+	absent, err := rechecker.Recheck(ctx, secondObject.Target, missing, grace)
+	if err != nil || absent.Exists || absent.Eligible() {
+		t.Fatal("其他对象的会话被误认为存在于原键", err)
+	}
+	newLease, err := rechecker.Recheck(ctx, target, first.Candidates[0], grace)
+	if err != nil || !newLease.Exists || !newLease.Facts.Protection.ActiveCreationLease || newLease.Eligible() {
+		t.Fatal("扫描后生效的创建租约未保护原会话", err)
+	}
 	afterFirst, err := store.FindUserUploadTask(ctx, 7, 19)
 	if err != nil || !reflect.DeepEqual(before, afterFirst) {
 		t.Fatal("跨对象扫描改变了第一个任务", err)
@@ -164,6 +188,19 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	afterSecond, err := store.FindUserUploadTask(ctx, 7, 28)
 	if err != nil || !reflect.DeepEqual(beforeSecond, afterSecond) {
 		t.Fatal("跨对象扫描改变了第二个任务", err)
+	}
+	execute("UPDATE upload_tasks SET storage_upload_id=? WHERE id=28", candidate.UploadID)
+	beforeBound, err := store.FindUserUploadTask(ctx, 7, 28)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowBound, err := rechecker.Recheck(ctx, secondObject.Target, candidate, grace)
+	if err != nil || !nowBound.Exists || !nowBound.Facts.Protection.Bound || nowBound.Eligible() {
+		t.Fatal("扫描后绑定的候选未受保护", err)
+	}
+	afterBound, err := store.FindUserUploadTask(ctx, 7, 28)
+	if err != nil || !reflect.DeepEqual(beforeBound, afterBound) {
+		t.Fatal("单条复核改变了新绑定后的任务", err)
 	}
 	for _, uploadID := range sessions {
 		if _, err := client.ListUploadPartsPage(ctx, key, uploadID, 0, 1); err != nil {
@@ -176,4 +213,5 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		}
 	}
 	t.Log("两个对象共享会话页数上限，断点续读分组正确，五个合成会话仍可读")
+	t.Log("单会话复核覆盖存在、原键缺失、宽限期、扫描后租约及绑定变化")
 }
