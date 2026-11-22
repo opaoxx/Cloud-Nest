@@ -39,13 +39,13 @@ func (reuse *FileReuseService) Reuse(
 	ctx context.Context, actor domain.Actor, parentID uint64, requestedName string, sizeBytes uint64, digest [sha256.Size]byte,
 ) (*domain.FileEntry, error) {
 	// 1. 校验请求并进入已认证的账号事务。
-	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 || parentID == 0 {
-		return nil, fmt.Errorf("秒传需要上下文、完整认证身份和非零父目录 ID")
+	if ctx == nil || actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
+		return nil, fmt.Errorf("秒传需要上下文和完整认证身份")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	name, err := ValidateEntryName(requestedName)
+	name, err := validateFileReuseDeclaration(parentID, requestedName, sizeBytes)
 	if err != nil {
 		return nil, err
 	}
