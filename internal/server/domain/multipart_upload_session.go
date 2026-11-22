@@ -1,6 +1,23 @@
 package domain
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// MultipartUploadSession 记录存储端仍可列出的会话及其原对象定位。
+type MultipartUploadSession struct {
+	ObjectKey   string
+	UploadID    string
+	InitiatedAt time.Time
+}
+
+// MultipartUploadSessionPage 是同一应用对象键下的一页会话。
+type MultipartUploadSessionPage struct {
+	Sessions []MultipartUploadSession
+	// NextUploadID 为空表示末页，否则用于继续同一对象的扫描。
+	NextUploadID string
+}
 
 // ValidMultipartUploadID 检查会话 ID 是否可按原值写入 storage_upload_id。
 func ValidMultipartUploadID(value string) bool {
