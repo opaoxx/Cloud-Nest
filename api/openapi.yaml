@@ -260,6 +260,69 @@ paths:
           $ref: '#/components/responses/SyncSnapshotExpired'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/sync/snapshots/{snapshot_id}/confirm:
+    post:
+      tags: [Sync]
+      operationId: confirmSyncSnapshotBaseline
+      x-cloudnest-status: planned
+      summary: 确认设备已持久化的一致性快照基线
+      description: |
+        计划契约，待服务接入。客户端保存同一份完整基线或可恢复待办后，原样提交末页的 baseline_token。
+        服务端核对签名及账号、设备、快照 ID 的绑定。在账号锁内复核当前授权、完整代次、原到期时间及截止序号的可续读范围。
+        首次成功将当前代次的设备从 RESET_REQUIRED 置为 ACTIVE。合法重试保持已有确认位置并返回该位置，无需 Idempotency-Key。
+        末页凭据可在缓存丢失后用于确认，仍须通过原期限及账号事务内的全部检查。客户端按本地已持久化的位置继续拉取。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: snapshot_id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/SyncSnapshotID'
+      requestBody:
+        required: true
+        description: 未压缩的 UTF-8 JSON。baseline_token 必须恰好出现一次。
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmSyncSnapshotBaselineRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SyncSnapshotBaselineConfirmed'
+        '400':
+          description: INVALID_ARGUMENT 用于非法 snapshot_id 或 JSON 结构。INVALID_CURSOR 定位缺失、无效或绑定不符的 baseline_token。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: ACCOUNT_DISABLED 或 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: CURSOR_EXPIRED。可信凭据已到期、当前同步记录缺失或代次已变化，或截止序号已不可续读。使用新幂等键创建整份快照。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/uploads:
     post:
       tags: [Uploads]
@@ -2111,6 +2174,32 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/SyncSnapshotPageData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+    ConfirmSyncSnapshotBaselineRequest:
+      type: object
+      additionalProperties: false
+      required: [baseline_token]
+      properties:
+        baseline_token:
+          $ref: '#/components/schemas/SyncSnapshotToken'
+    ConfirmSyncSnapshotBaselineResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [status, ack_sequence]
+          properties:
+            status:
+              type: string
+              enum: [ACTIVE]
+            ack_sequence:
+              type: string
+              pattern: '^(0|[1-9][0-9]{0,19})(?![\s\S])'
+              description: 本次事务确认的设备位置，范围为 0～18446744073709551615。重试可读到已推进的位置，客户端仍按本地已持久化的位置拉取。
         request_id:
           $ref: '#/components/headers/RequestID/schema'
     EntrySourceDeviceSummary:
@@ -4473,6 +4562,19 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/SyncSnapshotPageResponse'
+    SyncSnapshotBaselineConfirmed:
+      description: 当前设备已确认快照基线。返回提交后确认的位置和本次请求 ID。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ConfirmSyncSnapshotBaselineResponse'
     SyncSnapshotExpired:
       description: CURSOR_EXPIRED。可信设备的快照已到期、代次已改变、缓存已丢失或截止序号已不可续读。使用新幂等键创建整份快照。
       headers:
