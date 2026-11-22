@@ -138,6 +138,8 @@ info:
 servers:
   - url: http://127.0.0.1:18081
 tags:
+  - name: Sync
+    description: B5 一致性快照和同步基线计划契约
   - name: Uploads
     description: 当前用户的持久上传任务。
   - name: Entries
@@ -147,6 +149,121 @@ tags:
   - name: System
     description: 无需登录的开发探测、进程存活与依赖就绪检查。
 paths:
+  /api/v1/sync/snapshots:
+    post:
+      tags: [Sync]
+      operationId: createSyncSnapshot
+      x-cloudnest-status: planned
+      summary: 创建一致性同步快照并读取第一页
+      description: |
+        B5 计划契约，服务尚未注册此操作。
+        按认证账号的活动目录树构建快照。从同一个只读一致性视图取得条目和账号截止序号，释放数据库事务后固定分页内容。
+        创建成功提交同步设备的 RESET_REQUIRED 状态、新代次和幂等回执。新代次使旧快照凭据失效。
+        幂等键作用域为账号及创建操作，摘要绑定认证设备和规范化页大小。
+        同键重试返回原 201 数据和本次 request_id。快照失效需使用新键重建；同键异参或键记录到期返回 409。
+        单份最多 10000 个条目和 8 MiB 序列化条目数据。快照有效 10 分钟，从缓存固定时起算。
+        读页和重放不延长期限。返回的末页凭据交给后续基线确认操作。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSyncSnapshotRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/SyncSnapshotPageDelivered'
+        '400':
+          description: INVALID_ARGUMENT。错误字段可为 Idempotency-Key 或 page_size。非法 JSON 结构使用 details null。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: ACCOUNT_DISABLED 或 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: IDEMPOTENCY_CONFLICT 或 IDEMPOTENCY_EXPIRED。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          $ref: '#/components/responses/SyncSnapshotExpired'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: SNAPSHOT_TOO_LARGE。元数据超过单份快照上限，设备基线保持原值。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: SNAPSHOT_BUSY。缓存或构建准入预算已满，可稍后重试，设备基线保持原值。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/sync/snapshots/{snapshot_id}:
+    get:
+      tags: [Sync]
+      operationId: getSyncSnapshotPage
+      x-cloudnest-status: planned
+      summary: 依固定快照凭据读取下一页
+      description: |
+        B5 计划契约，服务尚未注册此操作。
+        认证后检查路径、签名用途、账号、设备、快照 ID、代次、页大小、位置及过期时间。
+        从创建时固定的元数据读取，同一有效分页凭据可重读同页。缓存缺失、快照到期或代次变化时返回 410。
+        末页返回独立用途的 baseline_token，翻页不更新设备的已确认位置。第一页可重试原创建请求读取。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: snapshot_id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/SyncSnapshotID'
+        - name: cursor
+          in: query
+          required: true
+          description: 首次创建或上一页返回的唯一 next_cursor。保留解码原文，拒绝空白及重复参数。
+          schema:
+            $ref: '#/components/schemas/SyncSnapshotToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/SyncSnapshotPageDelivered'
+        '400':
+          description: INVALID_ARGUMENT 定位非法 snapshot_id 或 query。INVALID_CURSOR 定位缺少、篡改、重复或绑定不匹配的 cursor。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: ACCOUNT_DISABLED 或 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          $ref: '#/components/responses/SyncSnapshotExpired'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/uploads:
     post:
       tags: [Uploads]
@@ -1903,6 +2020,103 @@ components:
       bearerFormat: JWT
       description: 单个 Authorization 头携带 Bearer 凭证，先校验 JWT，再查询并复核账号、会话及设备状态，成功后传递 Actor。
   schemas:
+    CreateSyncSnapshotRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          description: 快照创建后的固定页大小。
+    SyncSnapshotID:
+      type: string
+      format: uuid
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\s\S])'
+    SyncSnapshotToken:
+      type: string
+      minLength: 3
+      maxLength: 1024
+      pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![\s\S])'
+      description: 不透明的版本化签名凭据。续页与末页确认的签名用途各自独立。
+    SyncSnapshotEntry:
+      type: object
+      additionalProperties: false
+      required: [entry_id, parent_id, name, entry_type, revision, size_bytes, sha256]
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        name:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/name'
+        entry_type:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/entry_type'
+        revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        size_bytes:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/size_bytes'
+        sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}(?![\s\S])'
+      oneOf:
+        - properties:
+            entry_type: {enum: [DIR]}
+            size_bytes: {enum: [0]}
+            sha256: {type: string, nullable: true, enum: [null]}
+        - properties:
+            entry_type: {enum: [FILE]}
+            sha256: {type: string}
+    SyncSnapshotPageData:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, root_entry_id, high_water_sequence, expires_at, items, next_cursor, baseline_token]
+      properties:
+        snapshot_id:
+          $ref: '#/components/schemas/SyncSnapshotID'
+        root_entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        high_water_sequence:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,19})(?![\s\S])'
+          description: 同一读取视图内的账号变更序号，范围为 0～18446744073709551615。
+        expires_at:
+          type: string
+          format: date-time
+          description: 固定 UTC 到期时刻，到期边界含等号。
+        items:
+          type: array
+          maxItems: 100
+          description: 按条目 ID 数值升序，根目录由 root_entry_id 给出。空目录树交付空数组。
+          items:
+            $ref: '#/components/schemas/SyncSnapshotEntry'
+        next_cursor:
+          type: string
+          nullable: true
+        baseline_token:
+          type: string
+          nullable: true
+      oneOf:
+        - properties:
+            items: {minItems: 1}
+            next_cursor:
+              $ref: '#/components/schemas/SyncSnapshotToken'
+            baseline_token: {type: string, nullable: true, enum: [null]}
+        - properties:
+            next_cursor: {type: string, nullable: true, enum: [null]}
+            baseline_token:
+              $ref: '#/components/schemas/SyncSnapshotToken'
+    SyncSnapshotPageResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          $ref: '#/components/schemas/SyncSnapshotPageData'
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
     EntrySourceDeviceSummary:
       type: object
       nullable: true
@@ -4250,6 +4464,35 @@ components:
         request_id:
           $ref: '#/components/headers/RequestID/schema'
   responses:
+    SyncSnapshotPageDelivered:
+      description: 已固定的快照数据页。创建返回 201，续页返回 200。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SyncSnapshotPageResponse'
+    SyncSnapshotExpired:
+      description: CURSOR_EXPIRED。可信设备的快照已到期、代次已改变、缓存已丢失或截止序号已不可续读。使用新幂等键创建整份快照。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: {code: CURSOR_EXPIRED, message: 同步快照已失效，请重新建立基线, details: null}
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     PurgeEntryProgressRejected:
       description: HTTP 400，路径 ID 格式或范围不合法，返回 INVALID_ARGUMENT，details.field 为 id。
       headers:
