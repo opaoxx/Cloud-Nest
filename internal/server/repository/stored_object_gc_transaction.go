@@ -40,7 +40,7 @@ func (store *Store) WithStoredObjectGCTransaction(
 			return err
 		}
 
-		// 3. 比对状态和计时，复查文件与上传任务引用。
+		// 3. 比对状态和计时，复查文件、上传任务及历史版本引用。
 		if object.Status != candidate.Status || object.UnreferencedAt == nil || object.GCAfter == nil ||
 			!object.UnreferencedAt.Equal(candidate.UnreferencedAt) || !object.GCAfter.Equal(candidate.GCAfter) {
 			return domain.ErrStoredObjectGCCandidateStale

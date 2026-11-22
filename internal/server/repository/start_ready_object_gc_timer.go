@@ -32,7 +32,7 @@ func (store *Store) StartReadyObjectGCTimer(ctx context.Context, objectID uint64
 		return nil, domain.ErrInvalidStoredObjectData
 	}
 
-	// 2. 复核文件和上传任务的有效引用。
+	// 2. 复核文件、上传任务及历史版本的有效引用。
 	if err := store.checkStoredObjectUnreferenced(ctx, object); err != nil {
 		return nil, err
 	}

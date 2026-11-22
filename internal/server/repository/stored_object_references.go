@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// checkStoredObjectUnreferenced 检查当前仍有效的文件和任务引用。
+// checkStoredObjectUnreferenced 检查仍有效的文件、任务和历史版本引用。
 // 调用方须在同一用户事务中先按归属锁定 object。
 func (store *Store) checkStoredObjectUnreferenced(ctx context.Context, object *domain.StoredObject) error {
 	// 1. 核对用户事务、上下文和对象归属。
@@ -36,6 +36,8 @@ func (store *Store) checkStoredObjectUnreferenced(ctx context.Context, object *d
 		{"file_entries", "user_id = ? AND object_id = ? AND status <> 'PURGED'", []any{userID, objectID}},
 		// 3. 用当前读检查未终结上传任务的暂存和发布引用。
 		{"upload_tasks", "user_id = ? AND status NOT IN ('COMPLETED','CANCELLED','EXPIRED','FAILED') AND (staged_object_id = ? OR published_object_id = ?)", []any{userID, objectID, objectID}},
+		// 4. 历史行存在就保护对象，到期后也须等结算移除引用。
+		{"file_versions", "user_id = ? AND object_id = ?", []any{userID, objectID}},
 	} {
 		var reference struct{ ID uint64 }
 		queryError := store.database.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).

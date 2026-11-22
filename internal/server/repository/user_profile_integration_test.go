@@ -44,6 +44,10 @@ func userProfileDatabase(t *testing.T) *sql.DB {
 			t.Fatal(err)
 		}
 	}
+	// 3. 安装以目录项和对象为外键目标的正式历史表。
+	if _, err := pool.ExecContext(ctx, migrations.Ordered()[3].SQL); err != nil {
+		t.Fatal("安装历史引用夹具表失败", err)
+	}
 	return pool
 }
 

@@ -52,7 +52,7 @@ func (store *Store) MarkUserStagedObjectOrphaned(ctx context.Context, objectID u
 
 // markUnreferencedUploadObjectOrphaned 处理已锁定且阶段已复核的上传对象。
 func (lockedStore *Store) markUnreferencedUploadObjectOrphaned(ctx context.Context, object *domain.StoredObject) (*domain.StoredObject, error) {
-	// 1. 当前读检查文件与未终结上传任务的有效引用。
+	// 1. 当前读检查文件、未终结任务和历史版本的有效引用。
 	if err := lockedStore.checkStoredObjectUnreferenced(ctx, object); err != nil {
 		return nil, err
 	}

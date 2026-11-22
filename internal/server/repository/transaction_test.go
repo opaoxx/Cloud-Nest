@@ -28,6 +28,7 @@ type loginTransactionScript struct {
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	objectQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	uploadQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	fileVersionQuery                                   func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	leaseClockQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	claimUploadLease                                   func(context.Context, string, []driver.NamedValue) (driver.Result, error)
 	renewUploadLease                                   func(context.Context, string, []driver.NamedValue) (driver.Result, error)
@@ -241,6 +242,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 		if strings.Contains(query, "upload_tasks") && script.uploadQuery != nil {
 			script.record("upload")
 			return script.uploadQuery(ctx, query, arguments)
+		}
+		if strings.Contains(query, "file_versions") && script.fileVersionQuery != nil {
+			script.record("file_version")
+			return script.fileVersionQuery(ctx, query, arguments)
 		}
 		if strings.Contains(query, "auth_sessions") && script.sessionQuery != nil {
 			script.record("session")

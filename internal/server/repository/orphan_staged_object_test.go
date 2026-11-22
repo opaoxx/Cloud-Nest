@@ -19,7 +19,7 @@ func (*objectReferenceRows) Columns() []string { return []string{"id"} }
 
 func TestMarkUserStagedObjectOrphanedResults(t *testing.T) {
 	fault := errors.New("private orphan failure")
-	for _, mode := range []string{"staging", "orphaned without grace", "already orphaned", "longer grace retained", "zero bytes", "maximum object and size", "missing", "query failure", "verifying", "ready", "deleting", "deleted", "staging GC data", "short existing grace", "file reference", "task reference", "file query failure", "task query failure", "write failure", "zero affected", "multiple affected", "missing readback", "readback failure", "wrong status readback", "wrong grace readback", "wrong key readback", "outer failure", "commit failure"} {
+	for _, mode := range []string{"staging", "orphaned without grace", "already orphaned", "longer grace retained", "zero bytes", "maximum object and size", "missing", "query failure", "verifying", "ready", "deleting", "deleted", "staging GC data", "short existing grace", "file reference", "task reference", "history reference", "file query failure", "task query failure", "history query failure", "write failure", "zero affected", "multiple affected", "missing readback", "readback failure", "wrong status readback", "wrong grace readback", "wrong key readback", "outer failure", "commit failure"} {
 		t.Run(mode, func(t *testing.T) {
 			// 1. 复用完整对象夹具，保留摘要、位置及诊断，准备暂存阶段。
 			actor := domain.Actor{UserID: 7, DeviceID: 11, SessionID: 17}
@@ -49,9 +49,9 @@ func TestMarkUserStagedObjectOrphanedResults(t *testing.T) {
 				want.ID, want.FileSize, values[0], values[6] = ^uint64(0), ^uint64(0), "18446744073709551615", "18446744073709551615"
 			case "missing":
 				wantError = domain.ErrStoredObjectNotFound
-			case "query failure", "file query failure", "task query failure", "write failure", "readback failure", "outer failure", "commit failure":
+			case "query failure", "file query failure", "task query failure", "history query failure", "write failure", "readback failure", "outer failure", "commit failure":
 				wantError = fault
-			case "file reference", "task reference":
+			case "file reference", "task reference", "history reference":
 				wantError = domain.ErrStoredObjectInUse
 			case "verifying", "ready", "deleting", "deleted":
 				want.Status = domain.StoredObjectStatus(strings.ToUpper(mode))
@@ -128,6 +128,20 @@ func TestMarkUserStagedObjectOrphanedResults(t *testing.T) {
 				}
 				return &objectReferenceRows{&idempotencyRecordRows{values: result}}, nil
 			}
+			script.fileVersionQuery = func(_ context.Context, statement string, arguments []driver.NamedValue) (driver.Rows, error) {
+				if strings.ReplaceAll(statement, "`", "") != "SELECT id FROM file_versions WHERE user_id = ? AND object_id = ? LIMIT ? FOR UPDATE" ||
+					len(arguments) != 3 || arguments[0].Value != actor.UserID || arguments[1].Value != want.ID {
+					t.Error("历史版本引用应按归属当前读，且不按到期时间过滤")
+				}
+				if mode == "history query failure" {
+					return nil, fault
+				}
+				var result []driver.Value
+				if mode == "history reference" {
+					result = []driver.Value{"12"}
+				}
+				return &objectReferenceRows{&idempotencyRecordRows{values: result}}, nil
+			}
 			script.orphanStagedObject = func(_ context.Context, statement string, arguments []driver.NamedValue) (driver.Result, error) {
 				writes++
 				expectedSQL := "UPDATE stored_objects SET status = 'ORPHANED', unreferenced_at = UTC_TIMESTAMP(6), gc_after = DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 7 DAY), updated_at = UTC_TIMESTAMP(6) WHERE owner_user_id = ? AND id = ? AND status = ? AND unreferenced_at IS NULL AND gc_after IS NULL"
@@ -178,6 +192,9 @@ func TestMarkUserStagedObjectOrphanedResults(t *testing.T) {
 			}
 			if (mode == "already orphaned" || mode == "longer grace retained") && writes != 0 {
 				t.Fatal("重复标记重置了宽限期")
+			}
+			if (mode == "history reference" || mode == "history query failure") && writes != 0 {
+				t.Fatal("历史引用存在或查询失败时仍执行了孤立写入")
 			}
 		})
 	}
@@ -233,7 +250,7 @@ func TestMarkUserStagedObjectOrphanedBoundary(t *testing.T) {
 }
 
 func TestMarkUserStagedObjectOrphanedCancellation(t *testing.T) {
-	for _, phase := range []string{"object deadline", "file deadline", "task deadline", "file cancelled", "task cancelled", "idempotent cancelled", "write cancelled", "write failure cancelled", "readback cancelled"} {
+	for _, phase := range []string{"object deadline", "file deadline", "task deadline", "history deadline", "file cancelled", "task cancelled", "history cancelled", "idempotent cancelled", "write cancelled", "write failure cancelled", "readback cancelled"} {
 		t.Run(phase, func(t *testing.T) {
 			// 1. 在对象、引用、写入及复用阶段取消，结果须为空。
 			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
@@ -258,7 +275,7 @@ func TestMarkUserStagedObjectOrphanedCancellation(t *testing.T) {
 				}
 				return &storedObjectReadRows{&idempotencyRecordRows{values: values}}, nil
 			}
-			for _, reference := range []string{"file", "task"} {
+			for _, reference := range []string{"file", "task", "history"} {
 				query := func(queryContext context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
 					if phase == reference+" deadline" {
 						<-queryContext.Done()
@@ -269,10 +286,13 @@ func TestMarkUserStagedObjectOrphanedCancellation(t *testing.T) {
 					}
 					return &objectReferenceRows{&idempotencyRecordRows{}}, nil
 				}
-				if reference == "file" {
+				switch reference {
+				case "file":
 					script.entryQuery = query
-				} else {
+				case "task":
 					script.uploadQuery = query
+				case "history":
+					script.fileVersionQuery = query
 				}
 			}
 			script.orphanStagedObject = func(context.Context, string, []driver.NamedValue) (driver.Result, error) {
