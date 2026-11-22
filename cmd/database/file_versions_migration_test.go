@@ -17,7 +17,7 @@ func TestFileVersionsMigrationIntegration(t *testing.T) {
 		databaseName := readSyncMigrationValue(t, connection, "SELECT DATABASE()")
 		verifySyncMigrationAndRerun(t, connection, databaseName, catalog)
 		verifyFileVersionsTable(t, connection)
-		t.Log("空库依次应用 1、2、3、4，启动检查通过，历史表为空，重跑保持原记录")
+		t.Log("空库依次应用 1 至当前版本，启动检查通过，历史表为空，重跑保持原记录")
 	})
 
 	t.Run("upgrade v3 and verify history constraints", func(t *testing.T) {
@@ -39,11 +39,11 @@ func TestFileVersionsMigrationIntegration(t *testing.T) {
 		syncBefore := readSyncMigrationValue(t, connection, syncSnapshot)
 		oldLedger := readSyncMigrationValue(t, connection, syncMigrationLedger)
 
-		// 2. 运行正式迁移入口，核对只补版本 4，重跑和启动检查保持数据原值。
+		// 2. 运行正式迁移入口，核对从版本 4 补齐，重跑和启动检查保持数据原值。
 		if err := run(databaseName, false); err != nil {
 			t.Fatal(err)
 		}
-		assertFixtureMigrationRecords(t, connection, catalog, 4)
+		assertFixtureMigrationRecords(t, connection, catalog, len(catalog))
 		verifyFileVersionsTable(t, connection)
 		ledger := readSyncMigrationValue(t, connection, syncMigrationLedger)
 		if err := run(databaseName, false); err != nil {
@@ -59,7 +59,7 @@ func TestFileVersionsMigrationIntegration(t *testing.T) {
 			readSyncMigrationValue(t, connection, syncSnapshot) != syncBefore {
 			t.Fatal("版本 4、重跑或启动校验改写了既有账本、业务记录或同步状态")
 		}
-		t.Log("合法 v3 只补版本 4，账号、条目、对象、任务、回执、配额、事件和设备游标保持一致")
+		t.Log("合法 v3 补齐后续版本，账号、条目、对象、任务、回执、配额、事件和设备游标保持一致")
 
 		// 3. 在升级后的结构里验证正例、外键和时间约束。
 		verifyFileVersionConstraints(t, connection)
@@ -79,7 +79,7 @@ func TestFileVersionsMigrationIntegration(t *testing.T) {
 		if !strings.Contains(migrationError.Error(), "migration 4 failed and is marked dirty") {
 			t.Fatal(migrationError)
 		}
-		assertFixtureMigrationRecords(t, connection, catalog, 3)
+		assertFixtureMigrationRecords(t, connection, catalog[:4], 3)
 		dirtyLedger := readSyncMigrationValue(t, connection, syncMigrationLedger)
 
 		// 2. 验证两条入口均拒绝 dirty，保留现场以便诊断。
