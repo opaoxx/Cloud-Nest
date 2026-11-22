@@ -95,5 +95,9 @@ func copyUploadTask(task *domain.UploadTask) *domain.UploadTask {
 	result.LastErrorCode = copyOptionalValue(task.LastErrorCode)
 	result.LastErrorMessage = copyOptionalValue(task.LastErrorMessage)
 	result.CompletedAt = copyOptionalValue(task.CompletedAt)
+	result.ReplacementEntryID = copyOptionalValue(task.ReplacementEntryID)
+	result.ReplacementExpectedRevision = copyOptionalValue(task.ReplacementExpectedRevision)
+	result.ReplacementPublishedRevision = copyOptionalValue(task.ReplacementPublishedRevision)
+	result.ReplacementConflictingRevision = copyOptionalValue(task.ReplacementConflictingRevision)
 	return &result
 }

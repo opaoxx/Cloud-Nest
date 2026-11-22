@@ -63,6 +63,7 @@ func TestIdempotentCreateUploadServiceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	installUploadReplacementFixtureColumns(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(1,'idempotent_upload','幂等上传用户','fixture_hash',104857600),(3,'idempotent_upload_other','另一用户','fixture_hash',104857600)",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(13,1,'28ee758a-0727-42de-ae7d-3bb33155e148','原设备','WEB'),(14,1,'28ee758a-0727-42de-ae7d-3bb33155e149','另一设备','WINDOWS'),(31,3,'38ee758a-0727-42de-ae7d-3bb33155e148','另一用户设备','WINDOWS')",

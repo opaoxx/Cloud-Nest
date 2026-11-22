@@ -46,6 +46,7 @@ func TestCreateUploadHandlerIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	installUploadReplacementFixtureColumns(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota,used_storage) VALUES(1,'upload_handler','上传处理用户','fixture_hash',104857600,1),(3,'upload_handler_other','另一用户','fixture_hash',104857600,0)",
 		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(11,1,NULL,'',X'','DIR'),(33,3,NULL,'',X'','DIR')",

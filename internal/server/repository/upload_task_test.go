@@ -43,6 +43,7 @@ func uploadTaskReadFixture() (domain.UploadTask, []driver.Value) {
 		int64(16777216), int64(5242880), int64(3), "COMPLETED", int64(31), int64(0),
 		leaseOwner, leaseUntil, int64(3), nextAttemptAt, int64(2), want.ExpiresAt,
 		errorCode, errorMessage, want.CreatedAt, want.UpdatedAt, completedAt,
+		nil, nil, nil, nil,
 	}
 	return want, values
 }
@@ -181,6 +182,21 @@ func TestFindUserUploadTaskInvalidRecords(t *testing.T) {
 		{"submicrosecond time", map[int]driver.Value{22: time.Date(2026, 11, 17, 8, 0, 0, 1, time.UTC)}},
 		{"below database year", map[int]driver.Value{22: time.Date(999, 12, 31, 23, 59, 59, 0, time.UTC)}},
 		{"above database year", map[int]driver.Value{22: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}},
+		{"partial replacement target", map[int]driver.Value{28: "31"}},
+		{"partial replacement revision", map[int]driver.Value{29: "4"}},
+		{"zero replacement target", map[int]driver.Value{28: "0", 29: "4", 30: "5"}},
+		{"zero replacement revision", map[int]driver.Value{28: "31", 29: "0", 30: "1"}},
+		{"replacement missing digest", map[int]driver.Value{10: nil, 28: "31", 29: "4", 30: "5"}},
+		{"replacement wrong result entry", map[int]driver.Value{28: "32", 29: "4", 30: "5"}},
+		{"replacement completed missing version", map[int]driver.Value{28: "31", 29: "4"}},
+		{"replacement completed version skipped", map[int]driver.Value{28: "31", 29: "4", 30: "6"}},
+		{"replacement version cannot wrap", map[int]driver.Value{28: "31", 29: "18446744073709551615", 30: "0"}},
+		{"replacement premature version", map[int]driver.Value{14: "VERIFYING", 15: nil, 28: "31", 29: "4", 30: "5"}},
+		{"replacement unexpected result entry", map[int]driver.Value{14: "VERIFYING", 28: "31", 29: "4"}},
+		{"replacement conflict missing version", map[int]driver.Value{14: "FAILED", 15: nil, 23: domain.UploadRevisionConflictCode, 28: "31", 29: "4"}},
+		{"replacement conflict equals expectation", map[int]driver.Value{14: "FAILED", 15: nil, 23: domain.UploadRevisionConflictCode, 28: "31", 29: "4", 31: "4"}},
+		{"replacement unexpected conflict version", map[int]driver.Value{14: "FAILED", 15: nil, 28: "31", 29: "4", 31: "5"}},
+		{"ordinary upload with replacement outcome", map[int]driver.Value{30: "5"}},
 	}
 	for _, column := range []int{18, 20, 22, 25, 26, 27} {
 		fixtures = append(fixtures, struct {

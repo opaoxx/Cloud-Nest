@@ -196,9 +196,15 @@ func TestUploadTaskServiceInput(t *testing.T) {
 }
 
 func TestUploadTaskServiceCopiesAndConcurrency(t *testing.T) {
-	// 1. 两次交付的十三个可空目标分别独立于来源和其他结果。
+	// 1. 两次交付的可空字段分别独立于来源和其他结果。
 	actor, source := uploadTaskServiceFixture()
+	source.ReplacementEntryID = new(uint64(31))
+	source.ReplacementExpectedRevision = new(uint64(4))
+	source.ReplacementPublishedRevision = new(uint64(5))
 	_, expected := uploadTaskServiceFixture()
+	expected.ReplacementEntryID = new(uint64(31))
+	expected.ReplacementExpectedRevision = new(uint64(4))
+	expected.ReplacementPublishedRevision = new(uint64(5))
 	tasks := NewUploadTaskService(func(context.Context, uint64, uint64) (*domain.UploadTask, error) { return &source, nil })
 	first, err := tasks.Get(context.Background(), actor, source.ID)
 	if err != nil {
@@ -249,5 +255,21 @@ func TestUploadTaskServiceCopiesAndConcurrency(t *testing.T) {
 	*source.ResolvedName, *source.PartSize, source.RequestedName = "source changed", 1, "source changed.bin"
 	if !reflect.DeepEqual(second, &expected) {
 		t.Fatal("来源后续变化影响了已交付任务")
+	}
+
+	// 4. 失败任务也应独立持有冲突时的版本。
+	source.Status = domain.UploadStatusFailed
+	source.ResultEntryID = nil
+	source.ReplacementPublishedRevision = nil
+	source.ReplacementConflictingRevision = new(uint64(6))
+	source.LastErrorCode = new(domain.UploadRevisionConflictCode)
+	conflicting, err := tasks.Get(context.Background(), actor, source.ID)
+	if err != nil || conflicting == nil || conflicting.ReplacementConflictingRevision == nil ||
+		*conflicting.ReplacementConflictingRevision != 6 {
+		t.Fatal("查询服务没有保留冲突版本", err)
+	}
+	*conflicting.ReplacementConflictingRevision = 999
+	if *source.ReplacementConflictingRevision != 6 {
+		t.Fatal("修改冲突版本影响任务来源")
 	}
 }

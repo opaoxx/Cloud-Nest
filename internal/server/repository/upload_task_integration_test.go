@@ -29,6 +29,7 @@ func uploadTaskDatabase(t *testing.T) (*sql.DB, domain.UploadTask) {
 	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:end]); err != nil {
 		t.Fatal(err)
 	}
+	installUploadReplacementFixtureColumns(t, ctx, pool)
 	installChangeEventFixtureTable(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,status) VALUES(7,'upload_owner','上传用户','fixture_hash','ACTIVE'),(8,'upload_other','其他用户','fixture_hash','DISABLED')",
@@ -54,6 +55,13 @@ func uploadTaskDatabase(t *testing.T) (*sql.DB, domain.UploadTask) {
 	return pool, want
 }
 
+func installUploadReplacementFixtureColumns(t *testing.T, ctx context.Context, pool *sql.DB) {
+	t.Helper()
+	if _, err := pool.ExecContext(ctx, migrations.Ordered()[4].SQL); err != nil {
+		t.Fatal("安装上传替换夹具列失败", err)
+	}
+}
+
 func TestFindUserUploadTaskIntegration(t *testing.T) {
 	pool, want := uploadTaskDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
@@ -66,7 +74,7 @@ func TestFindUserUploadTaskIntegration(t *testing.T) {
 		t.Helper()
 		actual, err := store.FindUserUploadTask(ctx, expected.UserID, expected.ID)
 		if err != nil || !reflect.DeepEqual(actual, &expected) {
-			t.Fatal("正式任务二十八字段读回错误", err)
+			t.Fatal("正式任务字段读回错误", err)
 		}
 	}
 	check(t, want)
@@ -172,4 +180,69 @@ func TestFindUserUploadTaskIntegration(t *testing.T) {
 			t.Fatal("数据库故障被混同为任务缺失", err)
 		}
 	})
+}
+
+func TestFindUserUploadTaskReplacementIntegration(t *testing.T) {
+	pool, ordinary := uploadTaskDatabase(t)
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	execute := func(statement string, arguments ...any) {
+		t.Helper()
+		if _, err := pool.ExecContext(ctx, statement, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() *domain.UploadTask {
+		t.Helper()
+		task, err := store.FindUserUploadTask(ctx, ordinary.UserID, ordinary.ID)
+		if err != nil || task == nil {
+			t.Fatal("替换任务查询未返回记录", err)
+		}
+		return task
+	}
+
+	// 1. 普通任务四个字段保持 nil，准备中的替换任务只有目标和预期版本。
+	if task := read(); !reflect.DeepEqual(task, &ordinary) {
+		t.Fatal("普通任务读取结果有变化", task)
+	}
+	const maximum = ^uint64(0)
+	expectedVersion := maximum - 1
+	execute(`UPDATE upload_tasks SET status='UPLOADING',published_object_id=NULL,result_entry_id=NULL,resolved_name=NULL,
+		completed_at=NULL,last_error_code=NULL,replacement_entry_id=31,replacement_expected_revision=? WHERE id=19`, expectedVersion)
+	task, now, err := store.FindUserUploadTaskForPartSigning(ctx, ordinary.UserID, ordinary.ID)
+	if err != nil || task == nil || now.IsZero() || task.ReplacementEntryID == nil || *task.ReplacementEntryID != 31 ||
+		task.ReplacementExpectedRevision == nil || *task.ReplacementExpectedRevision != expectedVersion ||
+		task.ReplacementPublishedRevision != nil || task.ReplacementConflictingRevision != nil {
+		t.Fatal("任务加时钟读取未保留替换绑定", task, now, err)
+	}
+	if other, err := store.FindUserUploadTask(ctx, 8, ordinary.ID); other != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
+		t.Fatal("替换任务泄露给其他账号", other, err)
+	}
+
+	// 2. 完成时读取实际保存的最大版本，修改返回值不会影响再次查询。
+	execute(`UPDATE upload_tasks SET status='COMPLETED',result_entry_id=31,published_object_id=29,resolved_name=requested_name,
+		completed_at=UTC_TIMESTAMP(6),replacement_published_revision=? WHERE id=19`, maximum)
+	completed := read()
+	if completed.ReplacementPublishedRevision == nil || *completed.ReplacementPublishedRevision != maximum ||
+		completed.ReplacementConflictingRevision != nil {
+		t.Fatal("替换发布版本未完整读回", completed)
+	}
+	*completed.ReplacementEntryID, *completed.ReplacementExpectedRevision, *completed.ReplacementPublishedRevision = 999, 1, 1
+	if next := read(); next.ReplacementEntryID == nil || *next.ReplacementEntryID != 31 ||
+		next.ReplacementExpectedRevision == nil || *next.ReplacementExpectedRevision != expectedVersion ||
+		next.ReplacementPublishedRevision == nil || *next.ReplacementPublishedRevision != maximum {
+		t.Fatal("修改任务读取结果影响后续查询", next)
+	}
+
+	// 3. 冲突时保留诊断版本，结果目录项和发布版本为空。
+	execute(`UPDATE upload_tasks SET status='FAILED',last_error_code=?,result_entry_id=NULL,published_object_id=NULL,resolved_name=NULL,
+		replacement_published_revision=NULL,replacement_conflicting_revision=? WHERE id=19`, domain.UploadRevisionConflictCode, maximum)
+	conflict := read()
+	if conflict.Status != domain.UploadStatusFailed || conflict.ResultEntryID != nil || conflict.ReplacementPublishedRevision != nil ||
+		conflict.ReplacementConflictingRevision == nil || *conflict.ReplacementConflictingRevision != maximum {
+		t.Fatal("冲突版本快照未完整读回", conflict)
+	}
 }

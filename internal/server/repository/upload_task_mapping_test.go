@@ -16,7 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// uploadTaskMappingRows 复用单行结果读取，提供正式上传任务的二十八列。
+// uploadTaskMappingRows 复用单行结果读取，提供正式上传任务的完整列。
 type uploadTaskMappingRows struct{ *fileEntryRows }
 
 func (*uploadTaskMappingRows) Columns() []string {
@@ -26,11 +26,12 @@ func (*uploadTaskMappingRows) Columns() []string {
 		"file_size", "part_size", "part_count", "status", "result_entry_id", "reserved_bytes",
 		"lease_owner", "lease_until", "lease_version", "next_attempt_at", "attempt_count", "expires_at",
 		"last_error_code", "last_error_message", "created_at", "updated_at", "completed_at",
+		"replacement_entry_id", "replacement_expected_revision", "replacement_published_revision", "replacement_conflicting_revision",
 	}
 }
 
 func TestUploadTaskMappingSchema(t *testing.T) {
-	// 1. 核对表名、28 个列名和字段读取权限。
+	// 1. 核对表名、32 个列名和字段读取权限。
 	connector := &accountConnector{}
 	pool := sql.OpenDB(connector)
 	defer pool.Close()
@@ -42,7 +43,7 @@ func TestUploadTaskMappingSchema(t *testing.T) {
 	if err := statement.Parse(&models.UploadTask{}); err != nil {
 		t.Fatal(err)
 	}
-	if statement.Table != "upload_tasks" || len(statement.Schema.DBNames) != 28 || len(statement.Schema.Fields) != 28 {
+	if statement.Table != "upload_tasks" || len(statement.Schema.DBNames) != 32 || len(statement.Schema.Fields) != 32 {
 		t.Fatal("GORM 上传任务表名或字段数量错误")
 	}
 	_, table, found := strings.Cut(migrations.InitialSQL, "CREATE TABLE upload_tasks (\n")
@@ -50,9 +51,9 @@ func TestUploadTaskMappingSchema(t *testing.T) {
 		t.Fatal("正式上传任务表未找到")
 	}
 	table, _, _ = strings.Cut(table, ") ENGINE=")
-	columnPattern := regexp.MustCompile(`(?m)^ ([a-z_][a-z_0-9]*) (?:BIGINT|INT|VARCHAR|BINARY|DATETIME)`)
-	columns := columnPattern.FindAllStringSubmatch(table, -1)
-	if len(columns) != 28 {
+	columnPattern := regexp.MustCompile(`(?m)^ (?:ADD COLUMN )?([a-z_][a-z_0-9]*) (?:BIGINT|INT|VARCHAR|BINARY|DATETIME)`)
+	columns := columnPattern.FindAllStringSubmatch(table+"\n"+migrations.Ordered()[4].SQL, -1)
+	if len(columns) != 32 {
 		t.Fatal("正式上传任务列提取不完整")
 	}
 	domainType := reflect.TypeFor[domain.UploadTask]()
@@ -116,6 +117,7 @@ func TestUploadTaskMappingScan(t *testing.T) {
 				int64(16777216), int64(5242880), int64(3), "VERIFYING", int64(31), int64(16777216),
 				leaseOwner, stamp, int64(3), stamp, int64(2), want.ExpiresAt,
 				errorCode, errorMessage, stamp, stamp, stamp,
+				nil, nil, nil, nil,
 			}
 			switch mode {
 			case "SQL NULL optional fields":
@@ -145,6 +147,11 @@ func TestUploadTaskMappingScan(t *testing.T) {
 					values[column] = "18446744073709551615"
 				}
 				partCount, values[13], values[21] = 10000, int64(10000), "4294967295"
+				want.ReplacementEntryID, want.ReplacementExpectedRevision = &maximum, &maximum
+				want.ReplacementPublishedRevision, want.ReplacementConflictingRevision = &maximum, &maximum
+				for _, column := range []int{28, 29, 30, 31} {
+					values[column] = "18446744073709551615"
+				}
 			case "zero digest":
 				want.ExpectedSHA256, values[10] = make([]byte, 32), make([]byte, 32)
 			case "short digest retained":
@@ -190,7 +197,7 @@ func TestUploadTaskMappingScan(t *testing.T) {
 					t.Fatal("非法数值或时间未触发扫描错误")
 				}
 			} else if err != nil || !reflect.DeepEqual(actual, want) {
-				t.Fatal("上传任务二十八字段未完整扫描", err)
+				t.Fatal("上传任务字段未完整扫描", err)
 			}
 			if queries != 1 {
 				t.Fatal("上传任务映射扫描未恰好执行一次查询")

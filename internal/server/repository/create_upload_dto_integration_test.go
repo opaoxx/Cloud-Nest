@@ -36,6 +36,7 @@ func TestCreateUploadDataIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	installUploadReplacementFixtureColumns(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,storage_quota) VALUES(1,'create_upload_dto','创建响应用户','fixture_hash',104857600)",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(13,1,'28ee758a-0727-42de-ae7d-3bb33155e148','创建响应设备','WEB')",

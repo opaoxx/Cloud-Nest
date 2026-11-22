@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-// UploadTask 是上传任务二十八列的只读查询映射。
+// UploadTask 是上传任务的只读查询映射，包含替换任务扩展列。
 type UploadTask struct {
 	// 1. 映射任务标识、归属及当前暂存对象。
 	// ID 对应上传任务的完整无符号主键。
@@ -67,6 +67,16 @@ type UploadTask struct {
 	UpdatedAt time.Time `gorm:"column:updated_at;->"`
 	// CompletedAt 是可空的任务终结 UTC 时间，覆盖成功、取消、过期及失败。
 	CompletedAt *time.Time `gorm:"column:completed_at;->"`
+
+	// 5. 映射替换任务绑定与结果，保留普通任务的 NULL。
+	// ReplacementEntryID 是创建任务时绑定的目标文件。
+	ReplacementEntryID *uint64 `gorm:"column:replacement_entry_id;->"`
+	// ReplacementExpectedRevision 是该任务要求的原文件版本。
+	ReplacementExpectedRevision *uint64 `gorm:"column:replacement_expected_revision;->"`
+	// ReplacementPublishedRevision 是成功替换时提交的版本。
+	ReplacementPublishedRevision *uint64 `gorm:"column:replacement_published_revision;->"`
+	// ReplacementConflictingRevision 是发生发布冲突时的文件版本。
+	ReplacementConflictingRevision *uint64 `gorm:"column:replacement_conflicting_revision;->"`
 }
 
 // TableName 指向既有上传任务表。

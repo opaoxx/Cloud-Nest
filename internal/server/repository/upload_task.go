@@ -57,12 +57,13 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 		return nil, fmt.Errorf("查询上传任务失败: %w", err)
 	}
 
-	// 2. 绑定用户与任务 ID，仅在签发查询中同时读取数据库时间。
+	// 2. 按用户和任务 ID 读取任务及替换字段，按需附带数据库时间。
 	columns := []string{"id", "user_id", "device_id", "staged_object_id", "published_object_id", "target_parent_id",
 		"requested_name", "resolved_name", "upload_mode", "storage_upload_id", "expected_sha256",
 		"file_size", "part_size", "part_count", "status", "result_entry_id", "reserved_bytes",
 		"lease_owner", "lease_until", "lease_version", "next_attempt_at", "attempt_count", "expires_at",
-		"last_error_code", "last_error_message", "created_at", "updated_at", "completed_at"}
+		"last_error_code", "last_error_message", "created_at", "updated_at", "completed_at",
+		"replacement_entry_id", "replacement_expected_revision", "replacement_published_revision", "replacement_conflicting_revision"}
 	if databaseTime != nil {
 		columns = append(columns, "UTC_TIMESTAMP(6) AS database_time")
 	}
@@ -119,7 +120,7 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 	if status == domain.UploadStatusCompleted && (record.PublishedObjectID == nil || record.ResultEntryID == nil || record.CompletedAt == nil) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	if (record.LeaseOwner == nil) != (record.LeaseUntil == nil) {
+	if (record.LeaseOwner == nil) != (record.LeaseUntil == nil) || !validUploadTaskReplacement(&record.UploadTask, status) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
@@ -163,6 +164,11 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 		CreatedAt:         record.CreatedAt.UTC(),
 		UpdatedAt:         record.UpdatedAt.UTC(),
 		CompletedAt:       copyUploadTaskValue(record.CompletedAt),
+
+		ReplacementEntryID:             copyUploadTaskValue(record.ReplacementEntryID),
+		ReplacementExpectedRevision:    copyUploadTaskValue(record.ReplacementExpectedRevision),
+		ReplacementPublishedRevision:   copyUploadTaskValue(record.ReplacementPublishedRevision),
+		ReplacementConflictingRevision: copyUploadTaskValue(record.ReplacementConflictingRevision),
 	}
 	for _, stamp := range []*time.Time{result.LeaseUntil, result.NextAttemptAt, result.CompletedAt} {
 		if stamp != nil {
@@ -178,6 +184,31 @@ func (store *Store) findUserUploadTask(ctx context.Context, userID, taskID uint6
 		*databaseTime = record.DatabaseTime
 	}
 	return result, nil
+}
+
+// validUploadTaskReplacement 核对 v5 任务绑定与结果，调用方已检查通用任务状态和摘要长度。
+func validUploadTaskReplacement(record *models.UploadTask, status domain.UploadStatus) bool {
+	// 1. 普通任务的替换字段全空，替换任务必须绑定有效目标、版本和摘要。
+	target, expected := record.ReplacementEntryID, record.ReplacementExpectedRevision
+	published, conflicting := record.ReplacementPublishedRevision, record.ReplacementConflictingRevision
+	if target == nil {
+		return expected == nil && published == nil && conflicting == nil
+	}
+	if *target == 0 || expected == nil || *expected == 0 || record.ExpectedSHA256 == nil {
+		return false
+	}
+
+	// 2. 成功时核对结果指向原文件且版本恰好递增一次。
+	if status == domain.UploadStatusCompleted {
+		return record.ResultEntryID != nil && *record.ResultEntryID == *target &&
+			published != nil && *published > *expected && *published-*expected == 1 && conflicting == nil
+	}
+
+	// 3. 仅发布冲突可保存不同的冲突版本，其余状态没有结果。
+	if status == domain.UploadStatusFailed && record.LastErrorCode != nil && *record.LastErrorCode == domain.UploadRevisionConflictCode {
+		return record.ResultEntryID == nil && published == nil && conflicting != nil && *conflicting != 0 && *conflicting != *expected
+	}
+	return record.ResultEntryID == nil && published == nil && conflicting == nil
 }
 
 // copyUploadTaskValue 为任务中的可空标量生成独立副本，nil 保留为空。

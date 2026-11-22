@@ -31,6 +31,7 @@ func TestCreateUserUploadTaskIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	installUploadReplacementFixtureColumns(t, ctx, pool)
 	for _, statement := range []string{
 		"INSERT INTO users(id,username,display_name,password_hash,status) VALUES(1,'task_owner','上传用户','fixture_hash','ACTIVE'),(2,'task_disabled','禁用用户','fixture_hash','DISABLED'),(3,'task_other','另一用户','fixture_hash','ACTIVE')",
 		"INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(13,1,'28ee758a-0727-42de-ae7d-3bb33155e148','上传设备','WEB'),(31,3,'38ee758a-0727-42de-ae7d-3bb33155e148','另一设备','WINDOWS')",

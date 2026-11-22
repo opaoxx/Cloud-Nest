@@ -39,6 +39,7 @@ func uploadTaskCreateFixture(input domain.CreateUploadInput, objectID uint64, ex
 		"19", "7", "11", strconv.FormatUint(objectID, 10), nil, strconv.FormatUint(input.ParentID, 10),
 		input.Name, nil, "SINGLE", nil, digest, strconv.FormatUint(input.SizeBytes, 10), nil, nil, "UPLOADING", nil,
 		strconv.FormatUint(input.SizeBytes, 10), nil, nil, "0", nil, int64(0), want.ExpiresAt, nil, nil, stamp, stamp, nil,
+		nil, nil, nil, nil,
 	}
 	return want, values
 }

@@ -24,6 +24,9 @@ var ErrUploadTargetUnavailable = errors.New("目标目录已不可用")
 // UploadTargetUnavailableCode 标记目标目录失效导致的任务失败。
 const UploadTargetUnavailableCode = "TARGET_UNAVAILABLE"
 
+// UploadRevisionConflictCode 标记条件替换在发布时发现版本冲突。
+const UploadRevisionConflictCode = "REVISION_CONFLICT"
+
 // ErrUploadTaskBusy 表示当前任务仍由有效租约持有者处理。
 var ErrUploadTaskBusy = errors.New("上传任务正在处理中")
 
@@ -101,4 +104,14 @@ type UploadTask struct {
 	UpdatedAt time.Time
 	// CompletedAt 是可空的任务终结 UTC 时间，覆盖成功、取消、过期及失败。
 	CompletedAt *time.Time
+
+	// 5. 保存替换任务的初始绑定和终态版本，普通任务四项均为 nil。
+	// ReplacementEntryID 是替换任务绑定的目标文件。
+	ReplacementEntryID *uint64
+	// ReplacementExpectedRevision 是创建任务时绑定的原文件版本。
+	ReplacementExpectedRevision *uint64
+	// ReplacementPublishedRevision 是成功替换时提交的新版本。
+	ReplacementPublishedRevision *uint64
+	// ReplacementConflictingRevision 是发布冲突时锁读到的文件版本。
+	ReplacementConflictingRevision *uint64
 }

@@ -16,7 +16,7 @@ import (
 )
 
 func TestUploadTaskRecordShape(t *testing.T) {
-	// 1. 从正式迁移提取上传任务列，准备领域字段及准确类型。
+	// 1. 从首版表及 v5 扩展提取任务列，准备领域字段及准确类型。
 	_, table, found := strings.Cut(migrations.InitialSQL, "CREATE TABLE upload_tasks (\n")
 	if !found {
 		t.Fatal("正式迁移缺少上传任务表")
@@ -25,9 +25,9 @@ func TestUploadTaskRecordShape(t *testing.T) {
 	if !found {
 		t.Fatal("上传任务表定义不完整")
 	}
-	columnPattern := regexp.MustCompile(`(?m)^ ([a-z_][a-z_0-9]*) (BIGINT UNSIGNED|INT UNSIGNED|VARCHAR\(\d+\)|BINARY\(32\)|DATETIME\(6\))([^\n]*)`)
+	columnPattern := regexp.MustCompile(`(?m)^ (?:ADD COLUMN )?([a-z_][a-z_0-9]*) (BIGINT UNSIGNED|INT UNSIGNED|VARCHAR\(\d+\)|BINARY\(32\)|DATETIME\(6\))([^\n]*)`)
 	columns := make(map[string][]string)
-	for _, match := range columnPattern.FindAllStringSubmatch(table, -1) {
+	for _, match := range columnPattern.FindAllStringSubmatch(table+"\n"+migrations.Ordered()[4].SQL, -1) {
 		columns[match[1]] = match
 	}
 	fixtures := []struct {
@@ -64,9 +64,13 @@ func TestUploadTaskRecordShape(t *testing.T) {
 		{"CreatedAt", "created_at", "DATETIME(6)", reflect.TypeFor[time.Time]()},
 		{"UpdatedAt", "updated_at", "DATETIME(6)", reflect.TypeFor[time.Time]()},
 		{"CompletedAt", "completed_at", "DATETIME(6)", reflect.TypeFor[*time.Time]()},
+		{"ReplacementEntryID", "replacement_entry_id", "BIGINT UNSIGNED", reflect.TypeFor[*uint64]()},
+		{"ReplacementExpectedRevision", "replacement_expected_revision", "BIGINT UNSIGNED", reflect.TypeFor[*uint64]()},
+		{"ReplacementPublishedRevision", "replacement_published_revision", "BIGINT UNSIGNED", reflect.TypeFor[*uint64]()},
+		{"ReplacementConflictingRevision", "replacement_conflicting_revision", "BIGINT UNSIGNED", reflect.TypeFor[*uint64]()},
 	}
 	recordType := reflect.TypeFor[domain.UploadTask]()
-	if len(columns) != 28 || len(fixtures) != 28 || recordType.NumField() != 28 {
+	if len(columns) != 32 || len(fixtures) != 32 || recordType.NumField() != 32 {
 		t.Fatalf("上传任务字段数量不符，数据库 %d，夹具 %d，领域 %d", len(columns), len(fixtures), recordType.NumField())
 	}
 	for _, fixture := range fixtures {
