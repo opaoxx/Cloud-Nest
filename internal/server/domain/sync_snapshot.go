@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 )
 
@@ -20,6 +21,14 @@ type SyncSnapshotHeader struct {
 	RootEntryID uint64
 	// HighWaterSequence 是同一读取视图中的 users.change_seq，允许为零。
 	HighWaterSequence uint64
+}
+
+// SyncSnapshotEntriesJSON 保存可按位置分页的条目 JSON 和整份数组的字节数。
+type SyncSnapshotEntriesJSON struct {
+	// Items 保持输入条目顺序，空树编码为 []。
+	Items []json.RawMessage
+	// SizeBytes 包含条目、方括号和逗号，可用于整份快照的预算检查。
+	SizeBytes int
 }
 
 // SyncSnapshotEntry 保存一个可见后代的目录元数据和已验证内容摘要。

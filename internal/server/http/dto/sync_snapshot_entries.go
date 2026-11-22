@@ -7,21 +7,13 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// SyncSnapshotEntriesJSON 保存可按位置分页的条目 JSON 和整份数组的字节数。
-type SyncSnapshotEntriesJSON struct {
-	// Items 保持输入条目顺序，空树编码为 []。
-	Items []json.RawMessage
-	// SizeBytes 包含条目、方括号和逗号，可用于整份快照的预算检查。
-	SizeBytes int
-}
-
 // EncodeSyncSnapshotEntries 转换快照条目，最多交付 10000 项和 8 MiB 条目 JSON。
-func EncodeSyncSnapshotEntries(entries []domain.SyncSnapshotEntry) (*SyncSnapshotEntriesJSON, error) {
+func EncodeSyncSnapshotEntries(entries []domain.SyncSnapshotEntry) (*domain.SyncSnapshotEntriesJSON, error) {
 	// 1. 检查条目数，计入整个 JSON 数组的两个方括号。
 	if len(entries) > domain.MaxSyncSnapshotEntries {
 		return nil, domain.ErrSyncSnapshotTooLarge
 	}
-	result := &SyncSnapshotEntriesJSON{
+	result := &domain.SyncSnapshotEntriesJSON{
 		Items:     make([]json.RawMessage, 0, len(entries)),
 		SizeBytes: len("[]"),
 	}
