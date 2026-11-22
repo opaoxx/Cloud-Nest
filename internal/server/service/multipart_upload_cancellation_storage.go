@@ -2,15 +2,13 @@ package service
 
 import (
 	"context"
-	"errors"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
 // MultipartUploadCancellationStorageService 串联单条取消任务的存储中止与复查。
 type MultipartUploadCancellationStorageService struct {
-	cleanup    multipartUploadCleanupStorage
-	statObject func(context.Context, string) (*domain.UploadObjectResult, error)
+	cleanup multipartUploadCleanupStorage
 }
 
 // NewMultipartUploadCancellationStorageService 绑定使用同一存储配置的目标读取和存储操作。
@@ -24,7 +22,7 @@ func NewMultipartUploadCancellationStorageService(
 		panic("分片取消的存储收尾需要目标读取、会话中止、复查和对象查询方法")
 	}
 	return &MultipartUploadCancellationStorageService{
-		cleanup: multipartUploadCleanupStorage{findTarget: findTarget, abort: abort, check: check}, statObject: statObject,
+		cleanup: multipartUploadCleanupStorage{findTarget: findTarget, abort: abort, check: check, statObject: statObject},
 	}
 }
 
@@ -41,37 +39,7 @@ func (execution *MultipartUploadCancellationStorageService) ObserveBoundSession(
 func (execution *MultipartUploadCancellationStorageService) ObserveUnboundSession(
 	ctx context.Context, claimed *domain.UploadTask,
 ) (*domain.MultipartUploadCancellationObservation, error) {
-	// 1. 按当前取消租约读取原对象键，确认会话尚未绑定。
-	if err := validateCancellationStorageClaim(ctx, claimed); err != nil {
-		return nil, err
-	}
-	if claimed.StorageUploadID != nil {
-		return nil, domain.ErrUploadTaskNotReady
-	}
-	task := copyUploadTask(claimed)
-	objectKey, err := execution.cleanup.readObjectKey(ctx, task)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. 只读查询原对象，区分对象存在、明确缺失和查询失败。
-	object, statError := execution.statObject(ctx, objectKey)
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if statError != nil && !errors.Is(statError, domain.ErrUploadObjectMissing) {
-		return nil, multipartCleanupStorageFailure(statError)
-	}
-	// 成功需要对象元数据，明确缺失时对象元数据应为空。
-	if (statError == nil) != (object != nil) {
-		return nil, domain.ErrUploadStorageUnavailable
-	}
-
-	// 3. 再次核对租约、对象键和空绑定，返回观察。
-	if err := execution.cleanup.recheckObjectKey(ctx, task, objectKey); err != nil {
-		return nil, err
-	}
-	return newMultipartCleanupObservation(task, objectKey, object), nil
+	return execution.cleanup.observeUnboundSession(ctx, claimed, domain.UploadStatusCancelling)
 }
 
 func validateCancellationStorageClaim(ctx context.Context, claimed *domain.UploadTask) error {

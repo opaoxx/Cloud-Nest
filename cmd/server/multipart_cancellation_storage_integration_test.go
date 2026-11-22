@@ -169,7 +169,7 @@ func verifyServerMultipartBoundCleanupStorage(t *testing.T, pendingStatus domain
 				observe = service.NewMultipartUploadExpirationStorageService(
 					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
 						return store.FindMultipartUploadExpirationTarget(callContext, task, settings.Provider, settings.Bucket)
-					}, abort, check).ObserveBoundSession
+					}, abort, check, client.StatMultipartUploadObject).ObserveBoundSession
 			} else {
 				observe = service.NewMultipartUploadCancellationStorageService(
 					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {

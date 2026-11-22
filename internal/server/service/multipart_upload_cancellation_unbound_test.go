@@ -13,11 +13,24 @@ import (
 )
 
 func TestObserveUnboundMultipartUploadCancellationSession(t *testing.T) {
+	testObserveUnboundMultipartUploadCleanupSession(t, domain.UploadStatusCancelling)
+}
+
+func TestObserveUnboundMultipartUploadExpirationSession(t *testing.T) {
+	testObserveUnboundMultipartUploadCleanupSession(t, domain.UploadStatusExpiring)
+}
+
+func testObserveUnboundMultipartUploadCleanupSession(t *testing.T, pendingStatus domain.UploadStatus) {
+	t.Helper()
 	const key, etag, version = "fixture/unbound +%.bin", "fixture-etag", "Version+A/="
 	const flow = "target head target"
 	busy := domain.ErrUploadTaskBusy
 	missing := domain.ErrUploadObjectMissing
 	unavailable := domain.ErrUploadStorageUnavailable
+	otherCleanupPhase := domain.UploadStatusExpiring
+	if pendingStatus == domain.UploadStatusExpiring {
+		otherCleanupPhase = domain.UploadStatusCancelling
+	}
 	for _, fixture := range []struct {
 		name, calls, cancelAt string
 		firstError, lastError error
@@ -44,11 +57,12 @@ func TestObserveUnboundMultipartUploadCancellationSession(t *testing.T) {
 		{name: "canceled during recheck", calls: flow, withObject: true, cancelAt: "final", want: context.Canceled},
 		{name: "already bound", changeTask: func(task *domain.UploadTask) { task.StorageUploadID = new("fixture-session") }, want: domain.ErrUploadTaskNotReady},
 		{name: "wrong phase", changeTask: func(task *domain.UploadTask) { task.Status = domain.UploadStatusCreating }, want: domain.ErrInvalidUploadTaskData},
+		{name: "other cleanup phase", changeTask: func(task *domain.UploadTask) { task.Status = otherCleanupPhase }, want: domain.ErrInvalidUploadTaskData},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			task := &domain.UploadTask{ID: 19, UserID: 7, StagedObjectID: 23, Status: domain.UploadStatusCancelling,
+			task := &domain.UploadTask{ID: 19, UserID: 7, StagedObjectID: 23, Status: pendingStatus,
 				UploadMode: "MULTIPART", LeaseOwner: new("fixture-worker"), LeaseVersion: 5,
 				LeaseUntil: new(time.Now().UTC().Add(time.Minute)), FileSize: 16777217}
 			if fixture.changeTask != nil {
@@ -61,55 +75,60 @@ func TestObserveUnboundMultipartUploadCancellationSession(t *testing.T) {
 			var calls []string
 			var lookups int
 			object := &domain.UploadObjectResult{SizeBytes: 29, StorageETag: new(etag), StorageVersionID: new(version)}
-			execution := NewMultipartUploadCancellationStorageService(
-				func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
-					calls = append(calls, "target")
-					lookups++
-					if callContext != ctx || !reflect.DeepEqual(claimed, task) {
-						t.Fatal("原租约或上下文未传到查询")
-					}
-					if lookups == 1 && fixture.firstError != nil {
-						return nil, fixture.firstError
-					}
-					if lookups == 2 && fixture.lastError != nil {
-						return nil, fixture.lastError
-					}
-					target := &domain.MultipartUploadCancellationTarget{ObjectKey: key}
-					if lookups == fixture.bindAt {
-						target.UploadID = new("fixture-late-session")
-					}
-					if lookups == 2 && fixture.changeKey {
-						target.ObjectKey = "fixture/new-key"
-					}
-					if lookups == 2 && fixture.cancelAt == "final" {
-						cancel()
-					}
-					return target, nil
-				},
-				func(context.Context, string, string) error {
-					t.Fatal("未绑定分支发起了中止")
-					return nil
-				},
-				func(context.Context, string, string) (*domain.MultipartUploadAbortObservation, error) {
-					t.Fatal("未绑定分支访问了分片会话")
-					return nil, nil
-				},
-				func(callContext context.Context, objectKey string) (*domain.UploadObjectResult, error) {
-					calls = append(calls, "head")
-					if callContext != ctx || objectKey != key {
-						t.Fatal("HEAD 未读取原对象键")
-					}
-					if fixture.cancelAt == "head" {
-						cancel()
-					}
-					if fixture.withObject {
-						return object, fixture.statError
-					}
-					return nil, fixture.statError
-				})
+			findTarget := func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+				calls = append(calls, "target")
+				lookups++
+				if callContext != ctx || !reflect.DeepEqual(claimed, task) {
+					t.Fatal("原租约或上下文未传到查询")
+				}
+				if lookups == 1 && fixture.firstError != nil {
+					return nil, fixture.firstError
+				}
+				if lookups == 2 && fixture.lastError != nil {
+					return nil, fixture.lastError
+				}
+				target := &domain.MultipartUploadCancellationTarget{ObjectKey: key}
+				if lookups == fixture.bindAt {
+					target.UploadID = new("fixture-late-session")
+				}
+				if lookups == 2 && fixture.changeKey {
+					target.ObjectKey = "fixture/new-key"
+				}
+				if lookups == 2 && fixture.cancelAt == "final" {
+					cancel()
+				}
+				return target, nil
+			}
+			abort := func(context.Context, string, string) error {
+				t.Fatal("未绑定分支发起了中止")
+				return nil
+			}
+			check := func(context.Context, string, string) (*domain.MultipartUploadAbortObservation, error) {
+				t.Fatal("未绑定分支访问了分片会话")
+				return nil, nil
+			}
+			stat := func(callContext context.Context, objectKey string) (*domain.UploadObjectResult, error) {
+				calls = append(calls, "head")
+				if callContext != ctx || objectKey != key {
+					t.Fatal("HEAD 未读取原对象键")
+				}
+				if fixture.cancelAt == "head" {
+					cancel()
+				}
+				if fixture.withObject {
+					return object, fixture.statError
+				}
+				return nil, fixture.statError
+			}
+			var observe func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCleanupObservation, error)
+			if pendingStatus == domain.UploadStatusExpiring {
+				observe = NewMultipartUploadExpirationStorageService(findTarget, abort, check, stat).ObserveUnboundSession
+			} else {
+				observe = NewMultipartUploadCancellationStorageService(findTarget, abort, check, stat).ObserveUnboundSession
+			}
 
 			// 2. 核对查询次数与观察种类，再修改返回值确认它有独立副本。
-			observed, err := execution.ObserveUnboundSession(ctx, task)
+			observed, err := observe(ctx, task)
 			if got := strings.Join(calls, " "); got != fixture.calls || !errors.Is(err, fixture.want) ||
 				(observed != nil) != fixture.wantObservation {
 				t.Fatal("只读查询顺序、观察或错误不符", got, observed, err)

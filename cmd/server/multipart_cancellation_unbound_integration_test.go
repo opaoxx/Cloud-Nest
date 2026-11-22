@@ -21,6 +21,18 @@ func TestServerMultipartCancellationUnboundIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_MULTIPART_CANCEL_UNBOUND_TEST") != "1" {
 		t.Skip("显式启用后创建本轮专用 MySQL、MinIO 和合成数据")
 	}
+	verifyServerMultipartUnboundCleanup(t, domain.UploadStatusCancelling)
+}
+
+func TestServerMultipartExpirationUnboundIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_MULTIPART_EXPIRATION_UNBOUND_TEST") != "1" {
+		t.Skip("显式启用后验证专用桶内未绑定的分片到期复查")
+	}
+	verifyServerMultipartUnboundCleanup(t, domain.UploadStatusExpiring)
+}
+
+func verifyServerMultipartUnboundCleanup(t *testing.T, pendingStatus domain.UploadStatus) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	mysqlID := startIsolatedWebMySQL(t, ctx)
@@ -43,7 +55,7 @@ func TestServerMultipartCancellationUnboundIntegration(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 
-	// 1. 建立独占账号及未绑定会话的合成取消任务。
+	// 1. 建立独占账号及未绑定会话的合成任务，按收尾阶段领取租约。
 	const userID, usedBytes = 7, 1024
 	const partSize, fileSize = 16 << 20, (16 << 20) + 1
 	const reservedBytes = 3 * fileSize
@@ -53,7 +65,7 @@ func TestServerMultipartCancellationUnboundIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execute(t, "INSERT INTO users(id,username,display_name,password_hash,used_storage,reserved_storage) VALUES(7,'unbound_cancel_fixture','未绑定会话取消','fixture_hash',?,?)", usedBytes, reservedBytes)
+	execute(t, "INSERT INTO users(id,username,display_name,password_hash,used_storage,reserved_storage) VALUES(7,'unbound_cleanup_fixture','未绑定会话收尾','fixture_hash',?,?)", usedBytes, reservedBytes)
 	execute(t, "INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB')")
 	execute(t, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
 	core := minio.Core{Client: bucket.client}
@@ -91,16 +103,29 @@ func TestServerMultipartCancellationUnboundIntegration(t *testing.T) {
 			}
 			execute(t, "INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(?,7,?,?,?,?)",
 				fixture.object, settings.Provider, settings.Bucket, fixture.key, fileSize)
+			initialStatus := pendingStatus
+			if pendingStatus == domain.UploadStatusExpiring {
+				initialStatus = domain.UploadStatusCreating
+			}
 			execute(t, `INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,storage_upload_id,
 				expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at)
-				VALUES(?,7,11,?,13,'fixture.bin','MULTIPART',NULL,UNHEX(REPEAT('ab',32)),?,?,2,'CANCELLING',?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
-				fixture.taskID, fixture.object, fileSize, partSize, fileSize)
-			candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
-			if err != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
-				t.Fatal("未取得本项未绑定的取消候选", candidates, err)
+				VALUES(?,7,11,?,13,'fixture.bin','MULTIPART',NULL,UNHEX(REPEAT('ab',32)),?,?,2,?,?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
+				fixture.taskID, fixture.object, fileSize, partSize, initialStatus, fileSize)
+			var claimed *domain.UploadTask
+			if pendingStatus == domain.UploadStatusExpiring {
+				candidates, scanError := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+				if scanError != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
+					t.Fatal("未取得本项未绑定的到期候选", candidates, scanError)
+				}
+				claimed, err = store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-unbound-observer")
+			} else {
+				candidates, scanError := store.ListMultipartUploadCancellationCandidates(ctx, 1)
+				if scanError != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
+					t.Fatal("未取得本项未绑定的取消候选", candidates, scanError)
+				}
+				claimed, err = store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-unbound-observer")
 			}
-			claimed, err := store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-unbound-observer")
-			if err != nil || claimed == nil || claimed.StorageUploadID != nil {
+			if err != nil || claimed == nil || claimed.Status != pendingStatus || claimed.StorageUploadID != nil {
 				t.Fatal("未领取空绑定任务的租约", err)
 			}
 			objectBefore, err := store.FindUserStoredObject(ctx, userID, fixture.object)
@@ -110,30 +135,38 @@ func TestServerMultipartCancellationUnboundIntegration(t *testing.T) {
 
 			// 2. 使用正式仓储和 HEAD 适配器，在指定用例中于 HEAD 后模拟绑定变化。
 			var heads int
-			execution := service.NewMultipartUploadCancellationStorageService(
-				func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
-					return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
-				},
-				func(context.Context, string, string) error {
-					t.Fatal("未绑定任务发起了中止")
-					return nil
-				},
-				func(context.Context, string, string) (*domain.MultipartUploadAbortObservation, error) {
-					t.Fatal("未绑定任务查询了会话")
-					return nil, nil
-				},
-				func(callContext context.Context, objectKey string) (*domain.UploadObjectResult, error) {
-					heads++
-					if objectKey != fixture.key {
-						t.Fatal("HEAD 未使用原对象键")
-					}
-					object, err := client.StatMultipartUploadObject(callContext, objectKey)
-					if fixture.lateBinding && errors.Is(err, domain.ErrUploadObjectMissing) {
-						execute(t, "UPDATE upload_tasks SET storage_upload_id=? WHERE user_id=7 AND id=?", unboundSession, fixture.taskID)
-					}
-					return object, err
-				})
-			observed, err := execution.ObserveUnboundSession(ctx, claimed)
+			abort := func(context.Context, string, string) error {
+				t.Fatal("未绑定任务发起了中止")
+				return nil
+			}
+			check := func(context.Context, string, string) (*domain.MultipartUploadAbortObservation, error) {
+				t.Fatal("未绑定任务查询了会话")
+				return nil, nil
+			}
+			stat := func(callContext context.Context, objectKey string) (*domain.UploadObjectResult, error) {
+				heads++
+				if objectKey != fixture.key {
+					t.Fatal("HEAD 未使用原对象键")
+				}
+				object, err := client.StatMultipartUploadObject(callContext, objectKey)
+				if fixture.lateBinding && errors.Is(err, domain.ErrUploadObjectMissing) {
+					execute(t, "UPDATE upload_tasks SET storage_upload_id=? WHERE user_id=7 AND id=?", unboundSession, fixture.taskID)
+				}
+				return object, err
+			}
+			var observe func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCleanupObservation, error)
+			if pendingStatus == domain.UploadStatusExpiring {
+				observe = service.NewMultipartUploadExpirationStorageService(
+					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+						return store.FindMultipartUploadExpirationTarget(callContext, task, settings.Provider, settings.Bucket)
+					}, abort, check, stat).ObserveUnboundSession
+			} else {
+				observe = service.NewMultipartUploadCancellationStorageService(
+					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+						return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
+					}, abort, check, stat).ObserveUnboundSession
+			}
+			observed, err := observe(ctx, claimed)
 			if heads != 1 {
 				t.Fatal("本次检查未恰好查询一次原对象", heads)
 			}
@@ -176,5 +209,5 @@ func TestServerMultipartCancellationUnboundIntegration(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("对象缺失、版本存在、回读发现绑定变更均通过；未关联会话仍可读，已用 %d B、预占 %d B", usedBytes, reservedBytes)
+	t.Logf("%s 对象缺失、版本存在和回读发现绑定变更均通过，未关联会话仍可读，已用 %d B、预占 %d B", pendingStatus, usedBytes, reservedBytes)
 }

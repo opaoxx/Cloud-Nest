@@ -138,13 +138,14 @@ func testObserveBoundMultipartUploadCleanupSession(t *testing.T, pendingStatus d
 				return checked, nil
 			}
 			var observe func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCleanupObservation, error)
+			stat := func(context.Context, string) (*domain.UploadObjectResult, error) {
+				t.Fatal("已绑定分支应通过会话复查读取对象")
+				return nil, nil
+			}
 			if pendingStatus == domain.UploadStatusExpiring {
-				observe = NewMultipartUploadExpirationStorageService(findTarget, abort, check).ObserveBoundSession
+				observe = NewMultipartUploadExpirationStorageService(findTarget, abort, check, stat).ObserveBoundSession
 			} else {
-				observe = NewMultipartUploadCancellationStorageService(findTarget, abort, check, func(context.Context, string) (*domain.UploadObjectResult, error) {
-					t.Fatal("已绑定分支应通过会话复查读取对象")
-					return nil, nil
-				}).ObserveBoundSession
+				observe = NewMultipartUploadCancellationStorageService(findTarget, abort, check, stat).ObserveBoundSession
 			}
 			// 2. 核对调用顺序、中止次数及证据。粘连的可空字段不能影响原记录。
 			observed, err := observe(ctx, task)

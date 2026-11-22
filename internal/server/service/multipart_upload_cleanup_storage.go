@@ -11,6 +11,7 @@ type multipartUploadCleanupStorage struct {
 	findTarget func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error)
 	abort      func(context.Context, string, string) error
 	check      func(context.Context, string, string) (*domain.MultipartUploadAbortObservation, error)
+	statObject func(context.Context, string) (*domain.UploadObjectResult, error)
 }
 
 func (cleanup multipartUploadCleanupStorage) observeBoundSession(
@@ -57,6 +58,42 @@ func (cleanup multipartUploadCleanupStorage) observeBoundSession(
 		return nil, nil
 	}
 	return newMultipartCleanupObservation(task, objectKey, checked.Object), nil
+}
+
+func (cleanup multipartUploadCleanupStorage) observeUnboundSession(
+	ctx context.Context, claimed *domain.UploadTask, pendingStatus domain.UploadStatus,
+) (*domain.MultipartUploadCleanupObservation, error) {
+	// 1. 按收尾租约读取原对象键，确认会话尚未绑定。
+	if err := validateMultipartCleanupStorageClaim(ctx, claimed, pendingStatus); err != nil {
+		return nil, err
+	}
+	if claimed.StorageUploadID != nil {
+		return nil, domain.ErrUploadTaskNotReady
+	}
+	task := copyUploadTask(claimed)
+	objectKey, err := cleanup.readObjectKey(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 只读查询原对象，区分对象存在、明确缺失和查询失败。
+	object, statError := cleanup.statObject(ctx, objectKey)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if statError != nil && !errors.Is(statError, domain.ErrUploadObjectMissing) {
+		return nil, multipartCleanupStorageFailure(statError)
+	}
+	// 成功需要对象元数据，明确缺失时对象元数据应为空。
+	if (statError == nil) != (object != nil) {
+		return nil, domain.ErrUploadStorageUnavailable
+	}
+
+	// 3. 复核租约、对象键和空会话绑定后交付观察。
+	if err := cleanup.recheckObjectKey(ctx, task, objectKey); err != nil {
+		return nil, err
+	}
+	return newMultipartCleanupObservation(task, objectKey, object), nil
 }
 
 func newMultipartCleanupObservation(
