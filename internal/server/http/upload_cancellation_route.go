@@ -9,7 +9,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
 )
 
-// RegisterUploadCancellationRoute 注册受 Bearer 授权保护的单文件上传取消接口。
+// RegisterUploadCancellationRoute 注册受 Bearer 授权保护的上传取消接口。
 func RegisterUploadCancellationRoute(
 	router *gin.Engine,
 	authorize func(context.Context, string) (*domain.Actor, error),

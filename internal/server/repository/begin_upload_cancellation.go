@@ -20,6 +20,23 @@ func (store *Store) BeginUserMultipartUploadCancellation(ctx context.Context, ac
 	return store.beginUserUploadCancellation(ctx, actor, taskID, domain.ShouldBeginMultipartUploadCancellation)
 }
 
+// BeginUserUploadCancellationByMode 按所属用户事务锁定的上传模式受理取消。
+// 首次受理仅提交 CANCELLING，已受理或终结的任务复用当前记录。
+func (store *Store) BeginUserUploadCancellationByMode(ctx context.Context, actor domain.Actor, taskID uint64) (*domain.UploadTask, error) {
+	// 1. 复用受理事务，按认证账号和任务 ID 锁定当前记录。
+	return store.beginUserUploadCancellation(ctx, actor, taskID, func(current *domain.UploadTask, databaseTime time.Time) (bool, error) {
+		// 2. 按锁定记录的上传模式，使用原有期限、租约和阶段规则。
+		switch current.UploadMode {
+		case "SINGLE":
+			return domain.ShouldBeginUploadCancellation(current, databaseTime)
+		case "MULTIPART":
+			return domain.ShouldBeginMultipartUploadCancellation(current, databaseTime)
+		default:
+			return false, domain.ErrInvalidUploadTaskData
+		}
+	})
+}
+
 func (store *Store) beginUserUploadCancellation(
 	ctx context.Context, actor domain.Actor, taskID uint64,
 	shouldBeginCancellation func(*domain.UploadTask, time.Time) (bool, error),

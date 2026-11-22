@@ -10,12 +10,12 @@ import (
 // UploadCancellationSuccess 交付已提交的取消受理状态或任务已有的终态。
 // 调用方完成认证、归属检查和取消服务调用。
 func UploadCancellationSuccess(requestContext *gin.Context, result *domain.UploadTask) {
-	// 1. 确认响应还可写，再核对任务模式和状态。
+	// 1. 确认响应还可写，再核对受理状态。
 	if requestContext.Writer.Written() || requestContext.IsAborted() {
 		requestContext.Abort()
 		return
 	}
-	if result == nil || result.UploadMode != "SINGLE" || (result.Status != domain.UploadStatusCancelling && !result.Status.IsTerminal()) {
+	if result == nil || (result.Status != domain.UploadStatusCancelling && !result.Status.IsTerminal()) {
 		requestContext.Header("Pragma", "no-cache")
 		InternalError(requestContext, nil)
 		return
@@ -27,6 +27,6 @@ func UploadCancellationSuccess(requestContext *gin.Context, result *domain.Uploa
 		responseStatus = http.StatusAccepted
 	}
 
-	// 3. 复用任务公开响应，在写出前复查请求取消。
+	// 3. 复用任务公开响应，由任务 DTO 校验上传模式等公开字段后写出。
 	writeUploadTaskSuccess(requestContext, result, responseStatus)
 }

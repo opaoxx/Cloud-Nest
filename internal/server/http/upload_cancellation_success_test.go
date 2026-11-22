@@ -116,7 +116,7 @@ func TestUploadCancellationSuccessRealHTTP(t *testing.T) {
 }
 
 func TestUploadCancellationSuccessFailures(t *testing.T) {
-	for _, scenario := range []string{"nil task", "multipart", "creating", "uploading", "completing", "verifying", "expiring", "unknown status",
+	for _, scenario := range []string{"nil task", "unknown mode", "creating", "uploading", "completing", "verifying", "expiring", "unknown status",
 		"invalid task ID", "incomplete publication", "already canceled", "deadline exceeded", "cancel before write"} {
 		t.Run(scenario, func(t *testing.T) {
 			// 1. 注入异常任务或请求上下文，经真实响应逻辑处理。
@@ -130,8 +130,8 @@ func TestUploadCancellationSuccessFailures(t *testing.T) {
 				switch scenario {
 				case "nil task":
 					task = nil
-				case "multipart":
-					task.UploadMode = "MULTIPART"
+				case "unknown mode":
+					task.UploadMode = "unknown"
 				case "creating", "uploading", "completing", "verifying", "expiring", "unknown status":
 					task.Status = domain.UploadStatus(strings.ToUpper(scenario))
 				case "invalid task ID":
