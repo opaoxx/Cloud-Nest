@@ -130,6 +130,12 @@ func TestServerMultipartExpiredPartURLIntegration(t *testing.T) {
 		resumedTask.ID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
 		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 
+	// 6. 提交重签补传后的两片回执，核对正式后台发布结果和配额结算。
+	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts[0], resumed.Parts[1])
+	t.Logf("重签补传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
+	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
+	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
