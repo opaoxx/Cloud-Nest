@@ -1045,10 +1045,9 @@ paths:
     post:
       tags: [Entries, Uploads]
       operationId: createEntryContentReplacement
-      x-cloudnest-status: planned
       summary: 为指定版本的文件创建内容替换任务
       description: |
-        B5 计划契约，服务尚未注册此操作。
+        服务启动时注册此操作，沿用共享授权和双模式上传限制。
         1. Bearer 授权后校验路径 id、Idempotency-Key 和 JSON。账号和设备取自认证身份。
            幂等范围为账号及独立的替换创建操作。摘要绑定目标 ID、预期版本、字节数和规范化后的 SHA-256。
            复查当前授权后，有效同键同参数返回原始 201 快照和本次 request_id，实时状态通过任务查询读取。
@@ -3316,7 +3315,7 @@ components:
       additionalProperties: false
       required: [expected_revision, size_bytes, sha256]
       description: |
-        B5 计划。按 expected_revision、size_bytes、sha256 顺序校验声明。
+        按 expected_revision、size_bytes、sha256 顺序校验声明。
         预期版本为非零 uint64 的标准十进制字符串。SHA-256 必填，大小写等价，并在后台用实测摘要核对。
       properties:
         expected_revision:
@@ -5430,7 +5429,7 @@ components:
               - $ref: '#/components/schemas/CreateMultipartUploadResponse'
     CreateEntryContentReplacementSucceeded:
       description: |
-        B5 计划。HTTP 201 返回已提交的上传准备快照。replacement 绑定目标文件及预期版本，两个结果版本均为 null。
+        HTTP 201 返回已提交的上传准备快照。replacement 绑定目标文件及预期版本，两个结果版本均为 null。
         同键同参数重放交付原快照。实时阶段及发布结果由任务查询交付。
       headers:
         X-Request-ID:

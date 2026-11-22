@@ -582,6 +582,16 @@ func runWithServerDependencies(
 		dto.EncodeCreateUploadSnapshot,
 		dto.ValidateCreateUploadSnapshot,
 	)
+	// 内容替换沿用账号事务与同一份上传限制，使用自己的请求摘要和创建快照。
+	createReplacementService := service.NewIdempotentCreateUploadReplacementService(storageConfig.Provider, storageConfig.Bucket,
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentCreateUploadReplacementTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+		dto.EncodeCreateUploadReplacementSnapshot,
+		dto.ValidateCreateUploadReplacementSnapshot,
+	)
 
 	// 26. 用已检查的目录创建共享上传临时区。
 	uploadFiles, err := service.NewUploadContentFileService(uploadTempConfig.Directory, uploadSpace)
@@ -645,6 +655,12 @@ func runWithServerDependencies(
 	serverhttp.RegisterCreateUploadRoute(router, authorizationService.Authorize,
 		func(ctx context.Context, actor domain.Actor, input domain.CreateUploadInput, key string) (json.RawMessage, error) {
 			return createUploadService.CreateWithPlan(ctx, actor, input, key, uploadLimits)
+		})
+	serverhttp.RegisterCreateUploadReplacementRoute(router, authorizationService.Authorize,
+		func(ctx context.Context, actor domain.Actor, entryID uint64, input dto.CreateUploadReplacementInput, key string) (json.RawMessage, error) {
+			return createReplacementService.Create(ctx, actor, service.UploadReplacementDeclaration{
+				EntryID: entryID, ExpectedRevision: input.ExpectedRevision, SizeBytes: input.SizeBytes, ExpectedSHA256: input.ExpectedSHA256,
+			}, key, uploadLimits)
 		})
 	serverhttp.RegisterUploadPartURLsRoute(router, authorizationService.Authorize, uploadPartURLs.Create)
 	serverhttp.RegisterUploadPartsRoute(router, authorizationService.Authorize, uploadPartReceipts.List)
