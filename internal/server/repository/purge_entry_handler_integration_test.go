@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -14,8 +15,6 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	serverhttp "github.com/opaoxx/cloud-nest/internal/server/http"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
-	"github.com/opaoxx/cloud-nest/internal/server/http/handler"
-	"github.com/opaoxx/cloud-nest/internal/server/http/middleware"
 	"github.com/opaoxx/cloud-nest/internal/server/logging"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
@@ -24,7 +23,8 @@ func TestPurgeEntryHandlerIntegration(t *testing.T) {
 	// 1. 在隔离库准备真实会话和回收目录，签发测试访问令牌。
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	_, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	jwtConfig := config.JWTConfig{
 		SigningKey: bytes.Repeat([]byte{9}, 32), Issuer: "cloudnest-test", Audience: "cloudnest-api-test",
 		AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: 24 * time.Hour,
@@ -52,7 +52,7 @@ func TestPurgeEntryHandlerIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 2. 在测试路由绑定预检快照、用户事务和两条 HTTP 处理链。
+	// 2. 将预检快照和用户事务绑定到正式 HTTP 路由。
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	currentTime := func() time.Time { return now }
 	preview := service.NewPurgePreviewService(func(ctx context.Context, action func(context.Context, service.PurgePreviewReader) error) error {
@@ -82,13 +82,13 @@ func TestPurgeEntryHandlerIntegration(t *testing.T) {
 		}, currentTime,
 	)
 	authorization := service.NewAuthorizationService(tokenVerifier.Verify, store.FindSessionAuthorization)
-	auth := middleware.RequireAuthorization(authorization.Authorize, handler.AuthorizationFailure)
 	router := serverhttp.NewRouter(logging.New(io.Discard), nil, func(context.Context) bool { return true })
-	router.GET("/test-trash/:id/purge-preview", auth, handler.PurgePreview(preview.Preview))
-	router.DELETE("/test-trash/:id", auth, handler.PurgeEntry(purge.Begin))
+	serverhttp.RegisterPurgePreviewRoute(router, authorization.Authorize, preview.Preview)
+	serverhttp.RegisterPurgeEntryRoute(router, authorization.Authorize, purge.Begin)
 
-	// 3. 使用 HTTP 预检的版本和凭证确认，验证真实提交和过期后的同键重试。
-	previewRequest := httptest.NewRequest(http.MethodGet, "/test-trash/14/purge-preview", nil).WithContext(ctx)
+	// 3. 取得同一预检后验证失败、首次确认及凭证到期后的同键重试。
+	const path = "/api/v1/trash/14"
+	previewRequest := httptest.NewRequest(http.MethodGet, path+"/purge-preview", nil).WithContext(ctx)
 	previewRequest.Header.Set("Authorization", "Bearer "+token.Token)
 	previewResponse := httptest.NewRecorder()
 	router.ServeHTTP(previewResponse, previewRequest)
@@ -101,7 +101,7 @@ func TestPurgeEntryHandlerIntegration(t *testing.T) {
 	const key = "purge-http-14"
 	send := func(revision string, expectedStatus int) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(http.MethodDelete, "/test-trash/14", nil).WithContext(ctx)
+		request := httptest.NewRequest(http.MethodDelete, path, nil).WithContext(ctx)
 		request.Header.Set("Authorization", "Bearer "+token.Token)
 		request.Header.Set("Idempotency-Key", key)
 		request.Header.Set(dto.PurgeExpectedRevisionHeader, revision)
@@ -124,6 +124,29 @@ func TestPurgeEntryHandlerIntegration(t *testing.T) {
 		}
 		return accepted
 	}
+	readError := func(response *httptest.ResponseRecorder, want string) {
+		t.Helper()
+		var failure dto.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure.Error.Code != want {
+			t.Fatal("清理确认错误码不符", want, failure.Error.Code, err)
+		}
+	}
+	checkLog := func(want uint64) {
+		t.Helper()
+		var sequence, events, snapshots uint64
+		if err := pool.QueryRowContext(ctx, `SELECT change_seq,(SELECT COUNT(*) FROM change_events),
+			(SELECT COUNT(*) FROM idempotency_records) FROM users WHERE id=?`, actor.UserID).Scan(&sequence, &events, &snapshots); err != nil ||
+			sequence != want || events != want || snapshots != want {
+			t.Fatal("清理受理快照、事件数或账号序号不符", snapshots, events, sequence, err)
+		}
+	}
+	readError(send("2", http.StatusConflict), "REVISION_CONFLICT")
+	validTime := now
+	now = preflight.Data.ExpiresAt.Add(time.Second)
+	readError(send(preflight.Data.Revision, http.StatusConflict), "PURGE_PREVIEW_CHANGED")
+	checkLog(0)
+	now = validTime
+
 	first := readAccepted(send(preflight.Data.Revision, http.StatusAccepted))
 	now = preflight.Data.ExpiresAt.Add(time.Second)
 	replay := readAccepted(send(preflight.Data.Revision, http.StatusAccepted))
@@ -150,4 +173,24 @@ func TestPurgeEntryHandlerIntegration(t *testing.T) {
 	if err != nil || *saved != first.Data {
 		t.Fatal("已保存快照与 HTTP data 不符", err)
 	}
+	checkLog(1)
+	var savedID, savedRevision uint64
+	var eventType string
+	var rawPayload []byte
+	if err := pool.QueryRowContext(ctx, "SELECT entry_id,revision,event_type,payload FROM change_events WHERE user_id=? AND `sequence`=1",
+		actor.UserID).Scan(&savedID, &savedRevision, &eventType, &rawPayload); err != nil {
+		t.Fatal("未读到正式 HTTP 提交的清理受理事件", err)
+	}
+	want := map[string]string{"entry_id": "14", "parent_id": "11", "name": "已回收目录", "revision": "2"}
+	var payload map[string]string
+	if err := json.Unmarshal(rawPayload, &payload); err != nil || !reflect.DeepEqual(payload, want) ||
+		eventType != "ENTRY_PURGE_STARTED" || savedID != entry.ID || savedRevision != entry.Revision {
+		t.Fatal("清理受理事件与根项不符", string(rawPayload), err)
+	}
+	var retainedChild bool
+	if err := pool.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM file_entries WHERE id=15 AND parent_id=14 AND user_id=?
+		AND status='ACTIVE' AND revision=5 AND object_id=41 AND purged_at IS NULL)`, actor.UserID).Scan(&retainedChild); err != nil || !retainedChild {
+		t.Fatal("受理时改变了后代文件的状态、版本或对象引用", err)
+	}
+	t.Log("HTTP 版本冲突及预检到期时事件为 0，首次 202 仅为目录 14 写入序号 1，同键重试无新增事件")
 }

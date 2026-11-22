@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
@@ -21,6 +22,7 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 35*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	if _, err := pool.ExecContext(ctx, "UPDATE file_entries SET status='TRASHED', deleted_at='2000-01-01 00:00:00.000000' WHERE user_id=1 AND id=13"); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +79,16 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 		}
 		return entry
 	}
+	checkLog := func(t *testing.T, want uint64) {
+		t.Helper()
+		var sequence, events uint64
+		if err := pool.QueryRowContext(ctx, `SELECT change_seq,
+			(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=?`, actor.UserID).
+			Scan(&sequence, &events); err != nil || sequence != want || events != want {
+			t.Fatal("账号序号或受理事件数量不符", sequence, events, err)
+		}
+	}
+	checkLog(t, 0)
 
 	// 2. 核对首次提交和历史快照复用。
 	t.Run("first acceptance and replay after token expiry and state change", func(t *testing.T) {
@@ -98,6 +110,7 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 			!record.ExpiresAt.Equal(issuedAt.Add(8*24*time.Hour)) {
 			t.Fatal("已提交的 202 记录不符", err, hashError)
 		}
+		checkLog(t, 1)
 
 		// 模拟后续清理已完成，原记录仍可在自己的保留期内交付。
 		if _, err := pool.ExecContext(ctx, `UPDATE file_entries SET status='PURGED', object_id=NULL,
@@ -125,6 +138,7 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 			!errors.Is(err, domain.ErrIdempotencyRecordExpired) {
 			t.Fatal("记录到期后应停止复用", err)
 		}
+		checkLog(t, 1)
 	})
 
 	// 3. 模拟快照已写入但事务失败，两处写入都应回滚。
@@ -146,11 +160,49 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 			!reflect.DeepEqual(readEntry(t, 14), before) || record != nil || !errors.Is(recordError, domain.ErrIdempotencyRecordNotFound) {
 			t.Fatal("回滚后状态或受理记录未恢复", err, readError, recordError)
 		}
+		checkLog(t, 1)
 	})
 
-	// 4. 相同幂等键的并发请求共享一份快照。
+	// 4. 在受理状态、快照和序号已写入后拒绝事件，核对回滚。
+	const retryKey = "purge-event-retry"
+	t.Run("rollback on event insert failure", func(t *testing.T) {
+		request := preview(t, 14)
+		before := readEntry(t, 14)
+		const eventFailureMessage = "fixture rejected purge acceptance after writes"
+		if _, err := pool.ExecContext(ctx, `CREATE TRIGGER fixture_reject_purge_event BEFORE INSERT ON change_events FOR EACH ROW
+			BEGIN
+				IF NEW.event_type='ENTRY_PURGE_STARTED' AND NEW.sequence=2
+					AND EXISTS (SELECT 1 FROM file_entries WHERE id=14 AND id=NEW.entry_id AND user_id=NEW.user_id
+						AND status='PURGING' AND revision=2 AND purge_started_at IS NOT NULL AND purged_at IS NULL)
+					AND EXISTS (SELECT 1 FROM idempotency_records WHERE user_id=NEW.user_id AND resource_id=NEW.entry_id
+						AND operation='v1.trash.purge' AND idempotency_key='purge-event-retry' AND response_status=202)
+					AND EXISTS (SELECT 1 FROM users WHERE id=NEW.user_id AND change_seq=2) THEN
+					SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='`+eventFailureMessage+`';
+				END IF;
+			END`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if _, err := pool.ExecContext(ctx, "DROP TRIGGER fixture_reject_purge_event"); err != nil {
+				t.Error("无法清理隔离故障触发器", err)
+			}
+		})
+		body, err := purge.Begin(ctx, actor, request.EntryID, request.Revision, request.Credential.PreviewDigest, retryKey)
+		var mysqlError *mysql.MySQLError
+		var startedAt sql.NullTime
+		readError := pool.QueryRowContext(ctx, "SELECT purge_started_at FROM file_entries WHERE user_id=1 AND id=14").Scan(&startedAt)
+		record, recordError := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.PurgeEntryOperation, retryKey)
+		if !errors.As(err, &mysqlError) || mysqlError.Number != 1644 || mysqlError.Message != eventFailureMessage ||
+			body != nil || readError != nil || startedAt.Valid || !reflect.DeepEqual(readEntry(t, 14), before) ||
+			record != nil || !errors.Is(recordError, domain.ErrIdempotencyRecordNotFound) {
+			t.Fatal("事件失败后的状态或快照回滚不符", err, readError, recordError)
+		}
+		checkLog(t, 1)
+		t.Log("MySQL 1644 拒绝事件后，回收状态、受理快照和账号序号均回滚")
+	})
+
+	// 5. 解除故障后，同键并发重试共享一份快照和一个连续序号。
 	t.Run("concurrent retries", func(t *testing.T) {
-		const key = "purge-concurrent"
 		request := preview(t, 14)
 		pool.SetMaxOpenConns(2)
 		defer pool.SetMaxOpenConns(1)
@@ -163,7 +215,7 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 		for range 2 {
 			go func() {
 				<-start
-				body, err := purge.Begin(ctx, actor, request.EntryID, request.Revision, request.Credential.PreviewDigest, key)
+				body, err := purge.Begin(ctx, actor, request.EntryID, request.Revision, request.Credential.PreviewDigest, retryKey)
 				results <- result{body: body, err: err}
 			}()
 		}
@@ -174,5 +226,7 @@ func TestIdempotentPurgeEntryServiceIntegration(t *testing.T) {
 			entry.Status != "PURGING" || entry.Revision != request.Revision+1 {
 			t.Fatal("同键并发应只写入一次并交付同一快照", first.err, second.err, entry.Revision)
 		}
+		checkLog(t, 2)
+		t.Log("原键并发重试得到同一 202 快照，账号序号从 1 前进至 2")
 	})
 }

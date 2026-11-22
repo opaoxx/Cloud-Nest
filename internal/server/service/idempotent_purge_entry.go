@@ -12,11 +12,12 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// IdempotentPurgeEntryTransaction 提供同一事务中的受理和快照持久化能力。
+// IdempotentPurgeEntryTransaction 提供同一事务中的受理、快照及事件持久化能力。
 type IdempotentPurgeEntryTransaction interface {
 	PurgeEntryTransaction
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentPurgeEntryService 组合首次受理与同键结果复用。
@@ -112,9 +113,18 @@ func (purgeService *IdempotentPurgeEntryService) Begin(ctx context.Context, acto
 			if err != nil {
 				return fmt.Errorf("保存永久清理幂等记录失败: %w", err)
 			}
+
+			// 4. 为实际进入 PURGING 的根项追加事件，与状态、快照一起提交。
+			event, err := newEntryChangeEvent("ENTRY_PURGE_STARTED", entry)
+			if err != nil {
+				return fmt.Errorf("编码清理受理事件失败: %w", err)
+			}
+			if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
+				return fmt.Errorf("追加清理受理事件失败: %w", err)
+			}
 		}
 
-		// 4. 校验快照，事务提交后返回。
+		// 5. 校验快照，事务提交后返回。
 		if err := txContext.Err(); err != nil {
 			return err
 		}

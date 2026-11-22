@@ -19,7 +19,8 @@ func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
 	defer cancel()
 
 	// 1. 启动本轮专用 MySQL，再复用合成子树、只读存储桩和停用清理 worker 的实例。
-	startIsolatedWebMySQL(t, ctx)
+	container := startIsolatedWebMySQL(t, ctx)
+	t.Logf("浏览器清理确认专用 MySQL %s", container[:12])
 	pool, webURL := prepareWebPurgePreviewFixture(t, ctx)
 	if _, err := pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,deleted_at)
 		VALUES(60,7,33,'跨页恢复目录',CAST('跨页恢复目录' AS BINARY),'DIR','TRASHED',UTC_TIMESTAMP(6))`); err != nil {
@@ -43,6 +44,16 @@ func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
 	if accepted != 1 || restored != 1 || writes != 2 {
 		t.Fatalf("预期一次确认及一次对照恢复，实际受理=%d 恢复=%d 写入记录=%d", accepted, restored, writes)
 	}
+	var sequence, events, expectedEvents int
+	if err := pool.QueryRowContext(ctx, `SELECT change_seq,
+		(SELECT COUNT(*) FROM change_events WHERE user_id=users.id),
+		(SELECT COUNT(*) FROM change_events AS events WHERE user_id=users.id AND revision=2 AND
+			((events.sequence=1 AND entry_id=60 AND event_type='ENTRY_RESTORED') OR
+			 (events.sequence=2 AND entry_id=56 AND event_type='ENTRY_PURGE_STARTED')))
+		FROM users WHERE id=7`).Scan(&sequence, &events, &expectedEvents); err != nil ||
+		sequence != 2 || events != 2 || expectedEvents != 2 {
+		t.Fatal("对照恢复和唯一一次手动确认应各产生一条变更事件", sequence, events, expectedEvents, err)
+	}
 	unchanged := func(snapshot []string) []string {
 		return slices.DeleteFunc(snapshot, func(row string) bool {
 			return strings.HasPrefix(row, `["entry", 56,`) || strings.HasPrefix(row, `["entry", 60,`) ||
@@ -52,7 +63,7 @@ func TestServerWebPurgeConfirmationIntegration(t *testing.T) {
 	if after := readWebPurgePreviewSnapshot(t, ctx, pool); !slices.Equal(unchanged(after), unchanged(before)) {
 		t.Fatal("受理及对照恢复之外的合成业务数据发生变化")
 	}
-	t.Log("数据库核对通过：56 进入 PURGING，60 恢复为 ACTIVE，其余条目、对象和配额保持原样")
+	t.Log("数据库核对通过：56 进入 PURGING 并写入序号 2，60 恢复为 ACTIVE 并写入序号 1，其余条目、对象和配额保持原样")
 }
 
 func webFixtureBrowserCLI(t *testing.T, envKey string) string {
