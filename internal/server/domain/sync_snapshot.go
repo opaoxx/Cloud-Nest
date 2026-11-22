@@ -27,6 +27,9 @@ var ErrInvalidSyncSnapshotCursor = errors.New("同步快照分页凭据无效")
 // ErrSyncSnapshotExpired 表示可信设备的快照已到期、丢失或代次已变更。
 var ErrSyncSnapshotExpired = errors.New("同步快照已失效，请重新建立基线")
 
+// SyncCursorGeneration 是同步设备持久化的 16 字节随机代次，按完整值比较。
+type SyncCursorGeneration [16]byte
+
 // SyncSnapshotHeader 保存账号一致性快照的根目录和变更截止位置。
 type SyncSnapshotHeader struct {
 	// RootEntryID 是账号真实活动根目录的 ID。

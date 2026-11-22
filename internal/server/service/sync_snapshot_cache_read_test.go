@@ -66,8 +66,8 @@ func TestSyncSnapshotCacheGetBindingAndFixedData(t *testing.T) {
 		{"wrong page size", func(key *SyncSnapshotCacheBinding) { key.PageSize++ }, domain.ErrInvalidSyncSnapshotCursor},
 		{"malformed identifier", func(key *SyncSnapshotCacheBinding) { key.SnapshotID = uuid.Nil }, domain.ErrInvalidSyncSnapshotCursor},
 		{"missing", func(key *SyncSnapshotCacheBinding) { key.SnapshotID[15] ^= 1 }, domain.ErrSyncSnapshotExpired},
-		{"current generation is newer", func(key *SyncSnapshotCacheBinding) { key.Generation++ }, domain.ErrSyncSnapshotExpired},
-		{"current generation is older", func(key *SyncSnapshotCacheBinding) { key.Generation-- }, domain.ErrSyncSnapshotExpired},
+		{"first generation byte differs", func(key *SyncSnapshotCacheBinding) { key.Generation[0] ^= 1 }, domain.ErrSyncSnapshotExpired},
+		{"last generation byte differs", func(key *SyncSnapshotCacheBinding) { key.Generation[15] ^= 1 }, domain.ErrSyncSnapshotExpired},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			changed := binding

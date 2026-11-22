@@ -23,7 +23,7 @@ func TestSyncSnapshotCursorSignerCanonicalToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding, _ := syncSnapshotCacheFixture()
-	binding.UserID, binding.DeviceID, binding.Generation = math.MaxUint64, math.MaxUint64-1, math.MaxUint64-2
+	binding.UserID, binding.DeviceID = math.MaxUint64, math.MaxUint64-1
 	expiresAt := time.Date(2026, 11, 23, 10, 10, 0, 123456789, time.FixedZone("UTC+8", 8*60*60))
 	token, err := signer.Sign(binding, 50, expiresAt)
 	if err != nil || len(token) > 1024 || strings.Count(token, ".") != 1 || strings.Contains(token, "=") {
@@ -34,7 +34,7 @@ func TestSyncSnapshotCursorSignerCanonicalToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const wantPayload = `{"version":1,"snapshot_id":"052dc4f7-f4c1-46b3-a509-bf96992f6580","user_id":"18446744073709551615","device_id":"18446744073709551614","generation":"18446744073709551613","page_size":50,"next_position":50,"expires_at":"2026-11-23T02:10:00.123456789Z"}`
+	const wantPayload = `{"version":1,"snapshot_id":"052dc4f7-f4c1-46b3-a509-bf96992f6580","user_id":"18446744073709551615","device_id":"18446744073709551614","generation":"f10203040506070809101112131415fe","page_size":50,"next_position":50,"expires_at":"2026-11-23T02:10:00.123456789Z"}`
 	if string(payload) != wantPayload {
 		t.Fatalf("凭据载荷不符，实际=%s", payload)
 	}
@@ -110,7 +110,9 @@ func TestSyncSnapshotCursorSignerRejectsInvalidInput(t *testing.T) {
 		{"wrong UUID variant", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) { key.SnapshotID[8] = 0 }},
 		{"zero user", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) { key.UserID = 0 }},
 		{"zero device", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) { key.DeviceID = 0 }},
-		{"zero generation", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) { key.Generation = 0 }},
+		{"zero generation", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) {
+			key.Generation = domain.SyncCursorGeneration{}
+		}},
 		{"zero page size", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) { key.PageSize = 0 }},
 		{"page size too large", func(key *SyncSnapshotCacheBinding, _ *int, _ *time.Time) { key.PageSize = 101 }},
 		{"initial position", func(_ *SyncSnapshotCacheBinding, position *int, _ *time.Time) { *position = 0 }},

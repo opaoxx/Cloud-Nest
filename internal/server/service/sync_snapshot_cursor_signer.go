@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -59,11 +60,11 @@ func (signer *SyncSnapshotCursorSigner) Sign(binding SyncSnapshotCacheBinding, n
 		return "", domain.ErrInvalidSyncSnapshotCursor
 	}
 
-	// 2. 用规范十进制文本保留完整无符号标识，以 UTC 保留到期时间精度。
+	// 2. 用规范文本保留完整标识、16 字节随机代次和 UTC 到期时间精度。
 	payload := syncSnapshotCursorPayload{
 		Version: syncSnapshotCursorVersion, SnapshotID: binding.SnapshotID.String(),
 		UserID: strconv.FormatUint(binding.UserID, 10), DeviceID: strconv.FormatUint(binding.DeviceID, 10),
-		Generation: strconv.FormatUint(binding.Generation, 10), PageSize: binding.PageSize,
+		Generation: hex.EncodeToString(binding.Generation[:]), PageSize: binding.PageSize,
 		NextPosition: nextPosition, ExpiresAt: expiresAt.Format(time.RFC3339Nano),
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -73,11 +74,15 @@ func (signer *SyncSnapshotCursorSigner) Sign(binding SyncSnapshotCacheBinding, n
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
 	// 3. 对载荷文本计算 HMAC，拼接载荷与签名两段无填充 Base64URL。
-	messageMAC := hmac.New(sha256.New, signer.signingKey)
-	messageMAC.Write([]byte(encodedPayload))
-	token := encodedPayload + "." + base64.RawURLEncoding.EncodeToString(messageMAC.Sum(nil))
+	token := encodedPayload + "." + base64.RawURLEncoding.EncodeToString(signer.cursorMAC(encodedPayload))
 	if len(token) > domain.MaxSyncSnapshotTokenLength {
 		return "", domain.ErrInvalidSyncSnapshotCursor
 	}
 	return token, nil
+}
+
+func (signer *SyncSnapshotCursorSigner) cursorMAC(encodedPayload string) []byte {
+	messageMAC := hmac.New(sha256.New, signer.signingKey)
+	messageMAC.Write([]byte(encodedPayload))
+	return messageMAC.Sum(nil)
 }

@@ -17,7 +17,8 @@ const snapshotCacheFixtureItem = `{"entry_id":"12","parent_id":"11","name":"иµДж
 func syncSnapshotCacheFixture() (SyncSnapshotCacheBinding, *BuiltSyncSnapshot) {
 	return SyncSnapshotCacheBinding{
 		SnapshotID: uuid.MustParse("052dc4f7-f4c1-46b3-a509-bf96992f6580"),
-		UserID:     7, DeviceID: 19, Generation: 3, PageSize: 50,
+		UserID:     7, DeviceID: 19, PageSize: 50,
+		Generation: domain.SyncCursorGeneration{0xf1, 2, 3, 4, 5, 6, 7, 8, 9, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0xfe},
 	}, &BuiltSyncSnapshot{
 		Header: domain.SyncSnapshotHeader{RootEntryID: 11, HighWaterSequence: 42},
 		Entries: domain.SyncSnapshotEntriesJSON{
@@ -93,7 +94,9 @@ func TestSyncSnapshotCachePutReleasesFailedBuild(t *testing.T) {
 		clock  string
 		want   error
 	}{
-		{name: "invalid generation", mutate: func(binding *SyncSnapshotCacheBinding, _ *BuiltSyncSnapshot) { binding.Generation = 0 }},
+		{name: "invalid generation", mutate: func(binding *SyncSnapshotCacheBinding, _ *BuiltSyncSnapshot) {
+			binding.Generation = domain.SyncCursorGeneration{}
+		}},
 		{name: "invalid page size", mutate: func(binding *SyncSnapshotCacheBinding, _ *BuiltSyncSnapshot) { binding.PageSize = 101 }},
 		{name: "invalid UUID", mutate: func(binding *SyncSnapshotCacheBinding, _ *BuiltSyncSnapshot) { binding.SnapshotID = uuid.Nil }},
 		{name: "underreported array size", mutate: func(_ *SyncSnapshotCacheBinding, data *BuiltSyncSnapshot) { data.Entries.SizeBytes-- }, want: domain.ErrInvalidFileEntryData},
