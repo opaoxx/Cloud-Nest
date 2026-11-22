@@ -141,7 +141,7 @@ func (renameService *IdempotentRenameEntryService) Rename(ctx context.Context, a
 
 			// 5. 版本递增表明名称发生变化，事件和改名结果一同提交。
 			if entry.Revision > expectedRevision {
-				event, err := newEntryChangeEvent("ENTRY_RENAMED", entry)
+				event, err := domain.NewEntryChangeEvent("ENTRY_RENAMED", entry)
 				if err != nil {
 					return fmt.Errorf("编码重命名变更事件失败: %w", err)
 				}

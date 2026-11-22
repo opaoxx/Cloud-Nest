@@ -17,6 +17,7 @@ func TestExpiredTrashRootBatchIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
 	pool, store, _ := trashEntryTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	execute := func(sqlContext context.Context, statement string, args ...any) {
 		t.Helper()
 		if _, err := pool.ExecContext(sqlContext, statement, args...); err != nil {
@@ -74,5 +75,13 @@ func TestExpiredTrashRootBatchIntegration(t *testing.T) {
 			t.Fatal("条目状态或清理开始时间不符", expected.id, row.Status, row.PurgeStartedAt)
 		}
 	}
-	t.Log("首项失败、第二项失效后，第三项成功标记，第四项留在下一轮")
+	var sequence, events, matchedEvents uint64
+	if err := pool.QueryRowContext(ctx, `SELECT change_seq,
+		(SELECT COUNT(*) FROM change_events WHERE user_id=users.id),
+		(SELECT COUNT(*) FROM change_events AS events WHERE user_id=users.id AND events.sequence=1
+			AND entry_id=18 AND revision=4 AND event_type='ENTRY_PURGE_STARTED') FROM users WHERE id=1`).
+		Scan(&sequence, &events, &matchedEvents); err != nil || sequence != 1 || events != 1 || matchedEvents != 1 {
+		t.Fatal("批次只有成功标记的根项应追加事件", sequence, events, matchedEvents, err)
+	}
+	t.Log("首项失败、第二项失效，第三项标记并记录序号 1，第四项留在下一轮")
 }

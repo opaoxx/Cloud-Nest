@@ -125,7 +125,7 @@ func (restoreService *IdempotentRestoreEntryService) Restore(ctx context.Context
 			}
 
 			// 4. 事件使用实际恢复位置和最终名称，与恢复和快照一起提交。
-			event, err := newEntryChangeEvent("ENTRY_RESTORED", entry)
+			event, err := domain.NewEntryChangeEvent("ENTRY_RESTORED", entry)
 			if err != nil {
 				return fmt.Errorf("编码恢复变更事件失败: %w", err)
 			}

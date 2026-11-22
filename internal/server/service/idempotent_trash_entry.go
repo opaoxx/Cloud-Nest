@@ -124,7 +124,7 @@ func (trashService *IdempotentTrashEntryService) Trash(ctx context.Context, acto
 			}
 
 			// 4. 只为首次回收写入根项事件，后代的可见性仍由父链决定。
-			event, err := newEntryChangeEvent("ENTRY_TRASHED", &entry.FileEntry)
+			event, err := domain.NewEntryChangeEvent("ENTRY_TRASHED", &entry.FileEntry)
 			if err != nil {
 				return fmt.Errorf("编码回收变更事件失败: %w", err)
 			}

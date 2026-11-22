@@ -1,13 +1,14 @@
-package service
+package domain
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
-
-	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
+
+// EntryPurgeStartedEventType 表示回收站根项已进入清理流程。
+const EntryPurgeStartedEventType = "ENTRY_PURGE_STARTED"
 
 type entryChangePayload struct {
 	EntryID  string `json:"entry_id"`
@@ -17,7 +18,7 @@ type entryChangePayload struct {
 }
 
 // newEntryChangePayload 从调用方已核对的普通目录项取得当前名称与位置。
-func newEntryChangePayload(entry *domain.FileEntry) entryChangePayload {
+func newEntryChangePayload(entry *FileEntry) entryChangePayload {
 	return entryChangePayload{
 		EntryID:  strconv.FormatUint(entry.ID, 10),
 		ParentID: strconv.FormatUint(*entry.ParentID, 10),
@@ -26,12 +27,13 @@ func newEntryChangePayload(entry *domain.FileEntry) entryChangePayload {
 	}
 }
 
-func newEntryChangeEvent(eventType string, entry *domain.FileEntry) (domain.ChangeEventInput, error) {
+// NewEntryChangeEvent 编码调用方已核对的普通条目状态。
+func NewEntryChangeEvent(eventType string, entry *FileEntry) (ChangeEventInput, error) {
 	return encodeEntryChangeEvent(eventType, entry, newEntryChangePayload(entry))
 }
 
-// newFilePublishedChangeEvent 使用实际发布条目和已核对的内容摘要。
-func newFilePublishedChangeEvent(entry *domain.FileEntry, digest [sha256.Size]byte) (domain.ChangeEventInput, error) {
+// NewFilePublishedChangeEvent 使用实际发布条目和已核对的内容摘要。
+func NewFilePublishedChangeEvent(entry *FileEntry, digest [sha256.Size]byte) (ChangeEventInput, error) {
 	payload := struct {
 		entryChangePayload
 		SizeBytes uint64 `json:"size_bytes"`
@@ -44,12 +46,12 @@ func newFilePublishedChangeEvent(entry *domain.FileEntry, digest [sha256.Size]by
 	return encodeEntryChangeEvent("FILE_PUBLISHED", entry, payload)
 }
 
-func encodeEntryChangeEvent(eventType string, entry *domain.FileEntry, data any) (domain.ChangeEventInput, error) {
+func encodeEntryChangeEvent(eventType string, entry *FileEntry, data any) (ChangeEventInput, error) {
 	payload, err := json.Marshal(data)
 	if err != nil {
-		return domain.ChangeEventInput{}, err
+		return ChangeEventInput{}, err
 	}
-	return domain.ChangeEventInput{
+	return ChangeEventInput{
 		EntryID: entry.ID, Revision: entry.Revision, EventType: eventType, Payload: payload,
 	}, nil
 }

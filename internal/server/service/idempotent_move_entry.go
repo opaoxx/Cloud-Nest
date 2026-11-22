@@ -141,7 +141,7 @@ func (moveService *IdempotentMoveEntryService) Move(ctx context.Context, actor d
 
 			// 5. 版本递增表明父目录发生变化，事件和移动结果一同提交。
 			if entry.Revision > expectedRevision {
-				event, err := newEntryChangeEvent("ENTRY_MOVED", entry)
+				event, err := domain.NewEntryChangeEvent("ENTRY_MOVED", entry)
 				if err != nil {
 					return fmt.Errorf("编码移动变更事件失败: %w", err)
 				}

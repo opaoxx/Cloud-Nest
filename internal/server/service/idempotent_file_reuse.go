@@ -91,7 +91,7 @@ func (reuse *IdempotentFileReuseService) Reuse(
 			if err != nil {
 				return err
 			}
-			event, err := newFilePublishedChangeEvent(entry, digest)
+			event, err := domain.NewFilePublishedChangeEvent(entry, digest)
 			if err != nil {
 				return fmt.Errorf("编码秒传发布事件失败: %w", err)
 			}

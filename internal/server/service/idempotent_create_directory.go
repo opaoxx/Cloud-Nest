@@ -124,7 +124,7 @@ func (createService *IdempotentCreateDirectoryService) Create(ctx context.Contex
 			}
 
 			// 5. 从已核对的新目录构造事件，和目录、幂等快照一同提交。
-			event, err := newEntryChangeEvent("DIRECTORY_CREATED", entry)
+			event, err := domain.NewEntryChangeEvent("DIRECTORY_CREATED", entry)
 			if err != nil {
 				return fmt.Errorf("编码创建文件夹变更事件失败: %w", err)
 			}

@@ -115,7 +115,7 @@ func (purgeService *IdempotentPurgeEntryService) Begin(ctx context.Context, acto
 			}
 
 			// 4. 为实际进入 PURGING 的根项追加事件，与状态、快照一起提交。
-			event, err := newEntryChangeEvent("ENTRY_PURGE_STARTED", entry)
+			event, err := domain.NewEntryChangeEvent(domain.EntryPurgeStartedEventType, entry)
 			if err != nil {
 				return fmt.Errorf("编码清理受理事件失败: %w", err)
 			}

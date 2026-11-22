@@ -23,9 +23,11 @@ func TestServerExpiredTrashRootIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_SERVER_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_SERVER_TEST=1 后用独占库验证到期标记启动")
 	}
-	// 1. 创建独占库，准备 101 条到期根项及一个仍在保留期内的根项。
-	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	// 1. 创建专用容器和独占库，准备到期与保留期内的根项。
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
+	mysqlContainer := startIsolatedWebMySQL(t, ctx)
+	t.Logf("到期标记专用 MySQL %s", mysqlContainer[:12])
 	pool, databaseName := prepareServerIntegrationDatabase(t, ctx)
 	execute := func(statement string) {
 		t.Helper()
@@ -109,6 +111,21 @@ func TestServerExpiredTrashRootIntegration(t *testing.T) {
 		Scan(&remaining); err != nil || remaining != 2 {
 		t.Fatal("超限项或保留期内条目被提前标记", remaining, err)
 	}
+	var changeSequence, events, matchedEvents uint64
+	if err := pool.QueryRowContext(ctx, `SELECT change_seq,
+		(SELECT COUNT(*) FROM change_events WHERE user_id=users.id),
+		(SELECT COUNT(*) FROM change_events AS events
+		 JOIN file_entries AS entries ON entries.user_id=events.user_id AND entries.id=events.entry_id
+		 WHERE events.user_id=users.id AND entries.status='PURGING'
+		   AND events.event_type='ENTRY_PURGE_STARTED' AND events.sequence=entries.id-1000 AND events.revision=entries.revision
+		   AND JSON_UNQUOTE(JSON_EXTRACT(events.payload,'$.entry_id'))=CAST(entries.id AS CHAR)
+		   AND JSON_UNQUOTE(JSON_EXTRACT(events.payload,'$.parent_id'))=CAST(entries.parent_id AS CHAR)
+		   AND JSON_UNQUOTE(JSON_EXTRACT(events.payload,'$.name'))=entries.name
+		   AND JSON_UNQUOTE(JSON_EXTRACT(events.payload,'$.revision'))=CAST(entries.revision AS CHAR))
+		FROM users WHERE id=1`).Scan(&changeSequence, &events, &matchedEvents); err != nil ||
+		changeSequence != 100 || events != 100 || matchedEvents != 100 {
+		t.Fatal("到期标记和事件未逐项提交，或账号序号不连续", changeSequence, events, matchedEvents, err)
+	}
 
 	// 4. 在汇报暂停时停止 HTTP。放行后验证最后汇报、worker 退出和数据库释放的顺序。
 	stop()
@@ -147,7 +164,7 @@ func TestServerExpiredTrashRootIntegration(t *testing.T) {
 		!strings.Contains(logText, `"scanned":100,"marked":100,"stale_candidates":0,"candidate_errors":0`) {
 		t.Fatal("启动参数、隔离范围或首轮汇报不符", logText)
 	}
-	t.Log("首轮标记 100 项，超限和保留期内各 1 项未标记。放行汇报后先停 worker，再关闭数据库池")
+	t.Log("首轮标记 100 项，事件序号 1 至 100 与根项逐条一致，超限和保留期内各 1 项未标记。放行汇报后先停 worker，再关闭数据库池")
 }
 
 // prepareServerReadOnlyStorageStub 只为隔离进程提供本地桶检查接口。

@@ -9,7 +9,7 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// MarkExpiredTrashRootPurging 复核单条到期候选并提交永久清理开始状态。
+// MarkExpiredTrashRootPurging 复核单条到期候选并提交清理开始状态和变更事件。
 // 成功后旧扫描候选失效，返回的清理根项已提交。
 func (store *Store) MarkExpiredTrashRootPurging(ctx context.Context, candidate domain.ExpiredTrashRootCandidate) (*domain.PurgeRootCandidate, error) {
 	// 1. 锁定并复核单条到期候选。
@@ -40,7 +40,7 @@ func (store *Store) MarkExpiredTrashRootPurging(ctx context.Context, candidate d
 			return domain.ErrInvalidFileEntryData
 		}
 
-		// 3. 读回核对，事务提交后返回清理根项。
+		// 3. 读回根项，核对新版本和清理开始时间。
 		saved, err := txStore.readLockedTrashEntry(txContext, current.UserID, current.EntryID)
 		if errors.Is(err, domain.ErrFileEntryNotFound) {
 			return domain.ErrInvalidFileEntryData
@@ -61,9 +61,21 @@ func (store *Store) MarkExpiredTrashRootPurging(ctx context.Context, candidate d
 			!root.PurgeStartedAt.After(current.DeletedAt.AddDate(0, 0, domain.TrashRetentionDays)) {
 			return domain.ErrInvalidFileEntryData
 		}
+
+		// 4. 使用实际写回结果追加事件，失败则和本次标记一起回滚。
+		event, err := domain.NewEntryChangeEvent(domain.EntryPurgeStartedEventType, &domain.FileEntry{
+			ID: saved.ID, ParentID: saved.ParentID, Name: saved.Name, Revision: saved.Revision,
+		})
+		if err != nil {
+			return fmt.Errorf("编码到期清理开始事件失败: %w", err)
+		}
+		if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
+			return fmt.Errorf("追加到期清理开始事件失败: %w", err)
+		}
 		marked = &root
 		return nil
 	})
+	// 5. 仅在事务提交成功后返回清理根项。
 	if err != nil {
 		return nil, err
 	}
