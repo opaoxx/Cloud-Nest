@@ -28,6 +28,12 @@ func (store *Store) ListSingleUploadExpirationCandidates(ctx context.Context, li
 	return store.listUploadExpirationCandidates(ctx, limit, "SINGLE")
 }
 
+// ListMultipartUploadExpirationCandidates 在限量前筛出到期的分片任务。
+func (store *Store) ListMultipartUploadExpirationCandidates(ctx context.Context, limit int) ([]domain.UploadExpirationCandidate, error) {
+	// 1. 指定分片模式，复用数据库时钟、租约和重试时点筛选。
+	return store.listUploadExpirationCandidates(ctx, limit, "MULTIPART")
+}
+
 func (store *Store) listUploadExpirationCandidates(ctx context.Context, limit int, uploadMode string) ([]domain.UploadExpirationCandidate, error) {
 	// 1. 校验读取入口和批量上限。
 	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > maxUploadExpirationCandidates {
