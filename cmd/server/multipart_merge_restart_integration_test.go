@@ -17,9 +17,10 @@ import (
 )
 
 func TestServerMultipartMergeRestartIntegration(t *testing.T) {
-	verifyPublication := os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_PUBLICATION_TEST") == "1"
+	verifyDownload := os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_DOWNLOAD_TEST") == "1"
+	verifyPublication := verifyDownload || os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_PUBLICATION_TEST") == "1"
 	if os.Getenv("CLOUDNEST_MULTIPART_MERGE_RESTART_TEST") != "1" && !verifyPublication {
-		t.Skip("启用 CLOUDNEST_MULTIPART_MERGE_RESTART_TEST 观察重启恢复，或启用 CLOUDNEST_MULTIPART_MERGE_RESTART_PUBLICATION_TEST 验收发布")
+		t.Skip("按需启用 CLOUDNEST_MULTIPART_MERGE_RESTART_TEST、CLOUDNEST_MULTIPART_MERGE_RESTART_PUBLICATION_TEST 或 CLOUDNEST_MULTIPART_MERGE_RESTART_DOWNLOAD_TEST")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
@@ -182,6 +183,11 @@ func TestServerMultipartMergeRestartIntegration(t *testing.T) {
 		}
 		verifyResumedMultipartCompletionReplay(t, ctx, fixture, restarted, taskPath, completed)
 		t.Logf("重启发布保留原合并版本 %s，原任务 %s 只发布条目 %s", publication.objectVersion, completed.ID, publication.entry.ID)
+
+		if verifyDownload {
+			// 5. 从正式授权读取已核对的原版本，独立比对下载正文与合成源。
+			verifyResumedMultipartDownload(t, ctx, restarted, publication, fileDigest)
+		}
 	}
 
 	restartLogs, err := stopRestarted()
