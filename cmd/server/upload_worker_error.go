@@ -58,7 +58,7 @@ func uploadWorkerErrorCode(err error) string {
 		return "UPLOAD_OBJECT_MISSING"
 	case errors.Is(err, domain.ErrStoredObjectNotFound):
 		return "STORED_OBJECT_NOT_FOUND"
-	case errors.Is(err, domain.ErrUploadTargetUnavailable):
+	case errors.Is(err, domain.ErrUploadTargetUnavailable), errors.Is(err, domain.ErrUploadReplacementTargetUnavailable):
 		return domain.UploadTargetUnavailableCode
 	case errors.Is(err, domain.ErrEntryRevisionConflict):
 		return domain.UploadRevisionConflictCode

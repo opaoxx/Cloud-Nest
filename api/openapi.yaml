@@ -2670,7 +2670,7 @@ components:
         message:
           type: string
           enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常', '分片回执不一致，请核对后补传', '存储上传会话已失效，请重新创建任务', '文件已发生变化，请刷新后重试', '目标文件已不可用']
-          description: 按 code 生成的固定中文提示。
+          description: 按 code 生成的固定中文提示。TARGET_UNAVAILABLE 对普通上传提示目标目录不可用，对替换失败提示目标文件不可用。
     UploadTaskReplacement:
       type: object
       additionalProperties: false

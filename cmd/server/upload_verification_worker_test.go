@@ -126,6 +126,7 @@ func TestUploadVerificationErrorCode(t *testing.T) {
 	}{
 		{"digest mismatch evidence", &domain.UploadVerificationChecksumMismatch{}, "CHECKSUM_MISMATCH"},
 		{"missing target", domain.ErrUploadTargetUnavailable, "TARGET_UNAVAILABLE"},
+		{"missing replacement target", domain.ErrUploadReplacementTargetUnavailable, "TARGET_UNAVAILABLE"},
 		{"replacement revision conflict", &domain.EntryRevisionConflictError{CurrentRevision: 2}, "REVISION_CONFLICT"},
 		{"missing physical object", domain.ErrUploadObjectMissing, "UPLOAD_OBJECT_MISSING"},
 		{"missing object record", domain.ErrStoredObjectNotFound, "STORED_OBJECT_NOT_FOUND"},

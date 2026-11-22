@@ -110,7 +110,7 @@ func NewUploadTaskData(result *domain.UploadTask) (*UploadTaskData, error) {
 		UpdatedAt:     *updatedAt,
 		ExpiresAt:     *expiresAt,
 		CompletedAt:   completedAt,
-		LastError:     uploadTaskErrorSummary(result.LastErrorCode, result.ReplacementConflictingRevision != nil),
+		LastError:     uploadTaskErrorSummary(result),
 	}
 	if result.ResultEntryID != nil {
 		entryID := strconv.FormatUint(*result.ResultEntryID, 10)
@@ -135,21 +135,24 @@ func NewUploadTaskData(result *domain.UploadTask) (*UploadTaskData, error) {
 }
 
 // uploadTaskErrorSummary 将内部任务错误码转换为固定的公开提示。
-func uploadTaskErrorSummary(code *string, confirmedRevisionConflict bool) *UploadTaskErrorSummary {
+func uploadTaskErrorSummary(task *domain.UploadTask) *UploadTaskErrorSummary {
 	// 1. 未记录错误码时保留 null。
-	if code == nil {
+	if task.LastErrorCode == nil {
 		return nil
 	}
 
 	// 2. 按已批准的业务码生成提示，未知码使用通用处理异常。
-	publicCode := *code
-	if publicCode == domain.UploadRevisionConflictCode && !confirmedRevisionConflict {
+	publicCode := *task.LastErrorCode
+	if publicCode == domain.UploadRevisionConflictCode && task.ReplacementConflictingRevision == nil {
 		publicCode = "INTERNAL_ERROR"
 	}
 	var message string
 	switch publicCode {
 	case domain.UploadTargetUnavailableCode:
 		message = domain.ErrUploadTargetUnavailable.Error()
+		if task.ReplacementEntryID != nil && task.Status == domain.UploadStatusFailed {
+			message = domain.ErrUploadReplacementTargetUnavailable.Error()
+		}
 	case domain.UploadRevisionConflictCode:
 		message = domain.ErrEntryRevisionConflict.Error()
 	case domain.UploadBodySizeMismatchCode:

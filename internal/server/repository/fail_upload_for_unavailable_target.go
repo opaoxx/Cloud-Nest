@@ -52,8 +52,20 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 	if current.TargetParentID != task.TargetParentID {
 		return domain.ErrUploadTaskBusy
 	}
+	replacementUnavailable := errorCode == domain.UploadTargetUnavailableCode &&
+		(task.ReplacementEntryID != nil || task.ReplacementExpectedRevision != nil || current.ReplacementEntryID != nil)
 	if conflictingRevision != nil {
 		if err := store.checkUploadReplacementConflict(ctx, task, current, *conflictingRevision); err != nil {
+			return err
+		}
+	} else if replacementUnavailable {
+		// 可见性错误优先于版本错误。只有锁内再次确认不可用，才结束任务。
+		switch err := store.recheckUploadReplacementFailureTarget(ctx, task, current); err {
+		case domain.ErrFileEntryNotFound, domain.ErrFileEntryNotFile:
+			errorMessage = domain.ErrUploadReplacementTargetUnavailable.Error()
+		case nil:
+			return domain.ErrUploadTaskBusy
+		default:
 			return err
 		}
 	}
@@ -136,9 +148,10 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 	if uploadMode == "MULTIPART" && (!sameMultipartUploadPlan(current, failed) || !sameUploadStorageText(failed.StorageUploadID, current.StorageUploadID)) {
 		return domain.ErrInvalidUploadTaskData
 	}
-	if conflictingRevision != nil && (failed.ReplacementEntryID == nil || *failed.ReplacementEntryID != *current.ReplacementEntryID ||
-		failed.ReplacementExpectedRevision == nil || *failed.ReplacementExpectedRevision != *current.ReplacementExpectedRevision ||
-		failed.ReplacementConflictingRevision == nil || *failed.ReplacementConflictingRevision != *conflictingRevision) {
+	if (conflictingRevision != nil || replacementUnavailable) && !sameUploadReplacementBinding(current, failed) {
+		return domain.ErrInvalidUploadTaskData
+	}
+	if conflictingRevision != nil && (failed.ReplacementConflictingRevision == nil || *failed.ReplacementConflictingRevision != *conflictingRevision) {
 		return domain.ErrInvalidUploadTaskData
 	}
 	orphaned, err := lockedStore.markUnreferencedUploadObjectOrphaned(ctx, staged)
@@ -153,16 +166,13 @@ func (store *Store) failVerifyingUpload(ctx context.Context, task *domain.Upload
 
 // checkUploadReplacementConflict 确认冲突版本属于当前任务绑定的可见文件。
 func (store *Store) checkUploadReplacementConflict(ctx context.Context, snapshot, current *domain.UploadTask, revision uint64) error {
-	// 1. 核对原绑定以及冲突版本的范围。
-	if revision == 0 || snapshot.ReplacementEntryID == nil || current.ReplacementEntryID == nil ||
-		*snapshot.ReplacementEntryID != *current.ReplacementEntryID ||
-		snapshot.ReplacementExpectedRevision == nil || current.ReplacementExpectedRevision == nil ||
-		*snapshot.ReplacementExpectedRevision != *current.ReplacementExpectedRevision {
+	// 1. 要求调用方提供非零的冲突版本。
+	if revision == 0 {
 		return domain.ErrInvalidUploadTaskData
 	}
 
 	// 2. 沿用目标的可见性和版本锁读，防止用错误证据结束任务。
-	_, err := store.LockUploadReplacementTarget(ctx, *current.ReplacementEntryID, *current.ReplacementExpectedRevision)
+	err := store.recheckUploadReplacementFailureTarget(ctx, snapshot, current)
 	var conflict *domain.EntryRevisionConflictError
 	if errors.As(err, &conflict) {
 		if conflict.CurrentRevision == revision {
@@ -174,4 +184,20 @@ func (store *Store) checkUploadReplacementConflict(ctx context.Context, snapshot
 		return err
 	}
 	return domain.ErrUploadTaskBusy
+}
+
+// recheckUploadReplacementFailureTarget 使用原绑定和锁内记录复核替换的失败原因。
+func (store *Store) recheckUploadReplacementFailureTarget(ctx context.Context, snapshot, current *domain.UploadTask) error {
+	if !sameUploadReplacementBinding(snapshot, current) {
+		return domain.ErrInvalidUploadTaskData
+	}
+	_, err := store.LockUploadReplacementTarget(ctx, *current.ReplacementEntryID, *current.ReplacementExpectedRevision)
+	return err
+}
+
+func sameUploadReplacementBinding(first, second *domain.UploadTask) bool {
+	return first.ReplacementEntryID != nil && second.ReplacementEntryID != nil &&
+		*first.ReplacementEntryID == *second.ReplacementEntryID &&
+		first.ReplacementExpectedRevision != nil && second.ReplacementExpectedRevision != nil &&
+		*first.ReplacementExpectedRevision == *second.ReplacementExpectedRevision
 }

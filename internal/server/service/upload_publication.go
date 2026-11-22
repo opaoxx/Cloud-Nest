@@ -48,7 +48,7 @@ func NewUploadPublicationService(
 
 // Publish 使用事务外已读回校验的任务、暂存对象和实测摘要发布文件。
 // 对象、文件、配额、完成结果及同步事件由外层事务一起确认。
-// 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
+// 目标不可用时提交失败收尾，再返回对应的目录或文件不可用原因。
 // 只有校验与写回快照的替换绑定一致时，才发布既有文件的内容更新。
 // 替换版本冲突在失败收尾提交后交付原冲突版本。
 func (publication *UploadPublicationService) Publish(
@@ -87,8 +87,15 @@ func (publication *UploadPublicationService) Publish(
 				verifiedRevision == nil || task.ReplacementExpectedRevision == nil || *verifiedRevision != *task.ReplacementExpectedRevision {
 				return fmt.Errorf("内容替换任务绑定已变化: %w", domain.ErrUploadTaskNotReady)
 			}
-			// 版本冲突在对象选择和替换写入前收尾，后续写入故障仍交给外层回滚。
+			// 在对象选择前处理已确认的不可用或版本冲突，其他错误交给外层回滚。
 			if _, err := txn.LockUploadReplacementTarget(txContext, *verifiedTarget, *verifiedRevision); err != nil {
+				if err == domain.ErrFileEntryNotFound || err == domain.ErrFileEntryNotFile {
+					if err := txn.FailUploadForUnavailableTarget(txContext, task); err != nil {
+						return err
+					}
+					rejected = domain.ErrUploadReplacementTargetUnavailable
+					return nil
+				}
 				conflict, confirmed := err.(*domain.EntryRevisionConflictError)
 				if !confirmed || conflict == nil {
 					return err
