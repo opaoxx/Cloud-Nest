@@ -23,6 +23,11 @@ type SyncSnapshotCacheBinding struct {
 	PageSize   int
 }
 
+func (binding SyncSnapshotCacheBinding) valid() bool {
+	return binding.SnapshotID.Version() == 4 && binding.SnapshotID.Variant() == uuid.RFC4122 &&
+		binding.UserID != 0 && binding.DeviceID != 0 && binding.Generation != 0 && binding.PageSize >= 1 && binding.PageSize <= 100
+}
+
 // SyncSnapshotCache 持有进程内的固定快照及其共享预算。
 type SyncSnapshotCache struct {
 	mutex    sync.Mutex
@@ -48,7 +53,31 @@ func NewSyncSnapshotCache(now func() time.Time) *SyncSnapshotCache {
 
 // ReserveBuild 为即将开始的快照构建预留本缓存的名额和空间。
 func (cache *SyncSnapshotCache) ReserveBuild(ctx context.Context) (*SyncSnapshotReservation, error) {
+	// 1. 检查本次申请，串行处理缓存回收和名额预留。
+	if ctx == nil {
+		return nil, fmt.Errorf("预留同步快照需要上下文")
+	}
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// 2. 先回收已到期的快照，再申请名额，避免无人访问的旧项一直占用预算。
+	if len(cache.entries) > 0 {
+		now := cache.now()
+		for snapshotID, entry := range cache.entries {
+			if !now.Before(entry.expiresAt) {
+				cache.removeLocked(snapshotID, entry)
+			}
+		}
+	}
 	return cache.capacity.ReserveBuild(ctx)
+}
+
+func (cache *SyncSnapshotCache) removeLocked(snapshotID uuid.UUID, entry cachedSyncSnapshot) {
+	delete(cache.entries, snapshotID)
+	entry.reservation.Release()
 }
 
 // Put 接管本次构建预留并保存条目的独立副本，返回固定的 UTC 到期时刻。
@@ -56,8 +85,7 @@ func (cache *SyncSnapshotCache) ReserveBuild(ctx context.Context) (*SyncSnapshot
 func (cache *SyncSnapshotCache) Put(ctx context.Context, reservation *SyncSnapshotReservation, binding SyncSnapshotCacheBinding, snapshot *BuiltSyncSnapshot) (time.Time, error) {
 	// 1. 核对标识、设备绑定、上下文和实际 JSON 大小。
 	defer reservation.Release()
-	if ctx == nil || binding.SnapshotID.Version() != 4 || binding.SnapshotID.Variant() != uuid.RFC4122 ||
-		binding.UserID == 0 || binding.DeviceID == 0 || binding.Generation == 0 || binding.PageSize < 1 || binding.PageSize > 100 {
+	if ctx == nil || !binding.valid() {
 		return time.Time{}, fmt.Errorf("缓存同步快照需要上下文和有效的快照绑定")
 	}
 	if err := ctx.Err(); err != nil {

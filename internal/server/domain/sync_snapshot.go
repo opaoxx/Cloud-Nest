@@ -18,6 +18,12 @@ var ErrSyncSnapshotTooLarge = errors.New("同步快照超过大小上限")
 // ErrSyncSnapshotBusy 表示进程当前无法为新的快照构建预留资源。
 var ErrSyncSnapshotBusy = errors.New("同步快照构建繁忙，请稍后重试")
 
+// ErrInvalidSyncSnapshotCursor 表示分页凭据或其快照绑定不匹配。
+var ErrInvalidSyncSnapshotCursor = errors.New("同步快照分页凭据无效")
+
+// ErrSyncSnapshotExpired 表示可信设备的快照已到期、丢失或代次已变更。
+var ErrSyncSnapshotExpired = errors.New("同步快照已失效，请重新建立基线")
+
 // SyncSnapshotHeader 保存账号一致性快照的根目录和变更截止位置。
 type SyncSnapshotHeader struct {
 	// RootEntryID 是账号真实活动根目录的 ID。
