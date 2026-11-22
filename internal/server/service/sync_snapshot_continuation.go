@@ -60,18 +60,8 @@ func (reader *SyncSnapshotContinuationService) Read(ctx context.Context, actor d
 	}
 
 	// 2. 查询设备当前代次，失配或没有同步记录时提示重建。
-	generation, generationError := reader.findGeneration(ctx, actor.UserID, actor.DeviceID)
-	if err := ctx.Err(); err != nil {
+	if err := requireCurrentSyncSnapshotGeneration(ctx, actor, verified.Binding.Generation, reader.findGeneration); err != nil {
 		return nil, err
-	}
-	if errors.Is(generationError, domain.ErrSyncDeviceNotFound) {
-		return nil, domain.ErrSyncSnapshotExpired
-	}
-	if generationError != nil {
-		return nil, fmt.Errorf("读取设备当前同步代次失败: %w", generationError)
-	}
-	if generation != verified.Binding.Generation {
-		return nil, domain.ErrSyncSnapshotExpired
 	}
 
 	// 3. 通过缓存检查固定绑定和有效期，再按已签名的起点取得一页。
@@ -98,4 +88,26 @@ func (reader *SyncSnapshotContinuationService) Read(ctx context.Context, actor d
 	return &SyncSnapshotContinuation{
 		Binding: verified.Binding, Header: snapshot.Header, ExpiresAt: snapshot.ExpiresAt, Page: *page,
 	}, nil
+}
+
+// requireCurrentSyncSnapshotGeneration 确认快照仍属于设备当前已提交的代次。
+func requireCurrentSyncSnapshotGeneration(ctx context.Context, actor domain.Actor, expected domain.SyncCursorGeneration,
+	findGeneration func(context.Context, uint64, uint64) (domain.SyncCursorGeneration, error),
+) error {
+	// 1. 按已认证账号和设备读取当前代次，优先检查请求取消。
+	generation, err := findGeneration(ctx, actor.UserID, actor.DeviceID)
+	if contextError := ctx.Err(); contextError != nil {
+		return contextError
+	}
+	// 2. 无同步记录或代次变化均表示快照失效，保留其他查询错误。
+	if errors.Is(err, domain.ErrSyncDeviceNotFound) {
+		return domain.ErrSyncSnapshotExpired
+	}
+	if err != nil {
+		return fmt.Errorf("读取设备当前同步代次失败: %w", err)
+	}
+	if generation != expected {
+		return domain.ErrSyncSnapshotExpired
+	}
+	return nil
 }
