@@ -30,8 +30,11 @@ var ErrInvalidSyncSnapshotCursor = errors.New("同步快照分页凭据无效")
 // ErrInvalidSyncSnapshotBaselineToken 表示末页确认凭据或签发数据无效。
 var ErrInvalidSyncSnapshotBaselineToken = errors.New("同步快照末页确认凭据无效")
 
-// ErrSyncSnapshotExpired 表示可信设备的快照已到期、丢失或代次已变更。
+// ErrSyncSnapshotExpired 表示快照已到期、丢失、代次已变更或无法衔接保留的日志。
 var ErrSyncSnapshotExpired = errors.New("同步快照已失效，请重新建立基线")
+
+// ErrInvalidSyncSnapshotSequence 表示快照截止序号或其账号日志边界与当前序号矛盾。
+var ErrInvalidSyncSnapshotSequence = errors.New("同步快照截止序号或账号日志边界异常")
 
 // SyncCursorGeneration 是同步设备持久化的 16 字节随机代次，按完整值比较。
 type SyncCursorGeneration [16]byte
