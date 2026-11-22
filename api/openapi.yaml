@@ -213,10 +213,11 @@ paths:
       summary: 查询当前用户的指定上传任务
       description: |
         Bearer JWT 和数据库授权通过后解析路径 id，使用 Actor.UserID 读取任务。
-        返回十三字段公开数据，保留到期和终态事实，同账号其他设备可查询原设备创建的任务。
+        返回公开任务数据，保留到期和终态事实，同账号其他设备可查询原设备创建的任务。
         任务、目录和结果 ID 使用十进制字符串，大小遵守 JSON 安全整数，时间采用 UTC 微秒。
         last_error 采用固定公开业务码和提示。缺失或跨账号目标统一返回 UPLOAD_NOT_FOUND。
         每次请求复查账号、会话及设备的授权状态，格式错误定位 id，响应使用 no-store。
+        B5 计划：替换任务另返回 replacement。COMPLETED 交付已提交的目标及版本，FAILED 的 REVISION_CONFLICT 交付判定冲突时的版本。
       security:
         - BearerAuth: []
       parameters:
@@ -327,9 +328,10 @@ paths:
         4. MULTIPART 已在 COMPLETING 或 VERIFYING 时返回 202，已在 COMPLETED 时返回 200，读取已保存的 data.result_entry_id 和完成时间。
            这些请求可省略正文，带回的回执仅在进入 UPLOADING 的受理分支时读取。已受理完成快照不会被重试覆盖。
            尚未受理且不具备完成条件、正在取消或过期收尾，或已失败、取消、过期的任务返回 409 TASK_NOT_READY。
-        5. 后台完成存储对象并校验整文件大小及 SHA-256，发布事务一次性创建目录项并结算配额。202 后通过 GET /api/v1/uploads/{id} 查询进度。
+        5. 后台完成存储对象并校验整文件大小及 SHA-256，普通上传的发布事务一次性创建目录项并结算配额。202 后通过 GET /api/v1/uploads/{id} 查询进度。
            旧回执在后台被确认失配且原会话还能继续上传时，任务回到 UPLOADING，客户端补传后携带新回执提交。
            存储完成结果不明时沿原任务核对，保留 COMPLETING，后续查询交付实际阶段。重复完成请求以任务 ID 复用进度和已发布的同一结果。
+           B5 计划：替换任务复用此流程，发布时条件更新原文件。失败时用任务查询读取终态原因。
         请求无需 Idempotency-Key。服务端依靠任务状态、租约及提交的完成快照约束重复操作。
       security:
         - BearerAuth: []
@@ -1039,6 +1041,67 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/entries/{id}/content-replacement:
+    post:
+      tags: [Entries, Uploads]
+      operationId: createEntryContentReplacement
+      x-cloudnest-status: planned
+      summary: 为指定版本的文件创建内容替换任务
+      description: |
+        B5 计划契约，服务尚未注册此操作。
+        1. Bearer 授权后校验路径 id、Idempotency-Key 和 JSON。账号和设备取自认证身份。
+           幂等范围为账号及独立的替换创建操作。摘要绑定目标 ID、预期版本、字节数和规范化后的 SHA-256。
+           复查当前授权后，有效同键同参数返回原始 201 快照和本次 request_id，实时状态通过任务查询读取。
+        2. 无既有记录时在所属账号事务中锁读活动文件和可见祖先链，比较版本，再按新内容的完整大小预占。
+           任务、暂存对象、预占和 201 幂等快照同事务提交。任务期限与创建回执保留期沿用普通上传。
+           0～16777216 字节返回 SINGLE 提交路径，超过时返回 MULTIPART 固定分片计划。两种模式均须声明整文件 SHA-256。
+           适用 B4 配置和存储决定的文件上限。父目录和名称为准备时的快照，目标始终以 replacement.entry_id 标识。
+        3. 客户端沿用 /api/v1/uploads 下按任务 ID 的内容接收、分片、完成、查询和取消操作。
+           后台校验精确对象版本的大小与 SHA-256 后，再用原 expected_revision 条件提交。
+           成功时原文件 ID、名称及父目录保留，递增一次版本，保存旧内容引用，结算配额并追加变更事件。
+           发布时版本失配转为 FAILED，last_error.code 为 REVISION_CONFLICT，原文件保持当时状态。
+           客户端保留本地源并重读远端，内容仍冲突时用普通上传或合格的文件复用创建独立副本。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - $ref: '#/components/parameters/EntryID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEntryContentReplacementRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/CreateEntryContentReplacementSucceeded'
+        '400':
+          description: INVALID_ARGUMENT。路径或可见目标为目录时定位 id，其他字段错误定位 Idempotency-Key、expected_revision、size_bytes 或 sha256。正文结构错误的 details 为 null。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: 账号禁用或来源策略拒绝沿用 ACCOUNT_DISABLED 或 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/TargetEntryNotFound'
+        '409':
+          $ref: '#/components/responses/CreateEntryContentReplacementConflict'
+        '413':
+          $ref: '#/components/responses/CreateUploadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '507':
+          $ref: '#/components/responses/CreateUploadQuotaExceeded'
   /api/v1/entries/{id}/download:
     post:
       tags: [Entries]
@@ -2602,12 +2665,32 @@ components:
       properties:
         code:
           type: string
-          enum: [TARGET_UNAVAILABLE, BODY_SIZE_MISMATCH, FILE_TOO_LARGE, CHECKSUM_MISMATCH, QUOTA_EXCEEDED, TEMP_SPACE_EXHAUSTED, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, INTERNAL_ERROR, UPLOAD_PARTS_MISMATCH, UPLOAD_SESSION_LOST]
-          description: 未知或空的内部错误码统一转换为 INTERNAL_ERROR。
+          enum: [TARGET_UNAVAILABLE, BODY_SIZE_MISMATCH, FILE_TOO_LARGE, CHECKSUM_MISMATCH, QUOTA_EXCEEDED, TEMP_SPACE_EXHAUSTED, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, INTERNAL_ERROR, UPLOAD_PARTS_MISMATCH, UPLOAD_SESSION_LOST, REVISION_CONFLICT]
+          description: 未知或空的内部错误码统一转换为 INTERNAL_ERROR。REVISION_CONFLICT 为 B5 计划中替换任务发布时的终态错误。
         message:
           type: string
-          enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常', '分片回执不一致，请核对后补传', '存储上传会话已失效，请重新创建任务']
+          enum: ['目标目录已不可用', '文件实际大小与声明不一致', '文件大小超过当前上传限制', '文件校验失败，请重新上传', '存储空间不足', '上传临时空间不足，请稍后重试', '存储服务暂时不可用', '数据服务暂时不可用', '上传任务处理异常', '分片回执不一致，请核对后补传', '存储上传会话已失效，请重新创建任务', '文件已发生变化，请刷新后重试', '目标文件已不可用']
           description: 按 code 生成的固定中文提示。
+    UploadTaskReplacement:
+      type: object
+      additionalProperties: false
+      required: [entry_id, expected_revision, published_revision, conflicting_revision]
+      description: B5 计划。仅替换任务返回此对象。两个结果版本均为发布事务记下的事实，后续查询及重试沿用原值。
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        expected_revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        published_revision:
+          type: string
+          nullable: true
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 仅 COMPLETED 返回 expected_revision 加一，此时 result_entry_id 等于 entry_id。其他状态为 null。
+        conflicting_revision:
+          type: string
+          nullable: true
+          pattern: '^[1-9][0-9]{0,19}$'
+          description: 仅 FAILED 且 last_error.code 为 REVISION_CONFLICT 时返回冲突判定所见的可见文件版本。其他状态为 null。
     UploadTaskData:
       type: object
       additionalProperties: false
@@ -2663,6 +2746,8 @@ components:
           description: UTC 微秒任务终结时间。COMPLETED 必须提供 result_entry_id 和 completed_at。
         last_error:
           $ref: '#/components/schemas/UploadTaskErrorSummary'
+        replacement:
+          $ref: '#/components/schemas/UploadTaskReplacement'
     UploadTaskResponse:
       type: object
       additionalProperties: false
@@ -3226,6 +3311,24 @@ components:
         parent_id: '11'
         name: 学习资料
         color_key: green
+    CreateEntryContentReplacementRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, size_bytes, sha256]
+      description: |
+        B5 计划。按 expected_revision、size_bytes、sha256 顺序校验声明。
+        预期版本为非零 uint64 的标准十进制字符串。SHA-256 必填，大小写等价，并在后台用实测摘要核对。
+      properties:
+        expected_revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+        size_bytes:
+          $ref: '#/components/schemas/UploadTaskData/properties/size_bytes'
+        sha256:
+          $ref: '#/components/schemas/CreateMultipartUploadRequest/properties/sha256'
+      example:
+        expected_revision: '4'
+        size_bytes: 9
+        sha256: 15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225
     RenameEntryRequest:
       type: object
       additionalProperties: false
@@ -4559,6 +4662,32 @@ components:
                   message: 幂等键已用于不同请求参数
                   details: null
                 request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    CreateEntryContentReplacementConflict:
+      description: |
+        HTTP 409。目标可见且版本不符时使用 REVISION_CONFLICT，details.current_revision 为非零 uint64 的标准十进制字符串。
+        有效幂等键的参数不同返回 IDEMPOTENCY_CONFLICT，超过原快照的有效期返回 IDEMPOTENCY_EXPIRED，两者的 details 为 null。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: REVISION_CONFLICT
+              message: 文件已发生变化，请刷新后重试
+              details:
+                current_revision: '5'
+            request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
     EntryRevisionConflict:
       description: |
         HTTP 409，REVISION_CONFLICT，客户端预期版本与当前可见目录项版本不一致。
@@ -5299,6 +5428,48 @@ components:
             oneOf:
               - $ref: '#/components/schemas/CreateUploadResponse'
               - $ref: '#/components/schemas/CreateMultipartUploadResponse'
+    CreateEntryContentReplacementSucceeded:
+      description: |
+        B5 计划。HTTP 201 返回已提交的上传准备快照。replacement 绑定目标文件及预期版本，两个结果版本均为 null。
+        同键同参数重放交付原快照。实时阶段及发布结果由任务查询交付。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+        Pragma:
+          schema:
+            type: string
+            enum: [no-cache]
+      content:
+        application/json:
+          schema:
+            allOf:
+              - oneOf:
+                  - $ref: '#/components/schemas/CreateUploadResponse'
+                  - $ref: '#/components/schemas/CreateMultipartUploadResponse'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      task:
+                        type: object
+                        required: [replacement]
+                        properties:
+                          replacement:
+                            type: object
+                            properties:
+                              published_revision:
+                                type: string
+                                nullable: true
+                                enum: [null]
+                              conflicting_revision:
+                                type: string
+                                nullable: true
+                                enum: [null]
     UploadContentAccepted:
       description: |
         上传内容接收成功 HTTP 202，任务已进入 VERIFYING。
