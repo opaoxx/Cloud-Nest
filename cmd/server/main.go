@@ -705,7 +705,7 @@ func runWithPurgeRootWorker(
 	stopMultipartVerification := startServerMultipartUploadVerificationWorker(ctx, multipartVerification.RunOnce, logger)
 	defer stopMultipartVerification()
 
-	// 40. 仅在选定本机 Compose 项目时装配实例证明，供分片取消和到期复查使用。
+	// 40. 仅在选定本机 Compose 项目时装配实例证明，供分片收尾使用。
 	var multipartCleanupProof storage.MultipartSessionLockVerifier
 	if project := storageConfig.MinIOProofComposeProject; project != "" {
 		multipartCleanupProof = newLocalMinIOSessionLockVerifier(project, newLocalMinIODockerSnapshotReader(project))
@@ -723,7 +723,24 @@ func runWithPurgeRootWorker(
 	// 44. 等到期轮次汇报并退出后，才释放存储与数据库连接。
 	defer stopMultipartExpiration()
 
-	// 45. 启动 HTTP 并处理退出通知。
+	// 45. 已选定实例证明项目时启动孤儿会话收尾，限制单轮扫描与中止规模。
+	if multipartCleanupProof != nil {
+		limits := service.MultipartUploadSessionCleanupLimits{
+			Objects: 10, SessionsPerPage: 20, StoragePages: 5, Candidates: 10,
+		}
+		runSessionCleanup, err := newServerMultipartUploadSessionCleanupRound(
+			store, storageClient, storageConfig, multipartCleanupProof, limits, multipartUploadSessionCleanupGrace,
+		)
+		if err != nil {
+			logger.Error("装配分片会话收尾失败", "stage", "application", "error", err)
+			return err
+		}
+		stopSessionCleanup := startServerMultipartUploadSessionCleanupWorker(ctx, multipartUploadSessionCleanupInterval, runSessionCleanup, logger)
+		// 46. 等会话收尾汇报并退出，再释放 MinIO 和 MySQL。
+		defer stopSessionCleanup()
+	}
+
+	// 47. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

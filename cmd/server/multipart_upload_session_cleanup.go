@@ -12,6 +12,12 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
 
+const (
+	multipartUploadSessionCleanupInterval = time.Minute
+	// 以现有 24 小时上传任务生命周期作为首版孤儿会话宽限期。
+	multipartUploadSessionCleanupGrace = 24 * time.Hour
+)
+
 // newServerMultipartUploadSessionCleanupRound 装配一个由 worker 调用的单轮收尾入口。
 // 本轮和单项中止均要求可确认直接连接预期的存储实例。
 func newServerMultipartUploadSessionCleanupRound(
