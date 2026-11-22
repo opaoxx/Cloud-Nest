@@ -2,11 +2,30 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"gorm.io/gorm"
 )
+
+// CompleteExpiredFileVersion 在同一账号事务内结算一条到期历史，并为失去最后引用的对象开始回收计时。
+func (store *Store) CompleteExpiredFileVersion(ctx context.Context, candidate domain.FileVersion) error {
+	// 1. 在所属账号事务内加锁复核候选。
+	return store.WithExpiredFileVersionTransaction(ctx, candidate,
+		func(txContext context.Context, txStore *Store, current domain.FileVersion, object *domain.StoredObject) error {
+			// 2. 删除到期历史并扣减对应的已用空间。
+			if err := txStore.settleLockedExpiredFileVersion(txContext, current); err != nil {
+				return err
+			}
+
+			// 3. 有其他有效引用时结算仍成功。其他计时错误交给外层一起回滚。
+			if _, err := txStore.StartReadyObjectGCTimer(txContext, object.ID); err != nil && !errors.Is(err, domain.ErrStoredObjectInUse) {
+				return err
+			}
+			return nil
+		})
+}
 
 // settleLockedExpiredFileVersion 在 WithExpiredFileVersionTransaction 的回调内结算已复核的历史行。
 // 调用方须将错误交回外层事务，历史删除和计费扣减在事务提交成功后一起生效。
