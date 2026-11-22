@@ -9,6 +9,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/opaoxx/cloud-nest/internal/server/config"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/internal/server/storage"
@@ -160,7 +161,7 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 
 	// 5. 用扫描得到的原会话验证只读复核，覆盖空分片、缺失及保护变化。
 	rechecker := service.NewMultipartUploadSessionCandidateRechecker(settings.Provider, settings.Bucket,
-		client.CheckMultipartUploadSessionExists, store.ReadMultipartUploadSessionCleanupFacts)
+		client.CheckMultipartUploadSessionExists, store.RecheckMultipartUploadSessionCleanup)
 	secondObject := resumed.Objects[1]
 	candidate := secondObject.Scan.Candidates[0]
 	available, err := rechecker.Recheck(ctx, secondObject.Target, candidate, grace)
@@ -168,7 +169,7 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		t.Fatal("仍存在且超期的未保护会话未通过复核", err)
 	}
 	withinGrace, err := rechecker.Recheck(ctx, secondObject.Target, candidate, 2*time.Hour)
-	if err != nil || !withinGrace.Exists || withinGrace.Facts.GraceElapsed || withinGrace.Eligible() {
+	if err != nil || !withinGrace.Exists || withinGrace.Database.Facts.GraceElapsed || withinGrace.Eligible() {
 		t.Fatal("宽限期变化未被重新检查", err)
 	}
 	missing := candidate
@@ -178,7 +179,7 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		t.Fatal("其他对象的会话被误认为存在于原键", err)
 	}
 	newLease, err := rechecker.Recheck(ctx, target, first.Candidates[0], grace)
-	if err != nil || !newLease.Exists || !newLease.Facts.Protection.ActiveCreationLease || newLease.Eligible() {
+	if err != nil || !newLease.Exists || !newLease.Database.Facts.Protection.ActiveCreationLease || newLease.Eligible() {
 		t.Fatal("扫描后生效的创建租约未保护原会话", err)
 	}
 	afterFirst, err := store.FindUserUploadTask(ctx, 7, 19)
@@ -189,17 +190,27 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(beforeSecond, afterSecond) {
 		t.Fatal("跨对象扫描改变了第二个任务", err)
 	}
-	execute("UPDATE upload_tasks SET storage_upload_id=? WHERE id=28", candidate.UploadID)
-	beforeBound, err := store.FindUserUploadTask(ctx, 7, 28)
-	if err != nil {
-		t.Fatal(err)
+	// 6. 在存储探测返回之前提交一次真实绑定，再由服务进入账号事务。
+	var boundTask *domain.UploadTask
+	probeAndBind := func(probeContext context.Context, key, uploadID string) (bool, error) {
+		exists, err := client.CheckMultipartUploadSessionExists(probeContext, key, uploadID)
+		if err != nil || !exists {
+			return exists, err
+		}
+		bindContext, cancel := context.WithTimeout(probeContext, 3*time.Second)
+		defer cancel()
+		boundTask, err = store.BindMultipartUploadSession(bindContext, afterFirst, uploadID)
+		return exists, err
 	}
-	nowBound, err := rechecker.Recheck(ctx, secondObject.Target, candidate, grace)
-	if err != nil || !nowBound.Exists || !nowBound.Facts.Protection.Bound || nowBound.Eligible() {
-		t.Fatal("扫描后绑定的候选未受保护", err)
+	bindingRechecker := service.NewMultipartUploadSessionCandidateRechecker(settings.Provider, settings.Bucket,
+		probeAndBind, store.RecheckMultipartUploadSessionCleanup)
+	nowBound, err := bindingRechecker.Recheck(ctx, target, first.Candidates[0], grace)
+	if err != nil || boundTask == nil || !nowBound.Exists || nowBound.Database.TaskStatus != domain.UploadStatusUploading ||
+		!nowBound.Database.Facts.Protection.Bound || nowBound.Eligible() {
+		t.Fatal("探测期间提交的绑定未被加锁复核读到", nowBound, err)
 	}
-	afterBound, err := store.FindUserUploadTask(ctx, 7, 28)
-	if err != nil || !reflect.DeepEqual(beforeBound, afterBound) {
+	afterBound, err := store.FindUserUploadTask(ctx, 7, 19)
+	if err != nil || !reflect.DeepEqual(boundTask, afterBound) {
 		t.Fatal("单条复核改变了新绑定后的任务", err)
 	}
 	for _, uploadID := range sessions {
@@ -213,5 +224,5 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 		}
 	}
 	t.Log("两个对象共享会话页数上限，断点续读分组正确，五个合成会话仍可读")
-	t.Log("单会话复核覆盖存在、原键缺失、宽限期、扫描后租约及绑定变化")
+	t.Log("探测先于账号事务，期间提交的真实绑定被锁内复核识别，五个合成会话仍可读")
 }

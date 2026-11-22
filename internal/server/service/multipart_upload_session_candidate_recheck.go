@@ -8,39 +8,38 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-// MultipartUploadSessionCandidateCheck 保存原会话及数据库保护的最新只读观察。
+// MultipartUploadSessionCandidateCheck 保存原会话探测和数据库锁内复核结果。
 type MultipartUploadSessionCandidateCheck struct {
-	Exists bool
-	Facts  domain.MultipartUploadSessionCleanupFacts
+	Exists   bool
+	Database domain.MultipartUploadSessionLockedCheck
 }
 
-// Eligible 判断本次观察中，会话是否仍存在、已过宽限期且未受保护。
-// 调用方执行后续操作前仍须协调可能并发的绑定和创建。
+// Eligible 判断会话存在且通过数据库锁内的收尾条件。
 func (check MultipartUploadSessionCandidateCheck) Eligible() bool {
-	return check.Exists && check.Facts.GraceElapsed && !check.Facts.Protection.Bound && !check.Facts.Protection.ActiveCreationLease
+	return check.Exists && check.Database.Eligible()
 }
 
 // MultipartUploadSessionCandidateRechecker 在候选筛选后重新观察单条会话。
 type MultipartUploadSessionCandidateRechecker struct {
 	provider, bucket string
 	checkExists      func(context.Context, string, string) (bool, error)
-	readFacts        func(context.Context, string, string, domain.MultipartUploadSessionScanTarget, domain.MultipartUploadSession, time.Duration) (domain.MultipartUploadSessionCleanupFacts, error)
+	recheckLocked    func(context.Context, string, string, domain.MultipartUploadSessionScanTarget, domain.MultipartUploadSession, time.Duration) (domain.MultipartUploadSessionLockedCheck, error)
 }
 
-// NewMultipartUploadSessionCandidateRechecker 绑定同一存储范围内的会话探测和数据库复核。
+// NewMultipartUploadSessionCandidateRechecker 绑定同一存储范围内的会话探测和数据库加锁复核。
 func NewMultipartUploadSessionCandidateRechecker(
 	provider, bucket string,
 	checkExists func(context.Context, string, string) (bool, error),
-	readFacts func(context.Context, string, string, domain.MultipartUploadSessionScanTarget, domain.MultipartUploadSession, time.Duration) (domain.MultipartUploadSessionCleanupFacts, error),
+	recheckLocked func(context.Context, string, string, domain.MultipartUploadSessionScanTarget, domain.MultipartUploadSession, time.Duration) (domain.MultipartUploadSessionLockedCheck, error),
 ) *MultipartUploadSessionCandidateRechecker {
 	location := domain.CreateStagedObjectInput{Provider: provider, Bucket: bucket, ObjectKey: "validation"}
-	if !location.IsValid() || checkExists == nil || readFacts == nil {
-		panic("复核分片会话候选需要存储配置、会话查询及数据库复核")
+	if !location.IsValid() || checkExists == nil || recheckLocked == nil {
+		panic("复核分片会话候选需要存储配置、会话查询及数据库加锁复核")
 	}
-	return &MultipartUploadSessionCandidateRechecker{provider: provider, bucket: bucket, checkExists: checkExists, readFacts: readFacts}
+	return &MultipartUploadSessionCandidateRechecker{provider: provider, bucket: bucket, checkExists: checkExists, recheckLocked: recheckLocked}
 }
 
-// Recheck 读取候选当前的会话和保护状态。会话缺失时直接返回，读取失败时返回错误。
+// Recheck 先探测会话，再用账号事务复核保护状态。会话缺失时直接返回。
 func (rechecker *MultipartUploadSessionCandidateRechecker) Recheck(
 	ctx context.Context, target domain.MultipartUploadSessionScanTarget, session domain.MultipartUploadSession, gracePeriod time.Duration,
 ) (MultipartUploadSessionCandidateCheck, error) {
@@ -60,7 +59,7 @@ func (rechecker *MultipartUploadSessionCandidateRechecker) Recheck(
 		return result, err
 	}
 
-	// 2. 只读确认原存储会话当前是否存在。
+	// 2. 在事务外探测原存储会话。
 	exists, err := rechecker.checkExists(ctx, session.ObjectKey, session.UploadID)
 	if stopError := ctx.Err(); stopError != nil {
 		return result, stopError
@@ -69,13 +68,13 @@ func (rechecker *MultipartUploadSessionCandidateRechecker) Recheck(
 		return result, err
 	}
 
-	// 3. 刷新数据库保护和宽限期，返回复核结果。
-	facts, err := rechecker.readFacts(ctx, rechecker.provider, rechecker.bucket, target, session, gracePeriod)
+	// 3. 会话存在时加锁复核，用锁内结果判断是否通过。
+	databaseCheck, err := rechecker.recheckLocked(ctx, rechecker.provider, rechecker.bucket, target, session, gracePeriod)
 	if stopError := ctx.Err(); stopError != nil {
 		return result, stopError
 	}
 	if err != nil {
 		return result, err
 	}
-	return MultipartUploadSessionCandidateCheck{Exists: true, Facts: facts}, nil
+	return MultipartUploadSessionCandidateCheck{Exists: true, Database: databaseCheck}, nil
 }

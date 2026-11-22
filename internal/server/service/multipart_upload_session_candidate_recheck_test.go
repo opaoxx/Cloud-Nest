@@ -16,32 +16,37 @@ func TestMultipartUploadSessionCandidateRecheckerObservesCurrentProtection(t *te
 	storageFailure := errors.New("fixture storage failure")
 	databaseFailure := errors.New("fixture database failure")
 	for _, fixture := range []struct {
-		name          string
-		exists        bool
-		facts         domain.MultipartUploadSessionCleanupFacts
-		storageErr    error
-		databaseErr   error
-		cancelAt      string
-		wantErr       error
-		wantEligible  bool
-		wantReadFacts bool
+		name         string
+		exists       bool
+		facts        domain.MultipartUploadSessionCleanupFacts
+		status       domain.UploadStatus
+		storageErr   error
+		databaseErr  error
+		cancelAt     string
+		wantErr      error
+		wantEligible bool
+		wantLock     bool
 	}{
-		{name: "expired unprotected", exists: true, facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true}, wantEligible: true, wantReadFacts: true},
-		{name: "now bound", exists: true, facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true,
-			Protection: domain.MultipartUploadSessionProtection{Bound: true}}, wantReadFacts: true},
-		{name: "now creating", exists: true, facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true,
-			Protection: domain.MultipartUploadSessionProtection{ActiveCreationLease: true}}, wantReadFacts: true},
-		{name: "within grace", exists: true, wantReadFacts: true},
+		{name: "expired unprotected", exists: true, status: domain.UploadStatusUploading,
+			facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true}, wantEligible: true, wantLock: true},
+		{name: "now bound", exists: true, status: domain.UploadStatusUploading, facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true,
+			Protection: domain.MultipartUploadSessionProtection{Bound: true}}, wantLock: true},
+		{name: "creating with lease", exists: true, status: domain.UploadStatusCreating, facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true,
+			Protection: domain.MultipartUploadSessionProtection{ActiveCreationLease: true}}, wantLock: true},
+		{name: "creating without lease", exists: true, status: domain.UploadStatusCreating,
+			facts: domain.MultipartUploadSessionCleanupFacts{GraceElapsed: true}, wantLock: true},
+		{name: "within grace", exists: true, status: domain.UploadStatusUploading, wantLock: true},
 		{name: "session absent"},
 		{name: "storage error", storageErr: storageFailure, wantErr: storageFailure},
-		{name: "database error", exists: true, databaseErr: databaseFailure, wantErr: databaseFailure, wantReadFacts: true},
+		{name: "database error", exists: true, databaseErr: databaseFailure, wantErr: databaseFailure, wantLock: true},
 		{name: "cancel during storage", exists: true, cancelAt: "storage", wantErr: context.Canceled},
-		{name: "cancel during database", exists: true, cancelAt: "database", wantErr: context.Canceled, wantReadFacts: true},
+		{name: "cancel during database", exists: true, cancelAt: "database", wantErr: context.Canceled, wantLock: true},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var calls []string
+			lockedResult := domain.MultipartUploadSessionLockedCheck{TaskStatus: fixture.status, Facts: fixture.facts}
 			rechecker := NewMultipartUploadSessionCandidateRechecker("local_minio", "fixture-bucket", func(callContext context.Context, key, uploadID string) (bool, error) {
 				calls = append(calls, "storage")
 				if callContext != ctx || key != target.ObjectKey || uploadID != original.UploadID {
@@ -51,7 +56,7 @@ func TestMultipartUploadSessionCandidateRecheckerObservesCurrentProtection(t *te
 					cancel()
 				}
 				return fixture.exists, fixture.storageErr
-			}, func(callContext context.Context, provider, bucket string, gotTarget domain.MultipartUploadSessionScanTarget, session domain.MultipartUploadSession, grace time.Duration) (domain.MultipartUploadSessionCleanupFacts, error) {
+			}, func(callContext context.Context, provider, bucket string, gotTarget domain.MultipartUploadSessionScanTarget, session domain.MultipartUploadSession, grace time.Duration) (domain.MultipartUploadSessionLockedCheck, error) {
 				calls = append(calls, "database")
 				if callContext != ctx || provider != "local_minio" || bucket != "fixture-bucket" || gotTarget != target || session != original || grace != time.Minute {
 					t.Fatal("保护复核使用了不同的原对象或宽限期")
@@ -59,15 +64,15 @@ func TestMultipartUploadSessionCandidateRecheckerObservesCurrentProtection(t *te
 				if fixture.cancelAt == "database" {
 					cancel()
 				}
-				return fixture.facts, fixture.databaseErr
+				return lockedResult, fixture.databaseErr
 			})
 			wantCalls := []string{"storage"}
-			if fixture.wantReadFacts {
+			if fixture.wantLock {
 				wantCalls = append(wantCalls, "database")
 			}
 			want := MultipartUploadSessionCandidateCheck{}
 			if fixture.exists && fixture.wantErr == nil {
-				want = MultipartUploadSessionCandidateCheck{Exists: true, Facts: fixture.facts}
+				want = MultipartUploadSessionCandidateCheck{Exists: true, Database: lockedResult}
 			}
 			got, err := rechecker.Recheck(ctx, target, original, time.Minute)
 			if !errors.Is(err, fixture.wantErr) || got != want || got.Eligible() != fixture.wantEligible || !reflect.DeepEqual(calls, wantCalls) {
@@ -83,9 +88,9 @@ func TestMultipartUploadSessionCandidateRecheckerRejectsInvalidScope(t *testing.
 	rechecker := NewMultipartUploadSessionCandidateRechecker("local_minio", "fixture-bucket", func(context.Context, string, string) (bool, error) {
 		t.Fatal("无效候选触发了存储查询")
 		return false, nil
-	}, func(context.Context, string, string, domain.MultipartUploadSessionScanTarget, domain.MultipartUploadSession, time.Duration) (domain.MultipartUploadSessionCleanupFacts, error) {
+	}, func(context.Context, string, string, domain.MultipartUploadSessionScanTarget, domain.MultipartUploadSession, time.Duration) (domain.MultipartUploadSessionLockedCheck, error) {
 		t.Fatal("无效候选触发了数据库查询")
-		return domain.MultipartUploadSessionCleanupFacts{}, nil
+		return domain.MultipartUploadSessionLockedCheck{}, nil
 	})
 	for _, fixture := range []struct {
 		name string
