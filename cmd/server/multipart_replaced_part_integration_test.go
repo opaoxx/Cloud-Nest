@@ -30,13 +30,14 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 	const fileSize = partSize + 1
 	payload := make([]byte, fileSize)
 	payload[0], payload[partSize] = 0x31, 0x32
+	sourceDigest := sha256.Sum256(payload)
 	api := fixture.api
 	var created struct {
 		Data      dto.CreateMultipartUploadData `json:"data"`
 		RequestID string                        `json:"request_id"`
 	}
 	body := fmt.Sprintf(`{"parent_id":%q,"name":"multipart-replaced-part-fixture.bin","size_bytes":%d,"sha256":"%x"}`,
-		fixture.login.RootEntryID, fileSize, sha256.Sum256(payload))
+		fixture.login.RootEntryID, fileSize, sourceDigest)
 	api.request(t, ctx, http.MethodPost, "/api/v1/uploads", "multipart-replaced-part-fixture", strings.NewReader(body), http.StatusCreated, &created)
 	if created.RequestID == "" || created.Data.UploadMode != "MULTIPART" || created.Data.Task.Status != "CREATING" ||
 		created.Data.PartSizeBytes != partSize || created.Data.PartCount != 2 {
@@ -51,7 +52,7 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 		etag := putMultipartProbePart(t, ctx, api.httpClient, signed, checksum, contents, http.StatusOK, "")
 		return dto.UploadPartReceiptData{PartNumber: number, SizeBytes: uint64(len(contents)), ETag: etag, ChecksumSHA256: checksum}
 	}
-	readReceipts := func(expected ...dto.UploadPartReceiptData) {
+	readReceipts := func(expected ...dto.UploadPartReceiptData) []dto.UploadPartReceiptData {
 		t.Helper()
 		var receipts dto.UploadPartsResponse
 		api.request(t, ctx, http.MethodGet, taskPath+"/parts", "", nil, http.StatusOK, &receipts)
@@ -59,6 +60,7 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 			!slices.Equal(receipts.Data.Parts, expected) {
 			t.Fatal("正式分片清单与预期回执不符", receipts.Data)
 		}
+		return receipts.Data.Parts
 	}
 	readProfile := func() dto.UserProfileData {
 		t.Helper()
@@ -144,12 +146,19 @@ func TestServerMultipartReplacedPartIntegration(t *testing.T) {
 		!reflect.DeepEqual(afterTask.Data, expectedTask) || !reflect.DeepEqual(readProfile(), before) {
 		t.Fatal("拒绝旧尾片回执改变了原任务或预占配额", afterTask.Data)
 	}
-	readReceipts(firstReceipt, replacement)
+	latest := readReceipts(firstReceipt, replacement)
+	t.Logf("原任务 %s 提交旧尾片回执返回 409 UPLOAD_PARTS_MISMATCH，只指出第 2 片，核对租约版本 %d 到 %d 后释放，任务仍为 %s，完成快照 %d、文件 %d、预占 %d B",
+		readyTask.ID, prior.version, after.version, afterTask.Data.Status, after.snapshots, after.files, before.ReservedBytes)
+
+	// 7. 以正式查询的最新回执重新提交原任务，验证后台发布及配额结算。
+	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, afterTask.Data, latest[0], latest[1])
+	t.Logf("替换尾片后的原任务 %s 使用最新回执返回 202 COMPLETING", accepted.ID)
+	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
+	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, sourceDigest)
+
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("原任务 %s 提交旧尾片回执返回 409 UPLOAD_PARTS_MISMATCH，只指出第 2 片，核对租约版本 %d 到 %d 后释放，任务仍为 %s，完成快照 %d、文件 %d、预占 %d B",
-		readyTask.ID, prior.version, after.version, afterTask.Data.Status, after.snapshots, after.files, before.ReservedBytes)
 }
