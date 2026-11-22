@@ -160,9 +160,15 @@ func (execution *MultipartUploadCancellationStorageService) readCancellationObje
 	if target == nil || target.ObjectKey == "" {
 		return "", domain.ErrInvalidStoredObjectData
 	}
-	if (target.UploadID == nil) != (task.StorageUploadID == nil) ||
-		(target.UploadID != nil && *target.UploadID != *task.StorageUploadID) {
+	if !sameMultipartCancellationSession(target.UploadID, task.StorageUploadID) {
 		return "", domain.ErrUploadTaskBusy
 	}
 	return target.ObjectKey, nil
+}
+
+func sameMultipartCancellationSession(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
