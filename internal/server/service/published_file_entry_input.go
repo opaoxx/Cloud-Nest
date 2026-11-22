@@ -56,6 +56,13 @@ func BuildPublishedFileEntryInput(
 	}
 
 	// 3. 派生名称键、扩展名和分类，组装写入输入。
+	return buildFileEntryWriteInput(task.TargetParentID, resolvedName, object, sourceDevice)
+}
+
+// buildFileEntryWriteInput 将已核对的对象、设备和名称转换为文件条目字段。
+func buildFileEntryWriteInput(
+	parentID uint64, resolvedName string, object *domain.StoredObject, sourceDevice *domain.UserDevice,
+) (*domain.CreatePublishedFileEntryInput, error) {
 	metadata, err := BuildEntryNameMetadata("FILE", resolvedName)
 	if err != nil {
 		return nil, err
@@ -65,7 +72,7 @@ func BuildPublishedFileEntryInput(
 		return nil, err
 	}
 	return &domain.CreatePublishedFileEntryInput{
-		ParentID:         task.TargetParentID,
+		ParentID:         parentID,
 		Name:             metadata.Name,
 		NameKey:          nameKey,
 		Category:         *metadata.Category,

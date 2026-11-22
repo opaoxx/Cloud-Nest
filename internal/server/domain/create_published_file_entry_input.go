@@ -1,9 +1,9 @@
 package domain
 
-// CreatePublishedFileEntryInput 保存上传发布时创建普通文件目录项所需的字段。
-// 所属用户取自发布事务，初始状态和发布时间由写入流程确定。
+// CreatePublishedFileEntryInput 保存上传发布及同账号内容复用创建普通文件目录项所需的字段。
+// 所属用户取自账号事务，初始状态和写入时间由写入流程确定。
 type CreatePublishedFileEntryInput struct {
-	// ParentID 是上传任务当前的目标父目录 ID。
+	// ParentID 是当前创建操作的目标父目录 ID。
 	ParentID uint64
 	// Name 是已选定的发布展示名，保留大小写及 Unicode 写法。
 	Name string
@@ -19,7 +19,7 @@ type CreatePublishedFileEntryInput struct {
 	ObjectID uint64
 	// SizeBytes 是已校验对象的字节数，保存为文件大小快照。
 	SizeBytes uint64
-	// SourceDeviceID 是上传任务的来源设备 ID。
+	// SourceDeviceID 是创建此文件的操作来源设备 ID。
 	SourceDeviceID uint64
 	// SourceDeviceName 是内容发布时读取的设备名称快照。
 	SourceDeviceName string
