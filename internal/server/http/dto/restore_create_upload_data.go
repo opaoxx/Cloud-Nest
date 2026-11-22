@@ -54,7 +54,7 @@ func hasCreateUploadSnapshotFields(body []byte, requireReplacement bool, require
 		return fields, err == nil
 	}
 	if requireReplacement {
-		readObject = readUniqueUploadSnapshotObject
+		readObject = readUniqueJSONObject
 	}
 	payload, valid := readObject(body)
 	if !valid || len(payload) != len(requiredFields) {
