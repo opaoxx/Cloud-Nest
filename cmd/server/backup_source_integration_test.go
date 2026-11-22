@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -219,6 +220,12 @@ func prepareBackupSourceWithServer(t *testing.T, ctx context.Context, startMinIO
 
 func startBackupFixtureServer(t *testing.T, ctx context.Context, databaseName string) (backupSourceClient, func() (string, error)) {
 	t.Helper()
+	return startBackupFixtureServerWithRun(t, ctx, databaseName, run)
+}
+
+func startBackupFixtureServerWithRun(t *testing.T, ctx context.Context, databaseName string,
+	runServer func(context.Context, *slog.Logger) error) (backupSourceClient, func() (string, error)) {
+	t.Helper()
 	address := configureBackupFixtureServer(t, databaseName)
 	serverContext, cancelServer := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -226,7 +233,7 @@ func startBackupFixtureServer(t *testing.T, ctx context.Context, databaseName st
 	var runError error
 	go func() {
 		defer close(done)
-		runError = run(serverContext, logging.New(&serverLogs))
+		runError = runServer(serverContext, logging.New(&serverLogs))
 	}()
 	stop := func() (string, error) {
 		cancelServer()

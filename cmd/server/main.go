@@ -51,6 +51,16 @@ func runWithPurgeRootWorker(
 	logger *slog.Logger,
 	startPurgeRoot func(context.Context, func(context.Context, int, int) (service.PurgeRootBatchResult, error), *slog.Logger) func(),
 ) error {
+	return runWithServerDependencies(ctx, logger, startPurgeRoot, service.NewUploadTempSpace())
+}
+
+// runWithServerDependencies 为当前服务实例绑定清理 worker 和共享暂存预算。
+func runWithServerDependencies(
+	ctx context.Context,
+	logger *slog.Logger,
+	startPurgeRoot func(context.Context, func(context.Context, int, int) (service.PurgeRootBatchResult, error), *slog.Logger) func(),
+	uploadSpace *service.UploadTempSpace,
+) error {
 	// 1. 读取并校验监听配置，失败时记录原因并停止启动。
 	listenAddress, err := config.LoadHTTPAddress()
 	if err != nil {
@@ -574,7 +584,6 @@ func runWithPurgeRootWorker(
 	)
 
 	// 26. 用已检查的目录创建共享上传临时区。
-	uploadSpace := service.NewUploadTempSpace()
 	uploadFiles, err := service.NewUploadContentFileService(uploadTempConfig.Directory, uploadSpace)
 	if err != nil {
 		logger.Error("装配上传临时文件服务失败", "stage", "upload_temp", "error", err)
