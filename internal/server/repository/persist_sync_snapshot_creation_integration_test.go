@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +293,63 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 		}
 		if readDeviceState() != committed {
 			t.Fatal("复用或拒绝候选改变了设备状态")
+		}
+	})
+
+	// 7. 两个创建服务请求都错过首查，由最后的账号事务选出同一份快照。
+	t.Run("creation service reuses one committed page", func(t *testing.T) {
+		requestContext, stop := context.WithCancel(ctx)
+		defer stop()
+		const createServiceKey = "Concurrent-Creation-Service"
+		building, continueBuild := make(chan struct{}, 2), make(chan struct{})
+		preparation := service.NewSyncSnapshotPreparation(func(ctx context.Context, _ domain.Actor) (*service.BuiltSyncSnapshot, error) {
+			building <- struct{}{}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-continueBuild:
+				return &service.BuiltSyncSnapshot{
+					Header:  domain.SyncSnapshotHeader{RootEntryID: 11, HighWaterSequence: 35},
+					Entries: domain.SyncSnapshotEntriesJSON{Items: []json.RawMessage{}, SizeBytes: 2},
+				}, nil
+			}
+		}, service.NewSyncSnapshotCache(clock))
+		creator := service.NewSyncSnapshotCreationService(
+			preparation, func(ctx context.Context, identity domain.Actor, action func(context.Context, service.SyncSnapshotFinalizationTransaction) error) error {
+				return store.WithUserTransaction(ctx, identity, func(txContext context.Context, txStore *Store) error {
+					return action(txContext, txStore)
+				})
+			}, store.FindSyncDeviceGeneration, service.NewSyncSnapshotPageDelivery(cursorSigner.Sign, baselineSigner.Sign),
+			dto.EncodeCreateSyncSnapshotReceipt, dto.DecodeCreateSyncSnapshotReceipt, clock,
+		)
+		type creationResult struct {
+			page *domain.SyncSnapshotPageResult
+			err  error
+		}
+		results := make(chan creationResult, 2)
+		for range 2 {
+			go func() {
+				page, err := creator.Create(requestContext, actor, createServiceKey, binding.PageSize)
+				results <- creationResult{page: page, err: err}
+			}()
+		}
+		for range 2 {
+			select {
+			case <-requestContext.Done():
+				t.Fatal("两个请求没有都进入构建", requestContext.Err())
+			case <-building:
+			case result := <-results:
+				t.Fatal("账号首查未进入构建", result.err)
+			}
+		}
+		close(continueBuild)
+		first, second := <-results, <-results
+		if first.err != nil || second.err != nil || first.page == nil || !reflect.DeepEqual(first.page, second.page) || first.page.BaselineToken == nil {
+			t.Fatalf("同键并发首页不同：%+v，%+v", first, second)
+		}
+		retried, err := creator.Create(requestContext, actor, createServiceKey, binding.PageSize)
+		if err != nil || !reflect.DeepEqual(first.page, retried) || len(building) != 0 {
+			t.Fatalf("已提交回执未跳过构建或首页变化：%+v，%v", retried, err)
 		}
 	})
 }

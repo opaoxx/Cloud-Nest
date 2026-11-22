@@ -103,7 +103,7 @@ func (store *Store) withLockedUserTransaction(
 		return fmt.Errorf("提交用户事务前已取消: %w", err)
 	}
 	if commitError := transaction.Commit().Error; commitError != nil {
-		return fmt.Errorf("提交用户事务失败: %w", commitError)
+		return fmt.Errorf("提交用户事务失败: %w: %w", domain.ErrUserTransactionCommitUnconfirmed, commitError)
 	}
 	committed = true
 	return nil

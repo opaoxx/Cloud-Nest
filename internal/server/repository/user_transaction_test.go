@@ -128,6 +128,9 @@ func TestWithUserTransactionResults(t *testing.T) {
 			if testCase.rollbackError != nil && !errors.Is(err, testCase.rollbackError) {
 				t.Error("丢失回滚原因")
 			}
+			if errors.Is(err, domain.ErrUserTransactionCommitUnconfirmed) != (testCase.commitError != nil) {
+				t.Error("提交结果标记与实际提交阶段不符")
+			}
 			sequence := "begin,lock"
 			if testCase.stage != "user" {
 				sequence += ",device"
