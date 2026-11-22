@@ -15,6 +15,9 @@ const MaxSyncSnapshotBytes = 8 * 1024 * 1024
 // ErrSyncSnapshotTooLarge 表示完整快照超出允许的大小。
 var ErrSyncSnapshotTooLarge = errors.New("同步快照超过大小上限")
 
+// ErrSyncSnapshotBusy 表示进程当前无法为新的快照构建预留资源。
+var ErrSyncSnapshotBusy = errors.New("同步快照构建繁忙，请稍后重试")
+
 // SyncSnapshotHeader 保存账号一致性快照的根目录和变更截止位置。
 type SyncSnapshotHeader struct {
 	// RootEntryID 是账号真实活动根目录的 ID。
