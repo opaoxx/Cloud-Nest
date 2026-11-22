@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"strings"
@@ -48,6 +49,21 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	binding.Generation[15] = 0x80
 	now := time.Now().In(time.FixedZone("fixture", 8*60*60))
 	const key = "SyncSnapshot-Create-001"
+	hash, err := service.BuildCreateSyncSnapshotRequestHash(actor.DeviceID, binding.PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(receiptKey string, requestHash [sha256.Size]byte, checkedAt time.Time) (*domain.SyncSnapshotReceiptLocator, error) {
+		var locator *domain.SyncSnapshotReceiptLocator
+		err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+			var lookupError error
+			locator, lookupError = service.FindCreateSyncSnapshotReplayInTransaction(
+				txContext, actor, receiptKey, requestHash, checkedAt, txStore.FindUserIdempotencyRecord, dto.DecodeCreateSyncSnapshotReceipt,
+			)
+			return lookupError
+		})
+		return locator, err
+	}
 	type deviceState struct {
 		ack           uint64
 		status        string
@@ -67,7 +83,13 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	before := readDeviceState()
 	persist := func(cutoff uint64, afterWrite func(context.Context, *Store, error)) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
-			err := service.PersistSyncSnapshotCreationInTransaction(txContext, actor, binding, cutoff, key, now, txStore,
+			locator, err := service.FindCreateSyncSnapshotReplayInTransaction(
+				txContext, actor, key, hash, now, txStore.FindUserIdempotencyRecord, dto.DecodeCreateSyncSnapshotReceipt,
+			)
+			if err != nil || locator != nil {
+				t.Fatalf("首次写入前查找应为空：%+v，%v", locator, err)
+			}
+			err = service.PersistSyncSnapshotCreationInTransaction(txContext, actor, binding, cutoff, key, now, txStore,
 				dto.EncodeCreateSyncSnapshotReceipt, dto.DecodeCreateSyncSnapshotReceipt)
 			if afterWrite != nil {
 				afterWrite(txContext, txStore, err)
@@ -80,9 +102,8 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 		if actual := readDeviceState(); actual != before {
 			t.Fatalf("设备状态未保留：%+v，期望 %+v", actual, before)
 		}
-		if record, err := store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.CreateSyncSnapshotOperation, key); record != nil ||
-			!errors.Is(err, domain.ErrIdempotencyRecordNotFound) {
-			t.Fatalf("失败后出现回执：%+v，错误 %v", record, err)
+		if locator, err := lookup(key, hash, now); locator != nil || err != nil {
+			t.Fatalf("失败后出现回执或查询异常：%+v，错误 %v", locator, err)
 		}
 	}
 
@@ -93,7 +114,7 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	assertUnchanged(t)
 	execute("CREATE TRIGGER fixture_reject_snapshot_receipt BEFORE INSERT ON idempotency_records FOR EACH ROW " +
 		"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture receipt insert rejected'")
-	err := persist(35, func(txContext context.Context, txStore *Store, writeError error) {
+	err = persist(35, func(txContext context.Context, txStore *Store, writeError error) {
 		var databaseError *mysql.MySQLError
 		if !errors.As(writeError, &databaseError) || databaseError.Number != 1644 {
 			t.Fatalf("未经过预期的 MySQL 回执写入错误：%v", writeError)
@@ -131,14 +152,26 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatal("未读到已提交的创建回执", err)
 	}
-	hash, err := service.BuildCreateSyncSnapshotRequestHash(actor.DeviceID, binding.PageSize)
-	if err != nil {
-		t.Fatal(err)
-	}
-	locator, err := service.ValidateCreateSyncSnapshotReplay(record, actor, key, hash, now, dto.DecodeCreateSyncSnapshotReceipt)
+	locator, err := lookup(key, hash, now)
 	if err != nil || locator == nil || locator.SnapshotID != binding.SnapshotID || locator.Generation != generation ||
 		record.ResourceID != nil || record.ResponseStatus != http.StatusCreated ||
 		!record.ExpiresAt.Equal(now.UTC().Truncate(time.Microsecond).Add(8*24*time.Hour)) {
 		t.Fatalf("已保存回执或原快照定位不符：%+v，%+v，错误 %v", record, locator, err)
+	}
+	otherHash, err := service.BuildCreateSyncSnapshotRequestHash(actor.DeviceID, binding.PageSize+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locator, err := lookup(strings.ToLower(key), hash, now); locator != nil || err != nil {
+		t.Fatalf("大小写不同的键错误命中：%+v，%v", locator, err)
+	}
+	if locator, err := lookup(key, otherHash, now); locator != nil || !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+		t.Fatalf("同键异参结果为 %+v，错误 %v", locator, err)
+	}
+	if locator, err := lookup(key, hash, record.ExpiresAt); locator != nil || !errors.Is(err, domain.ErrIdempotencyRecordExpired) {
+		t.Fatalf("到期回执结果为 %+v，错误 %v", locator, err)
+	}
+	if actual := readDeviceState(); actual != committed {
+		t.Fatal("查找回执改变了同步设备的状态")
 	}
 }
