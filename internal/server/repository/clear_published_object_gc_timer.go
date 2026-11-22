@@ -12,7 +12,7 @@ import (
 )
 
 // ClearPublishedObjectGCTimer 清除已有活动文件引用的发布对象回收计时。
-// 调用方在同一用户事务中创建文件并传播失败，结果由外层事务确认。
+// 调用方在同一用户事务中创建文件或更新内容引用，结果由外层事务确认。
 func (store *Store) ClearPublishedObjectGCTimer(ctx context.Context, objectID, entryID uint64) (*domain.StoredObject, error) {
 	// 1. 核对用户事务和文件、对象标识。
 	if store == nil || store.database == nil || store.loginUserID == 0 || ctx == nil || objectID == 0 || entryID == 0 {

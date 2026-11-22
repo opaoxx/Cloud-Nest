@@ -18,6 +18,9 @@ type UploadPublicationTransaction interface {
 	CreatePublishedFileEntry(ctx context.Context, task *domain.UploadTask, input domain.CreatePublishedFileEntryInput) (*domain.FileEntry, error)
 	SettlePublishedUploadQuota(ctx context.Context, task *domain.UploadTask) error
 	CompletePublishedUpload(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error)
+	LockUploadReplacementTarget(ctx context.Context, entryID, expectedRevision uint64) (*domain.FileEntry, error)
+	ApplyUploadReplacementContent(ctx context.Context, task *domain.UploadTask, objectID uint64, digest domain.UploadContentDigest, retentionDays int) (*domain.FileEntry, error)
+	CompleteUploadReplacement(ctx context.Context, task *domain.UploadTask, objectID uint64, entry *domain.FileEntry) (*domain.UploadTask, error)
 	ClearPublishedObjectGCTimer(ctx context.Context, objectID, entryID uint64) (*domain.StoredObject, error)
 	MarkDeduplicatedUploadObjectOrphaned(ctx context.Context, taskID uint64) (*domain.StoredObject, error)
 	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
@@ -45,7 +48,7 @@ func NewUploadPublicationService(
 // Publish 使用事务外已读回校验的任务、暂存对象和实测摘要发布文件。
 // 对象、文件、配额、完成结果及同步事件由外层事务一起确认。
 // 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
-// 替换任务需要专用发布事务，在普通发布入口返回 ErrUploadTaskNotReady。
+// 只有校验与写回快照的替换绑定一致时，才发布既有文件的内容更新。
 func (publication *UploadPublicationService) Publish(
 	ctx context.Context,
 	verifiedTask *domain.UploadTask,
@@ -63,7 +66,8 @@ func (publication *UploadPublicationService) Publish(
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	taskID, userID := verifiedTask.ID, verifiedTask.UserID
-	verifiedAsReplacement := verifiedTask.ReplacementEntryID != nil
+	verifiedTarget := copyOptionalValue(verifiedTask.ReplacementEntryID)
+	verifiedRevision := copyOptionalValue(verifiedTask.ReplacementExpectedRevision)
 
 	var prepared *domain.UploadTask
 	var targetUnavailable bool
@@ -75,9 +79,18 @@ func (publication *UploadPublicationService) Publish(
 			return domain.ErrInvalidUploadTaskData
 		}
 
-		// 2. 拒绝任一快照中已绑定原文件的任务，避免进入普通上传写入。
-		if verifiedAsReplacement || task.ReplacementEntryID != nil {
-			return fmt.Errorf("内容替换需要专用发布事务: %w", domain.ErrUploadTaskNotReady)
+		// 2. 一致的替换绑定进入专用分支，绑定不一致时拒绝发布。
+		if verifiedTarget != nil || verifiedRevision != nil || task.ReplacementEntryID != nil || task.ReplacementExpectedRevision != nil {
+			if verifiedTarget == nil || task.ReplacementEntryID == nil || *verifiedTarget != *task.ReplacementEntryID ||
+				verifiedRevision == nil || task.ReplacementExpectedRevision == nil || *verifiedRevision != *task.ReplacementExpectedRevision {
+				return fmt.Errorf("内容替换任务绑定已变化: %w", domain.ErrUploadTaskNotReady)
+			}
+			completed, err := publishUploadReplacement(txContext, txn, task, staged, digest)
+			if err != nil {
+				return err
+			}
+			prepared = copyUploadTask(completed)
+			return nil
 		}
 
 		// 3. 复核目标目录，选定对象、文件名和来源设备。
@@ -134,13 +147,8 @@ func (publication *UploadPublicationService) Publish(
 		}
 
 		// 5. 清除发布对象的计时，并处理冗余暂存副本。
-		if _, err := txn.ClearPublishedObjectGCTimer(txContext, selected.ID, entry.ID); err != nil {
+		if err := protectPublishedUploadObject(txContext, txn, task, selected.ID, entry.ID); err != nil {
 			return err
-		}
-		if selected.ID != task.StagedObjectID {
-			if _, err := txn.MarkDeduplicatedUploadObjectOrphaned(txContext, taskID); err != nil {
-				return err
-			}
 		}
 
 		// 6. SINGLE 和 Multipart 共用发布事件，追加失败交给外层一起回滚。
@@ -166,4 +174,18 @@ func (publication *UploadPublicationService) Publish(
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	return prepared, nil
+}
+
+// protectPublishedUploadObject 保留已有活动引用的对象，并把冗余暂存副本交给回收流程。
+func protectPublishedUploadObject(ctx context.Context, txn UploadPublicationTransaction, task *domain.UploadTask, objectID, entryID uint64) error {
+	// 1. 清除实际发布对象的回收计时。
+	if _, err := txn.ClearPublishedObjectGCTimer(ctx, objectID, entryID); err != nil {
+		return err
+	}
+	// 2. 命中去重对象时，单独处理本次未采用的暂存副本。
+	if objectID != task.StagedObjectID {
+		_, err := txn.MarkDeduplicatedUploadObjectOrphaned(ctx, task.ID)
+		return err
+	}
+	return nil
 }

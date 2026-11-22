@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"reflect"
 	"testing"
@@ -15,20 +16,16 @@ func TestUploadReplacementPublicationGuardIntegration(t *testing.T) {
 	for _, uploadMode := range []string{"SINGLE", "MULTIPART"} {
 		for _, binding := range []struct {
 			name     string
-			verified bool
-			locked   bool
+			verified uint64
+			locked   uint64
 		}{
-			{name: "both snapshots", verified: true, locked: true},
-			{name: "only under lock", locked: true},
-			{name: "only verified snapshot", verified: true},
+			{name: "different revisions", verified: 1, locked: 2},
+			{name: "only under lock", locked: 1},
+			{name: "only verified snapshot", verified: 1},
 		} {
 			t.Run(uploadMode+"/"+binding.name, func(t *testing.T) {
 				// 1. 准备已校验字节的任务、仍活动的目标文件和完整预占。
-				pool, original := uploadTaskDatabase(t)
-				store, err := NewStore(pool)
-				if err != nil {
-					t.Fatal(err)
-				}
+				pool, store, digest := uploadReplacementPublicationFixture(t, uploadMode)
 				ctx := t.Context()
 				execute := func(statement string, arguments ...any) {
 					t.Helper()
@@ -36,25 +33,11 @@ func TestUploadReplacementPublicationGuardIntegration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				digest := domain.UploadContentDigest{SizeBytes: domain.MaxSingleUploadSizeBytes, SHA256: sha256.Sum256([]byte("replacement fixture"))}
-				var storageSession, partSize, partCount any
-				if uploadMode == "MULTIPART" {
-					digest.SizeBytes++
-					storageSession, partSize, partCount = "replacement-parts", domain.MaxSingleUploadSizeBytes, 2
-				}
-				execute("UPDATE users SET used_storage=?,reserved_storage=? WHERE id=7", original.FileSize, digest.SizeBytes)
-				execute(`UPDATE stored_objects SET status='VERIFYING',file_size=?,storage_version_id='replacement-version',
-					storage_etag='replacement-etag' WHERE id=23`, digest.SizeBytes)
-				execute(`UPDATE upload_tasks SET status='VERIFYING',upload_mode=?,storage_upload_id=?,part_size=?,part_count=?,expected_sha256=?,
-					file_size=?,reserved_bytes=?,published_object_id=NULL,result_entry_id=NULL,resolved_name=NULL,completed_at=NULL,
-					lease_owner='verify-worker',lease_version=3,lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE,
-					expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY,updated_at=UTC_TIMESTAMP(6) WHERE id=19`,
-					uploadMode, storageSession, partSize, partCount, digest.SHA256[:], digest.SizeBytes, digest.SizeBytes)
-				setBinding := func(bound bool) {
+				setBinding := func(version uint64) {
 					t.Helper()
 					var entryID, revision any
-					if bound {
-						entryID, revision = 31, 1
+					if version != 0 {
+						entryID, revision = 31, version
 					}
 					execute("UPDATE upload_tasks SET replacement_entry_id=?,replacement_expected_revision=? WHERE id=19", entryID, revision)
 				}
@@ -110,7 +93,7 @@ func TestUploadReplacementPublicationGuardIntegration(t *testing.T) {
 					action func(context.Context, service.UploadPublicationTransaction, *domain.UploadTask, *domain.StoredObject) error) error {
 					return store.WithUploadVerificationTransaction(ctx, task, object, measured, func(txContext context.Context, txStore *Store, current *domain.UploadTask, staged *domain.StoredObject) error {
 						callbacks++
-						if (current.ReplacementEntryID != nil) != binding.locked {
+						if (current.ReplacementEntryID != nil) != (binding.locked != 0) {
 							t.Fatal("锁内任务绑定与夹具不符")
 						}
 						return action(txContext, txStore, current, staged)
@@ -131,4 +114,36 @@ func TestUploadReplacementPublicationGuardIntegration(t *testing.T) {
 			})
 		}
 	}
+}
+
+func uploadReplacementPublicationFixture(t *testing.T, uploadMode string) (*sql.DB, *Store, domain.UploadContentDigest) {
+	t.Helper()
+	pool, original := uploadTaskDatabase(t)
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execute := func(statement string, arguments ...any) {
+		t.Helper()
+		if _, err := pool.ExecContext(t.Context(), statement, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest := domain.UploadContentDigest{
+		SizeBytes: domain.MaxSingleUploadSizeBytes, SHA256: sha256.Sum256([]byte("replacement fixture")), DetectedMIMEType: "text/plain",
+	}
+	var session, partSize, partCount any
+	if uploadMode == "MULTIPART" {
+		digest.SizeBytes++
+		session, partSize, partCount = "replacement-parts", domain.MaxSingleUploadSizeBytes, 2
+	}
+	execute("UPDATE users SET used_storage=?,reserved_storage=? WHERE id=7", original.FileSize, digest.SizeBytes)
+	execute(`UPDATE stored_objects SET status='VERIFYING',file_size=?,storage_version_id='replacement-version',
+		storage_etag='replacement-etag' WHERE id=23`, digest.SizeBytes)
+	execute(`UPDATE upload_tasks SET status='VERIFYING',upload_mode=?,storage_upload_id=?,part_size=?,part_count=?,expected_sha256=?,
+		file_size=?,reserved_bytes=?,published_object_id=NULL,result_entry_id=NULL,resolved_name=NULL,completed_at=NULL,
+		lease_owner='verify-worker',lease_version=3,lease_until=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE,
+		expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY,updated_at=UTC_TIMESTAMP(6) WHERE id=19`,
+		uploadMode, session, partSize, partCount, digest.SHA256[:], digest.SizeBytes, digest.SizeBytes)
+	return pool, store, digest
 }
