@@ -43,9 +43,7 @@ func NewSyncSnapshotCursorSigner(masterKey []byte) (*SyncSnapshotCursorSigner, e
 	}
 
 	// 2. 用快照续页专用用途标签派生本组件持有的密钥。
-	derivation := hmac.New(sha256.New, masterKey)
-	derivation.Write([]byte(syncSnapshotCursorKeyPurpose))
-	return &SyncSnapshotCursorSigner{signingKey: derivation.Sum(nil)}, nil
+	return &SyncSnapshotCursorSigner{signingKey: syncSnapshotTokenMAC(masterKey, syncSnapshotCursorKeyPurpose)}, nil
 }
 
 // Sign 使用缓存的绑定、分页给出的下一位置和缓存的固定到期时间签发凭据。
@@ -82,7 +80,12 @@ func (signer *SyncSnapshotCursorSigner) Sign(binding SyncSnapshotCacheBinding, n
 }
 
 func (signer *SyncSnapshotCursorSigner) cursorMAC(encodedPayload string) []byte {
-	messageMAC := hmac.New(sha256.New, signer.signingKey)
-	messageMAC.Write([]byte(encodedPayload))
+	return syncSnapshotTokenMAC(signer.signingKey, encodedPayload)
+}
+
+// syncSnapshotTokenMAC 在调用方为各自用途选择的密钥下计算 HMAC-SHA256。
+func syncSnapshotTokenMAC(signingKey []byte, message string) []byte {
+	messageMAC := hmac.New(sha256.New, signingKey)
+	messageMAC.Write([]byte(message))
 	return messageMAC.Sum(nil)
 }

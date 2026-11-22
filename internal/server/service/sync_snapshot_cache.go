@@ -24,9 +24,12 @@ type SyncSnapshotCacheBinding struct {
 }
 
 func (binding SyncSnapshotCacheBinding) valid() bool {
+	return binding.validIdentity() && binding.PageSize >= 1 && binding.PageSize <= 100
+}
+
+func (binding SyncSnapshotCacheBinding) validIdentity() bool {
 	return binding.SnapshotID.Version() == 4 && binding.SnapshotID.Variant() == uuid.RFC4122 &&
-		binding.UserID != 0 && binding.DeviceID != 0 && binding.Generation != (domain.SyncCursorGeneration{}) &&
-		binding.PageSize >= 1 && binding.PageSize <= 100
+		binding.UserID != 0 && binding.DeviceID != 0 && binding.Generation != (domain.SyncCursorGeneration{})
 }
 
 // SyncSnapshotCache 持有进程内的固定快照及其共享预算。

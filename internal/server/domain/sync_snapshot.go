@@ -24,6 +24,9 @@ var ErrSyncSnapshotBusy = errors.New("同步快照构建繁忙，请稍后重试
 // ErrInvalidSyncSnapshotCursor 表示分页凭据或其快照绑定不匹配。
 var ErrInvalidSyncSnapshotCursor = errors.New("同步快照分页凭据无效")
 
+// ErrInvalidSyncSnapshotBaselineToken 表示末页确认凭据或签发数据无效。
+var ErrInvalidSyncSnapshotBaselineToken = errors.New("同步快照末页确认凭据无效")
+
 // ErrSyncSnapshotExpired 表示可信设备的快照已到期、丢失或代次已变更。
 var ErrSyncSnapshotExpired = errors.New("同步快照已失效，请重新建立基线")
 
