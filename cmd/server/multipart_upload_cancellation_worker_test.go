@@ -10,6 +10,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -26,15 +27,15 @@ func TestServerMultipartUploadCancellationWorkerReportsRounds(t *testing.T) {
 		var logs bytes.Buffer
 		var firstOwner string
 		startedAt := time.Now()
-		rounds := 0
+		var rounds atomic.Int32
 
 		// 1. 首轮立即执行，扫描失败后下一轮沿用同一租约标识和扫描上限。
 		stop := startServerMultipartUploadCancellationWorker(t.Context(), func(_ context.Context, limit int, owner string) (service.MultipartUploadCancellationBatchResult, error) {
-			rounds++
+			round := rounds.Add(1)
 			if limit != 100 {
 				t.Error("单轮扫描上限不符", limit)
 			}
-			if rounds == 1 {
+			if round == 1 {
 				firstOwner = owner
 				if !time.Now().Equal(startedAt) || len(owner) > 64 || !strings.HasPrefix(owner, "multipart-cancel-") {
 					t.Error("首轮开始时间或租约持有者不符", owner, time.Since(startedAt))
@@ -58,8 +59,8 @@ func TestServerMultipartUploadCancellationWorkerReportsRounds(t *testing.T) {
 		synctest.Wait()
 		time.Sleep(30*time.Second - time.Nanosecond)
 		synctest.Wait()
-		if rounds != 1 {
-			t.Error("未等满间隔就开始下一轮", rounds)
+		if count := rounds.Load(); count != 1 {
+			t.Error("未等满间隔就开始下一轮", count)
 		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
@@ -95,8 +96,8 @@ func TestServerMultipartUploadCancellationWorkerReportsRounds(t *testing.T) {
 			{Message: "分片上传取消轮次结束", Scanned: 6, Cancelled: 2, Retries: 1, Skipped: 1, CandidateErrors: 2},
 			{Message: "分片上传取消 worker 已停止"},
 		}
-		if rounds != 2 || strings.Contains(logged, "hidden") || strings.Contains(logged, firstOwner) || !slices.Equal(events, want) {
-			t.Fatal("轮次数、结构化日志或脱敏结果不符", rounds, logged)
+		if count := rounds.Load(); count != 2 || strings.Contains(logged, "hidden") || strings.Contains(logged, firstOwner) || !slices.Equal(events, want) {
+			t.Fatal("轮次数、结构化日志或脱敏结果不符", count, logged)
 		}
 
 		// 3. 另一次启动使用不同的租约标识。

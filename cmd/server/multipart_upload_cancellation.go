@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -62,7 +61,7 @@ func startServerMultipartUploadCancellationWorker(
 			func(summary service.MultipartUploadCancellationBatchResult, roundError error) {
 				reportMultipartUploadCancellationRound(logger, summary, roundError, workerContext.Err())
 			})
-		if code := multipartUploadCancellationReportCode(err, workerContext.Err()); code != "" {
+		if code := multipartUploadCleanupReportCode(err, workerContext.Err()); code != "" {
 			logger.Error("分片上传取消 worker 异常退出", "error_code", code)
 		}
 	}()
@@ -78,11 +77,11 @@ func reportMultipartUploadCancellationRound(
 	logger *slog.Logger, summary service.MultipartUploadCancellationBatchResult, roundError, stopError error,
 ) {
 	// 1. 用固定错误码交付整轮错误和逐项故障，省略正常关停信号。
-	if code := multipartUploadCancellationReportCode(roundError, stopError); code != "" {
+	if code := multipartUploadCleanupReportCode(roundError, stopError); code != "" {
 		logger.Warn("分片上传取消轮次失败", "error_code", code)
 	}
 	for _, failure := range summary.CandidateErrors {
-		if code := multipartUploadCancellationReportCode(failure.Err, stopError); code != "" {
+		if code := multipartUploadCleanupReportCode(failure.Err, stopError); code != "" {
 			logger.Warn("分片上传取消任务处理失败", "task_id", failure.TaskID, "error_code", code)
 		}
 	}
@@ -92,25 +91,4 @@ func reportMultipartUploadCancellationRound(
 		logger.Info("分片上传取消轮次结束", "scanned", summary.Scanned, "cancelled", summary.Cancelled,
 			"retries_scheduled", summary.RetriesScheduled, "skipped", summary.Skipped, "candidate_errors", len(summary.CandidateErrors))
 	}
-}
-
-func multipartUploadCancellationReportCode(err, stopError error) string {
-	// 1. 沿单一包装链识别纯关停信号，保留含其他原因的合并错误。
-	if err == nil {
-		return ""
-	}
-	cause := err
-	for next := errors.Unwrap(cause); next != nil; next = errors.Unwrap(cause) {
-		cause = next
-	}
-	if cause == stopError {
-		return ""
-	}
-
-	// 2. 复用取消错误码；合并错误若只映射出停止码，则用通用故障码汇报。
-	code := uploadCleanupErrorCode(err)
-	if stopError != nil && errors.Is(err, stopError) && code == uploadCleanupErrorCode(stopError) {
-		return "INTERNAL_ERROR"
-	}
-	return code
 }

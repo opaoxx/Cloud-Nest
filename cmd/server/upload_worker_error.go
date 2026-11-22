@@ -7,6 +7,28 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
+// multipartUploadCleanupReportCode 过滤正常关停信号，保留收尾轮次中的独立故障。
+func multipartUploadCleanupReportCode(err, stopError error) string {
+	// 1. 沿单一包装链识别纯关停信号。
+	if err == nil {
+		return ""
+	}
+	cause := err
+	for next := errors.Unwrap(cause); next != nil; next = errors.Unwrap(cause) {
+		cause = next
+	}
+	if cause == stopError {
+		return ""
+	}
+
+	// 2. 若合并错误只映射出停止码，改用通用故障码保留告警。
+	code := uploadCleanupErrorCode(err)
+	if stopError != nil && errors.Is(err, stopError) && code == uploadCleanupErrorCode(stopError) {
+		return "INTERNAL_ERROR"
+	}
+	return code
+}
+
 // uploadCleanupErrorCode 为取消和过期的收尾日志返回固定错误码。
 func uploadCleanupErrorCode(err error) string {
 	// 1. 识别仍被引用而无法进入回收流程的暂存对象。
