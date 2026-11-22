@@ -49,11 +49,22 @@ func TestPurgeRootBatchIntegration(t *testing.T) {
 			t.Fatal("目录项状态不符", userID, entryID, entry, err)
 		}
 	}
+	assertEvents := func(userID, want uint64) {
+		t.Helper()
+		var sequence, events uint64
+		if err := pool.QueryRowContext(ctx, `SELECT change_seq,
+			(SELECT COUNT(*) FROM change_events WHERE user_id=users.id AND event_type='ENTRY_PURGED')
+			FROM users WHERE id=?`, userID).Scan(&sequence, &events); err != nil || sequence != want || events != want {
+			t.Fatal("清理单轮的账号序号或事件数量不符", userID, sequence, events, err)
+		}
+	}
 	assertStatus(1, 14, "PURGING")
 	assertStatus(1, 15, "PURGED")
 	assertStatus(1, 17, "PURGED")
 	assertStatus(1, 13, "PURGING")
 	assertStatus(2, 22, "PURGED")
+	assertEvents(1, 2)
+	assertEvents(2, 1)
 
 	// 3. 下一轮重新扫描数据库，优先完成最早的根目录。
 	next, err := batch.RunOnce(ctx, 1, 2)
@@ -62,4 +73,7 @@ func TestPurgeRootBatchIntegration(t *testing.T) {
 	}
 	assertStatus(1, 14, "PURGED")
 	assertStatus(1, 13, "PURGING")
+	assertEvents(1, 3)
+	assertEvents(2, 1)
+	t.Log("两个账号分别保有 3 条和 1 条清理事件；失败根项未增加事件")
 }

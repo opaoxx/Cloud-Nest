@@ -10,6 +10,9 @@ import (
 // EntryPurgeStartedEventType 表示回收站根项已进入清理流程。
 const EntryPurgeStartedEventType = "ENTRY_PURGE_STARTED"
 
+// EntryPurgedEventType 表示条目已完成逻辑清理。
+const EntryPurgedEventType = "ENTRY_PURGED"
+
 type entryChangePayload struct {
 	EntryID  string `json:"entry_id"`
 	ParentID string `json:"parent_id"`

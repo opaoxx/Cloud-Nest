@@ -17,6 +17,7 @@ import (
 func purgeLeafSettlementTestDatabase(t *testing.T, ctx context.Context) (*sql.DB, *Store) {
 	t.Helper()
 	pool, store, _ := trashEntryTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	for _, boundary := range []struct{ table, next string }{
 		{"user_entry_preferences", "upload_tasks"},
 		{"upload_tasks", "idempotency_records"},
@@ -78,21 +79,23 @@ func TestCompletePurgeLeafIntegration(t *testing.T) {
 		})
 	}
 	type settlementState struct {
-		status                   string
-		revision, used, reserved uint64
-		objectID                 sql.Null[uint64]
-		completedAt              sql.NullTime
-		preferenceCount          int
+		status                                     string
+		revision, used, reserved, sequence, events uint64
+		objectID                                   sql.Null[uint64]
+		completedAt                                sql.NullTime
+		preferenceCount                            int
 	}
 	readState := func(entryID uint64) settlementState {
 		t.Helper()
 		var state settlementState
 		err := pool.QueryRowContext(ctx, `
-			SELECT entry.status,entry.revision,entry.object_id,entry.purged_at,account.used_storage,account.reserved_storage,
-			       (SELECT COUNT(*) FROM user_entry_preferences WHERE user_id=entry.user_id AND entry_id=entry.id)
+			SELECT entry.status,entry.revision,entry.object_id,entry.purged_at,account.used_storage,account.reserved_storage,account.change_seq,
+			       (SELECT COUNT(*) FROM user_entry_preferences WHERE user_id=entry.user_id AND entry_id=entry.id),
+			       (SELECT COUNT(*) FROM change_events WHERE user_id=entry.user_id)
 			FROM file_entries AS entry JOIN users AS account ON account.id=entry.user_id
 			WHERE entry.user_id=1 AND entry.id=?`, entryID).
-			Scan(&state.status, &state.revision, &state.objectID, &state.completedAt, &state.used, &state.reserved, &state.preferenceCount)
+			Scan(&state.status, &state.revision, &state.objectID, &state.completedAt, &state.used, &state.reserved, &state.sequence,
+				&state.preferenceCount, &state.events)
 		if err != nil {
 			t.Fatal("读取结算后的数据库状态失败", err)
 		}
@@ -120,7 +123,7 @@ func TestCompletePurgeLeafIntegration(t *testing.T) {
 	committed := readState(15)
 	if committed.status != "PURGED" || committed.revision != candidate.Revision+1 ||
 		committed.objectID.Valid || !committed.completedAt.Valid || committed.used != 2048 ||
-		committed.reserved != 512 || committed.preferenceCount != 0 {
+		committed.reserved != 512 || committed.preferenceCount != 0 || committed.sequence != 1 || committed.events != 1 {
 		t.Fatalf("单项清理结算结果不符：%+v", committed)
 	}
 	var sharedReferenceCount int
@@ -172,7 +175,7 @@ func TestCompletePurgeLeafIntegration(t *testing.T) {
 	assertLastRolledBack()
 	execute("DROP TRIGGER fixture_fail_purge_gc_timer")
 
-	// 6. 最后一个引用解除后，验证已有计时也会随外层事务回滚。
+	// 6. 验证已有计时和事件也会随外层事务回滚。
 	rollbackFixture := errors.New("fixture rolls back purge settlement and timer")
 	err = store.WithPurgeRootTransaction(ctx, lastRoot, func(txContext context.Context, txStore *Store) error {
 		candidates, err := txStore.ListPurgeLeafCandidates(txContext, 1)
@@ -189,6 +192,12 @@ func TestCompletePurgeLeafIntegration(t *testing.T) {
 		if err != nil || object.UnreferencedAt == nil || object.GCAfter == nil {
 			return fmt.Errorf("事务内没有读到已启动的计时：%v", err)
 		}
+		var sequence, events uint64
+		if err := txStore.database.WithContext(txContext).Raw(`SELECT change_seq,
+			(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=1`).
+			Row().Scan(&sequence, &events); err != nil || sequence != 3 || events != 3 {
+			return fmt.Errorf("事务内最后一项未写入序号和事件，序号 %d，事件 %d，错误 %v", sequence, events, err)
+		}
 		return rollbackFixture
 	})
 	if !errors.Is(err, rollbackFixture) {
@@ -204,7 +213,9 @@ func TestCompletePurgeLeafIntegration(t *testing.T) {
 	object, err := store.FindUserStoredObject(ctx, 1, 41)
 	if err != nil || object.Status != domain.StoredObjectStatusReady || object.UnreferencedAt == nil || object.GCAfter == nil ||
 		!object.GCAfter.Equal(object.UnreferencedAt.Add(7*24*time.Hour)) ||
-		last.status != "PURGED" || last.used != 0 || last.reserved != 512 || last.objectID.Valid || last.preferenceCount != 0 {
+		last.status != "PURGED" || last.used != 0 || last.reserved != 512 || last.objectID.Valid || last.preferenceCount != 0 ||
+		last.sequence != 3 || last.events != 3 {
 		t.Fatal("最后一个文件的结算或对象回收计时不符", last, object, err)
 	}
+	t.Log("最后一个引用的完成事件和七天回收计时一起回滚，重试一起提交")
 }
