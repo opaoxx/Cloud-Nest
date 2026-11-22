@@ -8,10 +8,8 @@ import (
 
 // MultipartUploadCancellationExecutionService 处理一条已领取租约的 Multipart 取消任务。
 type MultipartUploadCancellationExecutionService struct {
-	provider, bucket                  string
-	observeBound, observeUnbound      func(context.Context, *domain.UploadTask) (*domain.MultipartUploadCancellationObservation, error)
-	completeMissing, completeExisting func(context.Context, string, string, *domain.MultipartUploadCancellationObservation) (*domain.UploadTask, error)
-	scheduleRetry                     func(context.Context, *domain.UploadTask, int, domain.MultipartUploadCancellationRetryReason) (*domain.UploadTask, error)
+	cleanup       multipartUploadCleanupExecution
+	scheduleRetry func(context.Context, *domain.UploadTask, int, domain.MultipartUploadCancellationRetryReason) (*domain.UploadTask, error)
 }
 
 // NewMultipartUploadCancellationExecutionService 绑定同一存储配置的观察及终态事务。
@@ -25,72 +23,33 @@ func NewMultipartUploadCancellationExecutionService(
 	if !location.IsValid() || observeBound == nil || observeUnbound == nil || completeMissing == nil || completeExisting == nil || scheduleRetry == nil {
 		panic("单条分片取消执行需要存储配置、观察、终态和重试事务")
 	}
-	return &MultipartUploadCancellationExecutionService{provider: provider, bucket: bucket,
-		observeBound: observeBound, observeUnbound: observeUnbound, completeMissing: completeMissing, completeExisting: completeExisting,
-		scheduleRetry: scheduleRetry}
+	return &MultipartUploadCancellationExecutionService{
+		cleanup: multipartUploadCleanupExecution{provider: provider, bucket: bucket, observeBound: observeBound, observeUnbound: observeUnbound,
+			completeMissing: completeMissing, completeExisting: completeExisting},
+		scheduleRetry: scheduleRetry,
+	}
 }
 
 // Execute 按当前租约处理一次，返回 CANCELLED 或已提交的重试登记信号。
 func (execution *MultipartUploadCancellationExecutionService) Execute(ctx context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
-	// 1. 按原会话绑定选择观察方式。
-	if err := validateCancellationStorageClaim(ctx, claimed); err != nil {
-		return nil, err
-	}
-	observe := execution.observeUnbound
-	if claimed.StorageUploadID != nil {
-		if !domain.ValidMultipartUploadID(*claimed.StorageUploadID) {
-			return nil, domain.ErrInvalidUploadTaskData
-		}
-		observe = execution.observeBound
-	}
-	observation, err := observe(ctx, claimed)
+	// 1. 按原会话绑定选择观察方式。存储暂时不能确认时登记重试。
+	observation, err := execution.cleanup.observe(ctx, claimed, domain.UploadStatusCancelling)
 	if err != nil {
 		return nil, execution.retryAfterStorageObservation(ctx, claimed, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 	if observation == nil {
 		return nil, execution.registerCancellationRetry(ctx, claimed, domain.ErrUploadStorageUnavailable, domain.MultipartCancellationRetryStorage)
 	}
 
-	// 2. 核对观察仍属于本次租约，再调用对应的终态事务。
-	observed := &observation.Task
-	if observation.ObjectKey == "" || !sameMultipartCancellationTaskBinding(observed, claimed) ||
-		observed.Status != claimed.Status || observed.ReservedBytes != claimed.ReservedBytes || observed.AttemptCount != claimed.AttemptCount ||
-		observed.LeaseOwner == nil || *observed.LeaseOwner != *claimed.LeaseOwner ||
-		observed.LeaseUntil == nil || !observed.LeaseUntil.Equal(*claimed.LeaseUntil) {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
-	complete := execution.completeMissing
-	if observation.Object != nil {
-		complete = execution.completeExisting
-	}
-	finished, err := complete(ctx, execution.provider, execution.bucket, observation)
+	// 2. 交付已确认的观察并核对终态。临时数据库错误可安排重试。
+	finished, err := execution.cleanup.complete(ctx, claimed, observation, domain.UploadStatusCancelled)
 	if err != nil {
 		return nil, execution.retryAfterCancellationWrite(ctx, claimed, err)
 	}
 
-	// 3. 确认返回的是同一任务已提交的 CANCELLED 结果。
-	if !validMultipartCancellationCompletion(finished, claimed) {
-		return nil, domain.ErrInvalidUploadTaskData
-	}
 	return finished, nil
 }
 
 func validMultipartCancellationCompletion(finished, claimed *domain.UploadTask) bool {
-	return finished != nil && sameMultipartCancellationTaskBinding(finished, claimed) &&
-		finished.Status == domain.UploadStatusCancelled && finished.ReservedBytes == 0 && finished.AttemptCount == claimed.AttemptCount &&
-		finished.LeaseOwner == nil && finished.LeaseUntil == nil && finished.NextAttemptAt == nil &&
-		finished.PublishedObjectID == nil && finished.ResultEntryID == nil && finished.ResolvedName == nil &&
-		finished.LastErrorCode == nil && finished.LastErrorMessage == nil &&
-		finished.CompletedAt != nil && finished.CompletedAt.Equal(finished.UpdatedAt) &&
-		!finished.CompletedAt.Before(claimed.UpdatedAt) && finished.CompletedAt.Before(*claimed.LeaseUntil)
-}
-
-func sameMultipartCancellationTaskBinding(current, claimed *domain.UploadTask) bool {
-	return current.ID == claimed.ID && current.UserID == claimed.UserID && current.StagedObjectID == claimed.StagedObjectID &&
-		current.UploadMode == claimed.UploadMode && current.LeaseVersion == claimed.LeaseVersion &&
-		current.FileSize == claimed.FileSize && current.ExpiresAt.Equal(claimed.ExpiresAt) &&
-		sameMultipartCleanupSession(current.StorageUploadID, claimed.StorageUploadID)
+	return validMultipartCleanupCompletion(finished, claimed, domain.UploadStatusCancelled)
 }

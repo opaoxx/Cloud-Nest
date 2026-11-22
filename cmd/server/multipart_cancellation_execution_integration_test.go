@@ -24,6 +24,18 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_MULTIPART_CANCEL_EXECUTION_TEST") != "1" {
 		t.Skip("显式启用后创建本轮专用 MySQL、MinIO 和合成数据")
 	}
+	testServerMultipartCleanupExecution(t, domain.UploadStatusCancelling, domain.UploadStatusCancelled)
+}
+
+func TestServerMultipartExpirationExecutionIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_MULTIPART_EXPIRATION_EXECUTION_TEST") != "1" {
+		t.Skip("显式启用后验证专用库和桶中的分片到期收尾")
+	}
+	testServerMultipartCleanupExecution(t, domain.UploadStatusExpiring, domain.UploadStatusExpired)
+}
+
+func testServerMultipartCleanupExecution(t *testing.T, pendingStatus, terminalStatus domain.UploadStatus) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	mysqlID := startIsolatedWebMySQL(t, ctx)
@@ -50,7 +62,7 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 	t.Cleanup(httpClient.CloseIdleConnections)
 	core := minio.Core{Client: bucket.client}
 
-	// 1. 创建合成账号及隔离任务，用正式仓储扫描并领取取消租约。
+	// 1. 创建合成账号及隔离任务，用正式仓储扫描并领取收尾租约。
 	const userID, usedBytes = 7, 1024
 	const partSize, fileSize = 16 << 20, (16 << 20) + 1
 	var remainingReserved uint64 = 6*fileSize + 512
@@ -60,12 +72,27 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execute(t, "INSERT INTO users(id,username,display_name,password_hash,used_storage,reserved_storage) VALUES(7,'cancel_executor_fixture','分片取消执行','fixture_hash',?,?)", usedBytes, remainingReserved)
+	execute(t, "INSERT INTO users(id,username,display_name,password_hash,used_storage,reserved_storage) VALUES(7,'cleanup_executor_fixture','分片收尾执行','fixture_hash',?,?)", usedBytes, remainingReserved)
 	execute(t, "INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES(11,7,'28ee758a-0727-42de-ae7d-3bb33155e148','fixture','WEB')")
 	execute(t, "INSERT INTO file_entries(id,user_id,name,name_key,entry_type) VALUES(13,7,'',X'','DIR')")
 	content := bytes.Repeat([]byte{0x42}, fileSize)
 	digest := sha256.Sum256(content)
 	start := time.Now().UTC().Truncate(time.Second)
+	claim := func(t *testing.T, taskID uint64) (*domain.UploadTask, error) {
+		t.Helper()
+		if pendingStatus == domain.UploadStatusExpiring {
+			candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+			if err != nil || len(candidates) != 1 || candidates[0].TaskID != taskID {
+				t.Fatal("未定位本项到期候选", candidates, err)
+			}
+			return store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-expiration-execution")
+		}
+		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
+		if err != nil || len(candidates) != 1 || candidates[0].TaskID != taskID {
+			t.Fatal("未定位本项取消候选", candidates, err)
+		}
+		return store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-cancel-execution")
+	}
 	for _, fixture := range []struct {
 		name, key         string
 		taskID, objectID  uint64
@@ -136,13 +163,9 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 				fixture.objectID, settings.Provider, settings.Bucket, fixture.key, fileSize)
 			execute(t, `INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,storage_upload_id,
 				expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at)
-				VALUES(?,7,11,?,13,'fixture.bin','MULTIPART',?,?,?,?,2,'CANCELLING',?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
-				fixture.taskID, fixture.objectID, binding, digest[:], fileSize, partSize, fileSize)
-			candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
-			if err != nil || len(candidates) != 1 || candidates[0].TaskID != fixture.taskID {
-				t.Fatal("未定位本项取消候选", candidates, err)
-			}
-			task, err := store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], "fixture-cancel-execution")
+				VALUES(?,7,11,?,13,'fixture.bin','MULTIPART',?,?,?,?,2,?,?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
+				fixture.taskID, fixture.objectID, binding, digest[:], fileSize, partSize, pendingStatus, fileSize)
+			task, err := claim(t, fixture.taskID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -157,13 +180,96 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 					SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'`)
 				defer execute(t, "DROP TRIGGER IF EXISTS fixture_cancel_execution_retry")
 			}
+			check := func(callContext context.Context, key, session string) (*domain.MultipartUploadAbortObservation, error) {
+				return client.CheckMultipartUploadAfterAbort(callContext, key, session, verify)
+			}
+			verifyCommitted := func(finished *domain.UploadTask) {
+				// 3. 读回终态、版本和配额，核对存储中的准确对象。
+				current, err := store.FindUserUploadTask(ctx, userID, fixture.taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				staged, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				remainingReserved -= fileSize
+				if !reflect.DeepEqual(current, finished) || current.Status != terminalStatus || current.ReservedBytes != 0 ||
+					staged.Status != domain.StoredObjectStatusOrphaned || staged.UnreferencedAt == nil || staged.GCAfter == nil ||
+					!staged.GCAfter.Equal(staged.UnreferencedAt.Add(7*24*time.Hour)) {
+					t.Fatal("终态、预占或回收登记未随执行提交")
+				}
+				var used, reserved uint64
+				if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
+					used != usedBytes || reserved != remainingReserved {
+					t.Fatal("账号结算数值不符", used, reserved, err)
+				}
+				if fixture.withObject {
+					stored, err := client.StatMultipartUploadObject(ctx, fixture.key)
+					if err != nil || stored == nil || stored.StorageVersionID == nil || *stored.StorageVersionID != existing.VersionID ||
+						staged.StorageVersionID == nil || *staged.StorageVersionID != existing.VersionID ||
+						staged.StorageETag == nil || *staged.StorageETag != existing.ETag {
+						t.Fatal("对象版本或回收定位未保留", err)
+					}
+					return
+				}
+				_, err = client.ListUploadPartsPage(ctx, fixture.key, session, 0, 1)
+				if fixture.bound && !errors.Is(err, domain.ErrUploadPartSessionMissing) || !fixture.bound && err != nil {
+					t.Fatal("会话中止或未关联会话保留结果不符", err)
+				}
+			}
+			if pendingStatus == domain.UploadStatusExpiring {
+				observations := service.NewMultipartUploadExpirationStorageService(
+					func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+						return store.FindMultipartUploadExpirationTarget(callContext, task, settings.Provider, settings.Bucket)
+					}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
+				execution := service.NewMultipartUploadExpirationExecutionService(settings.Provider, settings.Bucket,
+					observations.ObserveBoundSession, observations.ObserveUnboundSession,
+					store.CompleteMissingMultipartUploadExpiration, store.CompleteExistingMultipartUploadExpiration)
+				if fixture.retryReason != "" {
+					before, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					finished, err := execution.Execute(ctx, task)
+					if finished != nil {
+						t.Fatal("未确认或回滚的到期任务交付了终态")
+					}
+					if fixture.retryReason == domain.MultipartCancellationRetryDatabase {
+						var databaseError *mysql.MySQLError
+						if !errors.Is(err, domain.ErrUploadExpirationRetryable) || !errors.As(err, &databaseError) || databaseError.Number != 1205 {
+							t.Fatal("到期收尾未保留原数据库错误", err)
+						}
+					} else if err != nil {
+						t.Fatal("待确认的存储观察应保持等待", err)
+					}
+					afterTask, err := store.FindUserUploadTask(ctx, userID, fixture.taskID)
+					if err != nil || !reflect.DeepEqual(afterTask, task) {
+						t.Fatal("到期任务的租约或重试字段发生变化", err)
+					}
+					afterObject, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
+					if err != nil || !reflect.DeepEqual(afterObject, before) {
+						t.Fatal("暂存对象记录发生变化", err)
+					}
+					var used, reserved uint64
+					if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
+						used != usedBytes || reserved != remainingReserved {
+						t.Fatal("到期收尾待确认或失败改变了账目", used, reserved, err)
+					}
+					t.Logf("%s 保留 EXPIRING 任务、原租约和完整预占", fixture.retryReason)
+					return
+				}
+				finished, err := execution.Execute(ctx, task)
+				if err != nil || finished == nil {
+					t.Fatal("未交付确认到期结果", err)
+				}
+				verifyCommitted(finished)
+				return
+			}
 			observations := service.NewMultipartUploadCancellationStorageService(
 				func(callContext context.Context, task *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
 					return store.FindMultipartUploadCancellationTarget(callContext, task, settings.Provider, settings.Bucket)
-				}, client.AbortMultipartUpload,
-				func(callContext context.Context, key, session string) (*domain.MultipartUploadAbortObservation, error) {
-					return client.CheckMultipartUploadAfterAbort(callContext, key, session, verify)
-				}, client.StatMultipartUploadObject)
+				}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
 			execution := service.NewMultipartUploadCancellationExecutionService(settings.Provider, settings.Bucket,
 				observations.ObserveBoundSession, observations.ObserveUnboundSession,
 				store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
@@ -218,40 +324,12 @@ func TestServerMultipartCancellationExecutionIntegration(t *testing.T) {
 				t.Fatal("未交付确认取消结果", err)
 			}
 
-			// 3. 读回任务、版本和配额，核对存储中的准确对象。
-			current, err := store.FindUserUploadTask(ctx, userID, fixture.taskID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			staged, err := store.FindUserStoredObject(ctx, userID, fixture.objectID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			remainingReserved -= fileSize
-			if !reflect.DeepEqual(current, finished) || current.Status != domain.UploadStatusCancelled || current.ReservedBytes != 0 ||
-				staged.Status != domain.StoredObjectStatusOrphaned || staged.UnreferencedAt == nil || staged.GCAfter == nil ||
-				!staged.GCAfter.Equal(staged.UnreferencedAt.Add(7*24*time.Hour)) {
-				t.Fatal("终态、预占或回收登记未随执行提交")
-			}
-			var used, reserved uint64
-			if err := pool.QueryRowContext(ctx, "SELECT used_storage,reserved_storage FROM users WHERE id=7").Scan(&used, &reserved); err != nil ||
-				used != usedBytes || reserved != remainingReserved {
-				t.Fatal("账号结算数值不符", used, reserved, err)
-			}
-			if fixture.withObject {
-				stored, err := client.StatMultipartUploadObject(ctx, fixture.key)
-				if err != nil || stored == nil || stored.StorageVersionID == nil || *stored.StorageVersionID != existing.VersionID ||
-					staged.StorageVersionID == nil || *staged.StorageVersionID != existing.VersionID ||
-					staged.StorageETag == nil || *staged.StorageETag != existing.ETag {
-					t.Fatal("对象版本或回收定位未保留", err)
-				}
-			} else {
-				_, err := client.ListUploadPartsPage(ctx, fixture.key, session, 0, 1)
-				if fixture.bound && !errors.Is(err, domain.ErrUploadPartSessionMissing) || !fixture.bound && err != nil {
-					t.Fatal("会话中止或未关联会话保留结果不符", err)
-				}
-			}
+			verifyCommitted(finished)
 		})
 	}
-	t.Logf("四条确认路径和两条重试路径均提交 CANCELLED。已用 %d B、预占 %d B", usedBytes, remainingReserved)
+	if pendingStatus == domain.UploadStatusExpiring {
+		t.Logf("四条确认路径提交 EXPIRED，两条未确认或失败路径保留 EXPIRING。已用 %d B、预占 %d B", usedBytes, remainingReserved)
+	} else {
+		t.Logf("四条确认路径和两条重试路径均提交 CANCELLED。已用 %d B、预占 %d B", usedBytes, remainingReserved)
+	}
 }

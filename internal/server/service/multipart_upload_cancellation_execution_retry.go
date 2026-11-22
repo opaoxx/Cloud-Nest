@@ -57,7 +57,7 @@ func (execution *MultipartUploadCancellationExecutionService) registerCancellati
 	}
 
 	// 3. 核对已提交的重试时间和任务绑定，再返回登记信号。
-	if scheduled == nil || !sameMultipartCancellationTaskBinding(scheduled, claimed) ||
+	if scheduled == nil || !sameMultipartCleanupTaskBinding(scheduled, claimed) ||
 		scheduled.Status != domain.UploadStatusCancelling || scheduled.ReservedBytes != claimed.ReservedBytes ||
 		scheduled.LeaseOwner != nil || scheduled.LeaseUntil != nil || scheduled.CompletedAt != nil ||
 		scheduled.PublishedObjectID != nil || scheduled.ResultEntryID != nil || scheduled.ResolvedName != nil ||
