@@ -27,6 +27,10 @@ func (store *idempotentRestoreTransactionStub) CreateUserIdempotencyRecord(ctx c
 	return store.records.CreateUserIdempotencyRecord(ctx, input)
 }
 
+func (store *idempotentRestoreTransactionStub) AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error) {
+	return store.records.AppendUserChangeEvent(ctx, input)
+}
+
 func (store *idempotentRestoreTransactionStub) RestoreUserFileEntry(ctx context.Context, entryID, revision, parentID uint64, name string, key []byte) (*domain.FileEntry, error) {
 	store.writeCalls++
 	store.writeContext = ctx
@@ -79,7 +83,7 @@ func TestIdempotentRestoreEntryServiceFirstAndReplay(t *testing.T) {
 	const key = "restore-007"
 	first, err := restore.Restore(ctx, actor, 13, 3, key)
 	if err != nil || first == nil || transactions != 1 ||
-		store.writeCalls != 1 || store.records.findCalls != 1 || store.records.saveCalls != 1 {
+		store.writeCalls != 1 || store.records.findCalls != 1 || store.records.saveCalls != 1 || store.records.appendCalls != 1 {
 		t.Fatal("首次恢复未在一笔事务中完成", err)
 	}
 	input := store.records.saveInput
@@ -96,6 +100,11 @@ func TestIdempotentRestoreEntryServiceFirstAndReplay(t *testing.T) {
 		data.Entry.Name != "学习笔记 (1).md" || data.Entry.Revision != "4" || data.Entry.Status != "ACTIVE" {
 		t.Fatal("首次快照不符合实际恢复结果", data, err)
 	}
+	if event := store.records.event; store.records.appendContext != txContext || event.EntryID != 13 ||
+		event.Revision != 4 || event.EventType != "ENTRY_RESTORED" ||
+		string(event.Payload) != `{"entry_id":"13","parent_id":"11","name":"学习笔记 (1).md","revision":"4"}` {
+		t.Fatal("恢复事件未使用同一事务的实际父目录和冲突后的名称", event)
+	}
 
 	// 2. 匹配记录直接复用并复制正文，当前目录项无需读取。
 	store.records.record, store.records.findError = store.records.saved, nil
@@ -103,7 +112,7 @@ func TestIdempotentRestoreEntryServiceFirstAndReplay(t *testing.T) {
 	store.entries = nil
 	replayed, err := restore.Restore(ctx, actor, 13, 3, key)
 	if err != nil || !bytes.Equal(first, replayed) || transactions != 2 ||
-		store.writeCalls != 1 || store.records.saveCalls != 1 || len(store.calls) != coreCalls {
+		store.writeCalls != 1 || store.records.saveCalls != 1 || store.records.appendCalls != 1 || len(store.calls) != coreCalls {
 		t.Fatal("重复请求没有直接复用快照", err)
 	}
 	original := bytes.Clone(store.records.saved.ResponseBody)
@@ -126,6 +135,7 @@ func TestIdempotentRestoreEntryServiceFailures(t *testing.T) {
 		{"encode failure", failure, 1, 0},
 		{"unusable encoded body", domain.ErrInvalidIdempotencyRecordData, 1, 0},
 		{"save failure", failure, 1, 1},
+		{"append event failure", failure, 1, 1},
 		{"wrong readback version", domain.ErrInvalidIdempotencyRecordData, 1, 1},
 		{"invalid readback snapshot", domain.ErrInvalidIdempotencyRecordData, 1, 1},
 		{"cancellation after save", context.Canceled, 1, 1},
@@ -148,6 +158,8 @@ func TestIdempotentRestoreEntryServiceFailures(t *testing.T) {
 				restore.encodeResult = func(*domain.FileEntry) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
 			case "save failure":
 				store.records.saveError = failure
+			case "append event failure":
+				store.records.appendError = failure
 			case "wrong readback version":
 				store.records.afterSave = func(record *domain.IdempotencyRecord) {
 					record.ResponseBody = bytes.Replace(record.ResponseBody, []byte(`"revision":"4"`), []byte(`"revision":"5"`), 1)

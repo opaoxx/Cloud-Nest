@@ -18,6 +18,8 @@ type IdempotentRestoreEntryTransaction interface {
 	FindUserIdempotencyRecord(ctx context.Context, userID uint64, operation, key string) (*domain.IdempotencyRecord, error)
 	// CreateUserIdempotencyRecord 保存结果并读回，外层事务决定提交或回滚。
 	CreateUserIdempotencyRecord(ctx context.Context, input domain.IdempotencyResultInput) (*domain.IdempotencyRecord, error)
+	// AppendUserChangeEvent 在当前事务内追加一次业务变更。
+	AppendUserChangeEvent(ctx context.Context, input domain.ChangeEventInput) (uint64, error)
 }
 
 // IdempotentRestoreEntryService 组合首次恢复和同键结果复用。
@@ -121,9 +123,18 @@ func (restoreService *IdempotentRestoreEntryService) Restore(ctx context.Context
 			if err != nil {
 				return fmt.Errorf("保存恢复幂等结果失败: %w", err)
 			}
+
+			// 4. 事件使用实际恢复位置和最终名称，与恢复和快照一起提交。
+			event, err := newEntryChangeEvent("ENTRY_RESTORED", entry)
+			if err != nil {
+				return fmt.Errorf("编码恢复变更事件失败: %w", err)
+			}
+			if _, err := txStore.AppendUserChangeEvent(txContext, event); err != nil {
+				return fmt.Errorf("追加恢复变更事件失败: %w", err)
+			}
 		}
 
-		// 4. 校验快照和本次请求的对应关系。
+		// 5. 校验快照和本次请求的对应关系。
 		if err := ValidateRestoreEntryReplay(record, actor.UserID, entryID, expectedRevision, key, requestHash, restoreService.now()); err != nil {
 			return err
 		}
@@ -137,7 +148,7 @@ func (restoreService *IdempotentRestoreEntryService) Restore(ctx context.Context
 		return nil
 	})
 
-	// 5. 确认外层事务提交后交付快照。
+	// 6. 确认外层事务提交后交付快照。
 	if transactionError != nil {
 		return nil, fmt.Errorf("幂等恢复事务失败: %w", transactionError)
 	}

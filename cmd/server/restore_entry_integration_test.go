@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,141 @@ import (
 const serverRestoreDirectoryID = "74005"
 const serverRestoreDirectoryKey = "server-restore-nested-directory"
 const serverRestoreChildID = "74103"
+
+func TestServerRestoreChangeEventIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_RESTORE_CHANGE_EVENT_TEST") != "1" {
+		t.Skip("设置 CLOUDNEST_RESTORE_CHANGE_EVENT_TEST=1 后启动独占 MySQL、MinIO 和服务")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	fixture := prepareBackupSource(t, ctx)
+	t.Logf("恢复事件专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
+	userID := backupFixtureID(t, fixture.login.User.ID)
+	rootID := backupFixtureID(t, fixture.login.RootEntryID)
+	if _, err := fixture.pool.ExecContext(ctx, `INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,status,revision,deleted_at)
+		VALUES(11,?,?,'原父目录',CAST('原父目录' AS BINARY),'DIR','TRASHED',2,UTC_TIMESTAMP(6)),
+		      (12,?,11,'同步恢复目录',CAST('同步恢复目录' AS BINARY),'DIR','TRASHED',3,UTC_TIMESTAMP(6)),
+		      (13,?,12,'活动后代',CAST('活动后代' AS BINARY),'DIR','ACTIVE',1,NULL),
+		      (14,?,?,'同步恢复目录',CAST('同步恢复目录' AS BINARY),'DIR','ACTIVE',1,NULL),
+		      (15,?,?,'恢复故障目录',CAST('恢复故障目录' AS BINARY),'DIR','TRASHED',1,UTC_TIMESTAMP(6))`,
+		userID, rootID, userID, userID, userID, rootID, userID, rootID); err != nil {
+		t.Fatal("无法准备本轮专用回收目录树", err)
+	}
+	request := func(id, key, revision string, status int, code string, details map[string]any) dto.RestoreEntryResponse {
+		t.Helper()
+		return requestServerRestoreEntry(t, ctx, fixture.api.baseURL, fixture.api.accessToken, id, key, revision, status, code, details)
+	}
+	type restoreLogFacts struct{ snapshots, events, sequence uint64 }
+	readLog := func() restoreLogFacts {
+		t.Helper()
+		var log restoreLogFacts
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM idempotency_records WHERE user_id=users.id AND operation=?),
+			(SELECT COUNT(*) FROM change_events WHERE user_id=users.id),change_seq FROM users WHERE id=?`,
+			domain.RestoreEntryOperation, userID).Scan(&log.snapshots, &log.events, &log.sequence); err != nil {
+			t.Fatal(err)
+		}
+		return log
+	}
+	checkEntry := func(id, parentID, revision uint64, status, name string) sql.NullTime {
+		t.Helper()
+		var savedParent, savedRevision uint64
+		var savedStatus, savedName string
+		var deletedAt sql.NullTime
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT parent_id,revision,status,name,deleted_at FROM file_entries WHERE id=? AND user_id=?`,
+			id, userID).Scan(&savedParent, &savedRevision, &savedStatus, &savedName, &deletedAt); err != nil ||
+			savedParent != parentID || savedRevision != revision || savedStatus != status || savedName != name || deletedAt.Valid != (status == "TRASHED") {
+			t.Fatal("隔离条目的位置、名称、版本或回收事实不符", id, savedParent, savedRevision, savedStatus, savedName, deletedAt, err)
+		}
+		return deletedAt
+	}
+	checkEvent := func(sequence uint64, entry dto.RestoredEntrySummary) {
+		t.Helper()
+		var savedID, revision uint64
+		var eventType string
+		var payload []byte
+		if err := fixture.pool.QueryRowContext(ctx, "SELECT entry_id,revision,event_type,payload FROM change_events WHERE user_id=? AND `sequence`=?",
+			userID, sequence).Scan(&savedID, &revision, &eventType, &payload); err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]string
+		want := map[string]string{"entry_id": entry.ID, "parent_id": entry.ParentID, "name": entry.Name, "revision": entry.Revision}
+		if err := json.Unmarshal(payload, &fields); err != nil || !reflect.DeepEqual(fields, want) ||
+			eventType != "ENTRY_RESTORED" || strconv.FormatUint(savedID, 10) != entry.ID ||
+			strconv.FormatUint(revision, 10) != entry.Revision {
+			t.Fatal("恢复事件表列或载荷与实际恢复结果不符", string(payload), err)
+		}
+	}
+
+	// 1. 原父目录仍在回收站，恢复时回退到根目录并避开同名条目。
+	var hidden dto.ErrorResponse
+	fixture.api.request(t, ctx, http.MethodGet, "/api/v1/entries/13", "", nil, http.StatusNotFound, &hidden)
+	request("12", "restore-event-first", "2", http.StatusConflict, "REVISION_CONFLICT", map[string]any{"current_revision": "3"})
+	if hidden.Error.Code != "ENTRY_NOT_FOUND" || readLog() != (restoreLogFacts{}) {
+		t.Fatal("恢复前可见性或版本冲突的日志不符")
+	}
+	const firstName = "同步恢复目录 (1)"
+	first := request("12", "restore-event-first", "3", http.StatusOK, "", nil)
+	if first.Data.Entry != (dto.RestoredEntrySummary{
+		ID: "12", ParentID: fixture.login.RootEntryID, Name: firstName, EntryType: "DIR", Status: "ACTIVE", Revision: "4",
+	}) {
+		t.Fatal("恢复响应未交付实际回退位置和重名后缀", first.Data)
+	}
+	checkEntry(12, rootID, 4, "ACTIVE", firstName)
+	checkEntry(14, rootID, 1, "ACTIVE", "同步恢复目录")
+	checkEvent(1, first.Data.Entry)
+	var visible dto.EntryDetailResponse
+	fixture.api.request(t, ctx, http.MethodGet, "/api/v1/entries/13", "", nil, http.StatusOK, &visible)
+	if visible.Data.ID != "13" || visible.Data.ParentID == nil || *visible.Data.ParentID != "12" || visible.Data.Revision != "1" {
+		t.Fatal("恢复根项后没有重新显示原后代", visible.Data)
+	}
+
+	// 2. 同键重放保存的实际位置，已恢复条目上的新请求保持日志。
+	replay := request("12", "restore-event-first", "3", http.StatusOK, "", nil)
+	request("12", "restore-event-already-active", "4", http.StatusNotFound, "ENTRY_NOT_FOUND", nil)
+	afterFirst := restoreLogFacts{snapshots: 1, events: 1, sequence: 1}
+	if first.Data != replay.Data || first.RequestID == replay.RequestID || readLog() != afterFirst {
+		t.Fatal("同键重放或已恢复条目上的新请求改变了快照和日志")
+	}
+
+	// 3. 在状态、快照和序号写入后注入故障，核对回滚和原键重试。
+	beforeFailure := checkEntry(15, rootID, 1, "TRASHED", "恢复故障目录")
+	if _, err := fixture.pool.ExecContext(ctx, `CREATE TRIGGER fixture_restore_event_failure
+		BEFORE INSERT ON change_events FOR EACH ROW
+		BEGIN
+			IF NEW.event_type='ENTRY_RESTORED'
+				AND EXISTS (SELECT 1 FROM file_entries WHERE user_id=NEW.user_id AND id=NEW.entry_id
+					AND id=15 AND status='ACTIVE' AND revision=2 AND deleted_at IS NULL)
+				AND EXISTS (SELECT 1 FROM idempotency_records WHERE user_id=NEW.user_id AND resource_id=NEW.entry_id
+					AND idempotency_key='restore-event-rollback')
+				AND EXISTS (SELECT 1 FROM users WHERE id=NEW.user_id AND change_seq=2) THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture restore event insert failure';
+			END IF;
+		END`); err != nil {
+		t.Fatal("无法安装恢复事件隔离故障", err)
+	}
+	request("15", "restore-event-rollback", "1", http.StatusInternalServerError, "INTERNAL_ERROR", nil)
+	if deletedAt := checkEntry(15, rootID, 1, "TRASHED", "恢复故障目录"); !deletedAt.Time.Equal(beforeFailure.Time) || readLog() != afterFirst {
+		t.Fatal("事件写入失败后回收时间、快照或序号未回滚")
+	}
+	if _, err := fixture.pool.ExecContext(ctx, "DROP TRIGGER fixture_restore_event_failure"); err != nil {
+		t.Fatal(err)
+	}
+	recovered := request("15", "restore-event-rollback", "1", http.StatusOK, "", nil)
+	checkEntry(15, rootID, 2, "ACTIVE", "恢复故障目录")
+	checkEvent(1, first.Data.Entry)
+	checkEvent(2, recovered.Data.Entry)
+	if readLog() != (restoreLogFacts{snapshots: 2, events: 2, sequence: 2}) {
+		t.Fatal("恢复故障后的原键重试未取得连续序号")
+	}
+	logs, err := fixture.stop()
+	if err != nil {
+		t.Fatal("隔离服务停机失败", err)
+	}
+	verifyBackupSourceStopped(t, fixture.api.baseURL, logs)
+	t.Logf("目录 12 回退到根目录 %s，采用 %q、版本 4 并写事件 1。后代 13 恢复可见，冲突与重放未追加。回滚后目录 15 原键重试写事件 2",
+		fixture.login.RootEntryID, firstName)
+}
 
 func requestServerRestoreEntry(t *testing.T, ctx context.Context, baseURL, token, entryID, key, revision string, status int, code string, details map[string]any) dto.RestoreEntryResponse {
 	t.Helper()

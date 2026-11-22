@@ -28,6 +28,7 @@ func TestRestoreEntryHandlerIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 35*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	for _, statement := range []string{
 		"UPDATE file_entries SET status='TRASHED', deleted_at='2000-01-01 00:00:00.000000' WHERE user_id=1 AND id=15",
 		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(17,1,11,'隐藏.MD',CAST('隐藏.md' AS BINARY),'DIR')",

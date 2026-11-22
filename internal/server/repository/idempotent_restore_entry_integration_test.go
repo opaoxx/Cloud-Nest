@@ -39,6 +39,7 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 35*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryIdempotencyTestDatabase(t, ctx)
+	installChangeEventFixtureTable(t, ctx, pool)
 	for _, statement := range []string{
 		"UPDATE file_entries SET status='TRASHED', deleted_at='2000-01-01 00:00:00.000000' WHERE user_id=1 AND id IN (13,15)",
 		"INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type) VALUES(17,1,11,'隐藏.MD',CAST('隐藏.md' AS BINARY),'DIR')",
@@ -75,6 +76,15 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 	readRecord := func(key string) (*domain.IdempotencyRecord, error) {
 		return store.FindUserIdempotencyRecord(ctx, actor.UserID, domain.RestoreEntryOperation, key)
 	}
+	readLog := func(t *testing.T) [2]uint64 {
+		t.Helper()
+		var log [2]uint64
+		if err := pool.QueryRowContext(ctx, "SELECT change_seq,(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=?",
+			actor.UserID).Scan(&log[0], &log[1]); err != nil {
+			t.Fatal(err)
+		}
+		return log
+	}
 
 	// 2. 核对首次事务和幂等记录，再验证同键重试只交付历史快照。
 	t.Run("first restore and historical replay", func(t *testing.T) {
@@ -89,7 +99,7 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 		entry := readEntry(t, 15)
 		if err != nil || data == nil || entry.ParentID == nil || *entry.ParentID != 11 || entry.Status != "ACTIVE" ||
 			entry.Name != "隐藏 (1).md" || entry.Revision != 6 || data.Entry.ParentID != "11" ||
-			data.Entry.Name != entry.Name || data.Entry.Revision != "6" {
+			data.Entry.Name != entry.Name || data.Entry.Revision != "6" || readLog(t) != [2]uint64{1, 1} {
 			t.Fatal("首次恢复与已提交事实不符", data, entry, err)
 		}
 		record, err := readRecord(key)
@@ -118,7 +128,7 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 		}
 		current := readEntry(t, 15)
 		replayed, err := restore.Restore(ctx, actor, 15, 5, key)
-		if err != nil || !bytes.Equal(first, replayed) || !reflect.DeepEqual(readEntry(t, 15), current) {
+		if err != nil || !bytes.Equal(first, replayed) || !reflect.DeepEqual(readEntry(t, 15), current) || readLog(t) != [2]uint64{1, 1} {
 			t.Fatal("重试未复用首次快照，或改变了当前记录", err)
 		}
 		// 将两份已提交正文交给测试 HTTP 入口，核对快照相同且各带当次 ID。
@@ -161,6 +171,7 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 	t.Run("snapshot save failure rolls back both writes", func(t *testing.T) {
 		const key = "restore-rollback"
 		before := readEntry(t, 13)
+		beforeLog := readLog(t)
 		failure := errors.New("fixture failure after saving a snapshot")
 		broken := service.NewIdempotentRestoreEntryService(
 			func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentRestoreEntryTransaction) error) error {
@@ -172,7 +183,7 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 		body, err := broken.Restore(ctx, actor, 13, 3, key)
 		record, queryError := readRecord(key)
 		if body != nil || !errors.Is(err, failure) || !reflect.DeepEqual(readEntry(t, 13), before) ||
-			record != nil || !errors.Is(queryError, domain.ErrIdempotencyRecordNotFound) {
+			record != nil || !errors.Is(queryError, domain.ErrIdempotencyRecordNotFound) || readLog(t) != beforeLog {
 			t.Fatal("快照失败没有原子回滚", err, queryError)
 		}
 	})
@@ -201,7 +212,7 @@ func TestIdempotentRestoreEntryServiceIntegration(t *testing.T) {
 		entry := readEntry(t, 13)
 		if first.err != nil || second.err != nil || err != nil || record == nil ||
 			!bytes.Equal(first.body, second.body) || !bytes.Equal(first.body, record.ResponseBody) ||
-			entry.Status != "ACTIVE" || entry.Revision != 4 {
+			entry.Status != "ACTIVE" || entry.Revision != 4 || readLog(t) != [2]uint64{2, 2} {
 			t.Fatal("并发重试未共享首次恢复结果", first.err, second.err, err)
 		}
 	})
