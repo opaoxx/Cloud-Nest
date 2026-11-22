@@ -66,10 +66,6 @@ func (store *Store) findMultipartUploadCleanupTarget(
 	return &domain.MultipartUploadCleanupTarget{ObjectKey: object.ObjectKey, UploadID: rechecked.StorageUploadID}, nil
 }
 
-func (store *Store) readMultipartUploadCancellationLease(ctx context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
-	return store.readMultipartUploadCleanupLease(ctx, claimed, domain.UploadStatusCancelling)
-}
-
 func (store *Store) readMultipartUploadCleanupLease(ctx context.Context, claimed *domain.UploadTask, pendingStatus domain.UploadStatus) (*domain.UploadTask, error) {
 	current, databaseTime, err := store.findUserUploadTaskWithDatabaseTime(ctx, claimed.UserID, claimed.ID)
 	if err != nil {
@@ -79,10 +75,6 @@ func (store *Store) readMultipartUploadCleanupLease(ctx context.Context, claimed
 		return nil, err
 	}
 	return current, nil
-}
-
-func validMultipartUploadCancellationClaim(claimed *domain.UploadTask) bool {
-	return validMultipartUploadCleanupClaim(claimed, domain.UploadStatusCancelling)
 }
 
 func validMultipartUploadCleanupClaim(claimed *domain.UploadTask, pendingStatus domain.UploadStatus) bool {

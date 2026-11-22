@@ -13,6 +13,18 @@ import (
 )
 
 func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
+	testScheduleMultipartUploadCleanupRetry(t, domain.UploadStatusCancelling, (*Store).ScheduleMultipartUploadCancellationRetry)
+}
+
+func TestScheduleMultipartUploadExpirationRetryIntegration(t *testing.T) {
+	testScheduleMultipartUploadCleanupRetry(t, domain.UploadStatusExpiring, (*Store).ScheduleMultipartUploadExpirationRetry)
+}
+
+func testScheduleMultipartUploadCleanupRetry(
+	t *testing.T, pendingStatus domain.UploadStatus,
+	scheduleRetry func(*Store, context.Context, *domain.UploadTask, int, domain.MultipartUploadCleanupRetryReason) (*domain.UploadTask, error),
+) {
+	t.Helper()
 	ctx, pool, store := prepareMultipartCompletionDatabase(t)
 	pool.SetMaxOpenConns(1)
 	execute := func(t *testing.T, statement string, args ...any) {
@@ -27,27 +39,43 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 		t.Helper()
 		execute(t, "SET timestamp = ?", start.Unix()+int64(elapsed))
 	}
-	scan := func(t *testing.T, count int) []domain.UploadCancellationCandidate {
+	scanAndClaim := func(t *testing.T, count int, owner string) (*domain.UploadTask, error) {
 		t.Helper()
-		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
-		if err != nil || len(candidates) != count {
-			t.Fatal("取消候选数量不符", candidates, err)
+		if pendingStatus == domain.UploadStatusExpiring {
+			candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+			if err != nil || len(candidates) != count || (count == 1 && candidates[0].TaskID != 19) {
+				t.Fatal("到期候选不符", candidates, err)
+			}
+			if count == 0 {
+				return nil, nil
+			}
+			return store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], owner)
 		}
-		return candidates
+		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
+		if err != nil || len(candidates) != count || (count == 1 && candidates[0].TaskID != 19) {
+			t.Fatal("取消候选不符", candidates, err)
+		}
+		if count == 0 {
+			return nil, nil
+		}
+		return store.ClaimMultipartUploadCancellationLease(ctx, candidates[0], owner)
 	}
 	claim := func(t *testing.T, beforeClaim ...string) *domain.UploadTask {
 		t.Helper()
 		clock(t, 0)
 		resetMultipartUploadCancellationFixture(t, ctx, pool)
 		execute(t, "UPDATE upload_tasks SET attempt_count=2,last_error_code=NULL,last_error_message=NULL WHERE id=19")
+		if pendingStatus == domain.UploadStatusExpiring {
+			execute(t, "UPDATE upload_tasks SET status='EXPIRING',expires_at=UTC_TIMESTAMP(6) WHERE id=19")
+		}
 		for _, statement := range beforeClaim {
 			if statement != "" {
 				execute(t, statement)
 			}
 		}
-		claimed, err := store.ClaimMultipartUploadCancellationLease(ctx, scan(t, 1)[0], "fixture-cancel-retry")
+		claimed, err := scanAndClaim(t, 1, "fixture-cleanup-retry")
 		if err != nil || claimed == nil || claimed.LeaseUntil == nil || !claimed.LeaseUntil.Equal(start.Add(time.Minute)) {
-			t.Fatal("未取得预期的取消租约", err)
+			t.Fatal("未取得预期的收尾租约", err)
 		}
 		return claimed
 	}
@@ -78,25 +106,25 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 		name                 string
 		beforeClaim          []string
 		delay, elapsed, next int
-		reason               domain.MultipartUploadCancellationRetryReason
+		reason               domain.MultipartUploadCleanupRetryReason
 		message              string
 	}{
 		{name: "storage retry waits for original lease", delay: 1, next: 60,
-			reason: domain.MultipartCancellationRetryStorage, message: domain.ErrUploadStorageUnavailable.Error()},
+			reason: domain.MultipartCleanupRetryStorage, message: domain.ErrUploadStorageUnavailable.Error()},
 		{name: "database retry respects later backoff for unbound disabled account",
 			beforeClaim: []string{"UPDATE users SET status='DISABLED' WHERE id=7", "UPDATE upload_tasks SET storage_upload_id=NULL WHERE id=19"},
-			delay:       30, elapsed: 50, next: 80, reason: domain.MultipartCancellationRetryDatabase, message: "数据服务暂时不可用"},
+			delay:       30, elapsed: 50, next: 80, reason: domain.MultipartCleanupRetryDatabase, message: "数据服务暂时不可用"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			claimed := claim(t, fixture.beforeClaim...)
-			if fixture.reason == domain.MultipartCancellationRetryDatabase && claimed.StorageUploadID != nil {
+			if fixture.reason == domain.MultipartCleanupRetryDatabase && claimed.StorageUploadID != nil {
 				t.Fatal("未取得未绑定会话的合成租约")
 			}
 			clock(t, fixture.elapsed)
 			before := read(t)
-			updated, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, fixture.delay, fixture.reason)
+			updated, err := scheduleRetry(store, ctx, claimed, fixture.delay, fixture.reason)
 			if err != nil || updated == nil {
-				t.Fatal("登记取消重试失败", err)
+				t.Fatal("登记收尾重试失败", err)
 			}
 			before.task.LeaseOwner, before.task.LeaseUntil = nil, nil
 			before.task.AttemptCount++
@@ -106,20 +134,20 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 			if !reflect.DeepEqual(before.task, updated) || !reflect.DeepEqual(before, read(t)) {
 				t.Fatal("未准确保存重试安排、原绑定及预占")
 			}
-			if result, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, fixture.delay, fixture.reason); result != nil ||
+			if result, err := scheduleRetry(store, ctx, claimed, fixture.delay, fixture.reason); result != nil ||
 				!errors.Is(err, domain.ErrUploadTaskBusy) || !reflect.DeepEqual(before, read(t)) {
 				t.Fatal("同一租约重复登记了重试", err)
 			}
 			clock(t, fixture.next-1)
-			scan(t, 0)
+			scanAndClaim(t, 0, "")
 			clock(t, fixture.next)
-			next, err := store.ClaimMultipartUploadCancellationLease(ctx, scan(t, 1)[0], "fixture-next-cancel")
+			next, err := scanAndClaim(t, 1, "fixture-next-cleanup")
 			if err != nil || next == nil || next.LeaseVersion != claimed.LeaseVersion+1 || next.AttemptCount != updated.AttemptCount ||
-				!sameUploadStorageText(next.StorageUploadID, claimed.StorageUploadID) || !next.ExpiresAt.Before(start) {
+				!sameUploadStorageText(next.StorageUploadID, claimed.StorageUploadID) || !next.ExpiresAt.Equal(claimed.ExpiresAt) {
 				t.Fatal("重试到点后未能领取原已到期任务的新租约", err)
 			}
 			current := read(t)
-			if result, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, fixture.delay, fixture.reason); result != nil ||
+			if result, err := scheduleRetry(store, ctx, claimed, fixture.delay, fixture.reason); result != nil ||
 				!errors.Is(err, domain.ErrUploadTaskBusy) || !reflect.DeepEqual(current, read(t)) {
 				t.Fatal("新租约出现后旧执行者仍能改写重试", err)
 			}
@@ -128,17 +156,18 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 		})
 	}
 
-	// 2. 在读取当前任务后推进时钟，证明实际 UPDATE 也遵守租约边界。
-	t.Run("lease expires after locked lookup", func(t *testing.T) {
+	// 2. 在读取当前任务后改变时钟，验证 UPDATE 自己的时间条件。
+	checkWriteTime := func(t *testing.T, writeTime func(*domain.UploadTask) time.Time) {
+		t.Helper()
 		claimed := claim(t)
 		before := read(t)
 		advanced := false
-		const callback = "fixture:expire_cancellation_retry_after_lookup"
+		const callback = "fixture:shift_multipart_cleanup_retry_time_after_lookup"
 		queries := store.database.Callback().Query()
 		if err := queries.After("gorm:query").Register(callback, func(query *gorm.DB) {
 			if query.Error == nil && query.Statement.Table == "upload_tasks" && !advanced {
 				advanced = true
-				_, err := query.Statement.ConnPool.ExecContext(query.Statement.Context, "SET timestamp = ?", claimed.LeaseUntil.Unix())
+				_, err := query.Statement.ConnPool.ExecContext(query.Statement.Context, "SET timestamp = ?", writeTime(claimed).Unix())
 				query.AddError(err)
 			}
 		}); err != nil {
@@ -149,14 +178,34 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 				t.Error(err)
 			}
 		})
-		if result, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, 1, domain.MultipartCancellationRetryStorage); result != nil ||
+		if result, err := scheduleRetry(store, ctx, claimed, 1, domain.MultipartCleanupRetryStorage); result != nil ||
 			!advanced || !errors.Is(err, domain.ErrUploadTaskBusy) || !reflect.DeepEqual(before, read(t)) {
-			t.Fatal("写入未拦截恰好到期的租约，或留下变动", err)
+			t.Fatal("写入未拒绝时间不符合要求的重试，或留下变动", err)
 		}
-		t.Log("锁内读任务后推进时钟到租约截止，重试更新返回 UPLOAD_BUSY")
+		t.Log("锁内读任务后改变时钟，重试更新返回 UPLOAD_BUSY")
+	}
+	t.Run("lease expires after locked lookup", func(t *testing.T) {
+		checkWriteTime(t, func(task *domain.UploadTask) time.Time { return *task.LeaseUntil })
 	})
+	if pendingStatus == domain.UploadStatusExpiring {
+		t.Run("upload is not expired at write time", func(t *testing.T) {
+			checkWriteTime(t, func(task *domain.UploadTask) time.Time { return task.ExpiresAt.Add(-time.Second) })
+		})
+	} else {
+		t.Run("cancellation can retry before upload expiration", func(t *testing.T) {
+			claimed := claim(t, "UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 DAY WHERE id=19")
+			updated, err := scheduleRetry(store, ctx, claimed, 1, domain.MultipartCleanupRetryStorage)
+			if err != nil || updated == nil || !updated.UpdatedAt.Before(claimed.ExpiresAt) {
+				t.Fatal("已受理的取消应允许在原期限前安排重试", err)
+			}
+		})
+	}
 
-	// 3. 验证过时输入、计数边界或写回异常均不能改动待取消任务。
+	// 3. 验证过时输入、计数边界或写回异常均不能改动待收尾任务。
+	otherStatus := domain.UploadStatusExpiring
+	if pendingStatus == domain.UploadStatusExpiring {
+		otherStatus = domain.UploadStatusCancelling
+	}
 	for _, fixture := range []struct {
 		name, beforeClaim, change, trigger string
 		edit                               func(*domain.UploadTask)
@@ -168,7 +217,8 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 		{name: "raw session changed", change: "UPDATE upload_tasks SET storage_upload_id=RTRIM(storage_upload_id) WHERE id=19", want: domain.ErrUploadTaskBusy},
 		{name: "object binding changed", change: "UPDATE upload_tasks SET staged_object_id=29 WHERE id=19", want: domain.ErrUploadTaskBusy},
 		{name: "retry already deferred", change: "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE WHERE id=19", want: domain.ErrUploadTaskBusy},
-		{name: "task state changed", change: "UPDATE upload_tasks SET status='EXPIRING' WHERE id=19", want: domain.ErrUploadTaskNotReady},
+		{name: "task state changed", change: "UPDATE upload_tasks SET status='" + string(otherStatus) + "' WHERE id=19", want: domain.ErrUploadTaskNotReady},
+		{name: "wrong claim phase", edit: func(task *domain.UploadTask) { task.Status = otherStatus }, want: domain.ErrInvalidUploadTaskData},
 		{name: "wrong account", edit: func(task *domain.UploadTask) { task.UserID = 8 }, want: domain.ErrUploadTaskNotFound},
 		{name: "attempt count exhausted", beforeClaim: "UPDATE upload_tasks SET attempt_count=4294967295 WHERE id=19", want: domain.ErrInvalidUploadTaskData},
 		{name: "future lease version exhausted", beforeClaim: "UPDATE upload_tasks SET lease_version=18446744073709551614 WHERE id=19", want: domain.ErrUploadLeaseVersionExhausted},
@@ -186,7 +236,7 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 				fixture.edit(claimed)
 			}
 			before := read(t)
-			if result, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, 1, domain.MultipartCancellationRetryStorage); result != nil ||
+			if result, err := scheduleRetry(store, ctx, claimed, 1, domain.MultipartCleanupRetryStorage); result != nil ||
 				!errors.Is(err, fixture.want) || !reflect.DeepEqual(before, read(t)) {
 				t.Fatal("资格校验或回滚结果不符", fixture.want, err)
 			}
@@ -197,16 +247,16 @@ func TestScheduleMultipartUploadCancellationRetryIntegration(t *testing.T) {
 		claimed := claim(t)
 		before := read(t)
 		for _, delay := range []int{0, 31, math.MaxInt} {
-			if result, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, delay, domain.MultipartCancellationRetryStorage); result != nil || err == nil {
+			if result, err := scheduleRetry(store, ctx, claimed, delay, domain.MultipartCleanupRetryStorage); result != nil || err == nil {
 				t.Fatal("无效等待时间被接受", delay, err)
 			}
 		}
-		if result, err := store.ScheduleMultipartUploadCancellationRetry(ctx, claimed, 1, "raw-error"); result != nil || !errors.Is(err, domain.ErrInvalidUploadTaskData) {
+		if result, err := scheduleRetry(store, ctx, claimed, 1, "raw-error"); result != nil || !errors.Is(err, domain.ErrInvalidUploadTaskData) {
 			t.Fatal("无效重试原因被接受", err)
 		}
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
-		if result, err := store.ScheduleMultipartUploadCancellationRetry(canceled, claimed, 1, domain.MultipartCancellationRetryStorage); result != nil ||
+		if result, err := scheduleRetry(store, canceled, claimed, 1, domain.MultipartCleanupRetryStorage); result != nil ||
 			!errors.Is(err, context.Canceled) || !reflect.DeepEqual(before, read(t)) {
 			t.Fatal("上下文取消没有保留或出现数据变化", err)
 		}

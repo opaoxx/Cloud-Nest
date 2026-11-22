@@ -37,11 +37,19 @@ type MultipartUploadCleanupObservation struct {
 }
 
 // MultipartUploadCancellationRetryReason 指定取消任务再次尝试的原因。
-type MultipartUploadCancellationRetryReason string
+type MultipartUploadCancellationRetryReason = MultipartUploadCleanupRetryReason
+
+// MultipartUploadCleanupRetryReason 指定分片任务再次尝试收尾的原因。
+type MultipartUploadCleanupRetryReason string
 
 const (
+	// MultipartCleanupRetryStorage 表示存储状态暂时无法确认。
+	MultipartCleanupRetryStorage MultipartUploadCleanupRetryReason = "STORAGE_UNAVAILABLE"
+	// MultipartCleanupRetryDatabase 表示收尾事务遇到已确认的临时数据库故障。
+	MultipartCleanupRetryDatabase MultipartUploadCleanupRetryReason = "DATABASE_UNAVAILABLE"
+
 	// MultipartCancellationRetryStorage 表示存储状态暂时无法确认。
-	MultipartCancellationRetryStorage MultipartUploadCancellationRetryReason = "STORAGE_UNAVAILABLE"
+	MultipartCancellationRetryStorage = MultipartCleanupRetryStorage
 	// MultipartCancellationRetryDatabase 表示收尾事务遇到已确认的临时数据库故障。
-	MultipartCancellationRetryDatabase MultipartUploadCancellationRetryReason = "DATABASE_UNAVAILABLE"
+	MultipartCancellationRetryDatabase = MultipartCleanupRetryDatabase
 )
