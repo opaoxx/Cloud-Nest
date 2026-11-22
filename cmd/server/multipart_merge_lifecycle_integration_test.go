@@ -180,11 +180,14 @@ func TestServerMultipartMergeLifecycleIntegration(t *testing.T) {
 	if err != nil || info.VersionID != *object.StorageVersionID || info.Size != fileSize || info.ETag != *object.StorageETag {
 		t.Fatal("已提交的版本、大小或 ETag 与 MinIO 不符", minio.ToErrorResponse(err).Code)
 	}
-	var reserved, used uint64
-	if err := pool.QueryRowContext(ctx, "SELECT reserved_storage,used_storage FROM users WHERE id=?", actor.UserID).Scan(&reserved, &used); err != nil ||
-		reserved != fileSize || used != 0 {
-		t.Fatal("合并后应保留全额预占，已用空间仍为零", reserved, used, err)
+	var reserved, used, changeSequence, eventCount uint64
+	if err := pool.QueryRowContext(ctx, `SELECT reserved_storage,used_storage,change_seq,
+		(SELECT COUNT(*) FROM change_events WHERE user_id=users.id) FROM users WHERE id=?`, actor.UserID).
+		Scan(&reserved, &used, &changeSequence, &eventCount); err != nil ||
+		reserved != fileSize || used != 0 || changeSequence != 0 || eventCount != 0 {
+		t.Fatal("合并待校验时应保留全额预占，已用、序号和事件数仍为零", reserved, used, changeSequence, eventCount, err)
 	}
+	t.Log("合并对象已保存且任务为 VERIFYING，发布事件数及账号序号均为 0")
 	releaseMerge()
 
 	// 3. 放行校验首轮，核对原版本发布、目录项和只结算一次的配额。

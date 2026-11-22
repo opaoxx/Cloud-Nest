@@ -159,6 +159,19 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	// 7. 等待正式后台任务合并、校验和发布，核对文件与配额并验证下载。
 	completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath, accepted)
 	publication := verifyResumedMultipartPublication(t, ctx, fixture, restarted, completed, fileDigest)
+	var eventEntryID, eventRevision, eventSize uint64
+	var eventType, eventParent, eventName, eventSHA256 string
+	if err := fixture.pool.QueryRowContext(ctx, `SELECT entry_id,revision,event_type,
+		JSON_UNQUOTE(JSON_EXTRACT(payload,'$.parent_id')),JSON_UNQUOTE(JSON_EXTRACT(payload,'$.name')),
+		JSON_EXTRACT(payload,'$.size_bytes'),JSON_UNQUOTE(JSON_EXTRACT(payload,'$.sha256'))
+		FROM change_events WHERE user_id=? AND `+"`sequence`"+`=1`, fixture.login.User.ID).
+		Scan(&eventEntryID, &eventRevision, &eventType, &eventParent, &eventName, &eventSize, &eventSHA256); err != nil ||
+		strconv.FormatUint(eventEntryID, 10) != publication.entry.ID || strconv.FormatUint(eventRevision, 10) != publication.entry.Revision ||
+		eventType != "FILE_PUBLISHED" || eventParent != fixture.login.RootEntryID || eventName != publication.entry.Name ||
+		eventSize != fileSize || eventSHA256 != fmt.Sprintf("%x", fileDigest) {
+		t.Fatal("分片发布事件与实际文件或整文件校验结果不符", err)
+	}
+	t.Logf("FILE_PUBLISHED 序号 1，条目 %d，版本 %d，%d B，整文件 SHA-256 %s", eventEntryID, eventRevision, eventSize, eventSHA256)
 	verifyResumedMultipartDownload(t, ctx, restarted, publication, fileDigest)
 
 	// 8. 在原任务发布后无正文重试，核对完成结果和发布账目。
@@ -446,28 +459,31 @@ func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backu
 func verifyResumedMultipartCompletionReplay(t *testing.T, ctx context.Context, fixture backupSourceFixture, api backupSourceClient,
 	taskPath string, completed dto.UploadTaskData) {
 	t.Helper()
-	// 1. 从同一次只读查询记录发布对象、账号配额及文件、对象和回执数量。
+	// 1. 从同一次只读查询记录发布对象、账号配额、序号及相关行数。
 	type completionState struct {
 		publishedObjectID, usedBytes, reservedBytes uint64
 		files, objects, receipts                    uint64
+		sequence, events                            uint64
 	}
 	readState := func() completionState {
 		t.Helper()
 		var state completionState
-		if err := fixture.pool.QueryRowContext(ctx, `SELECT task.published_object_id,account.used_storage,account.reserved_storage,
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT task.published_object_id,account.used_storage,account.reserved_storage,account.change_seq,
 			(SELECT COUNT(*) FROM file_entries WHERE user_id=account.id AND entry_type='FILE'),
 			(SELECT COUNT(*) FROM stored_objects WHERE owner_user_id=account.id),
-			(SELECT COUNT(*) FROM upload_parts WHERE task_id=task.id)
+			(SELECT COUNT(*) FROM upload_parts WHERE task_id=task.id),
+			(SELECT COUNT(*) FROM change_events WHERE user_id=account.id)
 			FROM upload_tasks task JOIN users account ON account.id=task.user_id
 			WHERE task.id=? AND account.id=? AND task.status='COMPLETED'`, completed.ID, fixture.login.User.ID).
-			Scan(&state.publishedObjectID, &state.usedBytes, &state.reservedBytes, &state.files, &state.objects, &state.receipts); err != nil {
+			Scan(&state.publishedObjectID, &state.usedBytes, &state.reservedBytes, &state.sequence,
+				&state.files, &state.objects, &state.receipts, &state.events); err != nil {
 			t.Fatal("读取原任务的发布与配额快照失败", err)
 		}
 		return state
 	}
 	before := readState()
 	if before.publishedObjectID == 0 || before.usedBytes != completed.SizeBytes || before.reservedBytes != 0 ||
-		before.files != 1 || before.objects != 1 || before.receipts != 2 {
+		before.files != 1 || before.objects != 1 || before.receipts != 2 || before.sequence != 1 || before.events != 1 {
 		t.Fatal("重复完成前的发布快照不符", before)
 	}
 
@@ -478,11 +494,11 @@ func verifyResumedMultipartCompletionReplay(t *testing.T, ctx context.Context, f
 		t.Fatal("无正文重试未返回同一任务的已发布结果", replayed.Data)
 	}
 
-	// 3. 再读发布快照，确认文件、对象、回执和配额都没有变化。
+	// 3. 再读发布快照，确认发布、配额及事件状态都没有变化。
 	after := readState()
 	if after != before {
 		t.Fatal("重复完成改变了发布或配额快照", before, after)
 	}
-	t.Logf("原任务 %s 无正文重试返回 200 COMPLETED 和原条目 %s，重试前后均为 %d 个文件、%d 个对象、%d 条回执，已用 %d B、预占 %d B",
-		completed.ID, *completed.ResultEntryID, after.files, after.objects, after.receipts, after.usedBytes, after.reservedBytes)
+	t.Logf("原任务 %s 无正文重试返回 200 COMPLETED 和原条目 %s，重试前后均为 %d 个文件、%d 个对象、%d 条回执、%d 条事件，已用 %d B、预占 %d B",
+		completed.ID, *completed.ResultEntryID, after.files, after.objects, after.receipts, after.events, after.usedBytes, after.reservedBytes)
 }

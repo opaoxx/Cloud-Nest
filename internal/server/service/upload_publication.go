@@ -43,7 +43,7 @@ func NewUploadPublicationService(
 }
 
 // Publish 使用事务外已读回校验的任务、暂存对象和实测摘要发布文件。
-// 对象、文件、配额、完成结果及适用的同步事件由外层事务一起确认。
+// 对象、文件、配额、完成结果及同步事件由外层事务一起确认。
 // 目标不可用时完成失败收尾，提交后返回 ErrUploadTargetUnavailable。
 func (publication *UploadPublicationService) Publish(
 	ctx context.Context,
@@ -136,15 +136,13 @@ func (publication *UploadPublicationService) Publish(
 			}
 		}
 
-		// 5. 在同一账号事务追加 SINGLE 发布事件，失败交给外层回滚。
-		if task.UploadMode == "SINGLE" {
-			event, err := newFilePublishedChangeEvent(entry, digest)
-			if err != nil {
-				return err
-			}
-			if _, err := txn.AppendUserChangeEvent(txContext, event); err != nil {
-				return err
-			}
+		// 5. SINGLE 和 Multipart 共用发布事件，追加失败交给外层一起回滚。
+		event, err := newFilePublishedChangeEvent(entry, digest)
+		if err != nil {
+			return err
+		}
+		if _, err := txn.AppendUserChangeEvent(txContext, event); err != nil {
+			return err
 		}
 		prepared = copyUploadTask(completed)
 		return nil

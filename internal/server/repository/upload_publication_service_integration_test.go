@@ -64,6 +64,7 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 		{name: "orphaning fails after task completion", reuse: true, protectedCopy: true, wantError: domain.ErrStoredObjectInUse},
 		{name: "outer rollback after cleanup", reuse: true, wantError: outerFailure},
 		{name: "event insert failure rolls back publication and permits retry", rejectEvent: true},
+		{name: "multipart event insert failure rolls back publication and permits retry", multipart: true, rejectEvent: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// 1. 建立可校验任务、各自独立的 MySQL 记录及必要的失败条件。
@@ -232,7 +233,7 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 				Scan(&savedUsed, &savedReserved, &savedQuotaUpdatedAt); err != nil {
 				t.Fatal(err)
 			}
-			if scenario.wantError != nil || scenario.rejectEvent || scenario.multipart {
+			if scenario.wantError != nil || scenario.rejectEvent {
 				checkEvents(0)
 			}
 			if scenario.wantError == domain.ErrUploadTargetUnavailable {
@@ -318,10 +319,6 @@ func TestUploadPublicationServiceIntegration(t *testing.T) {
 			}
 			if retried, err := publisher.Publish(ctx, task, staged, digest); retried != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
 				t.Fatal("旧校验快照重复通过发布", retried, err)
-			}
-			if scenario.multipart {
-				checkEvents(0)
-				return
 			}
 			// 4. 验证事件仅追加一次，使用最终名称及已校验的内容事实。
 			checkEvents(1)

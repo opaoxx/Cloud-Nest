@@ -84,29 +84,32 @@ func TestServerMultipartChecksumFailureIntegration(t *testing.T) {
 
 	// 3. 核对预占已返还，任务没有发布条目，已合并对象已登记延迟回收。
 	checkQuota(0)
-	var reserved, publishedFiles, completedParts uint64
+	var reserved, publishedFiles, completedParts, changeSequence, eventCount uint64
 	var resultAbsent, leaseReleased, gcScheduled bool
 	var objectState, objectVersion string
 	if err := fixture.pool.QueryRowContext(ctx, `SELECT task.reserved_bytes,
 		task.result_entry_id IS NULL AND task.published_object_id IS NULL,
 		task.lease_owner IS NULL AND task.lease_until IS NULL, obj.status,obj.storage_version_id,obj.gc_after IS NOT NULL,
 		(SELECT COUNT(*) FROM file_entries WHERE user_id=task.user_id AND entry_type='FILE'),
-		(SELECT COUNT(*) FROM upload_parts WHERE task_id=task.id)
+		(SELECT COUNT(*) FROM upload_parts WHERE task_id=task.id),
+		(SELECT change_seq FROM users WHERE id=task.user_id),
+		(SELECT COUNT(*) FROM change_events WHERE user_id=task.user_id)
 		FROM upload_tasks task JOIN stored_objects obj ON obj.id=task.staged_object_id AND obj.owner_user_id=task.user_id
 		WHERE task.id=? AND task.user_id=? AND obj.bucket=? AND obj.object_key=?`,
 		failed.ID, fixture.login.User.ID, fixture.bucket.name, target.objectKey).
-		Scan(&reserved, &resultAbsent, &leaseReleased, &objectState, &objectVersion, &gcScheduled, &publishedFiles, &completedParts); err != nil ||
+		Scan(&reserved, &resultAbsent, &leaseReleased, &objectState, &objectVersion, &gcScheduled,
+			&publishedFiles, &completedParts, &changeSequence, &eventCount); err != nil ||
 		reserved != 0 || !resultAbsent || !leaseReleased || objectState != "ORPHANED" || objectVersion == "" ||
-		!gcScheduled || publishedFiles != 0 || completedParts != 2 {
-		t.Fatal("整文件摘要失配后任务、配额、文件或暂存对象不符", err, objectState, publishedFiles, completedParts)
+		!gcScheduled || publishedFiles != 0 || completedParts != 2 || changeSequence != 0 || eventCount != 0 {
+		t.Fatal("整文件摘要失配后任务、配额、文件、暂存对象或同步状态不符", err, objectState, publishedFiles, completedParts, changeSequence, eventCount)
 	}
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("原任务 %s 最终 FAILED CHECKSUM_MISMATCH，发布条目 %d，全额释放 %d B，已用和预占均为 0，已合并对象为 ORPHANED 并登记回收",
-		failed.ID, publishedFiles, fileSize)
+	t.Logf("原任务 %s 最终 FAILED CHECKSUM_MISMATCH，发布条目 %d，事件 %d，全额释放 %d B，已用和预占均为 0，已合并对象为 ORPHANED 并登记回收",
+		failed.ID, publishedFiles, eventCount, fileSize)
 }
 
 func awaitMultipartChecksumFailure(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string) dto.UploadTaskData {
