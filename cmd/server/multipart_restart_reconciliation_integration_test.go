@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -199,7 +200,17 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("续传后的完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
 	}
 
-	// 7. 关停后从独立数据库连接读取冻结的回执，避免依赖合并 worker 的时序。
+	// 7. 等待正式后台任务合并、校验和发布，核对文件及配额。
+	completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath)
+	if completed.ID != accepted.Data.ID || completed.UploadMode != "MULTIPART" || completed.ParentID != readyTask.ParentID ||
+		completed.ResultEntryID == nil || completed.CompletedAt == nil || completed.ResolvedName == nil ||
+		*completed.ResolvedName != filename || completed.SizeBytes != fileSize || completed.LastError != nil ||
+		completed.CompletedAt.Before(accepted.Data.UpdatedAt) {
+		t.Fatal("后台发布结果与原续传任务不一致", completed)
+	}
+	verifyResumedMultipartPublication(t, ctx, fixture, restarted, completed, fileDigest)
+
+	// 8. 关停后从独立数据库连接读取冻结的回执，确认发布也保留了原完成快照。
 	logs, err = stopRestarted()
 	if err != nil {
 		t.Fatal("重启实例停机失败", err)
@@ -236,4 +247,69 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	}
 	t.Logf("原任务 %d 返回 202 COMPLETING，关停后两条完成快照仍匹配，分片编号 1、2，字节数 %d、%d，共用核对时间 %s",
 		taskID, firstPart.SizeBytes, lastPart.SizeBytes, firstObservedAt.Format(time.RFC3339Nano))
+}
+
+func awaitResumedMultipartPublication(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string) dto.UploadTaskData {
+	t.Helper()
+	waitContext, stop := context.WithTimeout(ctx, 30*time.Second)
+	defer stop()
+	poll := time.NewTicker(200 * time.Millisecond)
+	defer poll.Stop()
+	// 1. 通过正式查询等待终态，合并和校验可能在两次查询之间完成。
+	for {
+		var result dto.UploadTaskResponse
+		api.request(t, waitContext, http.MethodGet, taskPath, "", nil, http.StatusOK, &result)
+		switch result.Data.Status {
+		case "COMPLETED":
+			return result.Data
+		case "COMPLETING", "VERIFYING":
+		default:
+			t.Fatal("续传发布进入意外状态", result.Data.Status, result.Data.LastError)
+		}
+		select {
+		case <-waitContext.Done():
+			t.Fatal("续传任务未在期限内完成发布", result.Data.Status, result.Data.LastError)
+		case <-poll.C:
+		}
+	}
+}
+
+func verifyResumedMultipartPublication(t *testing.T, ctx context.Context, fixture backupSourceFixture, api backupSourceClient,
+	completed dto.UploadTaskData, fileDigest [sha256.Size]byte) {
+	t.Helper()
+	// 1. 用任务返回的 ID 读取活动文件，核对父目录、名称及大小。
+	entryID := *completed.ResultEntryID
+	var entry dto.EntryDetailResponse
+	api.request(t, ctx, http.MethodGet, "/api/v1/entries/"+entryID, "", nil, http.StatusOK, &entry)
+	if entry.RequestID == "" || entry.Data.ID != entryID || entry.Data.ParentID == nil ||
+		*entry.Data.ParentID != fixture.login.RootEntryID || entry.Data.Name != *completed.ResolvedName ||
+		entry.Data.Status != "ACTIVE" || entry.Data.Kind == "folder" || entry.Data.SizeBytes != completed.SizeBytes {
+		t.Fatal("发布条目与续传任务的结果不一致", entry.Data)
+	}
+
+	// 2. 核对任务和条目引用同一个已校验对象，并确认只发布了一份文件。
+	var objectID, objectSize, entryCount uint64
+	var objectState, objectVersion string
+	var verifiedDigest []byte
+	if err := fixture.pool.QueryRowContext(ctx, `SELECT obj.id,obj.file_size,obj.status,obj.storage_version_id,obj.verified_sha256,
+		(SELECT COUNT(*) FROM file_entries WHERE user_id=task.user_id AND parent_id=task.target_parent_id AND entry_type='FILE' AND status='ACTIVE')
+		FROM upload_tasks task
+		JOIN file_entries entry ON entry.user_id=task.user_id AND entry.id=task.result_entry_id AND entry.object_id=task.published_object_id
+		JOIN stored_objects obj ON obj.owner_user_id=entry.user_id AND obj.id=entry.object_id
+		WHERE task.id=? AND task.user_id=? AND entry.id=? AND task.status='COMPLETED' AND task.reserved_bytes=0 AND obj.bucket=?`,
+		completed.ID, fixture.login.User.ID, entryID, fixture.bucket.name).
+		Scan(&objectID, &objectSize, &objectState, &objectVersion, &verifiedDigest, &entryCount); err != nil ||
+		objectID == 0 || objectSize != completed.SizeBytes || objectState != "READY" || objectVersion == "" ||
+		!bytes.Equal(verifiedDigest, fileDigest[:]) || entryCount != 1 {
+		t.Fatal("发布对象的定位、摘要或文件条目数量不符", err, objectState, entryCount)
+	}
+
+	// 3. 用公开资料确认这一个文件的大小已从预占转为已用。
+	var profile dto.UserProfileResponse
+	api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &profile)
+	if profile.Data.User.ID != fixture.login.User.ID || profile.Data.UsedBytes != completed.SizeBytes || profile.Data.ReservedBytes != 0 {
+		t.Fatal("续传发布后的账号配额不符", profile.Data.UsedBytes, profile.Data.ReservedBytes)
+	}
+	t.Logf("原任务 %s 达到 COMPLETED，发布文件条目 %s，引用 READY 对象 %d，版本已定位，整文件 SHA-256 %x，已用 %d B、预占 %d B",
+		completed.ID, entryID, objectID, verifiedDigest, profile.Data.UsedBytes, profile.Data.ReservedBytes)
 }
