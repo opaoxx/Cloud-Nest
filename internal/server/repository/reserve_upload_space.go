@@ -33,19 +33,13 @@ func (store *Store) ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64
 		return err
 	}
 
-	// 2. 当前读锁定用户配额并检查既有账目。
-	account, err := store.lockUserUploadQuota(updateContext, actor.UserID)
+	// 2. 当前读锁定用户配额并检查既有账目及剩余空间。
+	account, err := store.lockUserQuotaForAdditionalBytes(updateContext, actor.UserID, sizeBytes)
 	if err != nil {
 		return err
 	}
 
-	// 3. 用减法判断剩余空间。
-	availableBytes := account.QuotaBytes - account.UsedBytes - account.ReservedBytes
-	if sizeBytes > availableBytes {
-		return domain.ErrQuotaExceeded
-	}
-
-	// 4. 零字节直接成功，否则按原值条件更新预占。
+	// 3. 零字节直接成功，否则按原值条件更新预占。
 	if sizeBytes == 0 {
 		return updateContext.Err()
 	}
@@ -55,7 +49,7 @@ func (store *Store) ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64
 			"WHERE id = ? AND status = 'ACTIVE' AND storage_quota = ? AND used_storage = ? AND reserved_storage = ?",
 		reservedBytes, actor.UserID, account.QuotaBytes, account.UsedBytes, account.ReservedBytes)
 
-	// 5. 检查取消和更新结果，交由外层事务确认。
+	// 4. 检查取消和更新结果，交由外层事务确认。
 	if err := updateContext.Err(); err != nil {
 		return err
 	}
@@ -66,6 +60,21 @@ func (store *Store) ReserveUserUploadSpace(ctx context.Context, sizeBytes uint64
 		return domain.ErrInvalidAccountData
 	}
 	return nil
+}
+
+// lockUserQuotaForAdditionalBytes 供添加预占或新增逻辑空间复用配额上限检查。
+func (store *Store) lockUserQuotaForAdditionalBytes(ctx context.Context, userID, sizeBytes uint64) (*models.UserProfile, error) {
+	// 1. 当前读锁定用户配额并检查既有账目。
+	account, err := store.lockUserUploadQuota(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	// 2. 用减法计算剩余空间，避免无符号加法溢出。
+	availableBytes := account.QuotaBytes - account.UsedBytes - account.ReservedBytes
+	if sizeBytes > availableBytes {
+		return nil, domain.ErrQuotaExceeded
+	}
+	return account, nil
 }
 
 // lockUserUploadQuota 供用户事务复用，读取并核对活动账号的当前配额。
