@@ -23,17 +23,29 @@ func TestServerMultipartReplacementCancellationIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_MULTIPART_REPLACEMENT_CANCELLATION_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_MULTIPART_REPLACEMENT_CANCELLATION_TEST=1 后使用独占 MySQL、MinIO 和服务")
 	}
+	verifyServerMultipartReplacementCleanup(t, domain.UploadStatusCancelled)
+}
+
+func TestServerMultipartReplacementExpirationIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_MULTIPART_REPLACEMENT_EXPIRATION_TEST") != "1" {
+		t.Skip("设置 CLOUDNEST_MULTIPART_REPLACEMENT_EXPIRATION_TEST=1 后使用独占 MySQL、MinIO 和服务")
+	}
+	verifyServerMultipartReplacementCleanup(t, domain.UploadStatusExpired)
+}
+
+func verifyServerMultipartReplacementCleanup(t *testing.T, terminalStatus domain.UploadStatus) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 
-	// 1. 用一次成功替换准备当前文件和真实历史，再创建待取消的分片任务。
-	project := "cloudnest-replacement-cancel-" + uuid.NewString()
+	// 1. 准备当前文件和历史，创建分片替换任务并上传第一片。
+	project := "cloudnest-replacement-cleanup-" + uuid.NewString()
 	t.Setenv("CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT", project)
 	source := prepareBackupSourceWithMinIO(t, ctx, func(t *testing.T, ctx context.Context) string {
 		return startIsolatedWebMinIOForProject(t, ctx, "128m", project)
 	})
 	fixture := prepareReplacementPublicationFixtureFromSource(t, ctx, source)
-	t.Logf("分片替换取消专用 MySQL %s，专用 MinIO %s", fixture.mysqlContainer[:12], fixture.minioContainer[:12])
+	t.Logf("分片替换%s专用 MySQL %s，专用 MinIO %s", terminalStatus, fixture.mysqlContainer[:12], fixture.minioContainer[:12])
 	api := fixture.api
 	replacementPath := fixture.entryPath + "/content-replacement"
 	createBody := func(revision uint64, content []byte) *strings.Reader {
@@ -99,7 +111,6 @@ func TestServerMultipartReplacementCancellationIntegration(t *testing.T) {
 	}
 	fixture.checkQuota(t, ctx, used, declaredSize)
 
-	// 2. 上传第一片并核对回执，在提交完成前通过正式接口取消。
 	taskPath := "/api/v1/uploads/" + created.Task.ID
 	ready := waitForCreateUploadInitialization(t, ctx, api, taskPath)
 	target := readServerMultipartPartTarget(t, ctx, fixture.backupSourceFixture, ready)
@@ -113,46 +124,47 @@ func TestServerMultipartReplacementCancellationIntegration(t *testing.T) {
 	}
 	pending, err := fixture.store.FindUserUploadTask(ctx, fixture.userID, taskID)
 	if err != nil || pending.Status != domain.UploadStatusUploading || pending.ReservedBytes != declaredSize {
-		t.Fatal("取消前应保留该任务的全部预占", err)
-	}
-	var accepted dto.UploadTaskResponse
-	api.request(t, ctx, http.MethodPost, taskPath+"/cancel", "", nil, http.StatusAccepted, &accepted)
-	binding := accepted.Data.Replacement
-	if accepted.Data.ID != created.Task.ID || accepted.Data.Status != "CANCELLING" || accepted.Data.CompletedAt != nil ||
-		binding == nil || binding.EntryID != fmt.Sprint(fixture.target.ID) || binding.ExpectedRevision != fmt.Sprint(currentRevision) {
-		t.Fatal("取消受理没有返回原替换任务", accepted.Data)
+		t.Fatal("收尾前应保留该任务的全部预占", err)
 	}
 
-	// 3. 核对终态、分片会话关闭、全额释放与当前及历史记录的完整性。
-	finished := awaitBackupTargetCancellation(t, ctx, fixture.pool, pending)
-	want, err := dto.NewUploadTaskData(finished)
-	if err != nil || want.Replacement == nil || want.Replacement.EntryID != binding.EntryID || want.Replacement.ExpectedRevision != binding.ExpectedRevision ||
-		want.Replacement.PublishedRevision != nil || want.Replacement.ConflictingRevision != nil ||
-		finished.LeaseOwner != nil || finished.LeaseUntil != nil {
-		t.Fatal("取消终态丢失绑定或保存了发布结果", err)
+	// 2. 按用例触发到期或取消，等待正式 worker 提交终态。
+	var finished *domain.UploadTask
+	if terminalStatus == domain.UploadStatusExpired {
+		finished = expireServerMultipartReplacement(t, ctx, fixture, pending)
+	} else {
+		finished = cancelServerMultipartReplacement(t, ctx, fixture, pending, taskPath)
 	}
-	var queried, repeated dto.UploadTaskResponse
+
+	// 3. 核对会话、配额和历史，再通过正式接口读回当前文件。
+	want, err := dto.NewUploadTaskData(finished)
+	if err != nil || finished.Status != terminalStatus || want.Replacement == nil || want.Replacement.EntryID != fmt.Sprint(fixture.target.ID) ||
+		want.Replacement.ExpectedRevision != fmt.Sprint(currentRevision) || want.Replacement.PublishedRevision != nil ||
+		want.Replacement.ConflictingRevision != nil || finished.ReservedBytes != 0 || finished.PublishedObjectID != nil ||
+		want.ResultEntryID != nil || finished.CompletedAt == nil || finished.StagedObjectID != pending.StagedObjectID ||
+		finished.LeaseOwner != nil || finished.LeaseUntil != nil {
+		t.Fatal("收尾终态丢失原绑定、保留预占或保存了发布结果", err)
+	}
+	var queried dto.UploadTaskResponse
 	api.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &queried)
-	api.request(t, ctx, http.MethodPost, taskPath+"/cancel", "", nil, http.StatusOK, &repeated)
-	if !reflect.DeepEqual(queried.Data, *want) || !reflect.DeepEqual(repeated.Data, *want) {
-		t.Fatal("查询和重复取消未返回同一 CANCELLED 结果")
+	if !reflect.DeepEqual(queried.Data, *want) {
+		t.Fatal("查询未返回持久化的收尾终态", terminalStatus)
 	}
 	core := minio.Core{Client: fixture.bucket.client}
 	if _, err := core.ListObjectParts(ctx, target.bucket, target.objectKey, target.uploadID, 0, 1); minio.ToErrorResponse(err).Code != "NoSuchUpload" {
-		t.Fatal("正式取消未关闭原 MinIO 分片会话", minio.ToErrorResponse(err).Code)
+		t.Fatal("正式收尾未关闭原 MinIO 分片会话", minio.ToErrorResponse(err).Code)
 	}
 	if _, err := fixture.bucket.client.StatObject(ctx, target.bucket, target.objectKey, minio.StatObjectOptions{}); minio.ToErrorResponse(err).Code != "NoSuchKey" {
 		t.Fatal("未提交完成的分片生成了完整对象，或存储检查失败", minio.ToErrorResponse(err).Code)
 	}
 	fixture.checkQuota(t, ctx, used, 0)
 	if historyAfter := readHistory(); historyAfter != historyBefore {
-		t.Fatal("分片替换取消改变了已有历史记录")
+		t.Fatal("分片替换收尾改变了已有历史记录")
 	}
 	var sequence, eventCount uint64
 	err = fixture.pool.QueryRowContext(ctx, `SELECT change_seq,(SELECT COUNT(*) FROM change_events WHERE user_id=users.id)
 		FROM users WHERE id=?`, fixture.userID).Scan(&sequence, &eventCount)
 	if err != nil || sequence != fixture.baselineSequence+1 || eventCount != sequence {
-		t.Fatal("取消改变了原变更位置或事件条数", err)
+		t.Fatal("收尾改变了原变更位置或事件条数", err)
 	}
 	verifyReplacementDownload(t, ctx, fixture.backupSourceFixture, fixture.entryPath, currentRevision, currentObject, currentBytes)
 	logs, err := fixture.stop()
@@ -160,8 +172,74 @@ func TestServerMultipartReplacementCancellationIntegration(t *testing.T) {
 		t.Fatal("隔离服务退出失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("仅上传第一片 %d B；任务 %d 从 202 CANCELLING 到 200 CANCELLED，MinIO 返回 NoSuchUpload，未生成完整对象",
-		partSize, finished.ID)
+	t.Logf("仅上传第一片 %d B；任务 %d 查询返回 200 %s，MinIO 返回 NoSuchUpload，未生成完整对象",
+		partSize, finished.ID, terminalStatus)
 	t.Logf("释放 %d B，预占 0 B，已用 %d B；当前文件 %d v%d 为 %d B，SHA-256 %x；历史 v%d 和游标 %d 保持原值",
 		declaredSize, used, fixture.target.ID, currentRevision, len(currentBytes), sha256.Sum256(currentBytes), historyBefore.Revision, sequence)
+}
+
+func cancelServerMultipartReplacement(t *testing.T, ctx context.Context, fixture replacementPublicationFixture, pending *domain.UploadTask, taskPath string) *domain.UploadTask {
+	t.Helper()
+	var accepted dto.UploadTaskResponse
+	fixture.api.request(t, ctx, http.MethodPost, taskPath+"/cancel", "", nil, http.StatusAccepted, &accepted)
+	binding := accepted.Data.Replacement
+	if accepted.Data.ID != fmt.Sprint(pending.ID) || accepted.Data.Status != "CANCELLING" || accepted.Data.CompletedAt != nil ||
+		binding == nil || binding.EntryID != fmt.Sprint(fixture.target.ID) || binding.ExpectedRevision != fmt.Sprint(fixture.target.Revision+1) {
+		t.Fatal("取消受理没有返回原替换任务", accepted.Data)
+	}
+	finished := awaitBackupTargetCancellation(t, ctx, fixture.pool, pending)
+	want, err := dto.NewUploadTaskData(finished)
+	if err != nil {
+		t.Fatal("读取取消终态失败", err)
+	}
+	var repeated dto.UploadTaskResponse
+	fixture.api.request(t, ctx, http.MethodPost, taskPath+"/cancel", "", nil, http.StatusOK, &repeated)
+	if !reflect.DeepEqual(repeated.Data, *want) {
+		t.Fatal("重复取消未返回同一 CANCELLED 结果")
+	}
+	return finished
+}
+
+func expireServerMultipartReplacement(t *testing.T, ctx context.Context, fixture replacementPublicationFixture, pending *domain.UploadTask) *domain.UploadTask {
+	t.Helper()
+	// 1. 仅提前独占库中已上传首片的任务截止时间，由后台提交状态和配额。
+	result, err := fixture.pool.ExecContext(ctx, `UPDATE upload_tasks SET expires_at=UTC_TIMESTAMP(6)
+		WHERE user_id=? AND id=? AND upload_mode='MULTIPART' AND status='UPLOADING'
+			AND storage_upload_id IS NOT NULL AND expires_at>UTC_TIMESTAMP(6)`, fixture.userID, pending.ID)
+	if err != nil {
+		t.Fatal("设置合成任务截止时间失败", err)
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		t.Fatal("仅应调整一个仍有效的分片任务", count, err)
+	}
+
+	// 2. 用后台的正式轮询间隔等待终态，拒绝取消或发布结果。
+	waitContext, cancel := context.WithTimeout(ctx, uploadExpirationInterval+10*time.Second)
+	defer cancel()
+	poll := time.NewTicker(250 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		task, err := fixture.store.FindUserUploadTask(waitContext, fixture.userID, pending.ID)
+		if err != nil {
+			t.Fatal("读取待到期任务失败", err)
+		}
+		switch task.Status {
+		case domain.UploadStatusExpired:
+			if !task.ExpiresAt.Before(pending.ExpiresAt) || task.CompletedAt == nil || task.CompletedAt.Before(task.ExpiresAt) {
+				t.Fatal("到期终态未使用测试截止时间")
+			}
+			return task
+		case domain.UploadStatusUploading, domain.UploadStatusExpiring:
+			if task.ReservedBytes != pending.ReservedBytes {
+				t.Fatal("任务终结前已提前释放预占")
+			}
+		default:
+			t.Fatal("分片到期任务进入意外状态", task.Status)
+		}
+		select {
+		case <-waitContext.Done():
+			t.Fatal("正式后台未在指定时间完成到期收尾")
+		case <-poll.C:
+		}
+	}
 }
