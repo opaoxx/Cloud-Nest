@@ -27,16 +27,20 @@ func (store *Store) FindUploadSourceDevice(ctx context.Context, task *domain.Upl
 	if task == nil || task.ID == 0 || task.UserID != userID || task.DeviceID == 0 {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
-	deviceID := task.DeviceID
-
-	// 2. 按事务用户及设备 ID 读取设备记录。
+	// 2. 使用同一事务读取来源设备快照。
 	// 设备改名及撤销使用同一用户锁，发布事务内可稳定读取来源名称。
+	return findUserDeviceSnapshot(ctx, store.database, userID, task.DeviceID)
+}
+
+// findUserDeviceSnapshot 按用户和设备 ID 读取用于文件来源的设备快照。
+func findUserDeviceSnapshot(ctx context.Context, query *gorm.DB, userID, deviceID uint64) (*domain.UserDevice, error) {
+	// 1. 只读取构建设备快照需要的字段。
 	var record models.UserDevice
-	queryError := store.database.WithContext(ctx).
+	queryError := query.WithContext(ctx).
 		Select("id", "user_id", "name", "platform", "created_at", "last_seen_at", "revoked_at").
 		Where("user_id = ? AND id = ?", userID, deviceID).Take(&record).Error
 
-	// 3. 区分缺失和查询故障，校验后返回设备快照。
+	// 2. 区分缺失和查询故障，校验后返回设备快照。
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
