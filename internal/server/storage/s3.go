@@ -96,6 +96,13 @@ func NewClient(ctx context.Context, storageConfig config.StorageConfig) (*Client
 	return client, nil
 }
 
+// MatchesLocation 核对客户端与仓储使用同一存储提供商、桶和内部地址。
+func (client *Client) MatchesLocation(storageConfig config.StorageConfig) bool {
+	return client != nil && client.sdkClient != nil && storageConfig.Provider == "local_minio" &&
+		client.bucket == storageConfig.Bucket && storageConfig.EndpointURL != nil &&
+		client.sdkClient.EndpointURL().String() == storageConfig.EndpointURL.String()
+}
+
 // CheckBucket 在最多 5 秒内只读检查目标桶存在且可访问，供启动或就绪检查复用。
 // 不创建桶或对象；错误不回显原始响应，取消与超时可通过 errors.Is 判断。
 func (client *Client) CheckBucket(ctx context.Context) error {

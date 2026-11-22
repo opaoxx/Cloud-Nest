@@ -229,10 +229,9 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 
 	// 7. 只允许实际中止命中测试选定的原键与会话，确认同键绑定没有受到影响。
 	abortCalls := 0
-	allowedAborts := map[string]string{secondCandidate: secondKey}
 	aborter := service.NewMultipartUploadSessionCandidateAborter(rechecker, func(callContext context.Context, objectKey, uploadID string) error {
 		abortCalls++
-		if allowedKey, allowed := allowedAborts[uploadID]; !allowed || objectKey != allowedKey {
+		if objectKey != secondKey || uploadID != secondCandidate {
 			t.Fatal("实际中止范围偏离隔离夹具的目标会话")
 		}
 		return client.AbortMultipartUpload(callContext, objectKey, uploadID)
@@ -288,15 +287,63 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	}
 	t.Log("受信存储复查确认会话缺失，保留同键合成对象版本，未验证实例仍待确认")
 
-	// 9. 让一轮清理移除自己的页末游标，随后验证回退后仍能找到原对象的后续会话。
-	allowedAborts[sessions[0]] = key
-	allowedAborts[sessions[2]] = key
+	// 9. 用正式装配检查仓储与存储的范围，并验证未证明或更换实例时保留原会话。
 	limits := service.MultipartUploadSessionCleanupLimits{Objects: 1, SessionsPerPage: 1, StoragePages: 1, Candidates: 1}
-	round := service.NewMultipartUploadSessionCleanupRound(batch, cleanup)
-	started, err := round.RunOnce(ctx, service.MultipartUploadSessionCleanupPosition{}, limits, grace)
+	wrongLocation := settings
+	wrongLocation.Bucket = "fixture-other-bucket"
+	if runOnce, err := newServerMultipartUploadSessionCleanupRound(store, client, wrongLocation, verifyInstance, limits, grace); runOnce != nil ||
+		!errors.Is(err, domain.ErrInvalidStoredObjectData) {
+		t.Fatal("装配接受了不同的存储桶", err)
+	}
+	wrongLocation = settings
+	otherEndpoint := *settings.EndpointURL
+	otherEndpoint.Host = "127.0.0.1:1"
+	wrongLocation.EndpointURL = &otherEndpoint
+	if runOnce, err := newServerMultipartUploadSessionCleanupRound(store, client, wrongLocation, verifyInstance, limits, grace); runOnce != nil ||
+		!errors.Is(err, domain.ErrInvalidStoredObjectData) {
+		t.Fatal("装配接受了不同的存储端点", err)
+	}
+	untrustedRound, err := newServerMultipartUploadSessionCleanupRound(store, client, settings, nil, limits, grace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startPosition := service.MultipartUploadSessionCleanupPosition{}
+	proofCalls := 0
+	replacedInstance := func(callContext context.Context, endpoint string) (string, error) {
+		proofCalls++
+		identity, err := verifyInstance(callContext, endpoint)
+		if err != nil || identity == "" || proofCalls == 1 {
+			return identity, err
+		}
+		return identity + "/fixture-replaced", nil
+	}
+	changedRound, err := newServerMultipartUploadSessionCleanupRound(store, client, settings, replacedInstance, limits, grace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := changedRound(ctx, startPosition)
+	if err != nil || changed.Confirmed != 0 || changed.Unconfirmed != 1 || len(changed.Items) != 1 ||
+		!errors.Is(changed.Items[0].Err, domain.ErrUploadStorageUnavailable) {
+		t.Fatal("实例变化时未保留待确认结果", changed, err)
+	}
+	if _, err := client.ListUploadPartsPage(ctx, key, sessions[0], 0, 1); err != nil {
+		t.Fatal("实例变化时仍然中止了合成会话", err)
+	}
+
+	// 10. 使用受信装配移除页末会话，验证续扫回退与原绑定保护。
+	runOnce, err := newServerMultipartUploadSessionCleanupRound(store, client, settings, verifyInstance, limits, grace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runOnce(ctx, startPosition)
 	if err != nil || started.Done || started.Scan.Next.UploadID != sessions[0] || started.Confirmed != 1 ||
-		len(started.Items) != 1 || started.Items[0].Session.UploadID != sessions[0] || abortCalls != 2 {
+		len(started.Items) != 1 || started.Items[0].Session.UploadID != sessions[0] {
 		t.Fatal("首轮未按上限中止页末会话", started, err)
+	}
+	untrusted, err := untrustedRound(ctx, started.Next)
+	if !errors.Is(err, domain.ErrUploadStorageUnavailable) || untrusted.Scan.PagesScanned != 0 || len(untrusted.Items) != 0 ||
+		!reflect.DeepEqual(started.Next, untrusted.Next) {
+		t.Fatal("缺少实例证明时仍开始扫描，或丢失续扫位置", untrusted, err)
 	}
 	rawClient := minio.Core{Client: bucket.client}
 	empty, err := rawClient.ListMultipartUploads(ctx, bucket.name, key, key, sessions[0], "", 1)
@@ -306,30 +353,42 @@ func TestServerMultipartSessionCandidatePageIntegration(t *testing.T) {
 	if _, err := client.ListUploadPartsPage(ctx, key, sessions[2], 0, 1); err != nil {
 		t.Fatal("复现时后续会话应仍存在", err)
 	}
-	restarted, err := round.RunOnce(ctx, started.Next, limits, grace)
-	if err != nil || !restarted.ScanRestarted || restarted.Done || len(restarted.Items) != 0 || abortCalls != 2 {
+	restarted, err := runOnce(ctx, started.Next)
+	if err != nil || !restarted.ScanRestarted || restarted.Done || len(restarted.Items) != 0 {
 		t.Fatal("游标消失后未回退扫描起点", restarted, err)
 	}
-	protectedPage, err := round.RunOnce(ctx, restarted.Next, limits, grace)
+	protectedPage, err := runOnce(ctx, restarted.Next)
 	if err != nil || protectedPage.ScanRestarted || protectedPage.Done || protectedPage.Scan.Next.UploadID != sessions[1] ||
-		len(protectedPage.Items) != 0 || abortCalls != 2 {
+		len(protectedPage.Items) != 0 {
 		t.Fatal("回退后未越过仍受保护的会话", protectedPage, err)
 	}
-	nextPage, err := round.RunOnce(ctx, protectedPage.Next, limits, grace)
+	nextPage, err := runOnce(ctx, protectedPage.Next)
 	if err != nil || nextPage.ScanRestarted || nextPage.Done || nextPage.Confirmed != 1 || len(nextPage.Items) != 1 ||
-		nextPage.Items[0].Target != target || nextPage.Items[0].Session.UploadID != sessions[2] || abortCalls != 3 {
+		nextPage.Items[0].Target != target || nextPage.Items[0].Session.UploadID != sessions[2] {
 		t.Fatal("原对象的后续候选在游标回退后没有处理", nextPage, err)
 	}
-	lastPage, err := round.RunOnce(ctx, nextPage.Next, limits, grace)
-	if err != nil || !lastPage.Done || len(lastPage.Items) != 0 || abortCalls != 3 {
+	lastPage, err := runOnce(ctx, nextPage.Next)
+	if err != nil || !lastPage.Done || len(lastPage.Items) != 0 {
 		t.Fatal("跨对象扫描未安全收尾", lastPage, err)
 	}
 	if _, err := client.ListUploadPartsPage(ctx, key, sessions[1], 0, 1); err != nil {
 		t.Fatal("游标回退误中止了受保护会话", err)
+	}
+	if _, err := client.ListUploadPartsPage(ctx, secondKey, secondBound, 0, 1); err != nil {
+		t.Fatal("正式装配处理影响了另一对象的绑定会话", err)
+	}
+	firstTaskAfterRound, err := store.FindUserUploadTask(ctx, 7, 19)
+	if err != nil || !reflect.DeepEqual(afterBound, firstTaskAfterRound) {
+		t.Fatal("正式装配收尾改变了第一个原任务", err)
+	}
+	secondTaskAfterRound, err := store.FindUserUploadTask(ctx, 7, 28)
+	if err != nil || !reflect.DeepEqual(beforeSecond, secondTaskAfterRound) {
+		t.Fatal("正式装配收尾改变了第二个原任务", err)
 	}
 	end, err := client.ListMultipartUploadSessionsPage(ctx, key, sessions[1], 1)
 	if err != nil || end == nil || len(end.Sessions) != 0 || end.NextUploadID != "" {
 		t.Fatal("有效游标之后的真正空末页未被接受", end, err)
 	}
 	t.Log("真实复现失效游标空页，回退后处理后一页候选，两个对象的绑定会话保持可读")
+	t.Log("正式装配拒绝错误位置及替换实例，恢复受信后按范围和续扫位置完成")
 }
