@@ -19,6 +19,12 @@ func (store *Store) CompleteMissingMultipartUploadExpiration(
 		return nil, domain.ErrUploadTaskNotReady
 	}
 	// 2. 在同一事务中复核、返还预占并登记回收，提交后返回终态。
+	return store.completeMultipartUploadExpiration(ctx, provider, bucket, observation)
+}
+
+func (store *Store) completeMultipartUploadExpiration(
+	ctx context.Context, provider, bucket string, observation *domain.MultipartUploadCleanupObservation,
+) (*domain.UploadTask, error) {
 	completed, err := store.completeMultipartUploadCleanup(ctx, provider, bucket, observation,
 		domain.UploadStatusExpiring, domain.UploadStatusExpired)
 	return completed, markUploadTransactionRetryError(ctx, err, domain.ErrUploadExpirationRetryable)

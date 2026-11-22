@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -11,6 +12,20 @@ import (
 )
 
 func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
+	testCompleteExistingMultipartUploadCleanup(t, domain.UploadStatusCancelled, domain.ErrUploadCancellationRetryable,
+		(*Store).CompleteExistingMultipartUploadCancellation, (*Store).CompleteMissingMultipartUploadCancellation)
+}
+
+func TestCompleteExistingMultipartUploadExpirationIntegration(t *testing.T) {
+	testCompleteExistingMultipartUploadCleanup(t, domain.UploadStatusExpired, domain.ErrUploadExpirationRetryable,
+		(*Store).CompleteExistingMultipartUploadExpiration, (*Store).CompleteMissingMultipartUploadExpiration)
+}
+
+func testCompleteExistingMultipartUploadCleanup(
+	t *testing.T, terminalStatus domain.UploadStatus, retryMarker error,
+	completeExisting, completeMissing func(*Store, context.Context, string, string, *domain.MultipartUploadCleanupObservation) (*domain.UploadTask, error),
+) {
+	t.Helper()
 	ctx, pool, store := prepareMultipartCompletionDatabase(t)
 	const provider, bucket, key, etag, version = "local_minio", "fixture-bucket", "fixture/cancel exists +%.bin", "Opaque-ETag", "Version+A/="
 	execute := func(t *testing.T, statement string, args ...any) {
@@ -19,11 +34,26 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	claim := func(t *testing.T, observed *domain.UploadObjectResult) *domain.MultipartUploadCancellationObservation {
+	claim := func(t *testing.T, observed *domain.UploadObjectResult, unbound bool) *domain.MultipartUploadCleanupObservation {
 		t.Helper()
 		resetMultipartUploadCancellationFixture(t, ctx, pool)
 		execute(t, "UPDATE file_entries SET object_id=29 WHERE id=31")
 		execute(t, "UPDATE stored_objects SET provider=?,bucket=?,object_key=? WHERE id=23", provider, bucket, key)
+		if unbound {
+			execute(t, "UPDATE upload_tasks SET storage_upload_id=NULL WHERE id=19")
+		}
+		if terminalStatus == domain.UploadStatusExpired {
+			execute(t, "UPDATE upload_tasks SET status='EXPIRING' WHERE id=19")
+			candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+			if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
+				t.Fatal("未取得合成到期候选", candidates, err)
+			}
+			task, err := store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-existing-expiry")
+			if err != nil {
+				t.Fatal("未取得合成到期租约", err)
+			}
+			return &domain.MultipartUploadCleanupObservation{Task: *task, ObjectKey: key, Object: observed}
+		}
 		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
 		if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
 			t.Fatal("未取得合成取消候选", candidates, err)
@@ -32,7 +62,7 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal("未取得合成取消租约", err)
 		}
-		return &domain.MultipartUploadCancellationObservation{Task: *task, ObjectKey: key, Object: observed}
+		return &domain.MultipartUploadCleanupObservation{Task: *task, ObjectKey: key, Object: observed}
 	}
 	type facts struct {
 		task           *domain.UploadTask
@@ -57,16 +87,25 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 		}
 		return result
 	}
-	complete := func(observation *domain.MultipartUploadCancellationObservation) (*domain.UploadTask, error) {
-		return store.CompleteExistingMultipartUploadCancellation(ctx, provider, bucket, observation)
+	complete := func(observation *domain.MultipartUploadCleanupObservation) (*domain.UploadTask, error) {
+		return completeExisting(store, ctx, provider, bucket, observation)
 	}
-	checkCommitted := func(t *testing.T, before facts, observation *domain.MultipartUploadCancellationObservation, finished *domain.UploadTask) facts {
+	checkCommitted := func(t *testing.T, before facts, observation *domain.MultipartUploadCleanupObservation, finished *domain.UploadTask) facts {
 		t.Helper()
 		after := read(t)
-		if finished == nil || finished.Status != domain.UploadStatusCancelled || !reflect.DeepEqual(after.task, finished) ||
-			finished.CompletedAt == nil || finished.ReservedBytes != 0 || after.used != before.used ||
+		if finished == nil || finished.Status != terminalStatus || !reflect.DeepEqual(after.task, finished) ||
+			finished.CompletedAt == nil || finished.CompletedAt.Before(before.task.ExpiresAt) ||
+			!finished.CompletedAt.Before(*before.task.LeaseUntil) || finished.ReservedBytes != 0 || after.used != before.used ||
 			after.reserved != before.reserved-before.task.ReservedBytes || !after.accountUpdated.Equal(*finished.CompletedAt) {
 			t.Fatal("终态、账号已用或任务预占结算不符", finished, after.used, after.reserved)
+		}
+		expectedTask := *before.task
+		expectedTask.Status, expectedTask.ReservedBytes = terminalStatus, 0
+		expectedTask.CompletedAt, expectedTask.UpdatedAt = finished.CompletedAt, *finished.CompletedAt
+		expectedTask.LeaseOwner, expectedTask.LeaseUntil, expectedTask.NextAttemptAt = nil, nil, nil
+		expectedTask.LastErrorCode, expectedTask.LastErrorMessage = nil, nil
+		if !reflect.DeepEqual(&expectedTask, finished) {
+			t.Fatal("终态改变了原分片计划、会话或其他任务字段")
 		}
 		orphaned := after.object
 		if orphaned.UnreferencedAt == nil || orphaned.GCAfter == nil || orphaned.UnreferencedAt.Before(*finished.CompletedAt) ||
@@ -93,7 +132,7 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 		now := time.Now().UTC().Truncate(time.Second)
 		execute(t, "SET timestamp = ?", now.Unix())
 		defer execute(t, "SET timestamp = DEFAULT")
-		observation := claim(t, present(new(version), 29))
+		observation := claim(t, present(new(version), 29), false)
 		before := read(t)
 		finished, err := complete(observation)
 		if err != nil {
@@ -125,16 +164,17 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 		}
 		missing := *observation
 		missing.Object = nil
-		if result, err := store.CompleteMissingMultipartUploadCancellation(ctx, provider, bucket, &missing); result != nil ||
+		if result, err := completeMissing(store, ctx, provider, bucket, &missing); result != nil ||
 			!errors.Is(err, domain.ErrInvalidStoredObjectData) || !reflect.DeepEqual(replayBefore, read(t)) {
 			t.Fatal("缺失观察错误地复用了已登记对象的终态", err)
 		}
-		t.Logf("七天后回收领取保留版本与 ETag，终态重试后已用 %d B、预占 %d B", replayBefore.used, replayBefore.reserved)
+		t.Logf("七天后回收领取保留版本与 ETag，%s 重试后已用 %d B、预占 %d B", terminalStatus, replayBefore.used, replayBefore.reserved)
 	})
 
 	// 2. 复用精确的已知元数据，并覆盖可空版本和条件更新失败后的回滚。
 	for _, fixture := range []struct {
 		name, change, trigger string
+		unbound               bool
 		observed              *domain.UploadObjectResult
 		want                  error
 	}{
@@ -142,6 +182,7 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 			change: "UPDATE stored_objects SET status='VERIFYING',storage_etag='Opaque-ETag',storage_version_id='Version+A/=' WHERE id=23"},
 		{name: "no version ID", observed: present(nil, 29)},
 		{name: "explicit null version", observed: present(new("null"), 29)},
+		{name: "existing object without bound multipart session", unbound: true, observed: present(new(version), 29)},
 		{name: "reject missing observation object", want: domain.ErrUploadTaskNotReady},
 		{name: "reject stale version", observed: present(new("stale-version"), multipartCancellationFixtureSize),
 			change: "UPDATE stored_objects SET status='VERIFYING',storage_etag='Opaque-ETag',storage_version_id='Version+A/=' WHERE id=23", want: domain.ErrInvalidStoredObjectData},
@@ -152,10 +193,10 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 		{name: "rollback version write and quota on recovery registration failure", observed: present(new(version), 29), trigger: "fixture_existing_cancel_orphan",
 			change: `CREATE TRIGGER fixture_existing_cancel_orphan BEFORE UPDATE ON stored_objects FOR EACH ROW
 				BEGIN IF NEW.status='ORPHANED' THEN SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1205, MESSAGE_TEXT='fixture lock wait'; END IF; END`,
-			want: domain.ErrUploadCancellationRetryable},
+			want: retryMarker},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			observation := claim(t, fixture.observed)
+			observation := claim(t, fixture.observed, fixture.unbound)
 			if fixture.change != "" {
 				execute(t, fixture.change)
 			}
@@ -165,13 +206,13 @@ func TestCompleteExistingMultipartUploadCancellationIntegration(t *testing.T) {
 			before := read(t)
 			result, err := complete(observation)
 			if !errors.Is(err, fixture.want) {
-				t.Fatal("取消终态错误类别不符", fixture.want, err)
+				t.Fatal("收尾终态错误类别不符", fixture.want, err)
 			}
 			if fixture.want != nil {
 				if result != nil || !reflect.DeepEqual(before, read(t)) {
 					t.Fatal("拒绝后留下了任务、账目或对象修改")
 				}
-				if fixture.want == domain.ErrUploadCancellationRetryable {
+				if fixture.want == retryMarker {
 					var original *mysql.MySQLError
 					if !errors.As(err, &original) || original.Number != 1205 {
 						t.Fatal("回收登记失败丢失了原数据库错误", err)

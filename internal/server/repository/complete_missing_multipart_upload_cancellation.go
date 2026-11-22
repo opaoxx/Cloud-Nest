@@ -45,12 +45,12 @@ func (store *Store) completeMultipartUploadCleanup(
 			if err != nil {
 				return err
 			}
+			// 3. 补齐尚未登记的版本与 ETag，确认无引用后登记七天回收宽限。
 			if observed != nil && staged.StorageETag == nil {
-				if err := txStore.saveMultipartCancellationObjectLocation(txContext, staged, observed); err != nil {
+				if err := txStore.saveMultipartCleanupObjectLocation(txContext, staged, observed); err != nil {
 					return err
 				}
 			}
-			// 3. 核对对象已无引用，登记七天回收宽限并一起提交。
 			orphaned, err := txStore.markUnreferencedUploadObjectOrphaned(txContext, staged)
 			if err != nil {
 				return err

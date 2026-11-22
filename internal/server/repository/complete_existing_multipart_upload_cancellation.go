@@ -23,9 +23,9 @@ func (store *Store) CompleteExistingMultipartUploadCancellation(
 	return store.completeMultipartUploadCancellation(ctx, provider, bucket, observation)
 }
 
-// saveMultipartCancellationObjectLocation 在已持有对象锁时补齐待回收对象的原版本和 ETag。
+// saveMultipartCleanupObjectLocation 在已持有对象锁时补齐待回收对象的原版本和 ETag。
 // 调用方仍须在同一事务中登记回收并核对保存的原值。
-func (store *Store) saveMultipartCancellationObjectLocation(
+func (store *Store) saveMultipartCleanupObjectLocation(
 	ctx context.Context, staged *domain.StoredObject, observed *domain.UploadObjectResult,
 ) error {
 	// 1. 只为尚未记录存储结果的暂存对象补齐定位。
@@ -40,7 +40,7 @@ func (store *Store) saveMultipartCancellationObjectLocation(
 		return err
 	}
 	if result.Error != nil {
-		return fmt.Errorf("保存分片取消的对象定位失败: %w", result.Error)
+		return fmt.Errorf("保存分片收尾的对象定位失败: %w", result.Error)
 	}
 	// 2. 只有原记录完整匹配时才继续登记回收。
 	if result.RowsAffected != 1 {
