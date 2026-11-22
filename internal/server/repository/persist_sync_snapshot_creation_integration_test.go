@@ -85,14 +85,15 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	before := readDeviceState()
 	persist := func(cutoff uint64, afterWrite func(context.Context, *Store, error)) error {
 		return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
-			locator, err := service.FindCreateSyncSnapshotReplayInTransaction(
-				txContext, actor, key, hash, now, txStore.FindUserIdempotencyRecord, dto.DecodeCreateSyncSnapshotReceipt,
-			)
-			if err != nil || locator != nil {
-				t.Fatalf("首次写入前查找应为空：%+v，%v", locator, err)
+			prepared := service.PreparedSyncSnapshot{
+				Binding: binding, Header: domain.SyncSnapshotHeader{RootEntryID: 11, HighWaterSequence: cutoff},
+				ExpiresAt: now.Add(10 * time.Minute),
 			}
-			err = service.PersistSyncSnapshotCreationInTransaction(txContext, actor, binding, cutoff, key, now, txStore,
+			locator, err := service.FinalizeSyncSnapshotCreationInTransaction(txContext, actor, key, &prepared, now, txStore,
 				dto.EncodeCreateSyncSnapshotReceipt, dto.DecodeCreateSyncSnapshotReceipt)
+			if locator != nil {
+				t.Fatalf("首次写入错误地复用了回执：%+v", locator)
+			}
 			if afterWrite != nil {
 				afterWrite(txContext, txStore, err)
 			}
@@ -216,4 +217,81 @@ func TestPersistSyncSnapshotCreationIntegration(t *testing.T) {
 	if page, err := replay.ReadExistingFirstPage(ctx, actor, "Fresh-Snapshot-Request", binding.PageSize); page != nil || err != nil {
 		t.Fatalf("首次创建判断返回 %+v，错误 %v", page, err)
 	}
+
+	// 5. 两条连接用同一个新键竞争，只有一个候选能写入设备和回执。
+	t.Run("concurrent finalization with same key", func(t *testing.T) {
+		pool.SetMaxOpenConns(2)
+		const sharedKey = "Concurrent-Snapshot-Create"
+		first := service.PreparedSyncSnapshot{
+			Binding: binding, Header: domain.SyncSnapshotHeader{RootEntryID: 11, HighWaterSequence: 35},
+			ExpiresAt: now.Add(10 * time.Minute),
+		}
+		first.Binding.SnapshotID[15] ^= 1
+		first.Binding.Generation[15] ^= 1
+		second := first
+		second.Binding.SnapshotID[15] ^= 2
+		second.Binding.Generation[15] ^= 2
+
+		finalize := func(requestKey string, candidate service.PreparedSyncSnapshot) (*domain.SyncSnapshotReceiptLocator, error) {
+			var existing *domain.SyncSnapshotReceiptLocator
+			err := store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *Store) error {
+				var finalizeError error
+				existing, finalizeError = service.FinalizeSyncSnapshotCreationInTransaction(
+					txContext, actor, requestKey, &candidate, now, txStore,
+					dto.EncodeCreateSyncSnapshotReceipt, dto.DecodeCreateSyncSnapshotReceipt,
+				)
+				return finalizeError
+			})
+			return existing, err
+		}
+		type outcome struct {
+			binding  service.SyncSnapshotCacheBinding
+			existing *domain.SyncSnapshotReceiptLocator
+			err      error
+		}
+		start := make(chan struct{})
+		results := make(chan outcome, 2)
+		for _, candidate := range []service.PreparedSyncSnapshot{first, second} {
+			go func() {
+				<-start
+				existing, err := finalize(sharedKey, candidate)
+				results <- outcome{binding: candidate.Binding, existing: existing, err: err}
+			}()
+		}
+		close(start)
+		winner, follower := <-results, <-results
+		if winner.existing != nil {
+			winner, follower = follower, winner
+		}
+		if winner.err != nil || follower.err != nil || winner.existing != nil || follower.existing == nil ||
+			follower.existing.SnapshotID != winner.binding.SnapshotID || follower.existing.Generation != winner.binding.Generation {
+			t.Fatalf("并发结果未指向同一快照：写入 %+v，复用 %+v", winner, follower)
+		}
+		savedGeneration, err := store.FindSyncDeviceGeneration(ctx, actor.UserID, actor.DeviceID)
+		if err != nil || savedGeneration != winner.binding.Generation {
+			t.Fatalf("设备保存了错误代次 %x，错误 %v", savedGeneration, err)
+		}
+		var count int
+		if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM idempotency_records WHERE user_id=? AND operation=? AND idempotency_key=?",
+			actor.UserID, domain.CreateSyncSnapshotOperation, sharedKey).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("并发同键回执数为 %d，错误 %v", count, err)
+		}
+
+		// 6. 到期的候选只要命中回执仍可复用；没有回执时不能写入。
+		committed := readDeviceState()
+		second.ExpiresAt = now
+		if locator, err := finalize(sharedKey, second); err != nil || locator == nil || *locator != *follower.existing {
+			t.Fatalf("候选到期时已有回执复用结果为 %+v，%v", locator, err)
+		}
+		if locator, err := finalize("Expired-Candidate", second); locator != nil || !errors.Is(err, domain.ErrSyncSnapshotExpired) {
+			t.Fatalf("到期且无回执的候选返回 %+v，%v", locator, err)
+		}
+		second.Binding.PageSize++
+		if locator, err := finalize(sharedKey, second); locator != nil || !errors.Is(err, domain.ErrIdempotencyRequestConflict) {
+			t.Fatalf("同键异参在最终事务中返回 %+v，%v", locator, err)
+		}
+		if readDeviceState() != committed {
+			t.Fatal("复用或拒绝候选改变了设备状态")
+		}
+	})
 }
