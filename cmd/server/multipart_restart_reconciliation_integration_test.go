@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/http/dto"
 )
 
@@ -31,9 +33,14 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	payload := make([]byte, partSize+1)
 	payload[0], payload[partSize] = 0x31, 0x32
 	fileSize := uint64(len(payload))
+	fileDigest := sha256.Sum256(payload)
 	const filename = "multipart-restart-fixture.bin"
+	sourcePath := filepath.Join(t.TempDir(), filename)
+	if err := os.WriteFile(sourcePath, payload, 0600); err != nil {
+		t.Fatal("无法保存合成源文件", err)
+	}
 	declaration := fmt.Sprintf(`{"parent_id":%q,"name":%q,"size_bytes":%d,"sha256":"%x"}`,
-		fixture.login.RootEntryID, filename, fileSize, sha256.Sum256(payload))
+		fixture.login.RootEntryID, filename, fileSize, fileDigest)
 	var created struct {
 		Data      dto.CreateMultipartUploadData `json:"data"`
 		RequestID string                        `json:"request_id"`
@@ -69,35 +76,39 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	})
 
 	// 2. 签发并上传第一片，记录重启前的任务与回执。
-	firstPart := payload[:partSize]
-	checksum := multipartProbeSHA256(firstPart)
-	var signed dto.UploadPartURLsResponse
-	fixture.api.request(t, ctx, http.MethodPost, taskPath+"/part-urls", "",
-		strings.NewReader(fmt.Sprintf(`{"parts":[{"part_number":1,"sha256":"%x"}]}`, sha256.Sum256(firstPart))), http.StatusOK, &signed)
-	if signed.RequestID == "" || len(signed.Data.Parts) != 1 || !signed.Data.ExpiresAt.Equal(readyTask.ExpiresAt) {
-		t.Fatal("第一片签发范围或任务期限不符")
+	uploadPart := func(api backupSourceClient, number uint32, contents []byte) dto.UploadPartReceiptData {
+		t.Helper()
+		checksum := multipartProbeSHA256(contents)
+		var signed dto.UploadPartURLsResponse
+		api.request(t, ctx, http.MethodPost, taskPath+"/part-urls", "",
+			strings.NewReader(fmt.Sprintf(`{"parts":[{"part_number":%d,"sha256":"%x"}]}`, number, sha256.Sum256(contents))),
+			http.StatusOK, &signed)
+		if signed.RequestID == "" || len(signed.Data.Parts) != 1 || !signed.Data.ExpiresAt.Equal(readyTask.ExpiresAt) {
+			t.Fatal("分片签发范围或任务期限不符", number)
+		}
+		part := signed.Data.Parts[0]
+		uploadURL, err := url.Parse(part.URL)
+		if err != nil || uploadURL.Scheme+"://"+uploadURL.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") || uploadURL.User != nil ||
+			uploadURL.Path != "/"+fixture.bucket.name+"/"+objectKey || uploadURL.Query().Get("uploadId") != storageUploadID ||
+			uploadURL.Query().Get("partNumber") != fmt.Sprint(number) || part.PartNumber != number ||
+			part.SizeBytes != uint64(len(contents)) || part.RequiredHeaders.ChecksumSHA256 != checksum {
+			t.Fatal("签名没有限定在本轮隔离会话的预期分片", number)
+		}
+		etag := putMultipartProbePart(t, ctx, api.httpClient, uploadURL, checksum, contents, http.StatusOK, "")
+		return dto.UploadPartReceiptData{PartNumber: number, SizeBytes: part.SizeBytes, ETag: etag, ChecksumSHA256: checksum}
 	}
-	part := signed.Data.Parts[0]
-	uploadURL, err := url.Parse(part.URL)
-	if err != nil || uploadURL.Scheme+"://"+uploadURL.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") || uploadURL.User != nil ||
-		uploadURL.Path != "/"+fixture.bucket.name+"/"+objectKey || uploadURL.Query().Get("uploadId") != storageUploadID ||
-		uploadURL.Query().Get("partNumber") != "1" || part.PartNumber != 1 || part.SizeBytes != partSize ||
-		part.RequiredHeaders.ChecksumSHA256 != checksum {
-		t.Fatal("签名没有限定在本轮隔离会话的第一片")
-	}
-	etag := putMultipartProbePart(t, ctx, fixture.api.httpClient, uploadURL, checksum, firstPart, http.StatusOK, "")
-	wantReceipt := dto.UploadPartReceiptData{PartNumber: 1, SizeBytes: partSize, ETag: etag, ChecksumSHA256: checksum}
-	readReceipts := func(api backupSourceClient) dto.UploadPartsData {
+	firstReceipt := uploadPart(fixture.api, 1, payload[:partSize])
+	readReceipts := func(api backupSourceClient, expected ...dto.UploadPartReceiptData) dto.UploadPartsData {
 		t.Helper()
 		var receipts dto.UploadPartsResponse
 		api.request(t, ctx, http.MethodGet, taskPath+"/parts", "", nil, http.StatusOK, &receipts)
 		if receipts.RequestID == "" || receipts.Data.PartSizeBytes != partSize || receipts.Data.PartCount != 2 ||
-			!slices.Equal(receipts.Data.Parts, []dto.UploadPartReceiptData{wantReceipt}) {
+			!slices.Equal(receipts.Data.Parts, expected) {
 			t.Fatal("分片计划或实际回执不符", receipts.Data)
 		}
 		return receipts.Data
 	}
-	beforeRestart := readReceipts(fixture.api)
+	beforeRestart := readReceipts(fixture.api, firstReceipt)
 	var beforeProfile dto.UserProfileResponse
 	fixture.api.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &beforeProfile)
 	if beforeProfile.Data.UsedBytes != 0 || beforeProfile.Data.ReservedBytes != fileSize {
@@ -116,12 +127,50 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("重启后账号、根目录或预占额度发生变化")
 	}
 
-	// 4. 用原任务 ID 核对回执、配额和文件发布状态。
+	// 4. 用原任务 ID 核对已上传首片，再重新读取源文件验证大小和整文件摘要。
 	var afterRestart dto.UploadTaskResponse
 	restarted.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &afterRestart)
+	afterRestartParts := readReceipts(restarted, firstReceipt)
 	if afterRestart.RequestID == "" || !reflect.DeepEqual(afterRestart.Data, readyTask) ||
-		!reflect.DeepEqual(readReceipts(restarted), beforeRestart) {
+		!reflect.DeepEqual(afterRestartParts, beforeRestart) {
 		t.Fatal("重启后的任务或分片回执与基线不一致")
+	}
+	t.Logf("重启前 %s，重启后 %s；任务 %d 保持 UPLOADING，仅第 1/2 片 %d B，ETag %s，SHA-256 %s",
+		fixture.api.baseURL, restarted.baseURL, taskID, firstReceipt.SizeBytes, firstReceipt.ETag, firstReceipt.ChecksumSHA256)
+	resumedSource, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal("重读合成源文件失败", err)
+	}
+	if uint64(len(resumedSource)) != afterRestart.Data.SizeBytes || sha256.Sum256(resumedSource) != fileDigest {
+		t.Fatal("合成源大小或整文件摘要已变化，不能续传")
+	}
+
+	// 5. 依据计划找出缺失编号，仅对该片签发并上传，最后比对全部回执。
+	var missingParts []uint32
+	for number := uint32(1); number <= afterRestartParts.PartCount; number++ {
+		if !slices.ContainsFunc(afterRestartParts.Parts, func(receipt dto.UploadPartReceiptData) bool {
+			return receipt.PartNumber == number
+		}) {
+			missingParts = append(missingParts, number)
+		}
+	}
+	if !slices.Equal(missingParts, []uint32{2}) {
+		t.Fatal("缺失分片应只有第二片", missingParts)
+	}
+	number := missingParts[0]
+	tailSize, err := domain.ExpectedMultipartUploadPartSize(fileSize, afterRestartParts.PartSizeBytes, afterRestartParts.PartCount, number)
+	if err != nil || tailSize != 1 {
+		t.Fatal("缺失尾片字节数不符", tailSize, err)
+	}
+	offset := uint64(number-1) * afterRestartParts.PartSizeBytes
+	tailReceipt := uploadPart(restarted, number, resumedSource[offset:offset+tailSize])
+	readReceipts(restarted, firstReceipt, tailReceipt)
+	var afterResume dto.UploadTaskResponse
+	restarted.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &afterResume)
+	var afterProfile dto.UserProfileResponse
+	restarted.request(t, ctx, http.MethodGet, "/api/v1/me", "", nil, http.StatusOK, &afterProfile)
+	if !reflect.DeepEqual(afterResume.Data, readyTask) || !reflect.DeepEqual(afterProfile.Data, beforeProfile.Data) {
+		t.Fatal("补传尾片后任务状态、期限或配额发生变化")
 	}
 	var boundSession string
 	var completionRows, childEntries uint64
@@ -138,6 +187,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("重启实例停机失败", err)
 	}
 	verifyBackupSourceStopped(t, restarted.baseURL, logs)
-	t.Logf("重启前 %s，重启后 %s；任务 %d 保持 UPLOADING，仅第 1/2 片 %d B，ETag %s，SHA-256 %s，已用 %d B，预占 %d B，完成回执与发布条目均为 0",
-		fixture.api.baseURL, restarted.baseURL, taskID, wantReceipt.SizeBytes, etag, checksum, login.UsedBytes, login.ReservedBytes)
+	t.Logf("原任务 %d 只补传第 %d 片 %d B，ETag %s，SHA-256 %s；两片齐备，首片回执保持原值，已用 %d B，预占 %d B，完成回执与发布条目均为 0",
+		taskID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
+		afterProfile.Data.UsedBytes, afterProfile.Data.ReservedBytes)
 }
