@@ -10,8 +10,6 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxUploadExpirationCandidates = 100
-
 var uploadExpirationStatuses = [...]domain.UploadStatus{
 	domain.UploadStatusCreating, domain.UploadStatusUploading, domain.UploadStatusCompleting,
 	domain.UploadStatusVerifying, domain.UploadStatusExpiring,
@@ -36,8 +34,8 @@ func (store *Store) ListMultipartUploadExpirationCandidates(ctx context.Context,
 
 func (store *Store) listUploadExpirationCandidates(ctx context.Context, limit int, uploadMode string) ([]domain.UploadExpirationCandidate, error) {
 	// 1. 校验读取入口和批量上限。
-	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > maxUploadExpirationCandidates {
-		return nil, fmt.Errorf("扫描到期上传需要数据入口、上下文和 1～100 条的批量大小")
+	if store == nil || store.database == nil || ctx == nil || limit < 1 || limit > domain.MaxUploadExpirationCandidates {
+		return nil, fmt.Errorf("扫描到期上传需要数据入口、上下文和 1～%d 条的批量大小", domain.MaxUploadExpirationCandidates)
 	}
 	if _, inTransaction := store.database.Statement.ConnPool.(gorm.TxCommitter); inTransaction {
 		return nil, fmt.Errorf("跨用户扫描到期上传须使用事务外的数据入口")

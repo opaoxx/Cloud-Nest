@@ -2,6 +2,9 @@ package domain
 
 import "time"
 
+// MaxUploadExpirationCandidates 是每轮可扫描的到期候选上限。
+const MaxUploadExpirationCandidates = 100
+
 // UploadExpirationCandidate 是上传过期处理使用的只读定位快照。
 type UploadExpirationCandidate struct {
 	// TaskID 与 UserID 用于在所属用户事务中定位任务。

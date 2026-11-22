@@ -19,6 +19,18 @@ func TestServerMultipartCancellationBatchIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_MULTIPART_CANCEL_BATCH_TEST") != "1" {
 		t.Skip("显式启用后创建本轮专用 MySQL、MinIO 和合成数据")
 	}
+	testServerMultipartCleanupBatch(t, domain.UploadStatusCancelling, domain.UploadStatusCancelled, domain.UploadStatusExpiring)
+}
+
+func TestServerMultipartExpirationBatchIntegration(t *testing.T) {
+	if os.Getenv("CLOUDNEST_MULTIPART_EXPIRATION_BATCH_TEST") != "1" {
+		t.Skip("显式启用后验证隔离环境的分片到期批次")
+	}
+	testServerMultipartCleanupBatch(t, domain.UploadStatusExpiring, domain.UploadStatusExpired, domain.UploadStatusCancelling)
+}
+
+func testServerMultipartCleanupBatch(t *testing.T, pendingStatus, terminalStatus, staleStatus domain.UploadStatus) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	mysqlID := startIsolatedWebMySQL(t, ctx)
@@ -82,40 +94,69 @@ func TestServerMultipartCancellationBatchIntegration(t *testing.T) {
 		{23, 7, 25, "b4/batch-next-round.bin", nil},
 	}
 	for _, fixture := range fixtures {
+		status := pendingStatus
+		if pendingStatus == domain.UploadStatusExpiring && fixture.taskID == 22 {
+			status = domain.UploadStatusUploading
+		}
 		execute("INSERT INTO stored_objects(id,owner_user_id,provider,bucket,object_key,file_size) VALUES(?,?,?,?,?,?)",
 			fixture.objectID, fixture.userID, settings.Provider, settings.Bucket, fixture.key, fileSize)
 		execute(`INSERT INTO upload_tasks(id,user_id,device_id,staged_object_id,target_parent_id,requested_name,upload_mode,storage_upload_id,
 			expected_sha256,file_size,part_size,part_count,status,reserved_bytes,expires_at)
-			VALUES(?,?,?,?,?,'fixture.bin','MULTIPART',?,UNHEX(REPEAT('ab',32)),?,?,2,'CANCELLING',?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
-			fixture.taskID, fixture.userID, fixture.userID+4, fixture.objectID, fixture.userID+6, fixture.binding, fileSize, partSize, fileSize)
+			VALUES(?,?,?,?,?,'fixture.bin','MULTIPART',?,UNHEX(REPEAT('ab',32)),?,?,2,?,?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)`,
+			fixture.taskID, fixture.userID, fixture.userID+4, fixture.objectID, fixture.userID+6, fixture.binding, fileSize, partSize, status, fileSize)
 	}
 	execute(`INSERT INTO file_entries(id,user_id,parent_id,name,name_key,entry_type,category,object_id,file_size)
 		VALUES(31,7,13,'fixture.bin',CAST('fixture.bin' AS BINARY),'FILE','OTHER',22,?)`, fileSize)
 
 	// 2. 使用正式读取、租约、存储执行和写回。第一次领取前让已扫描候选失效。
-	observations := service.NewMultipartUploadCancellationStorageService(
-		func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
-			return store.FindMultipartUploadCancellationTarget(callContext, claimed, settings.Provider, settings.Bucket)
-		}, client.AbortMultipartUpload,
-		func(callContext context.Context, key, session string) (*domain.MultipartUploadAbortObservation, error) {
-			return client.CheckMultipartUploadAfterAbort(callContext, key, session, nil)
-		}, client.StatMultipartUploadObject)
-	execution := service.NewMultipartUploadCancellationExecutionService(settings.Provider, settings.Bucket,
-		observations.ObserveBoundSession, observations.ObserveUnboundSession,
-		store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
-		store.ScheduleMultipartUploadCancellationRetry)
-	batch := service.NewMultipartUploadCancellationBatch(store.ListMultipartUploadCancellationCandidates,
-		func(callContext context.Context, candidate domain.UploadCancellationCandidate, owner string) (*domain.UploadTask, error) {
-			if candidate.TaskID == 19 {
-				execute("UPDATE upload_tasks SET status='EXPIRING' WHERE user_id=7 AND id=19")
-			}
-			return store.ClaimMultipartUploadCancellationLease(callContext, candidate, owner)
-		}, execution.Execute)
-	summary, err := batch.RunOnce(ctx, 4, "fixture-batch")
-	if err != nil || summary.Scanned != 4 || summary.Cancelled != 1 || summary.RetriesScheduled != 1 || summary.Skipped != 1 ||
-		len(summary.CandidateErrors) != 1 || summary.CandidateErrors[0].TaskID != 20 ||
-		!errors.Is(summary.CandidateErrors[0].Err, domain.ErrStoredObjectInUse) {
-		t.Fatal("混合批次统计或错误不符", summary, err)
+	check := func(callContext context.Context, key, session string) (*domain.MultipartUploadAbortObservation, error) {
+		return client.CheckMultipartUploadAfterAbort(callContext, key, session, nil)
+	}
+	invalidateFirst := func(taskID uint64) {
+		if taskID == 19 {
+			execute("UPDATE upload_tasks SET status=? WHERE user_id=7 AND id=19", staleStatus)
+		}
+	}
+	if pendingStatus == domain.UploadStatusExpiring {
+		observations := service.NewMultipartUploadExpirationStorageService(
+			func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+				return store.FindMultipartUploadExpirationTarget(callContext, claimed, settings.Provider, settings.Bucket)
+			}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
+		execution := service.NewMultipartUploadExpirationExecutionService(settings.Provider, settings.Bucket,
+			observations.ObserveBoundSession, observations.ObserveUnboundSession,
+			store.CompleteMissingMultipartUploadExpiration, store.CompleteExistingMultipartUploadExpiration,
+			store.ScheduleMultipartUploadExpirationRetry)
+		batch := service.NewMultipartUploadExpirationBatch(store.ListMultipartUploadExpirationCandidates,
+			func(callContext context.Context, candidate domain.UploadExpirationCandidate, owner string) (*domain.UploadTask, error) {
+				invalidateFirst(candidate.TaskID)
+				return store.ClaimMultipartUploadExpirationLease(callContext, candidate, owner)
+			}, execution.Execute)
+		summary, err := batch.RunOnce(ctx, 4, "fixture-batch")
+		if err != nil || summary.Scanned != 4 || summary.Expired != 1 || summary.RetriesScheduled != 1 || summary.Skipped != 1 ||
+			len(summary.CandidateErrors) != 1 || summary.CandidateErrors[0].TaskID != 20 ||
+			!errors.Is(summary.CandidateErrors[0].Err, domain.ErrStoredObjectInUse) {
+			t.Fatal("到期混合批次统计或错误不符", summary, err)
+		}
+	} else {
+		observations := service.NewMultipartUploadCancellationStorageService(
+			func(callContext context.Context, claimed *domain.UploadTask) (*domain.MultipartUploadCancellationTarget, error) {
+				return store.FindMultipartUploadCancellationTarget(callContext, claimed, settings.Provider, settings.Bucket)
+			}, client.AbortMultipartUpload, check, client.StatMultipartUploadObject)
+		execution := service.NewMultipartUploadCancellationExecutionService(settings.Provider, settings.Bucket,
+			observations.ObserveBoundSession, observations.ObserveUnboundSession,
+			store.CompleteMissingMultipartUploadCancellation, store.CompleteExistingMultipartUploadCancellation,
+			store.ScheduleMultipartUploadCancellationRetry)
+		batch := service.NewMultipartUploadCancellationBatch(store.ListMultipartUploadCancellationCandidates,
+			func(callContext context.Context, candidate domain.UploadCancellationCandidate, owner string) (*domain.UploadTask, error) {
+				invalidateFirst(candidate.TaskID)
+				return store.ClaimMultipartUploadCancellationLease(callContext, candidate, owner)
+			}, execution.Execute)
+		summary, err := batch.RunOnce(ctx, 4, "fixture-batch")
+		if err != nil || summary.Scanned != 4 || summary.Cancelled != 1 || summary.RetriesScheduled != 1 || summary.Skipped != 1 ||
+			len(summary.CandidateErrors) != 1 || summary.CandidateErrors[0].TaskID != 20 ||
+			!errors.Is(summary.CandidateErrors[0].Err, domain.ErrStoredObjectInUse) {
+			t.Fatal("取消混合批次统计或错误不符", summary, err)
+		}
 	}
 
 	// 3. 逐项回读和核对账目，确认本轮上限及失败回滚。
@@ -124,10 +165,9 @@ func TestServerMultipartCancellationBatchIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantStatus := []domain.UploadStatus{domain.UploadStatusExpiring, domain.UploadStatusCancelling,
-			domain.UploadStatusCancelling, domain.UploadStatusCancelled, domain.UploadStatusCancelling}[index]
+		wantStatus := []domain.UploadStatus{staleStatus, pendingStatus, pendingStatus, terminalStatus, pendingStatus}[index]
 		wantReserved := uint64(fileSize)
-		if wantStatus == domain.UploadStatusCancelled {
+		if wantStatus == terminalStatus {
 			wantReserved = 0
 		}
 		if record.Status != wantStatus || record.ReservedBytes != wantReserved {
@@ -147,7 +187,7 @@ func TestServerMultipartCancellationBatchIntegration(t *testing.T) {
 	}
 	orphaned, err := store.FindUserStoredObject(ctx, 8, 24)
 	if err != nil || orphaned.Status != domain.StoredObjectStatusOrphaned || orphaned.GCAfter == nil {
-		t.Fatal("已取消候选缺少回收登记", err)
+		t.Fatal("已经收尾的候选缺少回收登记", err)
 	}
 	for _, account := range []struct{ id, used, reserved uint64 }{{7, 1024, 3*fileSize + otherReserved}, {8, 2048, fileSize + otherReserved}} {
 		var used, reserved uint64
@@ -156,9 +196,16 @@ func TestServerMultipartCancellationBatchIntegration(t *testing.T) {
 			t.Fatal("账号账目与批次结果不符", account.id, used, reserved, err)
 		}
 	}
-	next, err := store.ListMultipartUploadCancellationCandidates(ctx, 4)
-	if err != nil || len(next) != 1 || next[0].TaskID != 23 {
-		t.Fatal("剩余可处理任务与本轮限制不符", next, err)
+	if pendingStatus == domain.UploadStatusExpiring {
+		next, err := store.ListMultipartUploadExpirationCandidates(ctx, 4)
+		if err != nil || len(next) != 1 || next[0].TaskID != 23 {
+			t.Fatal("剩余到期任务与本轮限制不符", next, err)
+		}
+	} else {
+		next, err := store.ListMultipartUploadCancellationCandidates(ctx, 4)
+		if err != nil || len(next) != 1 || next[0].TaskID != 23 {
+			t.Fatal("剩余取消任务与本轮限制不符", next, err)
+		}
 	}
-	t.Log("扫描 4 条，已取消 22、已登记重试 21、跳过 19、任务 20 因对象仍被引用回滚，候选 23 留给下一轮")
+	t.Logf("扫描 4 条，任务 22 提交 %s，任务 21 登记重试，跳过 19，任务 20 因对象仍被引用回滚，候选 23 留给下一轮", terminalStatus)
 }
