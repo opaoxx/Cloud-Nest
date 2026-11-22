@@ -41,10 +41,11 @@ type SyncSnapshotCache struct {
 }
 
 type cachedSyncSnapshot struct {
-	binding     SyncSnapshotCacheBinding
-	snapshot    BuiltSyncSnapshot
-	expiresAt   time.Time
-	reservation *SyncSnapshotReservation
+	binding          SyncSnapshotCacheBinding
+	snapshot         BuiltSyncSnapshot
+	expiresAt        time.Time
+	reservation      *SyncSnapshotReservation
+	buildReservation *syncSnapshotReservationState
 }
 
 // NewSyncSnapshotCache 创建一份进程共享的快照缓存。
@@ -84,8 +85,29 @@ func (cache *SyncSnapshotCache) removeLocked(snapshotID uuid.UUID, entry cachedS
 	entry.reservation.Release()
 }
 
+// DiscardUncommitted 撤回调用方确认未提交的快照，须提供成功 Put 时使用的绑定及构建预留。
+// 可在请求取消后或重复调用。被实际撤回时返回 true。
+func (cache *SyncSnapshotCache) DiscardUncommitted(binding SyncSnapshotCacheBinding, reservation *SyncSnapshotReservation) bool {
+	// 1. 核对完整绑定和构建凭据。
+	if !binding.valid() || reservation == nil || reservation.state == nil {
+		return false
+	}
+
+	// 2. 持锁确认缓存项仍属于本次构建。
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	entry, exists := cache.entries[binding.SnapshotID]
+	if !exists || entry.binding != binding || entry.buildReservation != reservation.state {
+		return false
+	}
+
+	// 3. 移除匹配项并归还一次槽位和字节预算。
+	cache.removeLocked(binding.SnapshotID, entry)
+	return true
+}
+
 // Put 接管本次构建预留并保存条目的独立副本，返回固定的 UTC 到期时刻。
-// 成功时释放权移交给缓存，失败时归还传入的预留。
+// 成功时释放权移交给缓存，原凭据可用于确认未提交时的撤回。失败时归还传入的预留。
 func (cache *SyncSnapshotCache) Put(ctx context.Context, reservation *SyncSnapshotReservation, binding SyncSnapshotCacheBinding, snapshot *BuiltSyncSnapshot) (time.Time, error) {
 	// 1. 核对标识、设备绑定、上下文和实际 JSON 大小。
 	defer reservation.Release()
@@ -133,7 +155,10 @@ func (cache *SyncSnapshotCache) Put(ctx context.Context, reservation *SyncSnapsh
 		return time.Time{}, err
 	}
 	expiresAt := now.Add(syncSnapshotCacheTTL)
-	cache.entries[binding.SnapshotID] = cachedSyncSnapshot{binding: binding, snapshot: staged, expiresAt: expiresAt, reservation: retained}
+	cache.entries[binding.SnapshotID] = cachedSyncSnapshot{
+		binding: binding, snapshot: staged, expiresAt: expiresAt, reservation: retained,
+		buildReservation: reservation.state,
+	}
 	stored = true
 	return expiresAt, nil
 }
