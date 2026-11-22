@@ -139,14 +139,21 @@ func TestServerMultipartInterruptedPartIntegration(t *testing.T) {
 		sessionID != target.uploadID || completedParts != 0 || publishedFiles != 0 {
 		t.Fatal("补传后绑定会话、完成快照或发布文件不符", err, completedParts, publishedFiles)
 	}
+	t.Logf("原任务 %s 恢复后只补传第 %d 片 %d B，ETag %s，SHA-256 %s，两片回执齐备，首片保持原值，已用 %d B、预占 %d B",
+		resumedTask.ID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
+		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
+
+	// 6. 提交补传后的回执，等正式后台任务发布，再核对唯一条目和配额结算。
+	accepted := submitResumedMultipartCompletion(t, ctx, api, taskPath, resumedTask, resumed.Parts[0], resumed.Parts[1])
+	t.Logf("断网补传后的原任务 %s 返回 202 COMPLETING", accepted.ID)
+	completed := awaitResumedMultipartPublication(t, ctx, api, taskPath, accepted)
+	verifyResumedMultipartPublication(t, ctx, fixture, api, completed, fileDigest)
+
 	logs, err := fixture.stop()
 	if err != nil {
 		t.Fatal("隔离服务停机失败", err)
 	}
 	verifyBackupSourceStopped(t, api.baseURL, logs)
-	t.Logf("原任务 %s 恢复后只补传第 %d 片 %d B，ETag %s，SHA-256 %s，两片回执齐备，首片保持原值，已用 %d B、预占 %d B",
-		resumedTask.ID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
-		resumedProfile.UsedBytes, resumedProfile.ReservedBytes)
 }
 
 func sendInterruptedMultipartPart(t *testing.T, ctx context.Context, signed *url.URL, checksum string, payload []byte) {

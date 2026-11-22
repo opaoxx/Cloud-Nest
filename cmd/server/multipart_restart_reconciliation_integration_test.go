@@ -162,25 +162,12 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 
 	// 6. 使用补传后查询的编号和 ETag 提交原任务，确认 202 交付已提交的完成意图。
 	firstPart, lastPart := resumedParts.Parts[0], resumedParts.Parts[1]
-	completeBody := fmt.Sprintf(`{"parts":[{"part_number":%d,"etag":%q},{"part_number":%d,"etag":%q}]}`,
-		firstPart.PartNumber, firstPart.ETag, lastPart.PartNumber, lastPart.ETag)
-	var accepted dto.UploadTaskResponse
-	restarted.request(t, ctx, http.MethodPost, taskPath+"/complete", "", strings.NewReader(completeBody), http.StatusAccepted, &accepted)
-	if accepted.RequestID == "" || accepted.Data.ID != readyTask.ID || accepted.Data.UploadMode != "MULTIPART" ||
-		accepted.Data.Status != "COMPLETING" || accepted.Data.SizeBytes != fileSize || !accepted.Data.ExpiresAt.Equal(readyTask.ExpiresAt) ||
-		accepted.Data.ResultEntryID != nil || accepted.Data.CompletedAt != nil {
-		t.Fatal("续传后的完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
-	}
+	accepted := submitResumedMultipartCompletion(t, ctx, restarted, taskPath, readyTask, firstPart, lastPart)
 
 	// 7. 等待正式后台任务合并、校验和发布，核对文件与配额并验证下载。
-	completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath)
-	if completed.ID != accepted.Data.ID || completed.UploadMode != "MULTIPART" || completed.ParentID != readyTask.ParentID ||
-		completed.ResultEntryID == nil || completed.CompletedAt == nil || completed.ResolvedName == nil ||
-		*completed.ResolvedName != filename || completed.SizeBytes != fileSize || completed.LastError != nil ||
-		completed.CompletedAt.Before(accepted.Data.UpdatedAt) {
-		t.Fatal("后台发布结果与原续传任务不一致", completed)
-	}
-	verifyResumedMultipartPublication(t, ctx, fixture, restarted, completed, fileDigest)
+	completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath, accepted)
+	publication := verifyResumedMultipartPublication(t, ctx, fixture, restarted, completed, fileDigest)
+	verifyResumedMultipartDownload(t, ctx, restarted, publication, fileDigest)
 
 	// 8. 在原任务发布后无正文重试，核对完成结果和发布账目。
 	verifyResumedMultipartCompletionReplay(t, ctx, fixture, restarted, taskPath, completed)
@@ -213,7 +200,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 			firstObservedAt = observedAt
 		}
 		if persisted != expected || algorithm != "SHA256" || !observedAt.Equal(firstObservedAt) ||
-			observedAt.Before(afterResume.Data.UpdatedAt) || observedAt.After(accepted.Data.UpdatedAt) {
+			observedAt.Before(afterResume.Data.UpdatedAt) || observedAt.After(accepted.UpdatedAt) {
 			t.Fatal("已保存回执与续传查询或本轮核对时间不一致", persisted, algorithm, observedAt)
 		}
 	}
@@ -282,7 +269,27 @@ func (target serverMultipartPartTarget) signPart(t *testing.T, ctx context.Conte
 	return uploadURL, checksum
 }
 
-func awaitResumedMultipartPublication(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string) dto.UploadTaskData {
+func submitResumedMultipartCompletion(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string,
+	task dto.UploadTaskData, firstPart, lastPart dto.UploadPartReceiptData) dto.UploadTaskData {
+	t.Helper()
+	// 1. 只提交正式查询返回的分片编号和 ETag。
+	completeBody := fmt.Sprintf(`{"parts":[{"part_number":%d,"etag":%q},{"part_number":%d,"etag":%q}]}`,
+		firstPart.PartNumber, firstPart.ETag, lastPart.PartNumber, lastPart.ETag)
+	var accepted dto.UploadTaskResponse
+	api.request(t, ctx, http.MethodPost, taskPath+"/complete", "", strings.NewReader(completeBody), http.StatusAccepted, &accepted)
+
+	// 2. 受理结果使用原任务声明，此时尚没有发布条目。
+	if accepted.RequestID == "" || accepted.Data.ID != task.ID || accepted.Data.UploadMode != "MULTIPART" ||
+		accepted.Data.Status != "COMPLETING" || accepted.Data.ParentID != task.ParentID || accepted.Data.RequestedName != task.RequestedName ||
+		accepted.Data.SizeBytes != task.SizeBytes || !accepted.Data.ExpiresAt.Equal(task.ExpiresAt) ||
+		accepted.Data.ResultEntryID != nil || accepted.Data.CompletedAt != nil {
+		t.Fatal("续传后的完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
+	}
+	return accepted.Data
+}
+
+func awaitResumedMultipartPublication(t *testing.T, ctx context.Context, api backupSourceClient, taskPath string,
+	accepted dto.UploadTaskData) dto.UploadTaskData {
 	t.Helper()
 	waitContext, stop := context.WithTimeout(ctx, 30*time.Second)
 	defer stop()
@@ -294,7 +301,14 @@ func awaitResumedMultipartPublication(t *testing.T, ctx context.Context, api bac
 		api.request(t, waitContext, http.MethodGet, taskPath, "", nil, http.StatusOK, &result)
 		switch result.Data.Status {
 		case "COMPLETED":
-			return result.Data
+			completed := result.Data
+			if result.RequestID == "" || completed.ID != accepted.ID || completed.UploadMode != "MULTIPART" ||
+				completed.ParentID != accepted.ParentID || completed.ResultEntryID == nil || completed.CompletedAt == nil ||
+				completed.ResolvedName == nil || *completed.ResolvedName != accepted.RequestedName ||
+				completed.SizeBytes != accepted.SizeBytes || completed.LastError != nil || completed.CompletedAt.Before(accepted.UpdatedAt) {
+				t.Fatal("后台发布结果与原续传任务不一致", completed)
+			}
+			return completed
 		case "COMPLETING", "VERIFYING":
 		default:
 			t.Fatal("续传发布进入意外状态", result.Data.Status, result.Data.LastError)
@@ -307,8 +321,14 @@ func awaitResumedMultipartPublication(t *testing.T, ctx context.Context, api bac
 	}
 }
 
+type resumedMultipartPublication struct {
+	entry                     dto.EntryDetailData
+	objectID                  uint64
+	objectPath, objectVersion string
+}
+
 func verifyResumedMultipartPublication(t *testing.T, ctx context.Context, fixture backupSourceFixture, api backupSourceClient,
-	completed dto.UploadTaskData, fileDigest [sha256.Size]byte) {
+	completed dto.UploadTaskData, fileDigest [sha256.Size]byte) resumedMultipartPublication {
 	t.Helper()
 	// 1. 用任务返回的 ID 读取活动文件，核对父目录、名称及大小。
 	entryID := *completed.ResultEntryID
@@ -345,17 +365,20 @@ func verifyResumedMultipartPublication(t *testing.T, ctx context.Context, fixtur
 	}
 	t.Logf("原任务 %s 达到 COMPLETED，发布文件条目 %s，引用 READY 对象 %d，版本已定位，整文件 SHA-256 %x，已用 %d B、预占 %d B",
 		completed.ID, entryID, objectID, verifiedDigest, profile.Data.UsedBytes, profile.Data.ReservedBytes)
-	verifyResumedMultipartDownload(t, ctx, api, entry.Data, objectID, "/"+fixture.bucket.name+"/"+objectKey, objectVersion, fileDigest)
+	return resumedMultipartPublication{
+		entry: entry.Data, objectID: objectID, objectPath: "/" + fixture.bucket.name + "/" + objectKey, objectVersion: objectVersion,
+	}
 }
 
-func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backupSourceClient, entry dto.EntryDetailData,
-	objectID uint64, objectPath, objectVersion string, fileDigest [sha256.Size]byte) {
+func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backupSourceClient, publication resumedMultipartPublication,
+	fileDigest [sha256.Size]byte) {
 	t.Helper()
+	entry := publication.entry
 	// 1. 使用可见条目的当前版本申请下载，核对授权给出的对象和内容事实。
 	body := fmt.Sprintf(`{"expected_revision":%q,"purpose":"download"}`, entry.Revision)
 	var grant dto.CreateDownloadResponse
 	api.request(t, ctx, http.MethodPost, "/api/v1/entries/"+entry.ID+"/download", "", strings.NewReader(body), http.StatusOK, &grant)
-	if grant.RequestID == "" || grant.Data.Revision != entry.Revision || grant.Data.ObjectID != strconv.FormatUint(objectID, 10) ||
+	if grant.RequestID == "" || grant.Data.Revision != entry.Revision || grant.Data.ObjectID != strconv.FormatUint(publication.objectID, 10) ||
 		grant.Data.SizeBytes != entry.SizeBytes || grant.Data.SHA256 != fmt.Sprintf("%x", fileDigest) || !grant.Data.ExpiresAt.After(time.Now()) {
 		t.Fatal("下载授权的条目版本、对象或摘要不符", entry.ID)
 	}
@@ -364,7 +387,7 @@ func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backu
 	signed, err := url.Parse(grant.Data.URL)
 	if err != nil || signed.User != nil || signed.Fragment != "" ||
 		signed.Scheme+"://"+signed.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") ||
-		signed.Path != objectPath || signed.Query().Get("versionId") != objectVersion {
+		signed.Path != publication.objectPath || signed.Query().Get("versionId") != publication.objectVersion {
 		t.Fatal("下载签名没有绑定本轮隔离对象及已发布版本", entry.ID)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, signed.String(), nil)
@@ -378,7 +401,7 @@ func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backu
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK || response.ContentLength != int64(entry.SizeBytes) ||
-		response.Header.Get("X-Amz-Version-Id") != objectVersion {
+		response.Header.Get("X-Amz-Version-Id") != publication.objectVersion {
 		t.Fatalf("隔离存储返回的版本或长度不符，HTTP %d，长度 %d", response.StatusCode, response.ContentLength)
 	}
 
