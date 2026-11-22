@@ -212,7 +212,10 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	}
 	verifyResumedMultipartPublication(t, ctx, fixture, restarted, completed, fileDigest)
 
-	// 8. 关停后从独立数据库连接读取冻结的回执，确认发布也保留了原完成快照。
+	// 8. 在原任务发布后无正文重试，核对完成结果和发布账目。
+	verifyResumedMultipartCompletionReplay(t, ctx, fixture, restarted, taskPath, completed)
+
+	// 9. 关停后从独立数据库连接读取冻结的回执，确认重试也保留了原完成快照。
 	logs, err = stopRestarted()
 	if err != nil {
 		t.Fatal("重启实例停机失败", err)
@@ -360,4 +363,48 @@ func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backu
 	}
 	t.Logf("正式下载条目 %s，签名返回有效对象版本，读取 %d B，下载 SHA-256 %x，与合成源一致",
 		entry.ID, size, downloadDigest)
+}
+
+func verifyResumedMultipartCompletionReplay(t *testing.T, ctx context.Context, fixture backupSourceFixture, api backupSourceClient,
+	taskPath string, completed dto.UploadTaskData) {
+	t.Helper()
+	// 1. 从同一次只读查询记录发布对象、账号配额及文件、对象和回执数量。
+	type completionState struct {
+		publishedObjectID, usedBytes, reservedBytes uint64
+		files, objects, receipts                    uint64
+	}
+	readState := func() completionState {
+		t.Helper()
+		var state completionState
+		if err := fixture.pool.QueryRowContext(ctx, `SELECT task.published_object_id,account.used_storage,account.reserved_storage,
+			(SELECT COUNT(*) FROM file_entries WHERE user_id=account.id AND entry_type='FILE'),
+			(SELECT COUNT(*) FROM stored_objects WHERE owner_user_id=account.id),
+			(SELECT COUNT(*) FROM upload_parts WHERE task_id=task.id)
+			FROM upload_tasks task JOIN users account ON account.id=task.user_id
+			WHERE task.id=? AND account.id=? AND task.status='COMPLETED'`, completed.ID, fixture.login.User.ID).
+			Scan(&state.publishedObjectID, &state.usedBytes, &state.reservedBytes, &state.files, &state.objects, &state.receipts); err != nil {
+			t.Fatal("读取原任务的发布与配额快照失败", err)
+		}
+		return state
+	}
+	before := readState()
+	if before.publishedObjectID == 0 || before.usedBytes != completed.SizeBytes || before.reservedBytes != 0 ||
+		before.files != 1 || before.objects != 1 || before.receipts != 2 {
+		t.Fatal("重复完成前的发布快照不符", before)
+	}
+
+	// 2. 只带原任务 ID 提交完成重试，核对返回的完整终态和原条目 ID。
+	var replayed dto.UploadTaskResponse
+	api.request(t, ctx, http.MethodPost, taskPath+"/complete", "", nil, http.StatusOK, &replayed)
+	if replayed.RequestID == "" || !reflect.DeepEqual(replayed.Data, completed) {
+		t.Fatal("无正文重试未返回同一任务的已发布结果", replayed.Data)
+	}
+
+	// 3. 再读发布快照，确认文件、对象、回执和配额都没有变化。
+	after := readState()
+	if after != before {
+		t.Fatal("重复完成改变了发布或配额快照", before, after)
+	}
+	t.Logf("原任务 %s 无正文重试返回 200 COMPLETED 和原条目 %s，重试前后均为 %d 个文件、%d 个对象、%d 条回执，已用 %d B、预占 %d B",
+		completed.ID, *completed.ResultEntryID, after.files, after.objects, after.receipts, after.usedBytes, after.reservedBytes)
 }
