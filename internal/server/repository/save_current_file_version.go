@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
-	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -16,39 +14,20 @@ import (
 // 调用方须在同一事务更新当前引用并结算配额。失败须交给外层回滚。
 func (store *Store) SaveCurrentFileVersion(ctx context.Context, entryID, expectedRevision uint64, retentionDays int) (*domain.FileVersion, error) {
 	// 1. 要求持锁账号事务，按归属锁读文件、完整父链及预期版本。
-	if ctx == nil || store == nil || store.database == nil || store.loginUserID == 0 ||
-		entryID == 0 || expectedRevision == 0 || retentionDays <= 0 {
-		return nil, fmt.Errorf("保存文件历史需要账号事务、有效文件版本和正的保留天数")
+	if retentionDays <= 0 {
+		return nil, fmt.Errorf("保存文件历史需要正的保留天数")
 	}
-	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
-		return nil, fmt.Errorf("保存文件历史必须使用账号事务 Store")
+	entry, err := store.LockUploadReplacementTarget(ctx, entryID, expectedRevision)
+	if errors.Is(err, domain.ErrFileEntryNotFile) {
+		return nil, domain.ErrFileEntryNotFound
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	userID := store.loginUserID
-	lockedEntryStore := *store
-	lockedEntryStore.database = store.database.WithContext(ctx).
-		Table("file_entries FORCE INDEX (uk_entries_owner_id)").
-		Clauses(clause.Locking{Strength: "UPDATE"})
-	entry, err := lockedEntryStore.FindUserFileEntry(ctx, userID, entryID)
 	if err != nil {
 		return nil, err
 	}
-	if entry.Status != "ACTIVE" || entry.EntryType != "FILE" || entry.ParentID == nil {
-		return nil, domain.ErrFileEntryNotFound
-	}
-	if err := store.checkLockedActiveEntryAncestors(ctx, userID, *entry.ParentID); err != nil {
-		return nil, err
-	}
-	if entry.Revision != expectedRevision {
-		return nil, &domain.EntryRevisionConflictError{CurrentRevision: entry.Revision}
-	}
-	if entry.Revision == math.MaxUint64 {
-		return nil, domain.ErrEntryRevisionExhausted
-	}
+	userID := store.loginUserID
 
 	// 2. 按当前引用锁读旧对象，核对已校验状态、逻辑大小和回收计时。
+	lockedEntryStore := store.lockedFileEntryStore(ctx)
 	content, err := lockedEntryStore.FindUserFileEntryContent(ctx, userID, entryID)
 	if err != nil {
 		return nil, err
