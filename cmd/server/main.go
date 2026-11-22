@@ -704,13 +704,19 @@ func runWithPurgeRootWorker(
 	stopMultipartVerification := startServerMultipartUploadVerificationWorker(ctx, multipartVerification.RunOnce, logger)
 	defer stopMultipartVerification()
 
-	// 40. 装配并启动分片取消；无受信实例证明时，已绑定任务保留预占并重试。
-	multipartCancellation := newServerMultipartUploadCancellationBatch(store, storageClient, storageConfig, nil)
+	// 40. 仅在选定本机 Compose 项目时装配实例证明，供分片取消复查使用。
+	var cancellationProof storage.MultipartSessionLockVerifier
+	if project := storageConfig.MinIOProofComposeProject; project != "" {
+		cancellationProof = newLocalMinIOSessionLockVerifier(project, newLocalMinIODockerSnapshotReader(project))
+	}
+
+	// 41. 启动分片取消；无受信证明时，已绑定任务保留预占并重试。
+	multipartCancellation := newServerMultipartUploadCancellationBatch(store, storageClient, storageConfig, cancellationProof)
 	stopMultipartCancellation := startServerMultipartUploadCancellationWorker(ctx, multipartCancellation.RunOnce, logger)
-	// 41. 登记关停等待，使分片取消 worker 先于连接释放退出。
+	// 42. 登记关停等待，使分片取消 worker 先于连接释放退出。
 	defer stopMultipartCancellation()
 
-	// 42. 启动 HTTP 并处理退出通知。
+	// 43. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)
 	if err := serverhttp.Serve(ctx, httpServer, 30*time.Second, logger); err != nil {
 		if !errors.Is(err, context.Canceled) {

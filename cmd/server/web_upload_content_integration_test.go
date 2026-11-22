@@ -104,12 +104,21 @@ func startIsolatedWebMinIO(t *testing.T, ctx context.Context) string {
 
 func startIsolatedWebMinIOWithDataSize(t *testing.T, ctx context.Context, dataSize string) string {
 	t.Helper()
+	return startIsolatedWebMinIOForProject(t, ctx, dataSize, "")
+}
+
+func startIsolatedWebMinIOForProject(t *testing.T, ctx context.Context, dataSize, composeProject string) string {
+	t.Helper()
 	requireLocalWebFixtureDocker(t, ctx)
 	const image = "sha256:7c840b89c21e0af0e824cf57310becadbbd45c7fb407c78cd2ada4b74c76f733"
 	accessKey, secretKey := rand.Text(), rand.Text()
-	output, err := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--pull", "never",
-		"--tmpfs", "/data:uid=10001,gid=10001,mode=0700,size="+dataSize, "--publish", "127.0.0.1::9000",
-		"-e", "MINIO_ROOT_USER="+accessKey, "-e", "MINIO_ROOT_PASSWORD="+secretKey, image).Output()
+	arguments := []string{"run", "-d", "--rm", "--pull", "never",
+		"--tmpfs", "/data:uid=10001,gid=10001,mode=0700,size=" + dataSize, "--publish", "127.0.0.1::9000",
+		"-e", "MINIO_ROOT_USER=" + accessKey, "-e", "MINIO_ROOT_PASSWORD=" + secretKey}
+	if composeProject != "" {
+		arguments = append(arguments, "--label", "com.docker.compose.project="+composeProject, "--label", "com.docker.compose.service=minio")
+	}
+	output, err := exec.CommandContext(ctx, "docker", append(arguments, image)...).Output()
 	containerID := strings.TrimSpace(string(output))
 	if err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(containerID) {
 		t.Fatal("无法创建本轮专用 MinIO 容器", err)

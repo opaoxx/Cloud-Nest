@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,6 +16,8 @@ var bucketNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 
 // bucketIPPattern 拒绝 IPv4 样式名称，包括不能解析为合法 IP 的四段数字。
 var bucketIPPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$`)
+
+var minIOProofComposeProjectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // StorageConfig 保存本项目 MinIO 对象存储的访问配置。
 type StorageConfig struct {
@@ -30,9 +33,11 @@ type StorageConfig struct {
 	AccessKey string
 	// SecretKey 是服务端连接密钥，原样保留且不写入日志。
 	SecretKey string
+	// MinIOProofComposeProject 显式选择本机 MinIO 运行证明的 Compose 项目，空值保持待确认路径。
+	MinIOProofComposeProject string
 }
 
-// LoadStorageConfig 读取 CLOUDNEST_STORAGE_PROVIDER 和 CLOUDNEST_S3_* 环境变量。
+// LoadStorageConfig 读取 CLOUDNEST_STORAGE_PROVIDER、CLOUDNEST_S3_* 和可选的本机实例证明配置。
 // 未设置的变量使用开发默认值；失败返回零值配置与不含原始输入的错误。
 // 本方法只验证格式，不创建客户端、不访问 MinIO，也不检查桶或凭证是否可用。
 func LoadStorageConfig() (StorageConfig, error) {
@@ -73,7 +78,13 @@ func LoadStorageConfig() (StorageConfig, error) {
 		return StorageConfig{}, fmt.Errorf("CLOUDNEST_S3_SECRET_KEY 不能为空或全空白")
 	}
 
-	// 4. 返回存储配置，交给启动入口使用。
+	// 4. 校验显式选择的 Compose 项目，空值表示不启用证明来源。
+	storageConfig.MinIOProofComposeProject = os.Getenv("CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT")
+	if storageConfig.MinIOProofComposeProject != "" && !minIOProofComposeProjectPattern.MatchString(storageConfig.MinIOProofComposeProject) {
+		return StorageConfig{}, fmt.Errorf("CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT 必须是有效的 Compose 项目名")
+	}
+
+	// 5. 返回存储配置，交给启动入口使用。
 	storageConfig.EndpointURL = endpointURL
 	storageConfig.PublicEndpointURL = publicEndpointURL
 	return storageConfig, nil

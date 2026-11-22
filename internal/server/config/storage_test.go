@@ -9,7 +9,7 @@ import (
 // clearStorageEnvironment 暂时移除配置变量，测试结束后由 testing 恢复原环境。
 func clearStorageEnvironment(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"CLOUDNEST_STORAGE_PROVIDER", "CLOUDNEST_S3_ENDPOINT", "CLOUDNEST_S3_PUBLIC_ENDPOINT", "CLOUDNEST_S3_BUCKET", "CLOUDNEST_S3_ACCESS_KEY", "CLOUDNEST_S3_SECRET_KEY"} {
+	for _, name := range []string{"CLOUDNEST_STORAGE_PROVIDER", "CLOUDNEST_S3_ENDPOINT", "CLOUDNEST_S3_PUBLIC_ENDPOINT", "CLOUDNEST_S3_BUCKET", "CLOUDNEST_S3_ACCESS_KEY", "CLOUDNEST_S3_SECRET_KEY", "CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT"} {
 		t.Setenv(name, "temporary-value")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -28,6 +28,20 @@ func TestLoadStorageConfigDefaults(t *testing.T) {
 	// 2. 两个地址保留协议信息，凭证不作为测试失败内容输出。
 	if storageConfig.Provider != "local_minio" || storageConfig.Bucket != "cloudnest" || storageConfig.EndpointURL.String() != "http://127.0.0.1:19000" || storageConfig.PublicEndpointURL.String() != "http://127.0.0.1:19000" || storageConfig.AccessKey != "root" || storageConfig.SecretKey != "rootroot" {
 		t.Fatal("默认存储配置不符合预期")
+	}
+	if storageConfig.MinIOProofComposeProject != "" {
+		t.Fatal("默认配置不应启用本机实例证明")
+	}
+}
+
+func TestLoadStorageConfigMinIOProofComposeProject(t *testing.T) {
+	clearStorageEnvironment(t)
+	for _, project := range []string{"", "cloudnest", "cloudnest-proof_42"} {
+		t.Setenv("CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT", project)
+		settings, err := LoadStorageConfig()
+		if err != nil || settings.MinIOProofComposeProject != project {
+			t.Fatal("本机证明配置不符", err)
+		}
 	}
 }
 
@@ -130,6 +144,9 @@ func TestLoadStorageConfigInvalid(t *testing.T) {
 		{name: "blank access key", variable: "CLOUDNEST_S3_ACCESS_KEY", value: " \t"},
 		{name: "empty secret key", variable: "CLOUDNEST_S3_SECRET_KEY"},
 		{name: "blank secret key", variable: "CLOUDNEST_S3_SECRET_KEY", value: " \t"},
+		{name: "invalid proof project", variable: "CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT", value: "do-not-log\nproject"},
+		{name: "uppercase proof project", variable: "CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT", value: "CloudNest"},
+		{name: "proof project starts with dash", variable: "CLOUDNEST_MINIO_PROOF_COMPOSE_PROJECT", value: "-cloudnest"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
