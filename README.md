@@ -12,7 +12,7 @@
 go run ./cmd/database -database cloudnest -seed
 ~~~
 
-当前代码的迁移命令会把版本 1 的库升到版本 2，增加 `upload_parts`。重复执行会核对迁移摘要并复用已有账号与根目录。配置、隔离验证和异常处理参见 [迁移说明](migrations/README.md)。
+当前迁移清单包含版本 1～3。版本 2 新增 `upload_parts`，版本 3 新增 `change_events` 和 `sync_devices`。迁移命令按顺序补齐缺少的版本，重复执行会核对摘要并复用已有账号与根目录。配置、隔离验证和异常处理参见 [迁移说明](migrations/README.md)。
 
 阶段 1 的 MySQL 与 MinIO 停写、导出和新环境核对步骤见 [隔离备份恢复手册](docs/隔离备份恢复手册.md)。
 

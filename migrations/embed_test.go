@@ -6,8 +6,8 @@ func TestOrderedInitialMigration(t *testing.T) {
 	// 1. 核对首期清单引用的版本、文件、SQL 和已应用摘要。
 	const initialChecksum = "627a990d6b3e5cf77b3e01ff468806cfbb77da42a96bb46f0162cfedc0a4cfc7"
 	catalog := Ordered()
-	if len(catalog) < 2 {
-		t.Fatal("迁移清单缺少版本 1 或版本 2")
+	if len(catalog) < 3 {
+		t.Fatal("迁移清单缺少版本 1、2 或 3")
 	}
 	initial := catalog[0]
 	checksum := initial.Checksum()
@@ -19,6 +19,11 @@ func TestOrderedInitialMigration(t *testing.T) {
 	parts := catalog[1]
 	if parts.Version != 2 || parts.Name != "000002_upload_parts.up.sql" || parts.Checksum() != partsChecksum {
 		t.Fatalf("分片迁移的版本、文件或摘要有误，实际为 %d %s %s", parts.Version, parts.Name, parts.Checksum())
+	}
+	const syncChecksum = "4ba46ef19b0ed5c206da41121634250a23cd46e6ac239762d182fc4a7d9f2c0d"
+	syncLog := catalog[2]
+	if syncLog.Version != 3 || syncLog.Name != "000003_sync_log.up.sql" || syncLog.Checksum() != syncChecksum {
+		t.Fatalf("同步迁移的版本、文件或摘要有误，实际为 %d %s %s", syncLog.Version, syncLog.Name, syncLog.Checksum())
 	}
 
 	// 2. 确认版本严格递增，修改本次返回的切片后仍可读到原始定义。
