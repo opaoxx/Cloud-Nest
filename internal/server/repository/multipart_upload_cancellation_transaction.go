@@ -38,7 +38,7 @@ func (store *Store) WithMultipartUploadCancellationTransaction(
 		if task.StagedObjectID != candidate.StagedObjectID || task.LeaseVersion != candidate.LeaseVersion {
 			return domain.ErrUploadTaskBusy
 		}
-		if !validPendingMultipartUploadCancellationTask(task) {
+		if !validPendingMultipartUploadCleanupTask(task) {
 			return domain.ErrInvalidUploadTaskData
 		}
 		var now time.Time
@@ -65,7 +65,7 @@ func (store *Store) WithMultipartUploadCancellationTransaction(
 	})
 }
 
-func validPendingMultipartUploadCancellationTask(task *domain.UploadTask) bool {
+func validPendingMultipartUploadCleanupTask(task *domain.UploadTask) bool {
 	return validMultipartUploadCleanupDeclaration(task) &&
 		task.PublishedObjectID == nil && task.ResultEntryID == nil && task.ResolvedName == nil && task.CompletedAt == nil
 }

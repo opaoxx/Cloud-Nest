@@ -12,6 +12,18 @@ import (
 )
 
 func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
+	testFindMultipartUploadCleanupTarget(t, domain.UploadStatusCancelling, (*Store).FindMultipartUploadCancellationTarget)
+}
+
+func TestFindMultipartUploadExpirationTargetIntegration(t *testing.T) {
+	testFindMultipartUploadCleanupTarget(t, domain.UploadStatusExpiring, (*Store).FindMultipartUploadExpirationTarget)
+}
+
+func testFindMultipartUploadCleanupTarget(
+	t *testing.T, pendingStatus domain.UploadStatus,
+	findTarget func(*Store, context.Context, *domain.UploadTask, string, string) (*domain.MultipartUploadCleanupTarget, error),
+) {
+	t.Helper()
 	ctx, pool, store := prepareMultipartCompletionDatabase(t)
 	const provider, bucket, key = "local_minio", "fixture-bucket", "fixture/abort +%.bin"
 	execute := func(t *testing.T, statement string, arguments ...any) {
@@ -23,10 +35,22 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 	reset := func(t *testing.T) {
 		t.Helper()
 		resetMultipartUploadCancellationFixture(t, ctx, pool)
+		execute(t, "UPDATE upload_tasks SET status=? WHERE id=19", pendingStatus)
 		execute(t, "UPDATE stored_objects SET provider=?,bucket=?,object_key=? WHERE id=23", provider, bucket, key)
 	}
 	claim := func(t *testing.T) *domain.UploadTask {
 		t.Helper()
+		if pendingStatus == domain.UploadStatusExpiring {
+			candidates, err := store.ListMultipartUploadExpirationCandidates(ctx, 1)
+			if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
+				t.Fatal("未取得原任务的到期候选", candidates, err)
+			}
+			claimed, err := store.ClaimMultipartUploadExpirationLease(ctx, candidates[0], "fixture-expiration-worker")
+			if err != nil {
+				t.Fatal("未领取原任务的到期租约", err)
+			}
+			return claimed
+		}
 		candidates, err := store.ListMultipartUploadCancellationCandidates(ctx, 1)
 		if err != nil || len(candidates) != 1 || candidates[0].TaskID != 19 {
 			t.Fatal("未取得原任务的取消候选", candidates, err)
@@ -64,7 +88,7 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 		reset(t)
 		claimed := claim(t)
 		before := read(t)
-		target, err := store.FindMultipartUploadCancellationTarget(ctx, claimed, provider, bucket)
+		target, err := findTarget(store, ctx, claimed, provider, bucket)
 		if err != nil || target == nil || target.ObjectKey != key || target.UploadID == nil || *target.UploadID != multipartCancellationFixtureSession {
 			t.Fatal("未收到原样保存的对象键和会话", err)
 		}
@@ -80,7 +104,7 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 		execute(t, "UPDATE users SET status='DISABLED' WHERE id=7")
 		claimed := claim(t)
 		before := read(t)
-		target, err := store.FindMultipartUploadCancellationTarget(ctx, claimed, provider, bucket)
+		target, err := findTarget(store, ctx, claimed, provider, bucket)
 		if err != nil || target == nil || target.ObjectKey != key || target.UploadID != nil || !reflect.DeepEqual(before, read(t)) {
 			t.Fatal("已受理的原到期任务未按原未绑定目标返回", err)
 		}
@@ -97,13 +121,19 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 		execute(t, "UPDATE stored_objects SET status='VERIFYING',storage_etag='fixture-etag',storage_version_id='fixture-version' WHERE id=23")
 		claimed := claim(t)
 		before := read(t)
+		if pendingStatus == domain.UploadStatusExpiring {
+			execute(t, "SET timestamp = ?", claimed.ExpiresAt.Add(-time.Second).Unix())
+			if target, err := findTarget(store, ctx, claimed, provider, bucket); target != nil || !errors.Is(err, domain.ErrUploadTaskNotReady) {
+				t.Fatal("数据库时钟早于原任务到期时间时仍返回目标", err)
+			}
+		}
 		execute(t, "SET timestamp = ?", claimed.LeaseUntil.Add(-time.Second).Unix())
-		target, err := store.FindMultipartUploadCancellationTarget(ctx, claimed, provider, bucket)
+		target, err := findTarget(store, ctx, claimed, provider, bucket)
 		if err != nil || target == nil || target.ObjectKey != key || target.UploadID == nil || *target.UploadID != multipartCancellationFixtureSession {
-			t.Fatal("有效取消租约应能读取待校验对象", err)
+			t.Fatal("有效收尾租约应能读取待校验对象", err)
 		}
 		execute(t, "SET timestamp = ?", claimed.LeaseUntil.Unix())
-		if target, err := store.FindMultipartUploadCancellationTarget(ctx, claimed, provider, bucket); target != nil ||
+		if target, err := findTarget(store, ctx, claimed, provider, bucket); target != nil ||
 			!errors.Is(err, domain.ErrUploadTaskBusy) || !reflect.DeepEqual(before, read(t)) {
 			t.Fatal("租约到期瞬间仍返回了目标或改动了数据库", err)
 		}
@@ -111,6 +141,10 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 	})
 
 	// 3. 写入仅由隔离夹具执行，生产查询拒绝已失配的快照且保持原数据。
+	otherPendingStatus := domain.UploadStatusExpiring
+	if pendingStatus == domain.UploadStatusExpiring {
+		otherPendingStatus = domain.UploadStatusCancelling
+	}
 	for _, scenario := range []struct {
 		name, change string
 		want         error
@@ -121,7 +155,7 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 		{"session changed to null", "UPDATE upload_tasks SET storage_upload_id=NULL WHERE id=19", domain.ErrUploadTaskBusy},
 		{"retry postponed", "UPDATE upload_tasks SET next_attempt_at=UTC_TIMESTAMP(6)+INTERVAL 1 MINUTE WHERE id=19", domain.ErrUploadTaskBusy},
 		{"object binding changed", "UPDATE upload_tasks SET staged_object_id=29 WHERE id=19", domain.ErrUploadTaskBusy},
-		{"task no longer cancelling", "UPDATE upload_tasks SET status='EXPIRING' WHERE id=19", domain.ErrUploadTaskNotReady},
+		{"different cleanup phase", "UPDATE upload_tasks SET status='" + string(otherPendingStatus) + "' WHERE id=19", domain.ErrUploadTaskNotReady},
 		{"reservation incomplete", "UPDATE upload_tasks SET reserved_bytes=reserved_bytes-1 WHERE id=19", domain.ErrInvalidUploadTaskData},
 		{"object size changed", "UPDATE stored_objects SET file_size=file_size+1 WHERE id=23", domain.ErrInvalidStoredObjectData},
 		{"object no longer staging or verifying", "UPDATE stored_objects SET status='READY',verified_sha256=UNHEX(REPEAT('ac',32)),verified_at=UTC_TIMESTAMP(6) WHERE id=23", domain.ErrInvalidStoredObjectData},
@@ -133,7 +167,7 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 			claimed := claim(t)
 			execute(t, scenario.change)
 			before := read(t)
-			if target, err := store.FindMultipartUploadCancellationTarget(ctx, claimed, provider, bucket); target != nil ||
+			if target, err := findTarget(store, ctx, claimed, provider, bucket); target != nil ||
 				!errors.Is(err, scenario.want) || !reflect.DeepEqual(before, read(t)) {
 				t.Fatal("拒绝目标的结果或只读边界不符", scenario.want, err)
 			}
@@ -146,14 +180,28 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 		before := read(t)
 		other := *claimed
 		other.UserID = 8
-		if target, err := store.FindMultipartUploadCancellationTarget(ctx, &other, provider, bucket); target != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
+		if target, err := findTarget(store, ctx, &other, provider, bucket); target != nil || !errors.Is(err, domain.ErrUploadTaskNotFound) {
 			t.Fatal("其他账号取得了原对象定位", err)
 		}
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
-		if target, err := store.FindMultipartUploadCancellationTarget(canceled, claimed, provider, bucket); target != nil ||
+		if target, err := findTarget(store, canceled, claimed, provider, bucket); target != nil ||
 			!errors.Is(err, context.Canceled) || !reflect.DeepEqual(before, read(t)) {
 			t.Fatal("取消未正常返回或改变了原数据", err)
+		}
+	})
+	t.Run("reject transaction based lookup", func(t *testing.T) {
+		reset(t)
+		claimed := claim(t)
+		before := read(t)
+		err := store.WithLoginUserTransaction(ctx, 7, func(txContext context.Context, txStore *Store) error {
+			if target, err := findTarget(txStore, txContext, claimed, provider, bucket); target != nil || err == nil {
+				t.Error("收尾目标查询接受了可能读取旧快照的事务 Store", err)
+			}
+			return nil
+		})
+		if err != nil || !reflect.DeepEqual(before, read(t)) {
+			t.Fatal("拒绝事务内目标查询时改变了数据库", err)
 		}
 	})
 
@@ -162,7 +210,7 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 		claimed := claim(t)
 		before := read(t)
 		changed := false
-		const callback = "fixture:replace_cancellation_lease_after_object_read"
+		const callback = "fixture:replace_cleanup_lease_after_object_read"
 		queries := store.database.Callback().Query()
 		if err := queries.After("gorm:query").Register(callback, func(query *gorm.DB) {
 			if query.Error == nil && query.Statement.Table == "stored_objects" && !changed {
@@ -177,7 +225,7 @@ func TestFindMultipartUploadCancellationTargetIntegration(t *testing.T) {
 				t.Error(err)
 			}
 		})
-		target, err := store.FindMultipartUploadCancellationTarget(ctx, claimed, provider, bucket)
+		target, err := findTarget(store, ctx, claimed, provider, bucket)
 		before.task.LeaseVersion++
 		if !changed || target != nil || !errors.Is(err, domain.ErrUploadTaskBusy) || !reflect.DeepEqual(before, read(t)) {
 			t.Fatal("读取对象后未发现丢失租约，或产生了额外写入", err)

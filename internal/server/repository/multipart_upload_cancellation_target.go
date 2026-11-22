@@ -16,19 +16,33 @@ import (
 func (store *Store) FindMultipartUploadCancellationTarget(
 	ctx context.Context, claimed *domain.UploadTask, provider, bucket string,
 ) (*domain.MultipartUploadCancellationTarget, error) {
-	// 1. 在事务外读取当前任务，使用同条查询的数据库时间核对取消租约。
+	return store.findMultipartUploadCleanupTarget(ctx, claimed, provider, bucket, domain.UploadStatusCancelling)
+}
+
+// FindMultipartUploadExpirationTarget 按已提交的到期收尾租约只读查询原存储目标。
+// provider 和 bucket 来自实际存储客户端配置。后续写回仍须在事务中复核任务和存储绑定。
+func (store *Store) FindMultipartUploadExpirationTarget(
+	ctx context.Context, claimed *domain.UploadTask, provider, bucket string,
+) (*domain.MultipartUploadCleanupTarget, error) {
+	return store.findMultipartUploadCleanupTarget(ctx, claimed, provider, bucket, domain.UploadStatusExpiring)
+}
+
+func (store *Store) findMultipartUploadCleanupTarget(
+	ctx context.Context, claimed *domain.UploadTask, provider, bucket string, pendingStatus domain.UploadStatus,
+) (*domain.MultipartUploadCleanupTarget, error) {
+	// 1. 在事务外读取当前任务，使用同条查询的数据库时间核对收尾租约。
 	if store == nil || store.database == nil || ctx == nil {
-		return nil, fmt.Errorf("查询分片取消目标需要数据入口和上下文")
+		return nil, fmt.Errorf("查询分片收尾目标需要数据入口和上下文")
 	}
 	if _, nested := store.database.Statement.ConnPool.(gorm.TxCommitter); nested {
-		return nil, fmt.Errorf("分片取消目标需要在事务外读取最新租约")
+		return nil, fmt.Errorf("分片收尾目标需要在事务外读取最新租约")
 	}
-	if !validMultipartUploadCancellationClaim(claimed) {
+	if !validMultipartUploadCleanupClaim(claimed, pendingStatus) {
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 	queryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	current, err := store.readMultipartUploadCancellationLease(queryContext, claimed)
+	current, err := store.readMultipartUploadCleanupLease(queryContext, claimed, pendingStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -45,33 +59,45 @@ func (store *Store) FindMultipartUploadCancellationTarget(
 	}
 
 	// 3. 再读任务确认租约仍有效，返回原对象键和可空会话。
-	rechecked, err := store.readMultipartUploadCancellationLease(queryContext, claimed)
+	rechecked, err := store.readMultipartUploadCleanupLease(queryContext, claimed, pendingStatus)
 	if err != nil {
 		return nil, err
 	}
-	return &domain.MultipartUploadCancellationTarget{ObjectKey: object.ObjectKey, UploadID: rechecked.StorageUploadID}, nil
+	return &domain.MultipartUploadCleanupTarget{ObjectKey: object.ObjectKey, UploadID: rechecked.StorageUploadID}, nil
 }
 
 func (store *Store) readMultipartUploadCancellationLease(ctx context.Context, claimed *domain.UploadTask) (*domain.UploadTask, error) {
+	return store.readMultipartUploadCleanupLease(ctx, claimed, domain.UploadStatusCancelling)
+}
+
+func (store *Store) readMultipartUploadCleanupLease(ctx context.Context, claimed *domain.UploadTask, pendingStatus domain.UploadStatus) (*domain.UploadTask, error) {
 	current, databaseTime, err := store.findUserUploadTaskWithDatabaseTime(ctx, claimed.UserID, claimed.ID)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateMultipartUploadCancellationLease(current, claimed, databaseTime); err != nil {
+	if err := validateMultipartUploadCleanupLease(current, claimed, databaseTime, pendingStatus); err != nil {
 		return nil, err
 	}
 	return current, nil
 }
 
 func validMultipartUploadCancellationClaim(claimed *domain.UploadTask) bool {
+	return validMultipartUploadCleanupClaim(claimed, domain.UploadStatusCancelling)
+}
+
+func validMultipartUploadCleanupClaim(claimed *domain.UploadTask, pendingStatus domain.UploadStatus) bool {
 	return claimed != nil && claimed.ID != 0 && claimed.UserID != 0 && claimed.StagedObjectID != 0 &&
-		claimed.Status == domain.UploadStatusCancelling && claimed.UploadMode == "MULTIPART" &&
+		claimed.Status == pendingStatus && claimed.UploadMode == "MULTIPART" &&
 		claimed.LeaseOwner != nil && *claimed.LeaseOwner != "" && claimed.LeaseUntil != nil &&
-		claimed.LeaseVersion != 0 && validPendingMultipartUploadCancellationTask(claimed)
+		claimed.LeaseVersion != 0 && validPendingMultipartUploadCleanupTask(claimed)
 }
 
 func validateMultipartUploadCancellationLease(current, claimed *domain.UploadTask, databaseTime time.Time) error {
-	if current.Status != domain.UploadStatusCancelling || current.UploadMode != "MULTIPART" {
+	return validateMultipartUploadCleanupLease(current, claimed, databaseTime, domain.UploadStatusCancelling)
+}
+
+func validateMultipartUploadCleanupLease(current, claimed *domain.UploadTask, databaseTime time.Time, pendingStatus domain.UploadStatus) error {
+	if current.Status != pendingStatus || current.UploadMode != "MULTIPART" {
 		return domain.ErrUploadTaskNotReady
 	}
 	if current.StagedObjectID != claimed.StagedObjectID || current.LeaseVersion != claimed.LeaseVersion ||
@@ -81,8 +107,11 @@ func validateMultipartUploadCancellationLease(current, claimed *domain.UploadTas
 		!sameUploadStorageText(current.StorageUploadID, claimed.StorageUploadID) {
 		return domain.ErrUploadTaskBusy
 	}
-	if !validPendingMultipartUploadCancellationTask(current) || !sameMultipartUploadDeclaration(claimed, current) {
+	if !validPendingMultipartUploadCleanupTask(current) || !sameMultipartUploadDeclaration(claimed, current) {
 		return domain.ErrInvalidUploadTaskData
+	}
+	if pendingStatus == domain.UploadStatusExpiring && databaseTime.Before(current.ExpiresAt) {
+		return domain.ErrUploadTaskNotReady
 	}
 	return nil
 }
