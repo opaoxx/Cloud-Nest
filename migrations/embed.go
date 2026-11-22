@@ -18,6 +18,9 @@ var uploadPartsSQL string
 //go:embed 000003_sync_log.up.sql
 var syncLogSQL string
 
+//go:embed 000004_file_versions.up.sql
+var fileVersionsSQL string
+
 // Migration 描述一份由程序内嵌的已评审迁移文件。
 type Migration struct {
 	Version uint64
@@ -36,5 +39,6 @@ func Ordered() []Migration {
 		{Version: 1, Name: "000001_initial.up.sql", SQL: InitialSQL},
 		{Version: 2, Name: "000002_upload_parts.up.sql", SQL: uploadPartsSQL},
 		{Version: 3, Name: "000003_sync_log.up.sql", SQL: syncLogSQL},
+		{Version: 4, Name: "000004_file_versions.up.sql", SQL: fileVersionsSQL},
 	}
 }

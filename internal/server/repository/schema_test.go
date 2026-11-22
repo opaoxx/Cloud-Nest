@@ -68,6 +68,7 @@ func TestCheckSchemaIntegration(t *testing.T) {
 	catalog := migrations.Ordered()
 	versionTwo := migrationRecord{version: 2, checksum: catalog[1].Checksum()}
 	versionThree := migrationRecord{version: 3, checksum: catalog[2].Checksum()}
+	versionFour := migrationRecord{version: 4, checksum: catalog[3].Checksum()}
 	testCases := []struct {
 		name      string
 		noTable   bool
@@ -76,18 +77,21 @@ func TestCheckSchemaIntegration(t *testing.T) {
 	}{
 		{name: "missing table", noTable: true, wantError: "缺少 schema_migrations"},
 		{name: "empty ledger", wantError: "记录缺失"},
-		{name: "valid schema", records: []migrationRecord{validRecord, versionTwo, versionThree}},
+		{name: "valid schema", records: []migrationRecord{validRecord, versionTwo, versionThree, versionFour}},
 		{name: "missing second migration", records: []migrationRecord{validRecord}, wantError: "迁移版本 2 的记录缺失"},
 		{name: "missing sync migration", records: []migrationRecord{validRecord, versionTwo}, wantError: "迁移版本 3 的记录缺失"},
+		{name: "missing file versions migration", records: []migrationRecord{validRecord, versionTwo, versionThree}, wantError: "迁移版本 4 的记录缺失"},
 		{name: "older version", records: []migrationRecord{{version: 0, checksum: validChecksum}}, wantError: "迁移版本 0"},
 		{name: "missing first migration", records: []migrationRecord{versionTwo}, wantError: "迁移版本 2"},
-		{name: "extra future version", records: []migrationRecord{validRecord, versionTwo, versionThree, {version: 4, checksum: validChecksum}}, wantError: "迁移版本 4"},
+		{name: "extra future version", records: []migrationRecord{validRecord, versionTwo, versionThree, versionFour, {version: 5, checksum: validChecksum}}, wantError: "迁移版本 5"},
 		{name: "dirty migration", records: []migrationRecord{{version: 1, checksum: validChecksum, dirty: true}}, wantError: "dirty=true"},
 		{name: "checksum mismatch", records: []migrationRecord{{version: 1, checksum: strings.Repeat("0", 64)}}, wantError: "摘要"},
 		{name: "dirty second migration", records: []migrationRecord{validRecord, {version: 2, checksum: versionTwo.checksum, dirty: true}}, wantError: "迁移版本 2 的 dirty=true"},
 		{name: "second checksum mismatch", records: []migrationRecord{validRecord, {version: 2, checksum: strings.Repeat("0", 64)}}, wantError: "迁移版本 2 的摘要"},
 		{name: "dirty sync migration", records: []migrationRecord{validRecord, versionTwo, {version: 3, checksum: versionThree.checksum, dirty: true}}, wantError: "迁移版本 3 的 dirty=true"},
 		{name: "sync checksum mismatch", records: []migrationRecord{validRecord, versionTwo, {version: 3, checksum: strings.Repeat("0", 64)}}, wantError: "迁移版本 3 的摘要"},
+		{name: "dirty file versions migration", records: []migrationRecord{validRecord, versionTwo, versionThree, {version: 4, checksum: versionFour.checksum, dirty: true}}, wantError: "迁移版本 4 的 dirty=true"},
+		{name: "file versions checksum mismatch", records: []migrationRecord{validRecord, versionTwo, versionThree, {version: 4, checksum: strings.Repeat("0", 64)}}, wantError: "迁移版本 4 的摘要"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

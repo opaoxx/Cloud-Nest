@@ -12,7 +12,7 @@
 go run ./cmd/database -database cloudnest -seed
 ~~~
 
-当前迁移清单包含版本 1～3。版本 2 新增 `upload_parts`，版本 3 新增 `change_events` 和 `sync_devices`。迁移命令按顺序补齐缺少的版本，重复执行会核对摘要并复用已有账号与根目录。配置、隔离验证和异常处理参见 [迁移说明](migrations/README.md)。
+当前迁移清单包含版本 1～4。版本 2 新增 `upload_parts`，版本 3 新增 `change_events` 和 `sync_devices`，版本 4 新增 `file_versions`。迁移命令按顺序补齐缺少的版本，重复执行会核对摘要并复用已有账号与根目录。配置、隔离验证和异常处理参见 [迁移说明](migrations/README.md)。
 
 阶段 1 的 MySQL 与 MinIO 停写、导出和新环境核对步骤见 [隔离备份恢复手册](docs/隔离备份恢复手册.md)。
 
@@ -52,7 +52,7 @@ CLOUDNEST_ALLOWED_ORIGINS 配置逗号分隔的前端来源，未设置时为 ht
 
 启动 HTTP 前会在最多 5 秒内检查 MySQL 连接，失败记录原因并退出。因此运行服务前需要先启动本项目 MySQL；/ping 保留原有响应，不承担数据库持续健康检查。连接池及只读集成验证见 [第 004 步学习记录](docs/开发学习记录.md#第-004-步建立-mysql-连接池并检查连通性)。
 
-连接通过后，还会在最多 5 秒内核对 schema_migrations 的版本、dirty 状态和迁移 SQL 摘要。当前要求版本 1 和 2 的完整记录。检查失败则停止启动，迁移仍由独立命令执行。复验方法见 [第 561 步学习记录](docs/开发学习记录.md#第-561-步新增上传分片回执迁移)。
+连接通过后，还会在最多 5 秒内核对 schema_migrations 的版本、dirty 状态和迁移 SQL 摘要。当前要求版本 1～4 的完整记录。检查失败则停止启动，迁移仍由独立命令执行。复验方法见 [第 808 步学习记录](docs/开发学习记录.md#第-808-步新增历史版本表迁移)。
 
 启动成功后，GET /health/live 无需登录，返回 {"status":"ok"}，表示 HTTP 服务能够响应。这个请求不检查数据库或存储的持续可用性；接口契约见 [OpenAPI](api/openapi.yaml)，路由和处理函数的调用过程见 [第 006 步学习记录](docs/开发学习记录.md#第-006-步提供存活检查并拆分-http-路由)。
 
