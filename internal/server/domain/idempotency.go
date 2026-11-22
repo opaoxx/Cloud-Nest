@@ -34,6 +34,9 @@ const CreateUploadReplacementOperation = "v1.entries.content-replacement.create"
 // FileReuseOperation 是秒传请求摘要与幂等记录共用的版本化操作名。
 const FileReuseOperation = "v1.files.reuse"
 
+// CreateSyncSnapshotOperation 是同步快照创建摘要与幂等记录共用的版本化操作名。
+const CreateSyncSnapshotOperation = "v1.sync.snapshots.create"
+
 // ErrIdempotencyRecordNotFound 表示指定用户、操作和键的记录不存在。
 var ErrIdempotencyRecordNotFound = errors.New("幂等记录不存在")
 
