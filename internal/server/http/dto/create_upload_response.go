@@ -8,7 +8,7 @@ import (
 
 // CreateUploadData 保存上传创建时可交付和写入幂等记录的稳定结果。
 type CreateUploadData struct {
-	// Task 是创建时的十三字段公开任务快照。
+	// Task 是创建时的公开任务快照，替换任务同时携带原目标绑定。
 	Task UploadTaskData `json:"task"`
 	// UploadMode 是服务端确定的首期 SINGLE 上传方式。
 	UploadMode string `json:"upload_mode"`

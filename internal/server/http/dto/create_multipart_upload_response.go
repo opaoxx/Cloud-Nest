@@ -30,7 +30,7 @@ func NewCreateMultipartUploadData(result *domain.UploadTask) (*CreateMultipartUp
 		return nil, domain.ErrInvalidUploadTaskData
 	}
 
-	// 2. 复用十三字段任务转换，再复制公开计划和同一个截止时间。
+	// 2. 复用任务快照转换，再复制公开计划和同一个截止时间。
 	task, err := NewUploadTaskData(result)
 	if err != nil {
 		return nil, err
@@ -43,8 +43,12 @@ func NewCreateMultipartUploadData(result *domain.UploadTask) (*CreateMultipartUp
 
 // RestoreCreateMultipartUploadData 核对幂等记录中的 Multipart 创建快照及其固定计划。
 func RestoreCreateMultipartUploadData(body []byte) (*CreateMultipartUploadData, error) {
+	return restoreCreateMultipartUploadData(body, false)
+}
+
+func restoreCreateMultipartUploadData(body []byte, requireReplacement bool) (*CreateMultipartUploadData, error) {
 	// 1. 核对外层五个字段、公开任务字段和初始化空值。
-	if !hasCreateUploadSnapshotFields(body, "task", "upload_mode", "part_size_bytes", "part_count", "expires_at") {
+	if !hasCreateUploadSnapshotFields(body, requireReplacement, "task", "upload_mode", "part_size_bytes", "part_count", "expires_at") {
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}
 

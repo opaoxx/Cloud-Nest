@@ -12,8 +12,12 @@ import (
 // RestoreCreateUploadData 恢复并校验幂等记录中的上传创建快照。
 // 结果独立持有公开数据，异常统一返回幂等记录数据错误。
 func RestoreCreateUploadData(body []byte) (*CreateUploadData, error) {
+	return restoreCreateUploadData(body, false)
+}
+
+func restoreCreateUploadData(body []byte, requireReplacement bool) (*CreateUploadData, error) {
 	// 1. 检查外层字段、公开任务字段和初始化空值。
-	if !hasCreateUploadSnapshotFields(body, "task", "upload_mode", "content_path", "expires_at") {
+	if !hasCreateUploadSnapshotFields(body, requireReplacement, "task", "upload_mode", "content_path", "expires_at") {
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}
 
@@ -39,10 +43,21 @@ func RestoreCreateUploadData(body []byte) (*CreateUploadData, error) {
 }
 
 // hasCreateUploadSnapshotFields 核对两种模式共用的初始任务结构和各自外层字段。
-func hasCreateUploadSnapshotFields(body []byte, requiredFields ...string) bool {
+func hasCreateUploadSnapshotFields(body []byte, requireReplacement bool, requiredFields ...string) bool {
 	// 1. 检查 JSON 编码、外层字段和必填值。
-	var payload map[string]json.RawMessage
-	if !utf8.Valid(body) || json.Unmarshal(body, &payload) != nil || len(payload) != len(requiredFields) {
+	if !utf8.Valid(body) {
+		return false
+	}
+	readObject := func(raw []byte) (map[string]json.RawMessage, bool) {
+		var fields map[string]json.RawMessage
+		err := json.Unmarshal(raw, &fields)
+		return fields, err == nil
+	}
+	if requireReplacement {
+		readObject = readUniqueUploadSnapshotObject
+	}
+	payload, valid := readObject(body)
+	if !valid || len(payload) != len(requiredFields) {
 		return false
 	}
 	for _, name := range requiredFields {
@@ -53,8 +68,12 @@ func hasCreateUploadSnapshotFields(body []byte, requiredFields ...string) bool {
 	}
 
 	// 2. 检查任务快照字段及四项初始空值。
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload["task"], &fields) != nil || len(fields) != 13 {
+	fields, valid := readObject(payload["task"])
+	expectedCount := 13
+	if requireReplacement {
+		expectedCount++
+	}
+	if !valid || len(fields) != expectedCount {
 		return false
 	}
 	for _, name := range []string{
@@ -78,7 +97,8 @@ func hasCreateUploadSnapshotFields(body []byte, requiredFields ...string) bool {
 		}
 	}
 
-	return true
+	// 3. 替换快照另含原目标绑定及两个显式的空结果。
+	return !requireReplacement || validCreateUploadReplacementBinding(fields["replacement"])
 }
 
 func normalizeCreateUploadSnapshotTimes(task *UploadTaskData, snapshotExpiresAt *time.Time) bool {
