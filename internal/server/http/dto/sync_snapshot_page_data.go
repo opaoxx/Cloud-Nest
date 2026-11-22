@@ -25,6 +25,12 @@ type SyncSnapshotPageData struct {
 	BaselineToken *string `json:"baseline_token"`
 }
 
+// SyncSnapshotPageResponse 将快照公开页面与当次请求 ID 一起交付。
+type SyncSnapshotPageResponse struct {
+	Data      SyncSnapshotPageData `json:"data"`
+	RequestID string               `json:"request_id"`
+}
+
 // NewSyncSnapshotPageData 将已签发的页面结果转换为 OpenAPI 约定的公开数据。
 func NewSyncSnapshotPageData(result *domain.SyncSnapshotPageResult) (*SyncSnapshotPageData, error) {
 	// 1. 核对页头、到期时间和互斥的凭据字段。
