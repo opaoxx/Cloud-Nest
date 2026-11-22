@@ -62,24 +62,52 @@ func (capacity *SyncSnapshotCapacity) ReserveBuild(ctx context.Context) (*SyncSn
 
 // Complete 将构建预留转为实际 JSON 大小，本次槽位继续保留到 Release。
 func (reservation *SyncSnapshotReservation) Complete(sizeBytes int) error {
-	// 1. 校验实际数组大小，空数组至少有两个字节。
-	if reservation == nil || reservation.state == nil || sizeBytes < len("[]") {
-		return fmt.Errorf("结算同步快照需要有效预留和 JSON 数组大小")
+	// 1. 核对凭据并锁定所属预算。
+	if reservation == nil || reservation.state == nil {
+		return fmt.Errorf("结算同步快照需要有效预留")
+	}
+	state := reservation.state
+	state.capacity.mutex.Lock()
+	defer state.capacity.mutex.Unlock()
+
+	// 2. 结算实际数组大小，保留槽位。
+	return state.completeLocked(sizeBytes)
+}
+
+// retainBuild 结算实际容量，并把释放权转给缓存。原凭据及其副本随即失效。
+func (capacity *SyncSnapshotCapacity) retainBuild(reservation *SyncSnapshotReservation, sizeBytes int) (*SyncSnapshotReservation, error) {
+	// 1. 核对预留来自同一容量实例，在锁内结算。
+	if reservation == nil || reservation.state == nil || reservation.state.capacity != capacity {
+		return nil, fmt.Errorf("同步快照预留与缓存容量不匹配")
+	}
+	capacity.mutex.Lock()
+	defer capacity.mutex.Unlock()
+	state := reservation.state
+	if err := state.completeLocked(sizeBytes); err != nil {
+		return nil, err
+	}
+
+	// 2. 转移已结算占用，原凭据的重复释放不会影响缓存持有的槽位。
+	retained := &SyncSnapshotReservation{state: &syncSnapshotReservationState{capacity: capacity, sizeBytes: state.sizeBytes}}
+	state.sizeBytes = 0
+	return retained, nil
+}
+
+func (state *syncSnapshotReservationState) completeLocked(sizeBytes int) error {
+	// 1. 校验实际数组大小和当前构建状态。
+	if sizeBytes < len("[]") {
+		return fmt.Errorf("结算同步快照需要有效 JSON 数组大小")
 	}
 	if sizeBytes > domain.MaxSyncSnapshotBytes {
 		return domain.ErrSyncSnapshotTooLarge
 	}
-
-	// 2. 在锁内复核仍在构建，归还构建名额和多预留的字节数。
-	state := reservation.state
-	capacity := state.capacity
-	capacity.mutex.Lock()
-	defer capacity.mutex.Unlock()
 	if !state.building {
 		return fmt.Errorf("同步快照预留已结算或释放")
 	}
-	capacity.activeBuilds--
-	capacity.usedBytes -= state.sizeBytes - sizeBytes
+
+	// 2. 归还构建名额和多预留的字节数。
+	state.capacity.activeBuilds--
+	state.capacity.usedBytes -= state.sizeBytes - sizeBytes
 	state.building = false
 	state.sizeBytes = sizeBytes
 	return nil
