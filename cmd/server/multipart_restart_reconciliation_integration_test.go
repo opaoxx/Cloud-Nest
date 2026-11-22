@@ -70,7 +70,8 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
-		if err := core.AbortMultipartUpload(cleanup, fixture.bucket.name, objectKey, storageUploadID); err != nil {
+		if err := core.AbortMultipartUpload(cleanup, fixture.bucket.name, objectKey, storageUploadID); err != nil &&
+			minio.ToErrorResponse(err).Code != "NoSuchUpload" {
 			t.Error("合成分片会话清理失败", minio.ToErrorResponse(err).Code)
 		}
 	})
@@ -164,7 +165,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 	}
 	offset := uint64(number-1) * afterRestartParts.PartSizeBytes
 	tailReceipt := uploadPart(restarted, number, resumedSource[offset:offset+tailSize])
-	readReceipts(restarted, firstReceipt, tailReceipt)
+	resumedParts := readReceipts(restarted, firstReceipt, tailReceipt)
 	var afterResume dto.UploadTaskResponse
 	restarted.request(t, ctx, http.MethodGet, taskPath, "", nil, http.StatusOK, &afterResume)
 	var afterProfile dto.UserProfileResponse
@@ -182,12 +183,57 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		boundSession != storageUploadID || completionRows != 0 || childEntries != 0 {
 		t.Fatal("分片会话变化，或意外生成完成快照或文件条目", err, completionRows, childEntries)
 	}
+	t.Logf("原任务 %d 只补传第 %d 片 %d B，ETag %s，SHA-256 %s；两片齐备，首片回执保持原值，已用 %d B，预占 %d B，完成回执与发布条目均为 0",
+		taskID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
+		afterProfile.Data.UsedBytes, afterProfile.Data.ReservedBytes)
+
+	// 6. 使用补传后查询的编号和 ETag 提交原任务，确认 202 交付已提交的完成意图。
+	firstPart, lastPart := resumedParts.Parts[0], resumedParts.Parts[1]
+	completeBody := fmt.Sprintf(`{"parts":[{"part_number":%d,"etag":%q},{"part_number":%d,"etag":%q}]}`,
+		firstPart.PartNumber, firstPart.ETag, lastPart.PartNumber, lastPart.ETag)
+	var accepted dto.UploadTaskResponse
+	restarted.request(t, ctx, http.MethodPost, taskPath+"/complete", "", strings.NewReader(completeBody), http.StatusAccepted, &accepted)
+	if accepted.RequestID == "" || accepted.Data.ID != readyTask.ID || accepted.Data.UploadMode != "MULTIPART" ||
+		accepted.Data.Status != "COMPLETING" || accepted.Data.SizeBytes != fileSize || !accepted.Data.ExpiresAt.Equal(readyTask.ExpiresAt) ||
+		accepted.Data.ResultEntryID != nil || accepted.Data.CompletedAt != nil {
+		t.Fatal("续传后的完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
+	}
+
+	// 7. 关停后从独立数据库连接读取冻结的回执，避免依赖合并 worker 的时序。
 	logs, err = stopRestarted()
 	if err != nil {
 		t.Fatal("重启实例停机失败", err)
 	}
 	verifyBackupSourceStopped(t, restarted.baseURL, logs)
-	t.Logf("原任务 %d 只补传第 %d 片 %d B，ETag %s，SHA-256 %s；两片齐备，首片回执保持原值，已用 %d B，预占 %d B，完成回执与发布条目均为 0",
-		taskID, tailReceipt.PartNumber, tailReceipt.SizeBytes, tailReceipt.ETag, tailReceipt.ChecksumSHA256,
-		afterProfile.Data.UsedBytes, afterProfile.Data.ReservedBytes)
+	rows, err := fixture.pool.QueryContext(ctx, `SELECT part_number,size,etag,checksum_algorithm,checksum_value,observed_at
+		FROM upload_parts WHERE task_id=? ORDER BY part_number`, taskID)
+	if err != nil {
+		t.Fatal("关停后读取本次完成快照失败", err)
+	}
+	defer rows.Close()
+	var firstObservedAt time.Time
+	for _, expected := range resumedParts.Parts {
+		if !rows.Next() {
+			t.Fatal("完成快照缺少预期分片", expected.PartNumber, rows.Err())
+		}
+		var persisted dto.UploadPartReceiptData
+		var algorithm string
+		var observedAt time.Time
+		if err := rows.Scan(&persisted.PartNumber, &persisted.SizeBytes, &persisted.ETag,
+			&algorithm, &persisted.ChecksumSHA256, &observedAt); err != nil {
+			t.Fatal("读取完成回执字段失败", err)
+		}
+		if firstObservedAt.IsZero() {
+			firstObservedAt = observedAt
+		}
+		if persisted != expected || algorithm != "SHA256" || !observedAt.Equal(firstObservedAt) ||
+			observedAt.Before(afterResume.Data.UpdatedAt) || observedAt.After(accepted.Data.UpdatedAt) {
+			t.Fatal("已保存回执与续传查询或本轮核对时间不一致", persisted, algorithm, observedAt)
+		}
+	}
+	if rows.Next() || rows.Err() != nil {
+		t.Fatal("完成快照包含额外分片或读取失败", rows.Err())
+	}
+	t.Logf("原任务 %d 返回 202 COMPLETING，关停后两条完成快照仍匹配，分片编号 1、2，字节数 %d、%d，共用核对时间 %s",
+		taskID, firstPart.SizeBytes, lastPart.SizeBytes, firstObservedAt.Format(time.RFC3339Nano))
 }
