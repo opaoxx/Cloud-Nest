@@ -19,7 +19,7 @@ func DecodePurgeEntryAcceptedData(body []byte) (*PurgeEntryAcceptedData, error) 
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}
-	fields, valid := readSnapshotStringFields(decoder, 3)
+	fields, valid := readSnapshotFields(decoder, 3, "")
 	if !valid {
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}

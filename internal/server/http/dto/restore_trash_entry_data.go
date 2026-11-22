@@ -13,7 +13,7 @@ var trashSnapshotTimePattern = regexp.MustCompile(`^[1-9][0-9]{3}-[0-9]{2}-[0-9]
 // RestoreTrashEntryData 校验并恢复幂等记录中的七字段回收快照。
 func RestoreTrashEntryData(body []byte) (*TrashEntryData, error) {
 	// 1. 检查外层对象，读取七个必填字符串。
-	fields, validFields := readEntrySnapshotFields(body, 7)
+	fields, validFields := readEntrySnapshotFields(body, 7, "")
 	if !validFields {
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}

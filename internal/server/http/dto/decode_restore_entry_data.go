@@ -5,7 +5,7 @@ import "github.com/opaoxx/cloud-nest/internal/server/domain"
 // DecodeRestoreEntryData 校验并解码已保存的六字段单项恢复快照。
 func DecodeRestoreEntryData(body []byte) (*RestoreEntryData, error) {
 	// 1. 读取唯一的 entry 对象，要求恰好六个非空字符串字段。
-	fields, validFields := readEntrySnapshotFields(body, 6)
+	fields, validFields := readEntrySnapshotFields(body, 6, "")
 	if !validFields {
 		return nil, domain.ErrInvalidIdempotencyRecordData
 	}

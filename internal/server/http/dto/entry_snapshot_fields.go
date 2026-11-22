@@ -7,13 +7,14 @@ import (
 	"unicode/utf8"
 )
 
-// readEntrySnapshotFields 从 entry 对象读取指定数量的字符串字段，键名由调用方校验。
-func readEntrySnapshotFields(body []byte, fieldCount int) (map[string]string, bool) {
+// readEntrySnapshotFields 从 entry 对象读取指定数量的字段，可指定一个 JSON 数字字段。
+func readEntrySnapshotFields(body []byte, fieldCount int, numberField string) (map[string]string, bool) {
 	// 1. 检查 UTF-8 与只有 entry 对象的外层。
 	if !utf8.Valid(body) {
 		return nil, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
 	for _, expected := range []json.Token{json.Delim('{'), "entry", json.Delim('{')} {
 		token, err := decoder.Token()
 		if err != nil || token != expected {
@@ -21,8 +22,8 @@ func readEntrySnapshotFields(body []byte, fieldCount int) (map[string]string, bo
 		}
 	}
 
-	// 2. 读取 entry 对象内的字符串字段。
-	fields, valid := readSnapshotStringFields(decoder, fieldCount)
+	// 2. 读取 entry 的字段，数字保留原始文本供调用方校验。
+	fields, valid := readSnapshotFields(decoder, fieldCount, numberField)
 	if !valid {
 		return nil, false
 	}
@@ -40,9 +41,9 @@ func readEntrySnapshotFields(body []byte, fieldCount int) (map[string]string, bo
 	return fields, true
 }
 
-// readSnapshotStringFields 读取已打开对象的非空字符串字段，闭合符由调用方读取。
-func readSnapshotStringFields(decoder *json.Decoder, fieldCount int) (map[string]string, bool) {
-	// 1. 允许字段调序，拒绝解码后重复的键以及非字符串值。
+// readSnapshotFields 读取已打开对象的非空标量字段，闭合符由调用方读取。
+func readSnapshotFields(decoder *json.Decoder, fieldCount int, numberField string) (map[string]string, bool) {
+	// 1. 允许字段调序，拒绝解码后重复的键以及不匹配的值类型。
 	fields := make(map[string]string, fieldCount)
 	for decoder.More() {
 		nameToken, nameError := decoder.Token()
@@ -51,8 +52,19 @@ func readSnapshotStringFields(decoder *json.Decoder, fieldCount int) (map[string
 			return nil, false
 		}
 		valueToken, valueError := decoder.Token()
+		if valueError != nil {
+			return nil, false
+		}
+		if numberField != "" && name == numberField {
+			number, validNumber := valueToken.(json.Number)
+			if !validNumber {
+				return nil, false
+			}
+			fields[name] = number.String()
+			continue
+		}
 		value, validValue := valueToken.(string)
-		if valueError != nil || !validValue || value == "" {
+		if !validValue || value == "" {
 			return nil, false
 		}
 		fields[name] = value
