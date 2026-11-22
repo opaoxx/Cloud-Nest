@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -200,7 +202,7 @@ func TestServerMultipartRestartReconciliationIntegration(t *testing.T) {
 		t.Fatal("续传后的完成请求未交付原任务的 COMPLETING 快照", accepted.Data)
 	}
 
-	// 7. 等待正式后台任务合并、校验和发布，核对文件及配额。
+	// 7. 等待正式后台任务合并、校验和发布，核对文件与配额并验证下载。
 	completed := awaitResumedMultipartPublication(t, ctx, restarted, taskPath)
 	if completed.ID != accepted.Data.ID || completed.UploadMode != "MULTIPART" || completed.ParentID != readyTask.ParentID ||
 		completed.ResultEntryID == nil || completed.CompletedAt == nil || completed.ResolvedName == nil ||
@@ -289,17 +291,17 @@ func verifyResumedMultipartPublication(t *testing.T, ctx context.Context, fixtur
 
 	// 2. 核对任务和条目引用同一个已校验对象，并确认只发布了一份文件。
 	var objectID, objectSize, entryCount uint64
-	var objectState, objectVersion string
+	var objectState, objectKey, objectVersion string
 	var verifiedDigest []byte
-	if err := fixture.pool.QueryRowContext(ctx, `SELECT obj.id,obj.file_size,obj.status,obj.storage_version_id,obj.verified_sha256,
+	if err := fixture.pool.QueryRowContext(ctx, `SELECT obj.id,obj.file_size,obj.status,obj.object_key,obj.storage_version_id,obj.verified_sha256,
 		(SELECT COUNT(*) FROM file_entries WHERE user_id=task.user_id AND parent_id=task.target_parent_id AND entry_type='FILE' AND status='ACTIVE')
 		FROM upload_tasks task
 		JOIN file_entries entry ON entry.user_id=task.user_id AND entry.id=task.result_entry_id AND entry.object_id=task.published_object_id
 		JOIN stored_objects obj ON obj.owner_user_id=entry.user_id AND obj.id=entry.object_id
 		WHERE task.id=? AND task.user_id=? AND entry.id=? AND task.status='COMPLETED' AND task.reserved_bytes=0 AND obj.bucket=?`,
 		completed.ID, fixture.login.User.ID, entryID, fixture.bucket.name).
-		Scan(&objectID, &objectSize, &objectState, &objectVersion, &verifiedDigest, &entryCount); err != nil ||
-		objectID == 0 || objectSize != completed.SizeBytes || objectState != "READY" || objectVersion == "" ||
+		Scan(&objectID, &objectSize, &objectState, &objectKey, &objectVersion, &verifiedDigest, &entryCount); err != nil ||
+		objectID == 0 || objectSize != completed.SizeBytes || objectState != "READY" || objectKey == "" || objectVersion == "" ||
 		!bytes.Equal(verifiedDigest, fileDigest[:]) || entryCount != 1 {
 		t.Fatal("发布对象的定位、摘要或文件条目数量不符", err, objectState, entryCount)
 	}
@@ -312,4 +314,50 @@ func verifyResumedMultipartPublication(t *testing.T, ctx context.Context, fixtur
 	}
 	t.Logf("原任务 %s 达到 COMPLETED，发布文件条目 %s，引用 READY 对象 %d，版本已定位，整文件 SHA-256 %x，已用 %d B、预占 %d B",
 		completed.ID, entryID, objectID, verifiedDigest, profile.Data.UsedBytes, profile.Data.ReservedBytes)
+	verifyResumedMultipartDownload(t, ctx, api, entry.Data, objectID, "/"+fixture.bucket.name+"/"+objectKey, objectVersion, fileDigest)
+}
+
+func verifyResumedMultipartDownload(t *testing.T, ctx context.Context, api backupSourceClient, entry dto.EntryDetailData,
+	objectID uint64, objectPath, objectVersion string, fileDigest [sha256.Size]byte) {
+	t.Helper()
+	// 1. 使用可见条目的当前版本申请下载，核对授权给出的对象和内容事实。
+	body := fmt.Sprintf(`{"expected_revision":%q,"purpose":"download"}`, entry.Revision)
+	var grant dto.CreateDownloadResponse
+	api.request(t, ctx, http.MethodPost, "/api/v1/entries/"+entry.ID+"/download", "", strings.NewReader(body), http.StatusOK, &grant)
+	if grant.RequestID == "" || grant.Data.Revision != entry.Revision || grant.Data.ObjectID != strconv.FormatUint(objectID, 10) ||
+		grant.Data.SizeBytes != entry.SizeBytes || grant.Data.SHA256 != fmt.Sprintf("%x", fileDigest) || !grant.Data.ExpiresAt.After(time.Now()) {
+		t.Fatal("下载授权的条目版本、对象或摘要不符", entry.ID)
+	}
+
+	// 2. 限定签名链接指向本轮隔离桶及已发布对象的确切版本。
+	signed, err := url.Parse(grant.Data.URL)
+	if err != nil || signed.User != nil || signed.Fragment != "" ||
+		signed.Scheme+"://"+signed.Host != os.Getenv("CLOUDNEST_S3_PUBLIC_ENDPOINT") ||
+		signed.Path != objectPath || signed.Query().Get("versionId") != objectVersion {
+		t.Fatal("下载签名没有绑定本轮隔离对象及已发布版本", entry.ID)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, signed.String(), nil)
+	if err != nil {
+		t.Fatal("无法构造隔离签名下载请求", entry.ID)
+	}
+	request.Header.Set("Accept-Encoding", "identity")
+	response, err := api.httpClient.Do(request)
+	if err != nil {
+		t.Fatal("访问隔离签名下载地址失败", entry.ID)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.ContentLength != int64(entry.SizeBytes) ||
+		response.Header.Get("X-Amz-Version-Id") != objectVersion {
+		t.Fatalf("隔离存储返回的版本或长度不符，HTTP %d，长度 %d", response.StatusCode, response.ContentLength)
+	}
+
+	// 3. 流式读取实际正文，多读一字节用于发现超出声明的内容。
+	digest := sha256.New()
+	size, err := io.Copy(digest, io.LimitReader(response.Body, int64(entry.SizeBytes)+1))
+	downloadDigest := digest.Sum(nil)
+	if err != nil || size != int64(entry.SizeBytes) || !bytes.Equal(downloadDigest, fileDigest[:]) {
+		t.Fatal("续传下载正文与合成源不一致", entry.ID, size, err)
+	}
+	t.Logf("正式下载条目 %s，签名返回有效对象版本，读取 %d B，下载 SHA-256 %x，与合成源一致",
+		entry.ID, size, downloadDigest)
 }
