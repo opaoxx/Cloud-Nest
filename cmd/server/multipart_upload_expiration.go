@@ -5,9 +5,37 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"github.com/opaoxx/cloud-nest/internal/server/config"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/repository"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
+	"github.com/opaoxx/cloud-nest/internal/server/storage"
 )
+
+// newServerMultipartUploadExpirationBatch 装配匹配同一存储配置的到期批次。
+// 已绑定任务缺少受信实例核对时继续持有预占并登记重试。
+func newServerMultipartUploadExpirationBatch(
+	store *repository.Store, storageClient *storage.Client, storageConfig config.StorageConfig, verifyInstance storage.MultipartSessionLockVerifier,
+) *service.MultipartUploadExpirationBatch {
+	// 1. 绑定原对象定位、会话中止与存储复查。
+	observations := service.NewMultipartUploadExpirationStorageService(
+		func(ctx context.Context, task *domain.UploadTask) (*domain.MultipartUploadCleanupTarget, error) {
+			return store.FindMultipartUploadExpirationTarget(ctx, task, storageConfig.Provider, storageConfig.Bucket)
+		}, storageClient.AbortMultipartUpload,
+		func(ctx context.Context, objectKey, uploadID string) (*domain.MultipartUploadAbortObservation, error) {
+			return storageClient.CheckMultipartUploadAfterAbort(ctx, objectKey, uploadID, verifyInstance)
+		}, storageClient.StatMultipartUploadObject)
+
+	// 2. 绑定两种到期终态事务和重试登记。
+	execution := service.NewMultipartUploadExpirationExecutionService(storageConfig.Provider, storageConfig.Bucket,
+		observations.ObserveBoundSession, observations.ObserveUnboundSession,
+		store.CompleteMissingMultipartUploadExpiration, store.CompleteExistingMultipartUploadExpiration,
+		store.ScheduleMultipartUploadExpirationRetry)
+
+	// 3. 接入候选扫描与租约领取，返回单轮批次。
+	return service.NewMultipartUploadExpirationBatch(store.ListMultipartUploadExpirationCandidates,
+		store.ClaimMultipartUploadExpirationLease, execution.Execute)
+}
 
 // startServerMultipartUploadExpirationWorker 启动到期循环并返回取消且等待退出的方法。
 func startServerMultipartUploadExpirationWorker(
