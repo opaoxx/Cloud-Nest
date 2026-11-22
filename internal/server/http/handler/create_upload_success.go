@@ -12,16 +12,8 @@ import (
 // CreateUploadSuccess 交付已确认提交并完成复用条件校验的上传创建快照。
 // 请求 ID 由公共中间件提供，异常快照和取消交由统一错误响应处理。
 func CreateUploadSuccess(requestContext *gin.Context, stableBody []byte) {
-	// 1. 检查响应是否已发送，以及请求是否已取消。
-	if requestContext.Writer.Written() {
-		requestContext.Abort()
-		return
-	}
-	requestContext.Header("Cache-Control", "no-store")
-	requestContext.Header("Pragma", "no-cache")
-	ctx := requestContext.Request.Context()
-	if ctx.Err() != nil {
-		InternalError(requestContext, nil)
+	// 1. 检查响应状态和取消信号，设置禁止缓存头。
+	if !prepareCreateUploadSuccess(requestContext) {
 		return
 	}
 
@@ -32,6 +24,55 @@ func CreateUploadSuccess(requestContext *gin.Context, stableBody []byte) {
 		return
 	}
 	writeCreateUploadSuccess(requestContext, data)
+}
+
+// CreateUploadReplacementSuccess 交付已提交并校验过回执关联的内容替换创建快照。
+func CreateUploadReplacementSuccess(requestContext *gin.Context, stableBody []byte) {
+	// 1. 检查响应状态和取消信号，设置禁止缓存头。
+	if !prepareCreateUploadSuccess(requestContext) {
+		return
+	}
+
+	// 2. 按保存的模式严格恢复快照。
+	var snapshot struct {
+		UploadMode string `json:"upload_mode"`
+	}
+	if err := json.Unmarshal(stableBody, &snapshot); err != nil {
+		InternalError(requestContext, nil)
+		return
+	}
+	var data any
+	var restoreError error
+	switch snapshot.UploadMode {
+	case "SINGLE":
+		data, restoreError = dto.RestoreCreateUploadReplacementData(stableBody)
+	case "MULTIPART":
+		data, restoreError = dto.RestoreCreateMultipartUploadReplacementData(stableBody)
+	default:
+		InternalError(requestContext, nil)
+		return
+	}
+	if restoreError != nil {
+		InternalError(requestContext, nil)
+		return
+	}
+
+	// 3. 关联当前请求 ID，交付 HTTP 201。
+	writeCreateUploadSuccess(requestContext, data)
+}
+
+func prepareCreateUploadSuccess(requestContext *gin.Context) bool {
+	if requestContext.Writer.Written() {
+		requestContext.Abort()
+		return false
+	}
+	requestContext.Header("Cache-Control", "no-store")
+	requestContext.Header("Pragma", "no-cache")
+	if requestContext.Request.Context().Err() != nil {
+		InternalError(requestContext, nil)
+		return false
+	}
+	return true
 }
 
 func writeCreateUploadSuccess(requestContext *gin.Context, data any) {
