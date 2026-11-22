@@ -368,6 +368,26 @@ func runWithPurgeRootWorker(
 		},
 	)
 
+	// 绑定账号事务与公开快照编解码，装配幂等秒传服务。
+	fileReuseService := service.NewIdempotentFileReuseService(
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentFileReuseTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		},
+		func(entry *domain.FileEntry) (json.RawMessage, error) {
+			data, err := dto.NewReuseFileData(entry)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(data)
+		},
+		func(body json.RawMessage) error {
+			_, err := dto.RestoreReuseFileData(body)
+			return err
+		},
+	)
+
 	// 20. 绑定用户事务与重命名结果编解码，装配幂等重命名服务。
 	renameEntryService := service.NewIdempotentRenameEntryService(
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.IdempotentRenameEntryTransaction) error) error {
@@ -625,6 +645,7 @@ func runWithPurgeRootWorker(
 	serverhttp.RegisterUploadCompletionByModeRoute(router, authorizationService.Authorize, uploadTaskService.Get, multipartCompletion.Complete)
 	// 3. 在原取消路径根据账号事务锁定的任务模式受理，交给对应 worker 收尾。
 	serverhttp.RegisterUploadCancellationRoute(router, authorizationService.Authorize, store.BeginUserUploadCancellationByMode)
+	serverhttp.RegisterReuseFileRoute(router, authorizationService.Authorize, fileReuseService.Reuse)
 	serverhttp.RegisterCreateDirectoryRoute(router, authorizationService.Authorize, createDirectoryService.Create)
 	serverhttp.RegisterRenameEntryRoute(router, authorizationService.Authorize, renameEntryService.Rename)
 	serverhttp.RegisterMoveEntryRoute(router, authorizationService.Authorize, moveEntryService.Move)

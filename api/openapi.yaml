@@ -606,7 +606,7 @@ paths:
       operationId: reuseFile
       summary: 复用当前账号可见文件的已验证内容
       description: |
-        B4 计划契约，等待服务接入。客户端提交目标目录、文件名、字节数和整文件 SHA-256。
+        客户端提交目标目录、文件名、字节数和整文件 SHA-256。
         1. Bearer 授权后校验 Idempotency-Key 和 JSON，在当前用户事务内复查授权及本复用操作的幂等记录。
            以规范化的父目录、名称、大小与摘要比较参数。同键同参数在八天保留期内返回已提交的 201 快照并关联当前请求 ID。
            同键不同参数返回 IDEMPOTENCY_CONFLICT，过期返回 IDEMPOTENCY_EXPIRED。历史快照仅用于重放原结果，当前可见状态由目录项查询交付。
