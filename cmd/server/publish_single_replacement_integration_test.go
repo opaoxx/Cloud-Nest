@@ -204,6 +204,13 @@ func verifyReplacementDownload(t *testing.T, ctx context.Context, fixture backup
 	revision uint64, object *domain.StoredObject, want []byte,
 ) {
 	t.Helper()
+	copyVerifiedReplacementDownload(t, ctx, fixture, entryPath, revision, object, want, io.Discard)
+}
+
+func copyVerifiedReplacementDownload(t *testing.T, ctx context.Context, fixture backupSourceFixture, entryPath string,
+	revision uint64, object *domain.StoredObject, want []byte, destination io.Writer,
+) {
+	t.Helper()
 	// 1. 从正式接口取得新版本的签名，只接受本轮测试桶和对象版本。
 	var download dto.CreateDownloadResponse
 	fixture.api.request(t, ctx, http.MethodPost, entryPath+"/download", "",
@@ -218,7 +225,7 @@ func verifyReplacementDownload(t *testing.T, ctx context.Context, fixture backup
 		t.Fatal("签名授权没有绑定本轮隔离对象和实测摘要")
 	}
 
-	// 2. 按签名独立下载，核对实际字节数和 SHA-256。
+	// 2. 按签名独立下载，在写入目标时核对实际字节数和 SHA-256。
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, signed.String(), nil)
 	if err != nil {
 		t.Fatal("无法构造联测签名下载", err)
@@ -230,7 +237,7 @@ func verifyReplacementDownload(t *testing.T, ctx context.Context, fixture backup
 	}
 	defer response.Body.Close()
 	hash := sha256.New()
-	size, err := io.Copy(hash, io.LimitReader(response.Body, int64(len(want))+1))
+	size, err := io.Copy(io.MultiWriter(hash, destination), io.LimitReader(response.Body, int64(len(want))+1))
 	if err != nil || response.StatusCode != http.StatusOK || size != int64(len(want)) || !bytes.Equal(hash.Sum(nil), expectedDigest[:]) {
 		t.Fatal("新内容读回的字节数或摘要不符", response.StatusCode, size, err)
 	}
