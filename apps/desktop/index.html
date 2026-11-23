@@ -109,6 +109,7 @@
     let pendingPage = null;
     let selectionKey = "";
     let selectedDownload = null;
+    let activeMultipartSend = null;
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -124,12 +125,22 @@
       for (const button of directoryPanel.querySelectorAll("button")) {
         button.disabled = busy;
       }
-      for (const button of uploadItems.querySelectorAll("button")) {
-        button.disabled = busy;
-      }
+      updateUploadButtons();
       logoutAccount.disabled = busy;
       updateLoadMore();
       updateSaveUploadIntent();
+    }
+
+    function updateUploadButtons() {
+      for (const button of uploadItems.querySelectorAll("button")) {
+        if (button.dataset.pauseIntent) {
+          const canPause = activeMultipartSend?.intentID === button.dataset.pauseIntent;
+          button.hidden = !canPause;
+          button.disabled = !canPause || Boolean(activeMultipartSend.pauseRequest);
+        } else {
+          button.disabled = checkConnection.disabled;
+        }
+      }
     }
 
     function updateSaveUploadIntent() {
@@ -268,16 +279,26 @@
             " B · 已确认 " + plan.confirmed_parts + " / " + plan.part_count + " 片";
           const actions = document.createElement("div");
           actions.className = "upload-actions";
-          if (plan.confirmed_parts === 0) {
-            actions.append(uploadActionButton("上传第一片", () =>
-              runUploadAction("SendFirstPart", intent.id, "正在上传第一片…", "第一片已确认。")));
+          if (plan.pause_id) {
+            summary.textContent += " · 已暂停";
+            actions.append(uploadActionButton("继续上传", () =>
+              runMultipartSend("ContinueMultipart", intent, "正在复核源文件并继续上传…", "全部分片已确认。")));
+          } else {
+            if (plan.confirmed_parts === 0) {
+              actions.append(uploadActionButton("上传第一片", () =>
+                runMultipartSend("SendFirstPart", intent, "正在上传第一片…", "第一片已确认。")));
+            }
+            if (plan.confirmed_parts === plan.part_count && intent.confirmed_bytes === intent.size_bytes) {
+              actions.append(uploadActionButton("提交完成回执", () =>
+                runUploadAction("CompleteMultipart", intent.id, "正在提交完成回执…", "", showUploadPublication)));
+            }
+            actions.append(uploadActionButton("核对并续传", () =>
+              runMultipartSend("SendRemainingParts", intent, "正在核对并续传分片…", "全部分片已确认。")));
           }
-          if (plan.confirmed_parts === plan.part_count && intent.confirmed_bytes === intent.size_bytes) {
-            actions.append(uploadActionButton("提交完成回执", () =>
-              runUploadAction("CompleteMultipart", intent.id, "正在提交完成回执…", "", showUploadPublication)));
-          }
-          actions.append(uploadActionButton("核对并续传", () =>
-            runUploadAction("SendRemainingParts", intent.id, "正在核对并续传分片…", "全部分片已确认。")));
+          const pauseButton = uploadActionButton("暂停上传", () => requestMultipartPause(intent.id));
+          pauseButton.dataset.pauseIntent = intent.id;
+          pauseButton.hidden = true;
+          actions.append(pauseButton);
           row.append(actions);
         } else if (intent.status === "REUSED") {
           summary.textContent += " · 已复用并发布 · 条目 " + intent.result_entry_id;
@@ -317,6 +338,57 @@
       }
     }
 
+    function requestMultipartPause(intentID) {
+      const transfer = activeMultipartSend;
+      if (transfer?.intentID !== intentID || transfer.pauseRequest) return;
+
+      // 1. 通过独立调用保存暂停请求，正在上传的调用仍负责本批回执。
+      uploadStatus.textContent = "正在请求暂停…";
+      transfer.pauseRequest = Call.ByName("main.UploadIntents.PauseMultipart", intentID).then(result => {
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+        } else {
+          uploadStatus.textContent = "正在暂停，等待本批分片收尾…";
+        }
+      }).catch(error => {
+        transfer.pauseRequest = null;
+        uploadStatus.textContent = error.message || "暂停未确认，请重试";
+        updateUploadButtons();
+      });
+      updateUploadButtons();
+    }
+
+    async function runMultipartSend(method, intent, progress, success) {
+      if (checkConnection.disabled) return;
+      const transfer = { intentID: intent.id, pauseRequest: null };
+      const args = method === "ContinueMultipart" ? [intent.id, intent.multipart_plan.pause_id] : [intent.id];
+      activeMultipartSend = transfer;
+      setBusy(true);
+      uploadStatus.textContent = progress;
+      try {
+        const result = await Call.ByName("main.UploadIntents." + method, ...args).finally(async () => {
+          activeMultipartSend = null;
+          updateUploadButtons();
+          await transfer.pauseRequest;
+        });
+        if (!signedIn) return;
+
+        // 2. 两个调用都收尾后再刷新，确保显示本批最终回执和已保存的暂停状态。
+        const latest = transfer.pauseRequest && !result.loginRequired
+          ? await Call.ByName("main.UploadIntents.List") : result;
+        if (renderUploadIntents(latest)) {
+          const saved = latest.items.find(item => item.id === intent.id);
+          uploadStatus.textContent = saved?.multipart_plan?.pause_id ? "已暂停，可稍后继续上传。" : success;
+        }
+      } catch (error) {
+        await loadUploadIntents();
+        if (signedIn) uploadStatus.textContent = error.message || "分片未确认，请重试同一条记录";
+      } finally {
+        activeMultipartSend = null;
+        setBusy(false);
+      }
+    }
+
     async function runUploadAction(method, intentID, progress, success, afterAction) {
       if (checkConnection.disabled) return;
       setBusy(true);
@@ -328,7 +400,7 @@
           if (afterAction) await afterAction(result.items.find(item => item.id === intentID));
         }
       } catch (error) {
-        if (method === "Submit" || method === "SendRemainingParts" || method === "CompleteMultipart") await loadUploadIntents();
+        if (method === "Submit" || method === "CompleteMultipart") await loadUploadIntents();
         if (signedIn) uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
       } finally {
         setBusy(false);

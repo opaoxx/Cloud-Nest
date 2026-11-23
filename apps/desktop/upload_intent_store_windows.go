@@ -41,7 +41,7 @@ type UploadIntentView struct {
 var errUploadKeyConflict = errors.New("本次文件选择已保存到其他目标，请重新选择文件")
 
 func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
-	// 1. 使用文件 URI 保留数据目录中的空格等字符，并为并发写入设置等待时间。
+	// 1. 为并发写入设置等待时间。写事务先取得写权限，避免对账读后写时与暂停互相阻塞。
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("无效的本机任务数据库路径")
 	}
@@ -49,7 +49,7 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
 	}
-	dsn := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_busy_timeout=3000&_foreign_keys=1"}
+	dsn := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_busy_timeout=3000&_foreign_keys=1&_txlock=immediate"}
 	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, err
@@ -155,6 +155,16 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// 10. 暂停请求独立保存，让当前批次仍可登记分片回执。
+	const multipartPauseSchema = `CREATE TABLE IF NOT EXISTS multipart_upload_pauses (
+		intent_id INTEGER PRIMARY KEY REFERENCES multipart_upload_creations(intent_id),
+		pause_id TEXT NOT NULL
+	) STRICT`
+	if _, err := db.ExecContext(ctx, multipartPauseSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -194,13 +204,15 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 		COALESCE(o.result_entry_id, mo.result_entry_id, ru.entry_id, ''), COALESCE(ru.name, ''),
 		COALESCE(o.error_code, mo.error_code, ''), COALESCE(o.error_message, mo.error_message, ''),
 		COALESCE(p.confirmed_bytes, mp.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END),
-		COALESCE(m.part_size_bytes, 0), COALESCE(m.part_count, 0), COALESCE(mp.confirmed_parts, 0)
+		COALESCE(m.part_size_bytes, 0), COALESCE(m.part_count, 0), COALESCE(mp.confirmed_parts, 0),
+		COALESCE(pause.pause_id, '')
 		FROM upload_intents i
 		LEFT JOIN single_upload_creations c ON c.intent_id = i.id
 		LEFT JOIN single_upload_outcomes o ON o.intent_id = i.id
 		LEFT JOIN single_upload_confirmations p ON p.intent_id = i.id
 		LEFT JOIN multipart_upload_creations m ON m.intent_id = i.id
 		LEFT JOIN multipart_upload_outcomes mo ON mo.intent_id = m.intent_id
+		LEFT JOIN multipart_upload_pauses pause ON pause.intent_id = m.intent_id AND i.status = 'MULTIPART_CREATED'
 		LEFT JOIN upload_reuse_results ru ON ru.intent_id = i.id
 		LEFT JOIN (SELECT intent_id, COUNT(*) AS confirmed_parts, SUM(size_bytes) AS confirmed_bytes
 			FROM multipart_upload_parts GROUP BY intent_id) mp ON mp.intent_id = m.intent_id
@@ -216,9 +228,10 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 		var intent UploadIntentView
 		var plan client.MultipartPlan
 		var confirmedParts int
+		var pauseID string
 		if err := rows.Scan(&intent.ID, &intent.Name, &intent.SizeBytes, &intent.ParentID, &intent.Status, &intent.TaskID,
 			&intent.ResultEntryID, &intent.ResultName, &intent.ErrorCode, &intent.ErrorMessage, &intent.ConfirmedBytes,
-			&plan.PartSizeBytes, &plan.PartCount, &confirmedParts); err != nil {
+			&plan.PartSizeBytes, &plan.PartCount, &confirmedParts, &pauseID); err != nil {
 			return nil, err
 		}
 		if plan.PartCount > 0 || intent.Status == "MULTIPART_CREATED" {
@@ -229,7 +242,7 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 			}
 			intent.MultipartPlan = &MultipartPlanView{
 				PartCount: plan.PartCount, PartSizeBytes: plan.PartSizeBytes, ConfirmedParts: confirmedParts,
-				LastPartOffsetBytes: lastPart.OffsetBytes, LastPartSizeBytes: lastPart.SizeBytes,
+				LastPartOffsetBytes: lastPart.OffsetBytes, LastPartSizeBytes: lastPart.SizeBytes, PauseID: pauseID,
 			}
 		}
 		intents = append(intents, intent)

@@ -10,11 +10,12 @@ import (
 
 // MultipartPlanView 是窗口展示的计划摘要，字节数字段以十进制字符串交付。
 type MultipartPlanView struct {
-	PartCount           int   `json:"part_count"`
-	ConfirmedParts      int   `json:"confirmed_parts"`
-	PartSizeBytes       int64 `json:"part_size_bytes,string"`
-	LastPartOffsetBytes int64 `json:"last_part_offset_bytes,string"`
-	LastPartSizeBytes   int64 `json:"last_part_size_bytes,string"`
+	PartCount           int    `json:"part_count"`
+	ConfirmedParts      int    `json:"confirmed_parts"`
+	PartSizeBytes       int64  `json:"part_size_bytes,string"`
+	LastPartOffsetBytes int64  `json:"last_part_offset_bytes,string"`
+	LastPartSizeBytes   int64  `json:"last_part_size_bytes,string"`
+	PauseID             string `json:"pause_id,omitempty"`
 }
 
 func recordMultipartUploadCreation(ctx context.Context, intent scopedUploadIntent, receipt client.UploadCreation) error {

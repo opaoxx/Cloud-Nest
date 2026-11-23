@@ -24,6 +24,7 @@ type multipartUploadSource struct {
 	sha256   string
 	plan     client.MultipartPlan
 	status   string
+	pauseID  string
 }
 
 type multipartPartJob struct {
@@ -33,12 +34,12 @@ type multipartPartJob struct {
 
 // SendFirstPart sends part 1 for an existing Multipart intent.
 func (uploads *UploadIntents) SendFirstPart(ctx context.Context, intentID string) (UploadIntentResult, error) {
-	return uploads.sendMultipartParts(ctx, intentID, true)
+	return uploads.sendMultipartParts(ctx, intentID, true, "")
 }
 
 // SendRemainingParts reconciles the stored parts and uploads missing or mismatched ranges.
 func (uploads *UploadIntents) SendRemainingParts(ctx context.Context, intentID string) (UploadIntentResult, error) {
-	return uploads.sendMultipartParts(ctx, intentID, false)
+	return uploads.sendMultipartParts(ctx, intentID, false, "")
 }
 
 func (uploads *UploadIntents) actOnMultipartUpload(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
@@ -56,7 +57,7 @@ func (uploads *UploadIntents) actOnMultipartUpload(ctx context.Context, intentID
 	return uploads.actOnUploadIntent(ctx, intentID, action)
 }
 
-func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID string, firstOnly bool) (UploadIntentResult, error) {
+func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID string, firstOnly bool, resumePauseID string) (UploadIntentResult, error) {
 	return uploads.actOnMultipartUpload(ctx, intentID, func(intent scopedUploadIntent) error {
 		// 1. 读取当前账号的计划，用同一数据目录中的文件锁防止窗口间重复派发。
 		upload, err := readMultipartUploadSource(ctx, intent)
@@ -68,6 +69,12 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 		}
 		if upload.status != "MULTIPART_CREATED" {
 			return errors.New("当前任务无法发送分片，请查看发布结果")
+		}
+		if resumePauseID != "" && upload.pauseID != resumePauseID {
+			return errors.New("任务的暂停请求已变化，请重新选择继续")
+		}
+		if resumePauseID == "" && upload.pauseID != "" {
+			return nil
 		}
 		var numbers []int
 		if firstOnly {
@@ -96,16 +103,28 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 			return err
 		}
 
-		// 2. 续传使用实际存储清单，先收回匹配的回执，再计算要补传的片号。
+		// 2. 源文件校验通过后核对实际存储回执，再清除本次要继续的暂停请求。
 		if !firstOnly {
 			jobs, err = reconcileMultipartParts(ctx, intent, upload, jobs)
 			if err != nil {
 				return err
 			}
 		}
+		if resumePauseID != "" {
+			cleared, err := clearMultipartPause(ctx, intent, resumePauseID)
+			if err != nil || !cleared {
+				return err
+			}
+			// 令牌过期重试会重新检查暂停状态，避免清掉后续的新暂停请求。
+			resumePauseID = ""
+		}
 
-		// 3. 一批最多两片，等待本批所有结果保存后才开始下一批。
+		// 3. 读到暂停就停止派发。已获准的一批最多两片，保存本批结果后才检查下一批。
 		for len(jobs) > 0 {
+			paused, err := multipartPauseRequested(ctx, intent)
+			if err != nil || paused {
+				return err
+			}
 			count := min(len(jobs), multipartParallelParts)
 			if err := sendMultipartBatch(ctx, intent, upload, source, jobs[:count]); err != nil {
 				return err
@@ -119,12 +138,13 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 func readMultipartUploadSource(ctx context.Context, intent scopedUploadIntent) (multipartUploadSource, error) {
 	var upload multipartUploadSource
 	err := intent.db.QueryRowContext(ctx, `SELECT m.task_id, i.parent_id, i.source_path, i.sha256,
-		i.size_bytes, m.part_size_bytes, m.part_count, i.status
+		i.size_bytes, m.part_size_bytes, m.part_count, i.status, COALESCE(pause.pause_id, '')
 		FROM upload_intents i JOIN multipart_upload_creations m ON m.intent_id = i.id
+		LEFT JOIN multipart_upload_pauses pause ON pause.intent_id = i.id
 		WHERE i.id = ? AND i.server_address = ? AND i.user_id = ?`,
 		intent.id, intent.owner.Address, intent.owner.UserID).
 		Scan(&upload.taskID, &upload.parentID, &upload.path, &upload.sha256, &upload.plan.SizeBytes,
-			&upload.plan.PartSizeBytes, &upload.plan.PartCount, &upload.status)
+			&upload.plan.PartSizeBytes, &upload.plan.PartCount, &upload.status, &upload.pauseID)
 	return upload, err
 }
 

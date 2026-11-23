@@ -115,8 +115,35 @@ func TestUploadMultipartPlanSurvivesReopenAndIsScoped(t *testing.T) {
 	if _, err := readMultipartCompletionReceipts(ctx, intent, 2); err == nil {
 		t.Fatal("completion accepted a missing receipt")
 	}
-	if err := recordMultipartPart(ctx, intent, receipt.TaskID, part); err != nil {
+	if err := recordMultipartPause(ctx, intent, "first-pause"); err != nil {
 		t.Fatal(err)
+	}
+	otherIntent := scopedUploadIntent{db: db, owner: other, id: 1}
+	if err := recordMultipartPause(ctx, otherIntent, "other-account"); err == nil {
+		t.Fatal("different account paused the task")
+	}
+	if err := recordMultipartPart(ctx, intent, receipt.TaskID, part); err != nil {
+		t.Fatalf("in-flight part was not recorded while paused: %v", err)
+	}
+	if err := recordMultipartPause(ctx, intent, "second-pause"); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := clearMultipartPause(ctx, intent, "first-pause"); err != nil || cleared {
+		t.Fatalf("continue cleared a newer pause: %t, %v", cleared, err)
+	}
+	if cleared, err := clearMultipartPause(ctx, otherIntent, "second-pause"); err != nil || cleared {
+		t.Fatalf("different account cleared the pause: %t, %v", cleared, err)
+	}
+	items, err = listUploadIntents(ctx, db, owner)
+	if err != nil || len(items) != 1 || items[0].MultipartPlan == nil ||
+		items[0].MultipartPlan.PauseID != "second-pause" || items[0].MultipartPlan.ConfirmedParts != 2 {
+		t.Fatalf("paused task lost its current marker or receipt: %+v, %v", items, err)
+	}
+	if err := recordMultipartOutcome(ctx, intent, receipt.TaskID, client.UploadTaskSnapshot{Status: multipartCompletionPending}); err == nil {
+		t.Fatal("paused task entered completion")
+	}
+	if cleared, err := clearMultipartPause(ctx, intent, "second-pause"); err != nil || !cleared {
+		t.Fatalf("could not clear the selected pause: %t, %v", cleared, err)
 	}
 	ordered, err := readMultipartCompletionReceipts(ctx, intent, 2)
 	if err != nil || len(ordered) != 2 || ordered[0].Number != 1 || ordered[1].Number != 2 {

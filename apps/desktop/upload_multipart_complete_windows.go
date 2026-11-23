@@ -29,6 +29,9 @@ func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID stri
 		if multipartTerminal(upload.status) {
 			return nil
 		}
+		if submit && upload.status == "MULTIPART_CREATED" && upload.pauseID != "" {
+			return errors.New("请先继续已暂停的分片任务")
+		}
 		readStatus := func() (client.UploadTaskSnapshot, error) {
 			return client.ReadMultipartUploadTask(ctx, intent.owner.Address, intent.accessToken,
 				upload.taskID, upload.parentID, upload.plan.SizeBytes)
@@ -125,8 +128,10 @@ func recordMultipartOutcome(ctx context.Context, intent scopedUploadIntent, task
 	result, err := tx.ExecContext(ctx, `UPDATE upload_intents SET status = ?
 		WHERE id = ? AND server_address = ? AND user_id = ?
 		AND status IN ('MULTIPART_CREATED', 'MULTIPART_COMPLETION_PENDING', 'COMPLETING', 'VERIFYING')
-		AND EXISTS (SELECT 1 FROM multipart_upload_creations WHERE intent_id = upload_intents.id AND task_id = ?)`,
-		status, intent.id, intent.owner.Address, intent.owner.UserID, taskID)
+		AND EXISTS (SELECT 1 FROM multipart_upload_creations WHERE intent_id = upload_intents.id AND task_id = ?)
+		AND (? <> 'MULTIPART_COMPLETION_PENDING' OR NOT EXISTS (
+			SELECT 1 FROM multipart_upload_pauses WHERE intent_id = upload_intents.id
+		))`, status, intent.id, intent.owner.Address, intent.owner.UserID, taskID, status)
 	if err != nil {
 		return writeError
 	}
