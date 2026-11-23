@@ -29,8 +29,22 @@ type DirectoryPage struct {
 	NextCursor  *string               `json:"next_cursor"`
 }
 
+const maxDirectoryCursorBytes = 1024
+
 // ReadDirectoryPage 按真实父目录 ID 读取目录首页。
 func ReadDirectoryPage(ctx context.Context, address, accessToken, parentID string) (DirectoryPage, error) {
+	return readDirectoryPage(ctx, address, accessToken, parentID, "")
+}
+
+// ReadNextDirectoryPage 使用上一页返回的游标继续读取同一个目录。
+func ReadNextDirectoryPage(ctx context.Context, address, accessToken, parentID, cursor string) (DirectoryPage, error) {
+	if cursor == "" || len(cursor) > maxDirectoryCursorBytes {
+		return DirectoryPage{}, errors.New("续页游标有误，请刷新目录")
+	}
+	return readDirectoryPage(ctx, address, accessToken, parentID, cursor)
+}
+
+func readDirectoryPage(ctx context.Context, address, accessToken, parentID, cursor string) (DirectoryPage, error) {
 	// 1. 校验完整的十进制 ID，并把原文放入查询参数。
 	if !validEntryID(parentID) {
 		return DirectoryPage{}, errors.New("服务返回的目录 ID 有误")
@@ -38,7 +52,11 @@ func ReadDirectoryPage(ctx context.Context, address, accessToken, parentID strin
 	var result struct {
 		Data DirectoryPage `json:"data"`
 	}
-	if err := getAuthenticatedJSON(ctx, address, accessToken, "entries", url.Values{"parent_id": {parentID}}, &result); err != nil {
+	query := url.Values{"parent_id": {parentID}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	if err := getAuthenticatedJSON(ctx, address, accessToken, "entries", query, &result); err != nil {
 		return DirectoryPage{}, err
 	}
 
@@ -60,6 +78,12 @@ func ReadDirectoryPage(ctx context.Context, address, accessToken, parentID strin
 			(entry.EntryType != "FILE" && entry.EntryType != "DIR") || entry.SizeBytes > 1<<53-1 {
 			return DirectoryPage{}, errors.New("服务返回的目录项格式有误")
 		}
+	}
+
+	// 3. 空游标指针表示末页，非空游标必须有效且能继续推进。
+	if page.NextCursor != nil && (*page.NextCursor == "" || len(*page.NextCursor) > maxDirectoryCursorBytes ||
+		*page.NextCursor == cursor || len(page.Items) == 0) {
+		return DirectoryPage{}, errors.New("服务返回的续页游标有误，请刷新目录")
 	}
 	return page, nil
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/opaoxx/cloud-nest/pkg/client"
 )
 
-// DirectoryReadResult 将目录首页或重新登录提示交给桌面窗口。
+// DirectoryReadResult 将目录页或重新登录提示交给桌面窗口。
 type DirectoryReadResult struct {
 	Page          client.DirectoryPage `json:"page"`
 	LoginRequired string               `json:"loginRequired"`
@@ -20,6 +20,18 @@ func (account *Account) ReadRootDirectory(ctx context.Context) (DirectoryReadRes
 
 // ReadDirectory 读取指定目录首页。空 ID 表示先从本人资料取得根目录。
 func (account *Account) ReadDirectory(ctx context.Context, parentID string) (DirectoryReadResult, error) {
+	return account.readDirectory(ctx, parentID, "")
+}
+
+// ReadNextDirectoryPage 使用当前目录 ID 和上次返回的游标读取下一页。
+func (account *Account) ReadNextDirectoryPage(ctx context.Context, parentID, cursor string) (DirectoryReadResult, error) {
+	if parentID == "" || cursor == "" {
+		return DirectoryReadResult{}, errors.New("续页需要当前目录和游标，请刷新目录")
+	}
+	return account.readDirectory(ctx, parentID, cursor)
+}
+
+func (account *Account) readDirectory(ctx context.Context, parentID, cursor string) (DirectoryReadResult, error) {
 	page, err := readForAccount(ctx, account, func(address string, session client.NativeSession) (client.DirectoryPage, error) {
 		// 1. 首次进入时取得账号根目录。后续导航使用窗口传入的条目 ID。
 		targetID := parentID
@@ -34,7 +46,10 @@ func (account *Account) ReadDirectory(ctx context.Context, parentID string) (Dir
 			targetID = profile.RootEntryID
 		}
 
-		// 2. 使用同一会话读取目录。首次进入时确认路径只含根目录。
+		// 2. 续页沿用目录 ID 和游标。首次进入时确认路径只含根目录。
+		if cursor != "" {
+			return client.ReadNextDirectoryPage(ctx, address, session.AccessToken, targetID, cursor)
+		}
 		page, err := client.ReadDirectoryPage(ctx, address, session.AccessToken, targetID)
 		if err != nil {
 			return client.DirectoryPage{}, err
@@ -45,7 +60,7 @@ func (account *Account) ReadDirectory(ctx context.Context, parentID string) (Dir
 		return page, nil
 	})
 
-	// 3. 会话失效时让页面重回登录，否则交付目录首页或读取错误。
+	// 3. 会话失效时让页面重回登录，否则交付目录页或读取错误。
 	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) {
 		return DirectoryReadResult{LoginRequired: err.Error()}, nil
 	}

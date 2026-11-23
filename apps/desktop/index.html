@@ -53,6 +53,7 @@
         <button id="refreshDirectory" type="button">刷新目录</button>
         <output id="directoryStatus" role="status" aria-live="polite"></output>
         <ul id="directoryItems" aria-label="目录内容"></ul>
+        <button id="loadMore" type="button" hidden>加载更多</button>
       </section>
     </form>
   </main>
@@ -74,7 +75,11 @@
     const refreshDirectory = document.querySelector("#refreshDirectory");
     const directoryStatus = document.querySelector("#directoryStatus");
     const directoryItems = document.querySelector("#directoryItems");
+    const loadMore = document.querySelector("#loadMore");
+    const entryRows = new Map();
     let currentDirectoryID = "";
+    let nextCursor = null;
+    let pendingPage = null;
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -91,6 +96,18 @@
         button.disabled = busy;
       }
       logoutAccount.disabled = busy;
+      updateLoadMore();
+    }
+
+    function updateLoadMore() {
+      loadMore.hidden = nextCursor === null;
+      loadMore.disabled = refreshDirectory.disabled || pendingPage !== null;
+    }
+
+    function clearDirectoryItems() {
+      directoryItems.replaceChildren();
+      entryRows.clear();
+      nextCursor = null;
     }
 
     function showSignedIn(name, restored) {
@@ -108,8 +125,9 @@
       logoutAccount.hidden = true;
       password.value = "";
       currentDirectoryID = "";
+      pendingPage = null;
       directoryStatus.textContent = "";
-      directoryItems.replaceChildren();
+      clearDirectoryItems();
       breadcrumbs.replaceChildren();
       directoryPath.hidden = true;
       loginStatus.textContent = notice;
@@ -139,7 +157,7 @@
       return button;
     }
 
-    function renderDirectory(page) {
+    function renderDirectory(page, append) {
       breadcrumbs.replaceChildren();
       for (const [index, crumb] of page.breadcrumbs.entries()) {
         const part = document.createElement("li");
@@ -160,7 +178,7 @@
       }
       directoryPath.hidden = false;
 
-      directoryItems.replaceChildren();
+      if (!append) clearDirectoryItems();
       for (const item of page.items) {
         const row = document.createElement("li");
         const isDirectory = item.entry_type === "DIR";
@@ -169,23 +187,37 @@
         name.textContent = item.name;
         details.textContent = isDirectory ? "文件夹" : "文件 · " + item.size_bytes + " B";
         row.append(name, details);
-        directoryItems.append(row);
+        const previousRow = entryRows.get(item.id);
+        if (previousRow) {
+          previousRow.replaceWith(row);
+        } else {
+          directoryItems.append(row);
+        }
+        entryRows.set(item.id, row);
       }
       currentDirectoryID = page.breadcrumbs.at(-1).id;
-      directoryStatus.textContent = page.items.length === 0 ? "此目录为空。" :
-        page.next_cursor ? "已显示前 " + page.items.length + " 项。" : "";
+      nextCursor = page.next_cursor;
+      if (entryRows.size === 0) {
+        directoryStatus.textContent = "此目录为空。";
+      } else if (nextCursor !== null) {
+        directoryStatus.textContent = "已显示前 " + entryRows.size + " 项。";
+      } else {
+        directoryStatus.textContent = append ? "已显示全部 " + entryRows.size + " 项。" : "";
+      }
     }
 
     async function loadDirectory(targetID) {
+      // 导航和刷新都让上一次续页失效，即使之后回到同一个目录。
+      pendingPage = null;
       directoryStatus.textContent = "正在读取目录…";
-      if (targetID === currentDirectoryID) directoryItems.replaceChildren();
+      if (targetID === currentDirectoryID) clearDirectoryItems();
       try {
         const result = await Call.ByName("main.Account.ReadDirectory", targetID);
         if (result.loginRequired) {
           showSignedOut(result.loginRequired);
           return;
         }
-        renderDirectory(result.page);
+        renderDirectory(result.page, false);
       } catch (error) {
         directoryStatus.textContent = error.message || "读取目录失败，请重试";
       }
@@ -202,6 +234,33 @@
     }
 
     refreshDirectory.addEventListener("click", () => navigateTo(currentDirectoryID));
+
+    loadMore.addEventListener("click", async () => {
+      if (loadMore.disabled || nextCursor === null) return;
+      // 1. 记录本次续页的目录 ID 和原始游标，只禁用加载更多按钮。
+      const request = { directoryID: currentDirectoryID, cursor: nextCursor };
+      pendingPage = request;
+      updateLoadMore();
+      directoryStatus.textContent = "正在加载更多…";
+      try {
+        const result = await Call.ByName("main.Account.ReadNextDirectoryPage", request.directoryID, request.cursor);
+        // 2. 对象身份对应这一次加载，导航后不再交付旧结果。
+        if (pendingPage !== request) return;
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+        } else {
+          renderDirectory(result.page, true);
+        }
+      } catch (error) {
+        if (pendingPage === request) directoryStatus.textContent = error.message || "加载更多失败，请重试";
+      } finally {
+        // 3. 失败时保留原游标，恢复按钮以便重试。
+        if (pendingPage === request) {
+          pendingPage = null;
+          updateLoadMore();
+        }
+      }
+    });
 
     checkConnection.addEventListener("click", async () => {
       setBusy(true);

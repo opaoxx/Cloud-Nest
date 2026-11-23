@@ -65,3 +65,38 @@ func TestReadDirectoryPageUsesSelectedIDAndServerPath(t *testing.T) {
 		})
 	}
 }
+
+func TestReadNextDirectoryPagePreservesCursor(t *testing.T) {
+	const cursor = "opaque+/=%20"
+	for _, fixture := range []struct {
+		name       string
+		nextCursor string
+		wantError  bool
+	}{
+		{name: "last page", nextCursor: "null"},
+		{name: "repeated cursor", nextCursor: fmt.Sprintf("%q", cursor), wantError: true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				query := request.URL.Query()
+				if request.Method != http.MethodGet || request.URL.Path != "/api/v1/entries" ||
+					query.Get("parent_id") != "12" || query.Get("cursor") != cursor || len(query["cursor"]) != 1 {
+					t.Error("continuation request changed the directory ID or cursor")
+				}
+				fmt.Fprintf(writer, `{"data":{"items":[{"id":"42","parent_id":"12","name":"续页目录","entry_type":"DIR","size_bytes":0}],`+
+					`"breadcrumbs":[{"id":"1","name":""},{"id":"12","name":"资料"}],"next_cursor":%s}}`, fixture.nextCursor)
+			}))
+			defer server.Close()
+			page, err := ReadNextDirectoryPage(t.Context(), server.URL, "sample", "12", cursor)
+			if fixture.wantError {
+				if err == nil || page.Items != nil {
+					t.Fatalf("repeated cursor was accepted: %+v, %v", page, err)
+				}
+				return
+			}
+			if err != nil || page.NextCursor != nil || len(page.Items) != 1 || page.Items[0].ID != "42" {
+				t.Fatalf("expected the last page: %+v, %v", page, err)
+			}
+		})
+	}
+}
