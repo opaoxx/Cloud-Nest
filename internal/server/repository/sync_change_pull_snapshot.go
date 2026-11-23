@@ -52,6 +52,7 @@ func (store *Store) WithSyncChangePullSnapshot(ctx context.Context, actor domain
 		}
 
 		// 3. 把已核对的设备状态交给调用方，后续读取继续使用同一事务。
+		reader.syncChangePullUserID = actor.UserID
 		return action(readContext, reader, state)
 	})
 }

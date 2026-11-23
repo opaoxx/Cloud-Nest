@@ -2,8 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
@@ -27,36 +25,15 @@ func (store *Store) ValidateSyncSnapshotSequence(ctx context.Context, highWaterS
 		return err
 	}
 
-	// 2. 用同一查询读取锁内的当前序号及按账号索引找到的首条保留事件。
-	var currentSequence uint64
-	var firstRetained sql.Null[uint64]
-	err := store.database.WithContext(ctx).Raw(
-		"SELECT account.change_seq, (SELECT retained.`sequence` FROM change_events AS retained "+
-			"WHERE retained.user_id=account.id ORDER BY retained.`sequence` LIMIT 1) FROM users AS account WHERE account.id=?",
-		store.loginUserID,
-	).Row().Scan(&currentSequence, &firstRetained)
-	if contextError := ctx.Err(); contextError != nil {
-		return contextError
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.ErrAccountNotFound
-	}
+	// 2. 读取锁内的日志区间，沿用快照确认的上界与过期判定。
+	bounds, err := store.readSyncChangeSequenceBounds(ctx, store.loginUserID)
 	if err != nil {
-		return fmt.Errorf("读取账号变更日志边界失败: %w", err)
+		return err
 	}
-
-	// 3. 日志为空时只接受当前序号，有日志时从首条事件的前一位开始。
-	minimum := currentSequence
-	if firstRetained.Valid {
-		if firstRetained.V == 0 || firstRetained.V > currentSequence {
-			return domain.ErrInvalidSyncSnapshotSequence
-		}
-		minimum = firstRetained.V - 1
-	}
-	if highWaterSequence > currentSequence {
+	if highWaterSequence > bounds.HighWaterSequence {
 		return domain.ErrInvalidSyncSnapshotSequence
 	}
-	if highWaterSequence < minimum {
+	if highWaterSequence < bounds.MinimumPosition {
 		return domain.ErrSyncSnapshotExpired
 	}
 	return nil

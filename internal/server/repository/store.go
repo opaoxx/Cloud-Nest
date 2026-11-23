@@ -24,6 +24,8 @@ type Store struct {
 	purgeRoot *domain.PurgeRootCandidate
 	// syncSnapshot 仅在一致性快照事务读取并核对头部后绑定。
 	syncSnapshot *syncSnapshotScope
+	// syncChangePullUserID 仅在增量拉取读视图复核身份及设备状态后绑定。
+	syncChangePullUserID uint64
 }
 
 // NewStore 用现有连接池装配 GORM，不创建连接池、不执行探测或迁移，也不接管关闭操作。
