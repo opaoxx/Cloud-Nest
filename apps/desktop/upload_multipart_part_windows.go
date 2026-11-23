@@ -35,7 +35,7 @@ func (uploads *UploadIntents) SendFirstPart(ctx context.Context, intentID string
 	return uploads.sendMultipartParts(ctx, intentID, true)
 }
 
-// SendRemainingParts uploads all parts that have no local receipt in bounded batches.
+// SendRemainingParts reconciles the stored parts and uploads missing or mismatched ranges.
 func (uploads *UploadIntents) SendRemainingParts(ctx context.Context, intentID string) (UploadIntentResult, error) {
 	return uploads.sendMultipartParts(ctx, intentID, false)
 }
@@ -62,13 +62,18 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 		if err != nil {
 			return errors.New("无法读取本机分片上传记录")
 		}
-		lastNumber := upload.plan.PartCount
+		var numbers []int
 		if firstOnly {
-			lastNumber = 1
-		}
-		numbers, err := pendingMultipartParts(ctx, intent, lastNumber)
-		if err != nil || len(numbers) == 0 {
-			return err
+			saved, err := firstMultipartPartSaved(ctx, intent)
+			if err != nil || saved {
+				return err
+			}
+			numbers = []int{1}
+		} else {
+			numbers = make([]int, upload.plan.PartCount)
+			for index := range numbers {
+				numbers[index] = index + 1
+			}
 		}
 		if err := client.CheckMultipartUploadReady(ctx, intent.owner.Address, intent.accessToken,
 			upload.taskID, upload.parentID, upload.plan.SizeBytes); err != nil {
@@ -84,7 +89,15 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 			return err
 		}
 
-		// 2. 一批最多两片，等待本批所有结果保存后才开始下一批。
+		// 2. 续传使用实际存储清单，先收回匹配的回执，再计算要补传的片号。
+		if !firstOnly {
+			jobs, err = reconcileMultipartParts(ctx, intent, upload, jobs)
+			if err != nil {
+				return err
+			}
+		}
+
+		// 3. 一批最多两片，等待本批所有结果保存后才开始下一批。
 		for len(jobs) > 0 {
 			count := min(len(jobs), multipartParallelParts)
 			if err := sendMultipartBatch(ctx, intent, upload.taskID, source, jobs[:count]); err != nil {
@@ -108,30 +121,15 @@ func readMultipartUploadSource(ctx context.Context, intent scopedUploadIntent) (
 	return upload, err
 }
 
-func pendingMultipartParts(ctx context.Context, intent scopedUploadIntent, lastNumber int) ([]int, error) {
-	rows, err := intent.db.QueryContext(ctx, `SELECT part_number FROM multipart_upload_parts WHERE intent_id = ?`, intent.id)
+func firstMultipartPartSaved(ctx context.Context, intent scopedUploadIntent) (bool, error) {
+	var saved bool
+	err := intent.db.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM multipart_upload_parts WHERE intent_id = ? AND part_number = 1
+	)`, intent.id).Scan(&saved)
 	if err != nil {
-		return nil, errors.New("无法读取本机已确认分片")
+		return false, errors.New("无法读取本机已确认分片")
 	}
-	defer rows.Close()
-	saved := make(map[int]bool)
-	for rows.Next() {
-		var number int
-		if err := rows.Scan(&number); err != nil {
-			return nil, errors.New("无法读取本机已确认分片")
-		}
-		saved[number] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, errors.New("无法读取本机已确认分片")
-	}
-	var pending []int
-	for number := 1; number <= lastNumber; number++ {
-		if !saved[number] {
-			pending = append(pending, number)
-		}
-	}
-	return pending, nil
+	return saved, nil
 }
 
 func digestMultipartParts(ctx context.Context, source *os.File, upload multipartUploadSource, numbers []int) ([]multipartPartJob, error) {

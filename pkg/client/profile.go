@@ -48,6 +48,10 @@ func ReadCurrentProfile(ctx context.Context, address, accessToken string) (Curre
 }
 
 func getAuthenticatedJSON(ctx context.Context, address, accessToken, resource string, query url.Values, result any) error {
+	return getAuthenticatedJSONWithLimit(ctx, address, accessToken, resource, query, result, 256*1024)
+}
+
+func getAuthenticatedJSONWithLimit(ctx context.Context, address, accessToken, resource string, query url.Values, result any, maxBytes int) error {
 	// 1. 在配置的服务上发出带 Bearer 令牌的只读请求。
 	base, err := parseServiceAddress(address)
 	if err != nil {
@@ -77,8 +81,8 @@ func getAuthenticatedJSON(ctx context.Context, address, accessToken, resource st
 		return errors.New("服务未能返回请求的资料")
 	}
 
-	// 3. 为一页长文件名和条目元数据留出空间，并限制最大正文。
-	if err := readBoundedJSON(response.Body, 256*1024, result); err != nil {
+	// 3. 按当前接口的上限读取并解析 JSON。
+	if err := readBoundedJSON(response.Body, maxBytes, result); err != nil {
 		return errors.New("服务返回的资料格式有误")
 	}
 	return nil

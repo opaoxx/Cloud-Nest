@@ -247,13 +247,15 @@
             " · " + plan.part_count + " 片 · 标准片长 " + plan.part_size_bytes +
             " B · 末片偏移 " + plan.last_part_offset_bytes + " B · 末片大小 " + plan.last_part_size_bytes +
             " B · 已确认 " + plan.confirmed_parts + " / " + plan.part_count + " 片";
+          const actions = document.createElement("div");
+          actions.className = "upload-actions";
           if (plan.confirmed_parts === 0) {
-            row.append(uploadActionButton("上传第一片", () =>
+            actions.append(uploadActionButton("上传第一片", () =>
               runUploadAction("SendFirstPart", intent.id, "正在上传第一片…", "第一片已确认。")));
-          } else if (plan.confirmed_parts < plan.part_count) {
-            row.append(uploadActionButton("上传剩余分片", () =>
-              runUploadAction("SendRemainingParts", intent.id, "正在上传剩余分片…", "全部分片已确认。")));
           }
+          actions.append(uploadActionButton("核对并续传", () =>
+            runUploadAction("SendRemainingParts", intent.id, "正在核对并续传分片…", "全部分片已确认。")));
+          row.append(actions);
         } else if (intent.status === "COMPLETED") {
           summary.textContent += " · 已发布 · 任务 " + intent.task_id + " · 条目 " + intent.result_entry_id;
         } else {
