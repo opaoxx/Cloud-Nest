@@ -27,7 +27,7 @@ func OpenMySQL(ctx context.Context, databaseConfig config.DatabaseConfig) (*sql.
 	driverConfig.ReadTimeout = 5 * time.Second
 	driverConfig.WriteTimeout = 5 * time.Second
 	driverConfig.Params = map[string]string{"time_zone": "'+00:00'"}
-	
+
 	// 直接创建连接器时，字符集使用专用选项，不能作为普通系统变量放入 Params。
 	if err := driverConfig.Apply(mysql.Charset("utf8mb4", "")); err != nil {
 		return nil, fmt.Errorf("设置 MySQL 字符集失败: %w", err)
