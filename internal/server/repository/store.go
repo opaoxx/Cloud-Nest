@@ -1,16 +1,18 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// Store 封装业务数据访问，共用由启动入口管理的连接池。
+// Store 封装业务数据访问，连接池或专用连接由调用方管理。
 type Store struct {
 	// database 只在 Repository 内部使用，不向 HTTP 或 Service 暴露 ORM 操作。
 	database *gorm.DB
@@ -34,10 +36,27 @@ func NewStore(connectionPool *sql.DB) (*Store, error) {
 	if connectionPool == nil {
 		return nil, fmt.Errorf("创建数据访问入口需要现有 MySQL 连接池")
 	}
+	return newStore(connectionPool)
+}
 
-	// 2. 复用已有池，禁用隐式网络探测和原始 SQL 日志。
+// NewRestoredSyncStore 只用身份核对通过的专用连接装配停服恢复仓储。
+// 调用方继续管理该连接，并在扫描和换代完成后关闭。
+func NewRestoredSyncStore(
+	ctx context.Context, connection *sql.Conn, expectedServerUUID uuid.UUID, expectedDatabase string,
+) (*Store, error) {
+	// 1. 核对传入连接的实例 UUID 和库名。
+	if err := CheckRestoredSyncTarget(ctx, connection, expectedServerUUID, expectedDatabase); err != nil {
+		return nil, err
+	}
+
+	// 2. 用同一条连接装配仓储，生命周期仍由调用方管理。
+	return newStore(connection)
+}
+
+func newStore(connection gorm.ConnPool) (*Store, error) {
+	// 1. 复用传入的数据库入口，禁用隐式网络探测和原始 SQL 日志。
 	database, err := gorm.Open(mysql.New(mysql.Config{
-		Conn:                      connectionPool,
+		Conn:                      connection,
 		SkipInitializeWithVersion: true,
 	}), &gorm.Config{
 		DisableAutomaticPing: true,
@@ -47,6 +66,6 @@ func NewStore(connectionPool *sql.DB) (*Store, error) {
 		return nil, fmt.Errorf("装配 MySQL 数据访问入口失败: %w", err)
 	}
 
-	// 3. 返回数据访问入口，池仍由原调用方关闭。
+	// 2. 返回数据访问入口，底层连接仍由原调用方关闭。
 	return &Store{database: database}, nil
 }
