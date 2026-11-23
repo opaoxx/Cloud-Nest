@@ -33,7 +33,10 @@ func ValidateSyncChangePullStart(actor domain.Actor, start *SyncChangePullStart,
 	}
 
 	// 2. 在同一视图中检查设备状态、代次和日志区间。
-	if err := validateSyncChangePosition(position, state, bounds, credentialError); err != nil {
+	if err := validateSyncChangeDevice(position.Generation, state); err != nil {
+		return err
+	}
+	if err := validateSyncChangeSequence(position.Sequence, state.AckSequence, bounds, credentialError); err != nil {
 		return err
 	}
 
@@ -44,9 +47,8 @@ func ValidateSyncChangePullStart(actor domain.Actor, start *SyncChangePullStart,
 	return nil
 }
 
-// validateSyncChangePosition 复用拉取和增量确认对同一账号状态与区间的检查。
-func validateSyncChangePosition(position domain.SyncChangeCursorPosition, state domain.SyncDeviceState, bounds domain.SyncChangeSequenceBounds, credentialError error) error {
-	// 1. 检查设备状态和完整代次。
+// validateSyncChangeDevice 检查设备是否具备同一代次的活动基线。
+func validateSyncChangeDevice(generation domain.SyncCursorGeneration, state domain.SyncDeviceState) error {
 	if state.Generation == (domain.SyncCursorGeneration{}) {
 		return domain.ErrInvalidSyncDeviceData
 	}
@@ -60,21 +62,24 @@ func validateSyncChangePosition(position domain.SyncChangeCursorPosition, state 
 	default:
 		return domain.ErrInvalidSyncDeviceData
 	}
-	if position.Generation != state.Generation {
+	if generation != state.Generation {
 		return domain.ErrSyncSnapshotExpired
 	}
+	return nil
+}
 
-	// 2. 核对日志区间、已有确认位置和签名位置。
+// validateSyncChangeSequence 核对日志区间、已有确认位置和签名位置。
+func validateSyncChangeSequence(position, ackSequence uint64, bounds domain.SyncChangeSequenceBounds, credentialError error) error {
 	if bounds.MinimumPosition > bounds.HighWaterSequence {
 		return domain.ErrInvalidSyncSnapshotSequence
 	}
-	if state.AckSequence > bounds.HighWaterSequence {
+	if ackSequence > bounds.HighWaterSequence {
 		return domain.ErrInvalidSyncDeviceData
 	}
-	if position.Sequence > bounds.HighWaterSequence {
+	if position > bounds.HighWaterSequence {
 		return credentialError
 	}
-	if position.Sequence < bounds.MinimumPosition {
+	if position < bounds.MinimumPosition {
 		return domain.ErrSyncSnapshotExpired
 	}
 	return nil

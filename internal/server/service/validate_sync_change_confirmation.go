@@ -14,21 +14,36 @@ func ValidateSyncChangeConfirmation(
 	actor domain.Actor, position domain.SyncChangeCursorPosition, state domain.SyncDeviceState, bounds domain.SyncChangeSequenceBounds,
 ) (SyncChangeConfirmationDecision, error) {
 	// 1. 核对认证身份与游标绑定。
-	if actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
-		return SyncChangeConfirmationDecision{}, domain.ErrInvalidSessionData
-	}
-	if position.UserID != actor.UserID || position.DeviceID != actor.DeviceID || position.Generation == (domain.SyncCursorGeneration{}) {
-		return SyncChangeConfirmationDecision{}, domain.ErrInvalidSyncChangeCursor
-	}
-
-	// 2. 检查设备状态、完整代次和日志区间。
-	if err := validateSyncChangePosition(position, state, bounds, domain.ErrInvalidSyncChangeCursor); err != nil {
+	if err := validateSyncChangeConfirmationIdentity(actor, position); err != nil {
 		return SyncChangeConfirmationDecision{}, err
 	}
 
-	// 3. 较旧位置保留当前确认值。更高或等值位置均记录活动。
-	if position.Sequence < state.AckSequence {
-		return SyncChangeConfirmationDecision{AckSequence: state.AckSequence}, nil
+	// 2. 检查设备状态、完整代次和日志区间，再计算确认结果。
+	if err := validateSyncChangeDevice(position.Generation, state); err != nil {
+		return SyncChangeConfirmationDecision{}, err
 	}
-	return SyncChangeConfirmationDecision{AckSequence: position.Sequence, RecordActivity: true}, nil
+	return decideSyncChangeConfirmation(position.Sequence, state.AckSequence, bounds)
+}
+
+func validateSyncChangeConfirmationIdentity(actor domain.Actor, position domain.SyncChangeCursorPosition) error {
+	if actor.UserID == 0 || actor.DeviceID == 0 || actor.SessionID == 0 {
+		return domain.ErrInvalidSessionData
+	}
+	if position.UserID != actor.UserID || position.DeviceID != actor.DeviceID || position.Generation == (domain.SyncCursorGeneration{}) {
+		return domain.ErrInvalidSyncChangeCursor
+	}
+	return nil
+}
+
+func decideSyncChangeConfirmation(position, ackSequence uint64, bounds domain.SyncChangeSequenceBounds) (SyncChangeConfirmationDecision, error) {
+	// 1. 签名位置和设备确认位置须符合账号的日志区间。
+	if err := validateSyncChangeSequence(position, ackSequence, bounds, domain.ErrInvalidSyncChangeCursor); err != nil {
+		return SyncChangeConfirmationDecision{}, err
+	}
+
+	// 2. 较旧位置保留当前确认值。更高或等值位置均记录活动。
+	if position < ackSequence {
+		return SyncChangeConfirmationDecision{AckSequence: ackSequence}, nil
+	}
+	return SyncChangeConfirmationDecision{AckSequence: position, RecordActivity: true}, nil
 }
