@@ -17,15 +17,19 @@ func TestServerBackupSourceB5ManifestIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
-	// 1. 准备同一停写点的源库和 SQL。
 	source := prepareBackupSource(t, ctx)
+	prepareBackupSourceB5Manifest(t, ctx, source, t.TempDir())
+	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", source.mysqlContainer, source.minioContainer)
+}
+
+func prepareBackupSourceB5Manifest(t *testing.T, ctx context.Context, source backupSourceFixture, backupDir string) backupSourceManifest {
+	t.Helper()
+	// 1. 准备同一停写点的源库、SQL 和清单。
 	verifyBackupSourceSyncBaseline(t, ctx, source)
 	fixture := prepareReplacementPublicationFixtureFromSource(t, ctx, source)
 	verifyBackupSourceFileVersions(t, ctx, fixture)
-	backupDir := t.TempDir()
 	dump := stopAndExportBackupSourceB5SQL(t, ctx, fixture, backupDir)
-	writeAndVerifyBackupSourceB5Manifest(t, ctx, fixture, backupDir, dump)
-	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", source.mysqlContainer, source.minioContainer)
+	return writeAndVerifyBackupSourceB5Manifest(t, ctx, fixture, backupDir, dump)
 }
 
 func writeAndVerifyBackupSourceB5Manifest(t *testing.T, ctx context.Context, fixture replacementPublicationFixture,

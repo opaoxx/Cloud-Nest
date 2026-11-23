@@ -40,6 +40,12 @@ func prepareBackupSourceBundle(t *testing.T, ctx context.Context, fixture backup
 	backupDir := t.TempDir()
 	dump := stopAndExportBackupSourceSQL(t, ctx, fixture, backupDir)
 	manifest := writeAndVerifyBackupSourceManifest(t, ctx, fixture, backupDir, dump)
+	return openBackupSourceBundleRoot(t, backupDir), manifest
+}
+
+func openBackupSourceBundleRoot(t *testing.T, backupDir string) *os.Root {
+	t.Helper()
+	// 打开备份目录并创建受根目录约束的正文子目录。
 	root, err := os.OpenRoot(backupDir)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +58,7 @@ func prepareBackupSourceBundle(t *testing.T, ctx context.Context, fixture backup
 	if err := root.Mkdir("objects", 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return root, manifest
+	return root
 }
 
 func saveAndVerifyBackupSourcePayloads(t *testing.T, ctx context.Context, bucket *serverUploadContentBucket, root *os.Root, objects []backupManifestObject) {
