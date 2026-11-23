@@ -23,15 +23,16 @@ type uploadIntentDraft struct {
 
 // UploadIntentView 是窗口展示的一条本地上传记录。
 type UploadIntentView struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	SizeBytes     int64  `json:"size_bytes,string"`
-	ParentID      string `json:"parent_id"`
-	Status        string `json:"status"`
-	TaskID        string `json:"task_id"`
-	ResultEntryID string `json:"result_entry_id,omitempty"`
-	ErrorCode     string `json:"error_code,omitempty"`
-	ErrorMessage  string `json:"error_message,omitempty"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	SizeBytes      int64  `json:"size_bytes,string"`
+	ConfirmedBytes int64  `json:"confirmed_bytes,string"`
+	ParentID       string `json:"parent_id"`
+	Status         string `json:"status"`
+	TaskID         string `json:"task_id"`
+	ResultEntryID  string `json:"result_entry_id,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	ErrorMessage   string `json:"error_message,omitempty"`
 }
 
 var errUploadKeyConflict = errors.New("本次文件选择已保存到其他目标，请重新选择文件")
@@ -91,6 +92,16 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// 5. 正文确认独立于终态保存，失败或取消后仍能显示此前确认的字节。
+	const confirmationSchema = `CREATE TABLE IF NOT EXISTS single_upload_confirmations (
+		intent_id INTEGER PRIMARY KEY REFERENCES single_upload_creations(intent_id),
+		confirmed_bytes INTEGER NOT NULL CHECK (confirmed_bytes >= 0)
+	) STRICT`
+	if _, err := db.ExecContext(ctx, confirmationSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -125,12 +136,14 @@ func insertUploadIntent(ctx context.Context, db *sql.DB, owner uploadOwner, draf
 }
 
 func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]UploadIntentView, error) {
-	// 1. 只读取当前服务和当前账号的上传记录、创建回执和终态结果。
+	// 1. 读取当前账号的确认字节。旧版本的待校验及已发布任务已有完整正文。
 	rows, err := db.QueryContext(ctx, `SELECT CAST(i.id AS TEXT), i.name, i.size_bytes, i.parent_id, i.status, COALESCE(c.task_id, ''),
-		COALESCE(o.result_entry_id, ''), COALESCE(o.error_code, ''), COALESCE(o.error_message, '')
+		COALESCE(o.result_entry_id, ''), COALESCE(o.error_code, ''), COALESCE(o.error_message, ''),
+		COALESCE(p.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END)
 		FROM upload_intents i
 		LEFT JOIN single_upload_creations c ON c.intent_id = i.id
 		LEFT JOIN single_upload_outcomes o ON o.intent_id = i.id
+		LEFT JOIN single_upload_confirmations p ON p.intent_id = i.id
 		WHERE i.server_address = ? AND i.user_id = ? ORDER BY i.id DESC`, owner.Address, owner.UserID)
 	if err != nil {
 		return nil, err
@@ -142,7 +155,7 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 	for rows.Next() {
 		var intent UploadIntentView
 		if err := rows.Scan(&intent.ID, &intent.Name, &intent.SizeBytes, &intent.ParentID, &intent.Status, &intent.TaskID,
-			&intent.ResultEntryID, &intent.ErrorCode, &intent.ErrorMessage); err != nil {
+			&intent.ResultEntryID, &intent.ErrorCode, &intent.ErrorMessage, &intent.ConfirmedBytes); err != nil {
 			return nil, err
 		}
 		intents = append(intents, intent)

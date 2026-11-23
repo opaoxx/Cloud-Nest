@@ -45,7 +45,18 @@ func recordUploadOutcome(ctx context.Context, intent scopedUploadIntent, taskID 
 	}
 	defer tx.Rollback()
 
-	// 1. 只允许更新同账号的原任务，迟到的校验状态无法覆盖已保存的终态。
+	// 1. 新状态或此前的本机待校验状态能证明完整正文已接收。
+	if _, err := tx.ExecContext(ctx, `INSERT INTO single_upload_confirmations (intent_id, confirmed_bytes)
+		SELECT i.id, i.size_bytes FROM upload_intents i JOIN single_upload_creations c ON c.intent_id = i.id
+		WHERE i.id = ? AND i.server_address = ? AND i.user_id = ? AND c.task_id = ?
+		AND i.status IN ('CREATED', 'VERIFYING', ?)
+		AND (i.status = 'VERIFYING' OR ? IN ('VERIFYING', 'COMPLETED'))
+		ON CONFLICT(intent_id) DO NOTHING`,
+		intent.id, intent.owner.Address, intent.owner.UserID, taskID, snapshot.Status, snapshot.Status); err != nil {
+		return err
+	}
+
+	// 2. 只允许更新同账号的原任务，迟到的校验状态无法覆盖已保存的终态。
 	result, err := tx.ExecContext(ctx, `UPDATE upload_intents SET status = ?
 		WHERE id = ? AND server_address = ? AND user_id = ? AND status IN ('CREATED', 'VERIFYING', ?)
 		AND EXISTS (SELECT 1 FROM single_upload_creations WHERE intent_id = upload_intents.id AND task_id = ?)`,
@@ -61,7 +72,7 @@ func recordUploadOutcome(ctx context.Context, intent scopedUploadIntent, taskID 
 		return errors.New("上传状态或归属已变化")
 	}
 
-	// 2. 状态和发布条目或失败原因一起提交，重复确认时保留第一份终态结果。
+	// 3. 进度、状态和最终结果一起提交，重复确认时保留第一份结果。
 	if snapshot.Status != "VERIFYING" {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO single_upload_outcomes (intent_id, result_entry_id, error_code, error_message)
 			VALUES (?, ?, ?, ?) ON CONFLICT(intent_id) DO NOTHING`,

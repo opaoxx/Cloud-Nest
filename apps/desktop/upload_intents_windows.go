@@ -9,14 +9,14 @@ import (
 	"github.com/opaoxx/cloud-nest/pkg/client"
 )
 
-// UploadIntents 保存和读取当前账号在本机的待提交上传。
+// UploadIntents 保存和读取当前账号在本机的上传队列。
 type UploadIntents struct {
 	account      *Account
 	picker       *LocalFilePicker
 	databasePath string
 }
 
-// UploadIntentResult 将待提交记录或重新登录提示交给窗口。
+// UploadIntentResult 将本机队列或重新登录提示交给窗口。
 type UploadIntentResult struct {
 	Items         []UploadIntentView `json:"items"`
 	LoginRequired string             `json:"loginRequired"`
@@ -35,7 +35,7 @@ func (uploads *UploadIntents) Save(ctx context.Context, parentID, creationKey st
 	return uploads.load(ctx, &uploadIntentDraft{Source: source, ParentID: parentID})
 }
 
-// List 读取当前服务及账号的本机待提交上传。
+// List 读取当前服务及账号的本机上传队列。
 func (uploads *UploadIntents) List(ctx context.Context) (UploadIntentResult, error) {
 	return uploads.load(ctx, nil)
 }
@@ -76,7 +76,7 @@ func (uploads *UploadIntents) load(ctx context.Context, draft *uploadIntentDraft
 		}
 	}
 
-	// 3. 将该账号的本机待提交列表交给窗口。
+	// 3. 将该账号的本机上传队列交给窗口。
 	items, err := listUploadIntents(ctx, db, owner)
 	if err != nil {
 		return UploadIntentResult{}, errors.New("无法读取本机上传记录")

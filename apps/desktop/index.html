@@ -58,7 +58,7 @@
         <output id="fileSelection" role="status" aria-live="polite"></output>
       </section>
       <section id="uploadPanel" aria-labelledby="uploadTitle" hidden>
-        <h2 id="uploadTitle">上传任务</h2>
+        <h2 id="uploadTitle">上传队列</h2>
         <output id="uploadStatus" role="status" aria-live="polite"></output>
         <ul id="uploadItems" aria-label="上传任务列表"></ul>
       </section>
@@ -225,6 +225,7 @@
         summary.textContent = intent.name + " · " + intent.size_bytes + " B · 目录 " + intent.parent_id;
         row.append(summary);
         if (intent.status === "PENDING_CREATE") {
+          summary.textContent += " · 待创建任务";
           row.append(uploadActionButton("创建上传任务", () =>
             runUploadAction("Submit", intent.id, "正在创建上传任务…", "已创建 SINGLE 上传任务。")));
         } else if (intent.status === "CREATED") {
@@ -246,6 +247,7 @@
           if (intent.error_message) summary.textContent += " · " + intent.error_message;
           if (intent.error_code) summary.textContent += "（" + intent.error_code + "）";
         }
+        summary.textContent += " · 已确认 " + intent.confirmed_bytes + " / " + intent.size_bytes + " B";
         uploadItems.append(row);
       }
       uploadStatus.textContent = result.items.length ? "" : "暂无上传记录。";

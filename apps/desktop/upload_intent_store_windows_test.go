@@ -140,9 +140,6 @@ func TestUploadOutcomeIsAtomicAndDoesNotRegress(t *testing.T) {
 	if err := recordUploadOutcome(ctx, intent, "34", published); err == nil {
 		t.Fatal("another remote task recorded an outcome")
 	}
-	if err := recordUploadOutcome(ctx, intent, "33", waiting); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_outcome BEFORE INSERT ON single_upload_outcomes
 		BEGIN SELECT RAISE(ABORT, 'test outcome insert failure'); END`); err != nil {
 		t.Fatal(err)
@@ -151,10 +148,17 @@ func TestUploadOutcomeIsAtomicAndDoesNotRegress(t *testing.T) {
 		t.Fatal("expected outcome insert to fail")
 	}
 	items, err := listUploadIntents(ctx, db, owner)
-	if err != nil || len(items) != 1 || items[0].Status != "VERIFYING" || items[0].ResultEntryID != "" {
+	if err != nil || len(items) != 1 || items[0].Status != "CREATED" || items[0].ResultEntryID != "" {
 		t.Fatalf("failed insert left a partial outcome: %+v, %v", items, err)
 	}
+	var savedProgress int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM single_upload_confirmations`).Scan(&savedProgress); err != nil || savedProgress != 0 {
+		t.Fatalf("failed insert left confirmed progress: %d, %v", savedProgress, err)
+	}
 	if _, err := db.ExecContext(ctx, "DROP TRIGGER fail_outcome"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordUploadOutcome(ctx, intent, "33", waiting); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {

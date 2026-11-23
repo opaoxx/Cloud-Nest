@@ -57,19 +57,11 @@ func (uploads *UploadIntents) SendContent(ctx context.Context, intentID string) 
 			return errors.New("远端任务当前不接收正文")
 		}
 
-		// 3. 按原账号及任务 ID 更新本机状态，保留第 17 步创建回执。
-		result, err := intent.db.ExecContext(ctx, `UPDATE upload_intents SET status = 'VERIFYING'
-			WHERE id = ? AND server_address = ? AND user_id = ? AND status IN ('CREATED', 'VERIFYING')
-			AND EXISTS (SELECT 1 FROM single_upload_creations WHERE intent_id = upload_intents.id AND task_id = ?)`,
-			intent.id, intent.owner.Address, intent.owner.UserID, content.target.TaskID)
-		if err == nil {
-			var updated int64
-			updated, err = result.RowsAffected()
-			if err == nil && updated == 1 {
-				return nil
-			}
+		// 3. 在同一事务保存阶段和已确认字节，供重启后读取。
+		if err := recordUploadOutcome(ctx, intent, content.target.TaskID, client.SingleUploadTaskSnapshot{Status: "VERIFYING"}); err != nil {
+			return errors.New("无法保存正文接收状态，再次发送前会查询远端状态")
 		}
-		return errors.New("无法保存正文接收状态，再次发送前会查询远端状态")
+		return nil
 	})
 }
 
