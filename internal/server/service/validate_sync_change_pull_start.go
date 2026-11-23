@@ -32,7 +32,21 @@ func ValidateSyncChangePullStart(actor domain.Actor, start *SyncChangePullStart,
 		}
 	}
 
-	// 2. 检查设备状态和完整代次。
+	// 2. 在同一视图中检查设备状态、代次和日志区间。
+	if err := validateSyncChangePosition(position, state, bounds, credentialError); err != nil {
+		return err
+	}
+
+	// 3. 首次拉取还须核对设备已确认的基线。
+	if fromBaseline && state.AckSequence < position.Sequence {
+		return domain.ErrInvalidSyncDeviceData
+	}
+	return nil
+}
+
+// validateSyncChangePosition 复用拉取和增量确认对同一账号状态与区间的检查。
+func validateSyncChangePosition(position domain.SyncChangeCursorPosition, state domain.SyncDeviceState, bounds domain.SyncChangeSequenceBounds, credentialError error) error {
+	// 1. 检查设备状态和完整代次。
 	if state.Generation == (domain.SyncCursorGeneration{}) {
 		return domain.ErrInvalidSyncDeviceData
 	}
@@ -50,7 +64,7 @@ func ValidateSyncChangePullStart(actor domain.Actor, start *SyncChangePullStart,
 		return domain.ErrSyncSnapshotExpired
 	}
 
-	// 3. 判断起点是否在可续读区间内，首次拉取还须核对设备已确认基线。
+	// 2. 核对日志区间、已有确认位置和签名位置。
 	if bounds.MinimumPosition > bounds.HighWaterSequence {
 		return domain.ErrInvalidSyncSnapshotSequence
 	}
@@ -62,9 +76,6 @@ func ValidateSyncChangePullStart(actor domain.Actor, start *SyncChangePullStart,
 	}
 	if position.Sequence < bounds.MinimumPosition {
 		return domain.ErrSyncSnapshotExpired
-	}
-	if fromBaseline && state.AckSequence < position.Sequence {
-		return domain.ErrInvalidSyncDeviceData
 	}
 	return nil
 }
