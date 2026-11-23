@@ -54,6 +54,12 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 	if path == "" {
 		return "", nil
 	}
+	directory := filepath.Dir(account.credentials.path)
+	lock, err := lockDownloadCheckpoints(directory)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Close()
 
 	// 2. 在目标目录复核一份完整副本，失败时保留原下载以便重试。
 	temporaryPath, err := copyForDownloadSave(ctx, download, path)
@@ -64,17 +70,27 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 
 	// 3. 交付前再次核对会话，以禁止覆盖的方式提交最终名称。
 	account.mu.Lock()
-	defer account.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		account.mu.Unlock()
 		return "", err
 	}
 	if account.stagedDownload != download {
+		account.mu.Unlock()
 		return "", errors.New("所选文件的暂存已失效，请重新下载")
 	}
 	if err := publishDownload(temporaryPath, path); err != nil {
+		account.mu.Unlock()
 		return "", err
 	}
 	account.discardStagedDownload()
+	account.mu.Unlock()
+	// 成功交付后先清理临时文件。若未能清理，已发布到目标路径的结果仍然有效。
+	if err := os.Remove(download.file.Name()); err == nil || errors.Is(err, os.ErrNotExist) {
+		if db, err := openDownloadCheckpoints(context.WithoutCancel(ctx), directory); err == nil {
+			db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM download_checkpoints WHERE file_id = ?`, download.checkpointID)
+			db.Close()
+		}
+	}
 	return path, nil
 }
 

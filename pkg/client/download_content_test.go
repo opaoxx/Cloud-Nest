@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -71,5 +72,52 @@ func TestDownloadContentRejectsRedirect(t *testing.T) {
 	var destination bytes.Buffer
 	if err := DownloadContent(t.Context(), grant, &destination); err == nil || destination.Len() != 0 {
 		t.Fatalf("redirect was accepted, got %v", err)
+	}
+}
+
+func TestDownloadContentFromValidatesRangeBeforeOpeningWriter(t *testing.T) {
+	for _, fixture := range []struct {
+		name, contentRange, body, contentLength string
+		status                                  int
+		start                                   int64
+	}{
+		{"remaining bytes", "bytes 2-4/5", "cde", "3", 206, 2},
+		{"range ignored", "", "abcde", "5", 200, 0},
+		{"wrong start", "bytes 1-4/5", "bcde", "4", 206, -1},
+		{"wrong end", "bytes 2-3/5", "cd", "2", 206, -1},
+		{"wrong total", "bytes 2-4/6", "cde", "3", 206, -1},
+		{"wrong length", "bytes 2-4/5", "cd", "2", 206, -1},
+		{"partial full response", "bytes 2-4/5", "cde", "3", 200, -1},
+		{"out of range", "bytes */5", "", "0", 416, -1},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Header.Get("Range") != "bytes=2-" || request.Header.Get("Authorization") != "" ||
+					request.Header.Get("Accept-Encoding") != "identity" || request.URL.RawQuery != "sig=a%2Bb" {
+					t.Error("download range request changed the signed URL or headers")
+				}
+				writer.Header().Set("Content-Length", fixture.contentLength)
+				if fixture.contentRange != "" {
+					writer.Header().Set("Content-Range", fixture.contentRange)
+				}
+				writer.WriteHeader(fixture.status)
+				fmt.Fprint(writer, fixture.body)
+			}))
+			defer server.Close()
+			grant := DownloadGrant{URL: server.URL + "/object?sig=a%2Bb", ExpiresAt: time.Now().Add(time.Minute), SizeBytes: 5}
+			var destination bytes.Buffer
+			started := int64(-1)
+			err := DownloadContentFrom(t.Context(), grant, 2, func(start int64) (io.Writer, error) {
+				started = start
+				return &destination, nil
+			})
+			if fixture.start < 0 {
+				if err == nil || started != -1 || destination.Len() != 0 {
+					t.Fatalf("invalid headers opened the writer: %d, %q, %v", started, &destination, err)
+				}
+			} else if err != nil || started != fixture.start || destination.String() != fixture.body {
+				t.Fatalf("incorrect write: %d, %q, %v", started, &destination, err)
+			}
+		})
 	}
 }

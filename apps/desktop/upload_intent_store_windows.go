@@ -40,7 +40,7 @@ type UploadIntentView struct {
 
 var errUploadKeyConflict = errors.New("本次文件选择已保存到其他目标，请重新选择文件")
 
-func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
+func openTransferDatabase(path string) (*sql.DB, error) {
 	// 1. 为并发写入设置等待时间。写事务先取得写权限，避免对账读后写时与暂停互相阻塞。
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("无效的本机任务数据库路径")
@@ -50,7 +50,11 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		uriPath = "/" + uriPath
 	}
 	dsn := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_busy_timeout=3000&_foreign_keys=1&_txlock=immediate"}
-	db, err := sql.Open("sqlite", dsn.String())
+	return sql.Open("sqlite", dsn.String())
+}
+
+func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
+	db, err := openTransferDatabase(path)
 	if err != nil {
 		return nil, err
 	}

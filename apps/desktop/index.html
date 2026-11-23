@@ -529,7 +529,11 @@
           "对象 ID " + grant.object_id + " · 大小 " + grant.size_bytes + " B",
           "SHA-256 " + grant.sha256
         ].join("\n");
+        if (grant.confirmed_bytes > 0) {
+          downloadStatus.textContent += "\n本机已确认 " + grant.confirmed_bytes + " / " + grant.size_bytes + " B";
+        }
         selectedDownload = {item, objectID: grant.object_id};
+        stageDownload.textContent = grant.confirmed_bytes > 0 ? "继续下载" : "下载到临时文件";
         stageDownload.hidden = false;
       } catch (error) {
         if (signedIn) downloadStatus.textContent = error.message || "获取下载授权失败，请重试";
@@ -544,7 +548,7 @@
       const {item, objectID} = selectedDownload;
       downloadStatus.textContent = "正在下载并校验 " + item.name + "…";
       try {
-        // 1. 将选定的条目、修订和对象一起交给 Go 暂存。
+        // 1. 由 Go 重新取得同一条目、修订和对象的授权，检查本机断点。
         const result = await Call.ByName("main.Account.StageDownload", item.id, item.revision, objectID);
         if (!signedIn) return;
         if (result.loginRequired) {
@@ -560,7 +564,10 @@
           "SHA-256 " + result.sha256
         ].join("\n");
       } catch (error) {
-        if (signedIn) downloadStatus.textContent = error.message || "下载未完成，请重试";
+        if (signedIn) {
+          downloadStatus.textContent = error.message || "下载未完成，请重试";
+          stageDownload.textContent = "继续下载";
+        }
       } finally {
         setBusy(false);
       }
