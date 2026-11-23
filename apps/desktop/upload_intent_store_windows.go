@@ -131,6 +131,18 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// 8. 发布条目和终态原因独立于分片回执保存。
+	const multipartOutcomeSchema = `CREATE TABLE IF NOT EXISTS multipart_upload_outcomes (
+		intent_id INTEGER PRIMARY KEY REFERENCES multipart_upload_creations(intent_id),
+		result_entry_id TEXT NOT NULL,
+		error_code TEXT NOT NULL,
+		error_message TEXT NOT NULL
+	) STRICT`
+	if _, err := db.ExecContext(ctx, multipartOutcomeSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -167,7 +179,7 @@ func insertUploadIntent(ctx context.Context, db *sql.DB, owner uploadOwner, draf
 func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]UploadIntentView, error) {
 	// 1. 读取当前账号的确认字节。旧版本的待校验及已发布任务已有完整正文。
 	rows, err := db.QueryContext(ctx, `SELECT CAST(i.id AS TEXT), i.name, i.size_bytes, i.parent_id, i.status, COALESCE(c.task_id, m.task_id, ''),
-		COALESCE(o.result_entry_id, ''), COALESCE(o.error_code, ''), COALESCE(o.error_message, ''),
+		COALESCE(o.result_entry_id, mo.result_entry_id, ''), COALESCE(o.error_code, mo.error_code, ''), COALESCE(o.error_message, mo.error_message, ''),
 		COALESCE(p.confirmed_bytes, mp.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END),
 		COALESCE(m.part_size_bytes, 0), COALESCE(m.part_count, 0), COALESCE(mp.confirmed_parts, 0)
 		FROM upload_intents i
@@ -175,6 +187,7 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 		LEFT JOIN single_upload_outcomes o ON o.intent_id = i.id
 		LEFT JOIN single_upload_confirmations p ON p.intent_id = i.id
 		LEFT JOIN multipart_upload_creations m ON m.intent_id = i.id
+		LEFT JOIN multipart_upload_outcomes mo ON mo.intent_id = m.intent_id
 		LEFT JOIN (SELECT intent_id, COUNT(*) AS confirmed_parts, SUM(size_bytes) AS confirmed_bytes
 			FROM multipart_upload_parts GROUP BY intent_id) mp ON mp.intent_id = m.intent_id
 		WHERE i.server_address = ? AND i.user_id = ? ORDER BY i.id DESC`, owner.Address, owner.UserID)

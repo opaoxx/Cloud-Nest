@@ -23,6 +23,7 @@ type multipartUploadSource struct {
 	path     string
 	sha256   string
 	plan     client.MultipartPlan
+	status   string
 }
 
 type multipartPartJob struct {
@@ -40,20 +41,23 @@ func (uploads *UploadIntents) SendRemainingParts(ctx context.Context, intentID s
 	return uploads.sendMultipartParts(ctx, intentID, false)
 }
 
-func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID string, firstOnly bool) (UploadIntentResult, error) {
+func (uploads *UploadIntents) actOnMultipartUpload(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
 	if !filepath.IsAbs(uploads.databasePath) {
 		return UploadIntentResult{}, errors.New("无法打开本机上传记录")
 	}
 	lock, err := openExclusiveFileLock(uploads.databasePath + ".parts.lock")
 	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-		return UploadIntentResult{}, errors.New("正在上传分片，请稍后重试")
+		return UploadIntentResult{}, errors.New("分片任务正在处理，请稍后重试")
 	}
 	if err != nil {
-		return UploadIntentResult{}, errors.New("无法锁定本机分片上传队列")
+		return UploadIntentResult{}, errors.New("无法锁定本机分片任务")
 	}
 	defer lock.Close()
+	return uploads.actOnUploadIntent(ctx, intentID, action)
+}
 
-	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
+func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID string, firstOnly bool) (UploadIntentResult, error) {
+	return uploads.actOnMultipartUpload(ctx, intentID, func(intent scopedUploadIntent) error {
 		// 1. 读取当前账号的计划，用同一数据目录中的文件锁防止窗口间重复派发。
 		upload, err := readMultipartUploadSource(ctx, intent)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -61,6 +65,9 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 		}
 		if err != nil {
 			return errors.New("无法读取本机分片上传记录")
+		}
+		if upload.status != "MULTIPART_CREATED" {
+			return errors.New("当前任务无法发送分片，请查看发布结果")
 		}
 		var numbers []int
 		if firstOnly {
@@ -112,12 +119,12 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 func readMultipartUploadSource(ctx context.Context, intent scopedUploadIntent) (multipartUploadSource, error) {
 	var upload multipartUploadSource
 	err := intent.db.QueryRowContext(ctx, `SELECT m.task_id, i.parent_id, i.source_path, i.sha256,
-		i.size_bytes, m.part_size_bytes, m.part_count
+		i.size_bytes, m.part_size_bytes, m.part_count, i.status
 		FROM upload_intents i JOIN multipart_upload_creations m ON m.intent_id = i.id
-		WHERE i.id = ? AND i.server_address = ? AND i.user_id = ? AND i.status = 'MULTIPART_CREATED'`,
+		WHERE i.id = ? AND i.server_address = ? AND i.user_id = ?`,
 		intent.id, intent.owner.Address, intent.owner.UserID).
 		Scan(&upload.taskID, &upload.parentID, &upload.path, &upload.sha256, &upload.plan.SizeBytes,
-			&upload.plan.PartSizeBytes, &upload.plan.PartCount)
+			&upload.plan.PartSizeBytes, &upload.plan.PartCount, &upload.status)
 	return upload, err
 }
 

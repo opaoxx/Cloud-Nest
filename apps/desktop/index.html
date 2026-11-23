@@ -238,6 +238,15 @@
             runUploadAction("SendContent", intent.id, "正在发送正文…", "正文已接收，等待查看校验结果。")),
             uploadActionButton("查看校验结果", () => checkUploadStatus(intent.id)));
           row.append(actions);
+        } else if (intent.multipart_plan && ["MULTIPART_COMPLETION_PENDING", "COMPLETING", "VERIFYING"].includes(intent.status)) {
+          const phase = {
+            MULTIPART_COMPLETION_PENDING: "完成请求待确认",
+            COMPLETING: "正在合并分片",
+            VERIFYING: "正在校验文件"
+          }[intent.status];
+          summary.textContent += " · " + phase + " · 任务 " + intent.task_id;
+          row.append(uploadActionButton("查看发布结果", () =>
+            runUploadAction("CheckMultipartStatus", intent.id, "正在查询发布结果…", "", showUploadPublication)));
         } else if (intent.status === "VERIFYING") {
           summary.textContent += " · 正文已接收 · 待查看校验结果 · 任务 " + intent.task_id;
           row.append(uploadActionButton("查看校验结果", () => checkUploadStatus(intent.id)));
@@ -252,6 +261,10 @@
           if (plan.confirmed_parts === 0) {
             actions.append(uploadActionButton("上传第一片", () =>
               runUploadAction("SendFirstPart", intent.id, "正在上传第一片…", "第一片已确认。")));
+          }
+          if (plan.confirmed_parts === plan.part_count && intent.confirmed_bytes === intent.size_bytes) {
+            actions.append(uploadActionButton("提交完成回执", () =>
+              runUploadAction("CompleteMultipart", intent.id, "正在提交完成回执…", "", showUploadPublication)));
           }
           actions.append(uploadActionButton("核对并续传", () =>
             runUploadAction("SendRemainingParts", intent.id, "正在核对并续传分片…", "全部分片已确认。")));
@@ -300,7 +313,7 @@
           if (afterAction) await afterAction(result.items.find(item => item.id === intentID));
         }
       } catch (error) {
-        if (method === "SendRemainingParts") await loadUploadIntents();
+        if (method === "SendRemainingParts" || method === "CompleteMultipart") await loadUploadIntents();
         if (signedIn) uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
       } finally {
         setBusy(false);
@@ -308,15 +321,19 @@
     }
 
     function checkUploadStatus(intentID) {
-      return runUploadAction("CheckStatus", intentID, "正在查询校验结果…", "", async (intent) => {
-        // 3. 只在确认发布后重新读取当前目录，沿用原位置及续页失效规则。
-        if (intent.status === "COMPLETED") {
-          uploadStatus.textContent = "文件已发布。";
-          if (currentDirectoryID) await loadDirectory(currentDirectoryID);
-        } else if (intent.status === "VERIFYING" || intent.status === "CREATED") {
-          uploadStatus.textContent = "发布结果尚未确认，可以再次查看。";
-        }
-      });
+      return runUploadAction("CheckStatus", intentID, "正在查询校验结果…", "", showUploadPublication);
+    }
+
+    async function showUploadPublication(intent) {
+      // 只在确认发布后重新读取当前目录，沿用原位置及续页失效规则。
+      if (intent.status === "COMPLETED") {
+        uploadStatus.textContent = "文件已发布。";
+        if (currentDirectoryID) await loadDirectory(currentDirectoryID);
+      } else if (intent.status === "MULTIPART_CREATED") {
+        uploadStatus.textContent = "任务尚可上传，可以核对分片或提交完成回执。";
+      } else if (["VERIFYING", "CREATED", "COMPLETING", "MULTIPART_COMPLETION_PENDING"].includes(intent.status)) {
+        uploadStatus.textContent = "发布结果尚未确认，可以再次查看。";
+      }
     }
 
     saveUploadIntent.addEventListener("click", async () => {

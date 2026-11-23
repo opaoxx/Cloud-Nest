@@ -111,6 +111,33 @@ func TestUploadMultipartPlanSurvivesReopenAndIsScoped(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].ConfirmedBytes != 1 || items[0].MultipartPlan.ConfirmedParts != 1 {
 		t.Fatalf("remote snapshot did not replace stale progress: %+v, %v", items, err)
 	}
+
+	if _, err := readMultipartCompletionReceipts(ctx, intent, 2); err == nil {
+		t.Fatal("completion accepted a missing receipt")
+	}
+	if err := recordMultipartPart(ctx, intent, receipt.TaskID, part); err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := readMultipartCompletionReceipts(ctx, intent, 2)
+	if err != nil || len(ordered) != 2 || ordered[0].Number != 1 || ordered[1].Number != 2 {
+		t.Fatalf("SQLite did not restore a complete ordered receipt set: %+v, %v", ordered, err)
+	}
+	uploadStages := []client.UploadTaskSnapshot{
+		{Status: multipartCompletionPending}, {Status: "COMPLETING"}, {Status: "VERIFYING"}, {Status: "COMPLETED", ResultEntryID: "99"},
+	}
+	for _, stage := range uploadStages {
+		if err := recordMultipartOutcome(ctx, intent, receipt.TaskID, stage); err != nil {
+			t.Fatalf("recording %s: %v", stage.Status, err)
+		}
+	}
+	if err := recordMultipartOutcome(ctx, intent, receipt.TaskID, client.UploadTaskSnapshot{Status: "VERIFYING"}); err == nil {
+		t.Fatal("published task was moved back into verification")
+	}
+	items, err = listUploadIntents(ctx, db, owner)
+	if err != nil || len(items) != 1 || items[0].Status != "COMPLETED" ||
+		items[0].ResultEntryID != "99" || items[0].ConfirmedBytes != size {
+		t.Fatalf("published row lost its result or progress: %+v, %v", items, err)
+	}
 }
 
 func TestUploadMultipartReconcileSelectsOnlyMissingOrChangedParts(t *testing.T) {
