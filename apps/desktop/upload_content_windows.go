@@ -20,7 +20,7 @@ type uploadContentSource struct {
 
 // SendContent 发送当前账号的已创建任务正文，并保存待查看校验结果的状态。
 func (uploads *UploadIntents) SendContent(ctx context.Context, intentID string) (UploadIntentResult, error) {
-	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
 		// 1. 读取持久化的任务地址和源文件，查询服务端是否已经收过正文。
 		content, err := readUploadContentSource(ctx, intent)
 		if errors.Is(err, sql.ErrNoRows) {

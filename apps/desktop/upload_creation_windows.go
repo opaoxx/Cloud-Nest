@@ -83,6 +83,22 @@ type scopedUploadIntent struct {
 	accessToken string
 }
 
+func (uploads *UploadIntents) actOnUploadTransfer(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
+	// 正文、分片、完成和取消共享原有的分片锁，同一数据目录一次执行一个操作。
+	if !filepath.IsAbs(uploads.databasePath) {
+		return UploadIntentResult{}, errors.New("无法打开本机上传记录")
+	}
+	lock, err := openExclusiveFileLock(uploads.databasePath + ".parts.lock")
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return UploadIntentResult{}, errors.New("上传任务正在处理，请稍后重试")
+	}
+	if err != nil {
+		return UploadIntentResult{}, errors.New("无法锁定本机上传任务")
+	}
+	defer lock.Close()
+	return uploads.actOnUploadIntent(ctx, intentID, action)
+}
+
 func (uploads *UploadIntents) actOnUploadIntent(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
 	// 1. 用当前会话确认归属，读取已保存的创建参数和幂等键。
 	id, err := strconv.ParseInt(intentID, 10, 64)

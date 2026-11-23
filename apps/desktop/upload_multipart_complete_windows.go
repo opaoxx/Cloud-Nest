@@ -20,14 +20,17 @@ func (uploads *UploadIntents) CheckMultipartStatus(ctx context.Context, intentID
 }
 
 func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID string, submit bool) (UploadIntentResult, error) {
-	return uploads.actOnMultipartUpload(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
 		// 1. 先查询原任务。已受理或已进入终态时直接保存观察结果。
 		upload, err := readMultipartUploadSource(ctx, intent)
 		if err != nil {
 			return errors.New("无法读取当前账号的本机分片任务")
 		}
-		if multipartTerminal(upload.status) {
+		if uploadTerminal(upload.status) {
 			return nil
+		}
+		if upload.status == uploadCancelPending || upload.status == "CANCELLING" {
+			return errors.New("请查看原任务的取消结果")
 		}
 		if submit && upload.status == "MULTIPART_CREATED" && upload.pauseID != "" {
 			return errors.New("请先继续已暂停的分片任务")
@@ -69,7 +72,7 @@ func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID stri
 		if err := recordMultipartOutcome(ctx, intent, upload.taskID, snapshot); err != nil {
 			return err
 		}
-		if snapshot.Status == "COMPLETING" || snapshot.Status == "VERIFYING" || multipartTerminal(snapshot.Status) {
+		if snapshot.Status == "COMPLETING" || snapshot.Status == "VERIFYING" || snapshot.Status == "CANCELLING" || uploadTerminal(snapshot.Status) {
 			return nil
 		}
 		return submitError
@@ -100,21 +103,12 @@ func readMultipartCompletionReceipts(ctx context.Context, intent scopedUploadInt
 	return receipts, nil
 }
 
-func multipartTerminal(status string) bool {
-	switch status {
-	case "COMPLETED", "FAILED", "CANCELLED", "EXPIRED":
-		return true
-	default:
-		return false
-	}
-}
-
 func recordMultipartOutcome(ctx context.Context, intent scopedUploadIntent, taskID string, snapshot client.UploadTaskSnapshot) error {
 	status := snapshot.Status
 	switch status {
 	case "UPLOADING":
 		status = "MULTIPART_CREATED"
-	case "CREATING", "CANCELLING", "EXPIRING":
+	case "CREATING", "EXPIRING":
 		return nil
 	}
 	writeError := errors.New("无法保存分片发布状态，请查看原任务的发布结果")
@@ -127,11 +121,12 @@ func recordMultipartOutcome(ctx context.Context, intent scopedUploadIntent, task
 	// 1. 只更新当前账号的同一任务，已公布的终态不被旧状态覆盖。
 	result, err := tx.ExecContext(ctx, `UPDATE upload_intents SET status = ?
 		WHERE id = ? AND server_address = ? AND user_id = ?
-		AND status IN ('MULTIPART_CREATED', 'MULTIPART_COMPLETION_PENDING', 'COMPLETING', 'VERIFYING')
+		AND (status IN ('MULTIPART_CREATED', 'MULTIPART_COMPLETION_PENDING', 'COMPLETING', 'VERIFYING') OR
+			(status IN ('UPLOAD_CANCEL_PENDING', 'CANCELLING') AND ? IN ('CANCELLING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')))
 		AND EXISTS (SELECT 1 FROM multipart_upload_creations WHERE intent_id = upload_intents.id AND task_id = ?)
 		AND (? <> 'MULTIPART_COMPLETION_PENDING' OR NOT EXISTS (
 			SELECT 1 FROM multipart_upload_pauses WHERE intent_id = upload_intents.id
-		))`, status, intent.id, intent.owner.Address, intent.owner.UserID, taskID, status)
+		))`, status, intent.id, intent.owner.Address, intent.owner.UserID, status, taskID, status)
 	if err != nil {
 		return writeError
 	}
@@ -141,7 +136,7 @@ func recordMultipartOutcome(ctx context.Context, intent scopedUploadIntent, task
 	}
 
 	// 2. 终态与发布条目或失败原因一起持久化。
-	if multipartTerminal(status) {
+	if uploadTerminal(status) {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO multipart_upload_outcomes (intent_id, result_entry_id, error_code, error_message)
 			VALUES (?, ?, ?, ?)`, intent.id, snapshot.ResultEntryID, snapshot.ErrorCode, snapshot.ErrorMessage); err != nil {
 			return writeError

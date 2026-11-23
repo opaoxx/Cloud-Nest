@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/opaoxx/cloud-nest/pkg/client"
-	"golang.org/x/sys/windows"
 )
 
 const multipartParallelParts = 2
@@ -42,23 +40,8 @@ func (uploads *UploadIntents) SendRemainingParts(ctx context.Context, intentID s
 	return uploads.sendMultipartParts(ctx, intentID, false, "")
 }
 
-func (uploads *UploadIntents) actOnMultipartUpload(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
-	if !filepath.IsAbs(uploads.databasePath) {
-		return UploadIntentResult{}, errors.New("无法打开本机上传记录")
-	}
-	lock, err := openExclusiveFileLock(uploads.databasePath + ".parts.lock")
-	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-		return UploadIntentResult{}, errors.New("分片任务正在处理，请稍后重试")
-	}
-	if err != nil {
-		return UploadIntentResult{}, errors.New("无法锁定本机分片任务")
-	}
-	defer lock.Close()
-	return uploads.actOnUploadIntent(ctx, intentID, action)
-}
-
 func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID string, firstOnly bool, resumePauseID string) (UploadIntentResult, error) {
-	return uploads.actOnMultipartUpload(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
 		// 1. 读取当前账号的计划，用同一数据目录中的文件锁防止窗口间重复派发。
 		upload, err := readMultipartUploadSource(ctx, intent)
 		if errors.Is(err, sql.ErrNoRows) {

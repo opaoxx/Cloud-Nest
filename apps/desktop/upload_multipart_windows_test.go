@@ -150,11 +150,17 @@ func TestUploadMultipartPlanSurvivesReopenAndIsScoped(t *testing.T) {
 		t.Fatalf("SQLite did not restore a complete ordered receipt set: %+v, %v", ordered, err)
 	}
 	uploadStages := []client.UploadTaskSnapshot{
-		{Status: multipartCompletionPending}, {Status: "COMPLETING"}, {Status: "VERIFYING"}, {Status: "COMPLETED", ResultEntryID: "99"},
+		{Status: multipartCompletionPending}, {Status: "COMPLETING"}, {Status: "VERIFYING"},
+		{Status: uploadCancelPending}, {Status: "COMPLETED", ResultEntryID: "99"},
 	}
 	for _, stage := range uploadStages {
 		if err := recordMultipartOutcome(ctx, intent, receipt.TaskID, stage); err != nil {
 			t.Fatalf("recording %s: %v", stage.Status, err)
+		}
+		if stage.Status == uploadCancelPending {
+			if err := recordMultipartOutcome(ctx, intent, receipt.TaskID, client.UploadTaskSnapshot{Status: "UPLOADING"}); err == nil {
+				t.Fatal("stale status cleared an unconfirmed cancel request")
+			}
 		}
 	}
 	if err := recordMultipartOutcome(ctx, intent, receipt.TaskID, client.UploadTaskSnapshot{Status: "VERIFYING"}); err == nil {
