@@ -107,7 +107,7 @@ func TestSelectSyncChangePrunePrefixIntegration(t *testing.T) {
 			{time.Time{}, 1},
 			{cutoff.Add(time.Nanosecond), 1},
 			{cutoff, 0},
-			{cutoff, maxSyncChangePruneBatchSize + 1},
+			{cutoff, domain.MaxSyncChangePruneBatchSize + 1},
 		} {
 			prefix, err := txStore.selectSyncChangePrunePrefix(txContext, invalid.cutoff, invalid.limit)
 			if prefix != (domain.SyncChangePruneRange{}) || err == nil {

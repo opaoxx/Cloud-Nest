@@ -2,6 +2,9 @@ package domain
 
 import "errors"
 
+// MaxSyncChangePruneBatchSize 限定一个账号事务最多删除的日志数。
+const MaxSyncChangePruneBatchSize = 100
+
 // ErrSyncChangePruneCountMismatch 表示实际删除的日志数与事务内选出的范围不符。
 var ErrSyncChangePruneCountMismatch = errors.New("同步日志裁剪行数不一致")
 

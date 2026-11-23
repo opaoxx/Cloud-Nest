@@ -8,8 +8,6 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
-const maxSyncChangePruneBatchSize = 100
-
 // selectSyncChangePrunePrefix 在所属账号事务内只读选出本批可裁剪的连续范围。
 func (store *Store) selectSyncChangePrunePrefix(ctx context.Context, cutoff time.Time, limit int) (domain.SyncChangePruneRange, error) {
 	// 1. 校验截止时间和批量上限，在账号锁内读取确认上界。
@@ -17,8 +15,8 @@ func (store *Store) selectSyncChangePrunePrefix(ctx context.Context, cutoff time
 	if cutoff.IsZero() || cutoff.Nanosecond()%int(time.Microsecond) != 0 {
 		return empty, fmt.Errorf("筛选日志裁剪范围需要有效的微秒精度截止时间")
 	}
-	if limit < 1 || limit > maxSyncChangePruneBatchSize {
-		return empty, fmt.Errorf("日志裁剪筛选上限须为 1～%d", maxSyncChangePruneBatchSize)
+	if limit < 1 || limit > domain.MaxSyncChangePruneBatchSize {
+		return empty, fmt.Errorf("日志裁剪筛选上限须为 1～%d", domain.MaxSyncChangePruneBatchSize)
 	}
 	ackLimit, err := store.readSyncChangePruneAckLimit(ctx)
 	if err != nil {
