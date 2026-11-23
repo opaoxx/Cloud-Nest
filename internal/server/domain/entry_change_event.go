@@ -14,6 +14,9 @@ const EntryPurgeStartedEventType = "ENTRY_PURGE_STARTED"
 // EntryPurgedEventType 表示条目已完成逻辑清理。
 const EntryPurgedEventType = "ENTRY_PURGED"
 
+// FilePublishedEventType 表示新文件已发布。
+const FilePublishedEventType = "FILE_PUBLISHED"
+
 // FileContentReplacedEventType 表示既有文件已发布新的内容版本。
 const FileContentReplacedEventType = "FILE_CONTENT_REPLACED"
 
@@ -41,7 +44,7 @@ func NewEntryChangeEvent(eventType string, entry *FileEntry) (ChangeEventInput, 
 
 // NewFilePublishedChangeEvent 使用实际发布条目和已核对的内容摘要。
 func NewFilePublishedChangeEvent(entry *FileEntry, digest [sha256.Size]byte) (ChangeEventInput, error) {
-	return newFileContentChangeEvent("FILE_PUBLISHED", entry, digest)
+	return newFileContentChangeEvent(FilePublishedEventType, entry, digest)
 }
 
 // NewFileContentReplacedChangeEvent 从已替换的文件和实测内容构造变更事实。

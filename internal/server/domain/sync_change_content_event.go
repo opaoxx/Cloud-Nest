@@ -9,7 +9,7 @@ import (
 // ValidateSyncChangeContentEvent 核对文件发布或内容替换事件的六字段载荷。
 func ValidateSyncChangeContentEvent(event SyncChangeEvent) error {
 	// 1. 确认事件类型，并严格解码六字段载荷。
-	if event.EventType != "FILE_PUBLISHED" && event.EventType != FileContentReplacedEventType {
+	if event.EventType != FilePublishedEventType && event.EventType != FileContentReplacedEventType {
 		return fmt.Errorf("%w: 六字段载荷的事件类型无效", ErrInvalidSyncChangePage)
 	}
 	var payload struct {
