@@ -24,12 +24,18 @@ func TestServerBackupSourceB5ManifestIntegration(t *testing.T) {
 
 func prepareBackupSourceB5Manifest(t *testing.T, ctx context.Context, source backupSourceFixture, backupDir string) backupSourceManifest {
 	t.Helper()
+	manifest, _ := prepareBackupSourceB5ManifestAndCursor(t, ctx, source, backupDir)
+	return manifest
+}
+
+func prepareBackupSourceB5ManifestAndCursor(t *testing.T, ctx context.Context, source backupSourceFixture, backupDir string) (backupSourceManifest, string) {
+	t.Helper()
 	// 1. 准备同一停写点的源库、SQL 和清单。
-	verifyBackupSourceSyncBaseline(t, ctx, source)
+	cursor := verifyBackupSourceSyncBaseline(t, ctx, source)
 	fixture := prepareReplacementPublicationFixtureFromSource(t, ctx, source)
 	verifyBackupSourceFileVersions(t, ctx, fixture)
 	dump := stopAndExportBackupSourceB5SQL(t, ctx, fixture, backupDir)
-	return writeAndVerifyBackupSourceB5Manifest(t, ctx, fixture, backupDir, dump)
+	return writeAndVerifyBackupSourceB5Manifest(t, ctx, fixture, backupDir, dump), cursor
 }
 
 func writeAndVerifyBackupSourceB5Manifest(t *testing.T, ctx context.Context, fixture replacementPublicationFixture,

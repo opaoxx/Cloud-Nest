@@ -30,7 +30,7 @@ func TestServerBackupSourceSyncBaselineIntegration(t *testing.T) {
 	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", fixture.mysqlContainer, fixture.minioContainer)
 }
 
-func verifyBackupSourceSyncBaseline(t *testing.T, ctx context.Context, fixture backupSourceFixture) {
+func verifyBackupSourceSyncBaseline(t *testing.T, ctx context.Context, fixture backupSourceFixture) string {
 	t.Helper()
 	client, login := fixture.api, fixture.login
 	artifactDir := t.TempDir()
@@ -135,4 +135,5 @@ func verifyBackupSourceSyncBaseline(t *testing.T, ctx context.Context, fixture b
 	}
 	t.Logf("隔离源端账号 %d，设备 %d，快照截止 1，拉取和确认到 2，同一游标续读空页，数据库 ACTIVE/ack=%d/H=%d/保留=%d，游标 SHA-256 %x",
 		userID, deviceID, ack, high, retained, sha256.Sum256([]byte(savedPage.NextCursor)))
+	return savedPage.NextCursor
 }
