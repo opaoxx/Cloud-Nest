@@ -16,3 +16,11 @@ type SyncChangeEvent struct {
 	EventType string
 	Payload   json.RawMessage
 }
+
+// SyncChangePullResult 保存一页通过校验的增量事件及其续读凭据。
+type SyncChangePullResult struct {
+	Events            []SyncChangeEvent
+	HighWaterSequence uint64
+	NextCursor        string
+	HasMore           bool
+}

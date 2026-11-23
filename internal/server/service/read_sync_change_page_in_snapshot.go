@@ -18,6 +18,8 @@ type SyncChangePageReader interface {
 type SyncChangeReadPage struct {
 	HighWaterSequence uint64
 	Events            []domain.SyncChangeEvent
+	startPosition     domain.SyncChangeCursorPosition
+	pageSize          int
 }
 
 // ReadSyncChangePageInSnapshot 在拉取读视图中复核起点并读取整页。
@@ -45,7 +47,8 @@ func ReadSyncChangePageInSnapshot(
 	}
 
 	// 2. 用复核后的起点和上界限量查询事件。
-	position := start.Position.Sequence
+	startPosition := start.Position
+	position := startPosition.Sequence
 	events, err := reader.ListSyncChangeEvents(ctx, position, bounds.HighWaterSequence, pageSize)
 	if err != nil {
 		return nil, err
@@ -58,5 +61,10 @@ func ReadSyncChangePageInSnapshot(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &SyncChangeReadPage{HighWaterSequence: bounds.HighWaterSequence, Events: events}, nil
+	return &SyncChangeReadPage{
+		HighWaterSequence: bounds.HighWaterSequence,
+		Events:            events,
+		startPosition:     startPosition,
+		pageSize:          pageSize,
+	}, nil
 }
