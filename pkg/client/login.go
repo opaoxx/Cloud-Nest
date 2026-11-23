@@ -128,10 +128,20 @@ func postNativeAuth(ctx context.Context, address, operation string, payload, res
 	if response.StatusCode != http.StatusOK {
 		return response.StatusCode, nil
 	}
-	const maxAuthResponseBytes = 32 * 1024
-	reply, err := io.ReadAll(io.LimitReader(response.Body, maxAuthResponseBytes+1))
-	if err != nil || len(reply) > maxAuthResponseBytes || json.Unmarshal(reply, result) != nil {
+	if err := readSmallJSON(response.Body, result); err != nil {
 		return 0, errors.New("无法读取认证响应，请核对服务地址后重试")
 	}
 	return response.StatusCode, nil
+}
+
+func readSmallJSON(body io.Reader, result any) error {
+	const maxResponseBytes = 32 * 1024
+	reply, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(reply) > maxResponseBytes {
+		return errors.New("响应正文超过限制")
+	}
+	return json.Unmarshal(reply, result)
 }

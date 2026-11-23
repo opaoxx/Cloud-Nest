@@ -36,6 +36,8 @@
         <button type="submit">登录</button>
       </fieldset>
       <output id="loginStatus" role="status" aria-live="polite"></output>
+      <button id="readProfile" type="button" hidden>读取账号资料</button>
+      <output id="profileStatus" role="status" aria-live="polite"></output>
     </form>
   </main>
   <script type="module">
@@ -49,6 +51,8 @@
     const username = document.querySelector("#username");
     const password = document.querySelector("#password");
     const loginStatus = document.querySelector("#loginStatus");
+    const readProfile = document.querySelector("#readProfile");
+    const profileStatus = document.querySelector("#profileStatus");
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -61,13 +65,36 @@
       address.readOnly = busy || signedIn;
       checkConnection.disabled = busy;
       credentials.disabled = busy;
+      readProfile.disabled = busy;
     }
 
     function showSignedIn(name, restored) {
       signedIn = true;
       credentials.hidden = true;
+      readProfile.hidden = false;
       loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
     }
+
+    readProfile.addEventListener("click", async () => {
+      setBusy(true);
+      profileStatus.textContent = "正在读取账号资料…";
+      try {
+        const result = await Call.ByName("main.Account.ReadProfile");
+        if (result.loginRequired) {
+          signedIn = false;
+          credentials.hidden = false;
+          readProfile.hidden = true;
+          profileStatus.textContent = "";
+          loginStatus.textContent = result.loginRequired;
+        } else {
+          profileStatus.textContent = "当前账号：" + result.username;
+        }
+      } catch (error) {
+        profileStatus.textContent = error.message || "读取账号资料失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
 
     checkConnection.addEventListener("click", async () => {
       setBusy(true);

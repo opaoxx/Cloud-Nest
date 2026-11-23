@@ -16,6 +16,7 @@ type Account struct {
 	credentials    sessionFile
 	session        client.NativeSession
 	address        string
+	sessionEpoch   uint64
 }
 
 // RestoredAccount 是启动时可交给桌面页面的会话恢复信息。
@@ -55,6 +56,7 @@ func (account *Account) Login(ctx context.Context, address, username, password s
 	}
 	account.session = session
 	account.address = address
+	account.sessionEpoch++
 	return session.Username, nil
 }
 
@@ -85,7 +87,7 @@ func (account *Account) Restore(ctx context.Context) (RestoredAccount, error) {
 
 	// 2. 使用记录内的原服务地址刷新。只在凭证明确被拒绝时删除记录。
 	view := RestoredAccount{Address: record.Address}
-	session, err := client.RefreshNative(ctx, record.Address, record.RefreshToken)
+	session, err := account.rotateCredential(ctx, record)
 	if err != nil {
 		view.Notice = err.Error()
 		if errors.Is(err, client.ErrRefreshRejected) {
@@ -96,15 +98,24 @@ func (account *Account) Restore(ctx context.Context) (RestoredAccount, error) {
 		return view, nil
 	}
 
-	// 3. 先保存替换后的凭证，再公布会话恢复成功。
-	record.RefreshToken = session.RefreshToken
-	if err := account.credentials.write(record); err != nil {
-		view.Notice = "无法保存轮换后的刷新凭证，请重新登录"
-		return view, nil
-	}
-	session.Username = record.Username
+	// 3. 新凭证已保存，公布会话恢复成功。
 	account.session = session
 	account.address = record.Address
+	account.sessionEpoch++
 	view.Username = record.Username
 	return view, nil
+}
+
+// rotateCredential 在持有文件锁时轮换凭证，先保存新记录，再交出会话。
+func (account *Account) rotateCredential(ctx context.Context, record savedSession) (client.NativeSession, error) {
+	session, err := client.RefreshNative(ctx, record.Address, record.RefreshToken)
+	if err != nil {
+		return client.NativeSession{}, err
+	}
+	record.RefreshToken = session.RefreshToken
+	if err := account.credentials.write(record); err != nil {
+		return client.NativeSession{}, errors.New("无法保存轮换后的刷新凭证，请重新登录")
+	}
+	session.Username = record.Username
+	return session, nil
 }
