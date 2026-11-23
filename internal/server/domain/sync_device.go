@@ -18,7 +18,7 @@ const (
 	SyncDeviceStatusResetRequired SyncDeviceStatus = "RESET_REQUIRED"
 )
 
-// SyncDeviceState 是锁内读到的设备同步状态，代次和序号按值保存。
+// SyncDeviceState 保存事务内读到的设备同步状态，代次和序号按值保存。
 type SyncDeviceState struct {
 	Status      SyncDeviceStatus
 	Generation  SyncCursorGeneration
