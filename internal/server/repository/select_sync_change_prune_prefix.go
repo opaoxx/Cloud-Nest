@@ -10,17 +10,10 @@ import (
 
 const maxSyncChangePruneBatchSize = 100
 
-// syncChangePrunePrefix 表示从最早保留事件开始的连续范围。零值表示没有可裁剪事件。
-type syncChangePrunePrefix struct {
-	FirstSequence uint64
-	LastSequence  uint64
-	Count         int
-}
-
 // selectSyncChangePrunePrefix 在所属账号事务内只读选出本批可裁剪的连续范围。
-func (store *Store) selectSyncChangePrunePrefix(ctx context.Context, cutoff time.Time, limit int) (syncChangePrunePrefix, error) {
+func (store *Store) selectSyncChangePrunePrefix(ctx context.Context, cutoff time.Time, limit int) (domain.SyncChangePruneRange, error) {
 	// 1. 校验截止时间和批量上限，在账号锁内读取确认上界。
-	var empty syncChangePrunePrefix
+	var empty domain.SyncChangePruneRange
 	if cutoff.IsZero() || cutoff.Nanosecond()%int(time.Microsecond) != 0 {
 		return empty, fmt.Errorf("筛选日志裁剪范围需要有效的微秒精度截止时间")
 	}
@@ -42,7 +35,7 @@ func (store *Store) selectSyncChangePrunePrefix(ctx context.Context, cutoff time
 	defer rows.Close()
 
 	// 3. 遇到保留期边界就停止。发现已检查范围存在断档时，交付空结果和错误。
-	var prefix syncChangePrunePrefix
+	var prefix domain.SyncChangePruneRange
 	stoppedAtCutoff := false
 	for rows.Next() {
 		var sequence uint64

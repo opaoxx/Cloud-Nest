@@ -46,9 +46,9 @@ func TestSelectSyncChangePrunePrefixIntegration(t *testing.T) {
 	execute(t, `INSERT INTO sync_devices(device_id,user_id,status,ack_sequence,cursor_generation,last_seen_at)
 		VALUES(?,?,'ACTIVE',20,UNHEX(REPEAT('11',16)),?)`, actor.DeviceID, actor.UserID, cutoff)
 
-	assertSelection := func(t *testing.T, userID uint64, deadline time.Time, limit int, want syncChangePrunePrefix, wantErr error) {
+	assertSelection := func(t *testing.T, userID uint64, deadline time.Time, limit int, want domain.SyncChangePruneRange, wantErr error) {
 		t.Helper()
-		var result syncChangePrunePrefix
+		var result domain.SyncChangePruneRange
 		const allowDisabled = true
 		err := store.withLockedUserTransaction(ctx, userID, allowDisabled, func(txContext context.Context, txStore *Store) error {
 			var readErr error
@@ -61,42 +61,42 @@ func TestSelectSyncChangePrunePrefixIntegration(t *testing.T) {
 	}
 
 	// 2. 验证时间边界、确认上界、批量上限及按所属账号隔离。
-	assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{18, 18, 1}, nil)
+	assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{FirstSequence: 18, LastSequence: 18, Count: 1}, nil)
 	execute(t, setEventTime, newer, 19)
-	assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{18, 18, 1}, nil)
+	assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{FirstSequence: 18, LastSequence: 18, Count: 1}, nil)
 	execute(t, setEventTime, newer, 18)
-	assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{}, nil)
+	assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{}, nil)
 	execute(t, setEventTime, older, 18)
 	execute(t, setEventTime, older, 19)
-	assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{18, 20, 3}, nil)
-	assertSelection(t, actor.UserID, cutoff, 2, syncChangePrunePrefix{18, 19, 2}, nil)
+	assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{FirstSequence: 18, LastSequence: 20, Count: 3}, nil)
+	assertSelection(t, actor.UserID, cutoff, 2, domain.SyncChangePruneRange{FirstSequence: 18, LastSequence: 19, Count: 2}, nil)
 	execute(t, setPosition, 17)
-	assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{}, nil)
+	assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{}, nil)
 	execute(t, setPosition, 20)
 
 	execute(t, setHighWater, uint64(math.MaxUint64), 2)
-	assertSelection(t, 2, cutoff, 100, syncChangePrunePrefix{}, nil)
+	assertSelection(t, 2, cutoff, 100, domain.SyncChangePruneRange{}, nil)
 	execute(t, insertEvent, 2, uint64(math.MaxUint64), 21, older)
-	assertSelection(t, 2, cutoff, 100, syncChangePrunePrefix{math.MaxUint64, math.MaxUint64, 1}, nil)
-	assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{18, 20, 3}, nil)
+	assertSelection(t, 2, cutoff, 100, domain.SyncChangePruneRange{FirstSequence: math.MaxUint64, LastSequence: math.MaxUint64, Count: 1}, nil)
+	assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{FirstSequence: 18, LastSequence: 20, Count: 3}, nil)
 
 	// 3. 构造可见断档或提前读尽，验证不会返回之前已选中的部分范围。
 	execute(t, setHighWater, 23, actor.UserID)
 	t.Run("interior gap", func(t *testing.T) {
 		execute(t, setSequence, 23, 19)
 		t.Cleanup(func() { execute(t, setSequence, 19, 23) })
-		assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{}, domain.ErrInvalidSyncSnapshotSequence)
-		assertSelection(t, actor.UserID, cutoff, 1, syncChangePrunePrefix{18, 18, 1}, nil)
+		assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{}, domain.ErrInvalidSyncSnapshotSequence)
+		assertSelection(t, actor.UserID, cutoff, 1, domain.SyncChangePruneRange{FirstSequence: 18, LastSequence: 18, Count: 1}, nil)
 	})
 	t.Run("unexpected end below ack limit", func(t *testing.T) {
 		execute(t, setSequence, 23, 20)
 		t.Cleanup(func() { execute(t, setSequence, 20, 23) })
-		assertSelection(t, actor.UserID, cutoff, 100, syncChangePrunePrefix{}, domain.ErrInvalidSyncSnapshotSequence)
+		assertSelection(t, actor.UserID, cutoff, 100, domain.SyncChangePruneRange{}, domain.ErrInvalidSyncSnapshotSequence)
 	})
 	execute(t, setHighWater, 22, actor.UserID)
 
 	// 4. 拒绝非法输入和取消，并在独立连接上核对日志仍完整。
-	if prefix, err := store.selectSyncChangePrunePrefix(ctx, cutoff, 1); prefix != (syncChangePrunePrefix{}) || err == nil {
+	if prefix, err := store.selectSyncChangePrunePrefix(ctx, cutoff, 1); prefix != (domain.SyncChangePruneRange{}) || err == nil {
 		t.Fatalf("未拒绝事务外调用：%+v，%v", prefix, err)
 	}
 	if err := store.withLockedUserTransaction(ctx, actor.UserID, true, func(txContext context.Context, txStore *Store) error {
@@ -110,14 +110,14 @@ func TestSelectSyncChangePrunePrefixIntegration(t *testing.T) {
 			{cutoff, maxSyncChangePruneBatchSize + 1},
 		} {
 			prefix, err := txStore.selectSyncChangePrunePrefix(txContext, invalid.cutoff, invalid.limit)
-			if prefix != (syncChangePrunePrefix{}) || err == nil {
+			if prefix != (domain.SyncChangePruneRange{}) || err == nil {
 				return fmt.Errorf("未拒绝非法输入：%+v，%v", prefix, err)
 			}
 		}
 		canceled, stop := context.WithCancel(txContext)
 		stop()
 		prefix, err := txStore.selectSyncChangePrunePrefix(canceled, cutoff, 1)
-		if prefix != (syncChangePrunePrefix{}) || !errors.Is(err, context.Canceled) {
+		if prefix != (domain.SyncChangePruneRange{}) || !errors.Is(err, context.Canceled) {
 			return fmt.Errorf("取消查询后仍返回范围：%+v，%v", prefix, err)
 		}
 		return nil
