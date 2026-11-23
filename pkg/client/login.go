@@ -106,20 +106,10 @@ func RefreshNative(ctx context.Context, address, refreshToken string) (NativeSes
 }
 
 func postNativeAuth(ctx context.Context, address, operation string, payload, result any) (int, error) {
-	base, err := parseServiceAddress(address)
+	request, err := newNativeAuthRequest(ctx, address, operation, payload)
 	if err != nil {
 		return 0, err
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return 0, errors.New("无法编码认证请求")
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base.JoinPath("api", "v1", "auth", operation).String(), bytes.NewReader(body))
-	if err != nil {
-		return 0, errors.New("无法使用这个服务地址，请检查后重试")
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-CloudNest-Client", "native")
 	response, err := serviceHTTPClient.Do(request)
 	if err != nil {
 		return 0, errors.New("无法连接服务，请检查地址及后端是否已启动")
@@ -132,6 +122,24 @@ func postNativeAuth(ctx context.Context, address, operation string, payload, res
 		return 0, errors.New("无法读取认证响应，请核对服务地址后重试")
 	}
 	return response.StatusCode, nil
+}
+
+func newNativeAuthRequest(ctx context.Context, address, operation string, payload any) (*http.Request, error) {
+	base, err := parseServiceAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, errors.New("无法编码认证请求")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base.JoinPath("api", "v1", "auth", operation).String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, errors.New("无法使用这个服务地址，请检查后重试")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CloudNest-Client", "native")
+	return request, nil
 }
 
 func readSmallJSON(body io.Reader, result any) error {

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 )
 
@@ -28,15 +29,8 @@ func ReadCurrentUsername(ctx context.Context, address, accessToken string) (stri
 	defer response.Body.Close()
 
 	// 2. 只有明确的过期错误会进入刷新，其他非成功响应按读取失败处理。
-	if response.StatusCode == http.StatusUnauthorized {
-		var failure struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		if readSmallJSON(response.Body, &failure) == nil && failure.Error.Code == "TOKEN_EXPIRED" {
-			return "", ErrAccessTokenExpired
-		}
+	if response.StatusCode == http.StatusUnauthorized && authErrorCode(response.Body) == "TOKEN_EXPIRED" {
+		return "", ErrAccessTokenExpired
 	}
 	if response.StatusCode != http.StatusOK {
 		return "", errors.New("服务未能返回账号资料")
@@ -54,4 +48,16 @@ func ReadCurrentUsername(ctx context.Context, address, accessToken string) (stri
 		return "", errors.New("服务返回的账号资料格式有误")
 	}
 	return result.Data.User.Username, nil
+}
+
+func authErrorCode(body io.Reader) string {
+	var failure struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if readSmallJSON(body, &failure) != nil {
+		return ""
+	}
+	return failure.Error.Code
 }

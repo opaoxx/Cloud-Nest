@@ -37,6 +37,7 @@
       </fieldset>
       <output id="loginStatus" role="status" aria-live="polite"></output>
       <button id="readProfile" type="button" hidden>读取账号资料</button>
+      <button id="logoutAccount" type="button" hidden>退出账号</button>
       <output id="profileStatus" role="status" aria-live="polite"></output>
     </form>
   </main>
@@ -52,6 +53,7 @@
     const password = document.querySelector("#password");
     const loginStatus = document.querySelector("#loginStatus");
     const readProfile = document.querySelector("#readProfile");
+    const logoutAccount = document.querySelector("#logoutAccount");
     const profileStatus = document.querySelector("#profileStatus");
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
@@ -66,14 +68,40 @@
       checkConnection.disabled = busy;
       credentials.disabled = busy;
       readProfile.disabled = busy;
+      logoutAccount.disabled = busy;
     }
 
     function showSignedIn(name, restored) {
       signedIn = true;
       credentials.hidden = true;
       readProfile.hidden = false;
+      logoutAccount.hidden = false;
       loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
     }
+
+    function showSignedOut(notice) {
+      signedIn = false;
+      credentials.hidden = false;
+      readProfile.hidden = true;
+      logoutAccount.hidden = true;
+      password.value = "";
+      profileStatus.textContent = "";
+      loginStatus.textContent = notice;
+    }
+
+    logoutAccount.addEventListener("click", async () => {
+      setBusy(true);
+      loginStatus.textContent = "正在退出账号…";
+      try {
+        const notice = await Call.ByName("main.Account.Logout");
+        username.value = "";
+        showSignedOut(notice);
+      } catch (error) {
+        loginStatus.textContent = error.message || "退出失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
 
     readProfile.addEventListener("click", async () => {
       setBusy(true);
@@ -81,11 +109,7 @@
       try {
         const result = await Call.ByName("main.Account.ReadProfile");
         if (result.loginRequired) {
-          signedIn = false;
-          credentials.hidden = false;
-          readProfile.hidden = true;
-          profileStatus.textContent = "";
-          loginStatus.textContent = result.loginRequired;
+          showSignedOut(result.loginRequired);
         } else {
           profileStatus.textContent = "当前账号：" + result.username;
         }

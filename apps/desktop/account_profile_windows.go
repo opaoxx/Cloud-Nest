@@ -16,6 +16,7 @@ type ProfileReadResult struct {
 
 var errLoginRequired = errors.New("当前会话不可用，请重新登录")
 var errRefreshOutcomeUnknown = errors.New("无法确认刷新结果，请重新登录")
+var errSessionChanged = errors.New("登录账号已更新，请重新读取资料")
 
 // ReadProfile 使用当前会话读取本人资料，令牌过期时最多刷新并重试一次。
 func (account *Account) ReadProfile(ctx context.Context) (ProfileReadResult, error) {
@@ -47,6 +48,9 @@ func (account *Account) ReadProfile(ctx context.Context) (ProfileReadResult, err
 	account.mu.Lock()
 	defer account.mu.Unlock()
 	if account.sessionEpoch != epoch {
+		if account.session.AccessToken != "" {
+			return ProfileReadResult{}, errSessionChanged
+		}
 		return ProfileReadResult{LoginRequired: errLoginRequired.Error()}, nil
 	}
 	if username != account.session.Username {
@@ -61,6 +65,9 @@ func (account *Account) refreshForRead(ctx context.Context, previousRefreshToken
 
 	// 1. 等候期间会话可能已轮换或结束，先检查再决定是否发请求。
 	if account.sessionEpoch != epoch {
+		if account.session.AccessToken != "" {
+			return "", errSessionChanged
+		}
 		return "", errLoginRequired
 	}
 	if account.session.RefreshToken != previousRefreshToken {
