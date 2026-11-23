@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
@@ -71,6 +72,56 @@ func TestConfirmSyncChangesInTransactionIntegration(t *testing.T) {
 	if active := readState(); active.position != 17 || !active.lastSeen.After(before.lastSeen) || !active.updated.Equal(active.lastSeen) {
 		t.Fatalf("等值确认应只记录活动：%+v", active)
 	}
+
+	t.Run("confirm service accepts the cursor delivered by pull", func(t *testing.T) {
+		// 1. 使用合成密钥把现有拉取和确认服务接到各自正式事务。
+		key := sha256.Sum256([]byte("isolated sync confirmation fixture"))
+		cursorSigner, err := service.NewSyncChangeCursorSigner(key[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursorVerifier, err := service.NewSyncChangeCursorVerifier(key[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		baselineVerifier, err := service.NewSyncSnapshotBaselineVerifier(key[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		start, err := cursorSigner.Sign(domain.SyncChangeCursorPosition{
+			UserID: actor.UserID, DeviceID: actor.DeviceID, Generation: generation, Sequence: 17,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		puller := service.NewSyncChangePullService(service.NewSyncChangePullStartResolver(baselineVerifier, cursorVerifier, time.Now),
+			func(ctx context.Context, actor domain.Actor, read func(context.Context, service.SyncChangePageReader, domain.SyncDeviceState) error) error {
+				return store.WithSyncChangePullSnapshot(ctx, actor, func(readContext context.Context, reader *Store, state domain.SyncDeviceState) error {
+					return read(readContext, reader, state)
+				})
+			}, cursorSigner)
+		confirmer := service.NewSyncChangeConfirmationService(cursorVerifier,
+			func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SyncChangeConfirmationTransaction) error) error {
+				return store.WithUserTransaction(ctx, actor, func(txContext context.Context, transaction *Store) error {
+					return action(txContext, transaction)
+				})
+			})
+
+		// 2. 证明拉取保留确认位置，确认服务使用实际返回的凭据提交新位置。
+		beforePull := readState()
+		page, err := puller.Pull(ctx, actor, "", start, 1)
+		if err != nil || page == nil || len(page.Events) != 1 || page.Events[0].Sequence != 18 || readState() != beforePull {
+			t.Fatalf("拉取应交付第 18 条并保持设备记录：%v", err)
+		}
+		if ack, err := confirmer.Confirm(ctx, actor, page.NextCursor); err != nil || ack != 18 || readState().position != 18 {
+			t.Fatalf("确认服务应交付数据库已提交的位置：%d，错误 %v", ack, err)
+		}
+		committed := readState()
+		if ack, err := confirmer.Confirm(ctx, actor, page.NextCursor+"A"); ack != 0 ||
+			!errors.Is(err, domain.ErrInvalidSyncChangeCursor) || readState() != committed {
+			t.Fatalf("修改过的凭据应被拒绝且保持持久状态：%d，错误 %v", ack, err)
+		}
+	})
 
 	// 2. 由两条连接并发确认 19 与 22，最终位置只能是 22。
 	type confirmationResult struct {
