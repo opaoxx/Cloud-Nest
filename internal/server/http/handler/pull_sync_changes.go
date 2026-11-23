@@ -70,12 +70,7 @@ func writePullSyncChangesFailure(requestContext *gin.Context, err error) {
 	case errors.Is(err, domain.ErrInvalidSyncSnapshotBaselineToken):
 		invalidSyncSnapshotBaselineToken(requestContext)
 	case errors.Is(err, domain.ErrInvalidSyncChangeCursor):
-		requestContext.AbortWithStatusJSON(http.StatusBadRequest, dto.ErrorResponse{
-			Error: dto.ErrorDetail{
-				Code: "INVALID_CURSOR", Message: domain.ErrInvalidSyncChangeCursor.Error(), Details: map[string]any{"field": "cursor"},
-			},
-			RequestID: requestcontext.RequestID(requestContext.Request.Context()),
-		})
+		invalidSyncChangeCursor(requestContext)
 	case errors.Is(err, domain.ErrSyncSnapshotExpired):
 		writeSyncSnapshotPageFailure(requestContext, err)
 	default:
