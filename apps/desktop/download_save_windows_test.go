@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/opaoxx/cloud-nest/pkg/client"
+	"golang.org/x/sys/windows"
 )
 
 func TestDownloadSaveKeepsExistingTargetAndSupportsRetry(t *testing.T) {
@@ -21,12 +25,14 @@ func TestDownloadSaveKeepsExistingTargetAndSupportsRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	download := &stagedDownload{file: source, result: DownloadGrantResult{
-		SizeBytes: uint64(len(content)), SHA256: fmt.Sprintf("%x", sha256.Sum256(content)),
-	}}
 	folder := t.TempDir()
 	destination := filepath.Join(folder, "下载结果 01.bin")
-	temporaryPath, err := copyForDownloadSave(t.Context(), download, destination)
+	size := int64(len(content))
+	sha := fmt.Sprintf("%x", sha256.Sum256(content))
+	copyTo := func(path string) (string, error) {
+		return copyForDownloadSave(t.Context(), io.NewSectionReader(source, 0, size), size, sha, path)
+	}
+	temporaryPath, err := copyTo(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,12 +49,12 @@ func TestDownloadSaveKeepsExistingTargetAndSupportsRetry(t *testing.T) {
 	if actual, err := os.ReadFile(destination); err != nil || !bytes.Equal(actual, original) {
 		t.Fatalf("existing target changed: %v", err)
 	}
-	if _, err := copyForDownloadSave(t.Context(), download, destination); !errors.Is(err, errSaveTargetExists) {
+	if _, err := copyTo(destination); !errors.Is(err, errSaveTargetExists) {
 		t.Fatalf("expected to reject the known conflict, got %v", err)
 	}
 
 	other := filepath.Join(folder, "下载结果 另存.bin")
-	alternateTemp, err := copyForDownloadSave(t.Context(), download, other)
+	alternateTemp, err := copyTo(other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,14 +77,99 @@ func TestDownloadSaveRejectsInvalidCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	folder := t.TempDir()
-	download := &stagedDownload{file: source, result: DownloadGrantResult{
-		SizeBytes: 3, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("abc"))),
-	}}
-	if _, err := copyForDownloadSave(t.Context(), download, filepath.Join(folder, "new.bin")); err == nil ||
+	sha := fmt.Sprintf("%x", sha256.Sum256([]byte("abc")))
+	if _, err := copyForDownloadSave(t.Context(), io.NewSectionReader(source, 0, 3), 3, sha, filepath.Join(folder, "new.bin")); err == nil ||
 		err.Error() != "保存副本 SHA-256 校验失败，请重试" {
 		t.Fatalf("corrupted copy was accepted: %v", err)
 	}
 	if entries, err := os.ReadDir(folder); err != nil || len(entries) != 0 {
 		t.Fatalf("failed copy left a file in the target directory: %v", err)
+	}
+}
+
+type downloadFaultReader func([]byte) (int, error)
+
+func (read downloadFaultReader) Read(body []byte) (int, error) { return read(body) }
+
+func TestDownloadSaveDiskFullKeepsVerifiedDataAndAllowsAnotherTarget(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	db, err := openDownloadCheckpoints(ctx, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	body := []byte("verified download")
+	auth := downloadAuthorization{owner: uploadOwner{Address: "http://127.0.0.1:18081", UserID: "7"}, entryID: "20",
+		grant: client.DownloadGrant{ObjectID: "33", Revision: "1", SizeBytes: uint64(len(body)),
+			SHA256: fmt.Sprintf("%x", sha256.Sum256(body))}}
+	checkpoint, err := createDownloadCheckpoint(ctx, db, auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary, err := openDownloadCheckpointFile(directory, checkpoint.fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer temporary.Close()
+	if _, err := temporary.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	writer := downloadCheckpointWriter{ctx: ctx, db: db, file: temporary, checkpoint: checkpoint, offset: int64(len(body))}
+	if err := writer.flush(); err != nil {
+		t.Fatal(err)
+	}
+	download := &stagedDownload{file: temporary, entryID: auth.entryID, checkpointID: checkpoint.fileID, result: downloadGrantView(auth.grant)}
+	account := &Account{credentials: sessionFile{path: filepath.Join(directory, "session.bin")}, stagedDownload: download}
+	targetFolder := t.TempDir()
+	expectedTarget := filepath.Join(targetFolder, "result.bin")
+	existing := filepath.Join(targetFolder, "existing.bin")
+	original := []byte("keep this file")
+	if err := os.WriteFile(existing, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. 把真实副本写到一半，再返回 Windows 磁盘已满错误。
+	var observedPartial bool
+	prefix := body[:6]
+	fault := downloadFaultReader(func([]byte) (int, error) {
+		candidates, err := filepath.Glob(filepath.Join(targetFolder, ".cloudnest-save-*.part"))
+		if err != nil || len(candidates) != 1 {
+			return 0, fmt.Errorf("expected a single in-progress copy, found %v: %w", candidates, err)
+		}
+		info, err := os.Stat(candidates[0])
+		observedPartial = err == nil && info.Size() == int64(len(prefix))
+		return 0, &os.PathError{Op: "write", Path: candidates[0], Err: windows.ERROR_DISK_FULL}
+	})
+	if _, err := account.saveStagedDownload(ctx, download, io.MultiReader(bytes.NewReader(prefix), fault), expectedTarget); !errors.Is(err, errSaveDiskFull) || !observedPartial {
+		t.Fatalf("space failure did not reach a partial copy: %v", err)
+	}
+
+	// 2. 清理目标临时副本，并保留完整的本机文件和失败原因。
+	entries, err := os.ReadDir(targetFolder)
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(existing) {
+		t.Fatalf("failed save changed the destination: %v, %v", entries, err)
+	}
+	if actual, err := os.ReadFile(existing); err != nil || !bytes.Equal(actual, original) {
+		t.Fatalf("existing target changed: %v", err)
+	}
+	persisted, err := readDownloadCheckpoint(ctx, db, auth)
+	if err != nil || persisted.failure != errSaveDiskFull.code || persisted.confirmed != int64(len(body)) ||
+		account.stagedDownload != download {
+		t.Fatalf("verified checkpoint not preserved: %+v, %v", persisted, err)
+	}
+
+	// 3. 用同一份已校验的文件换位置另存，清除失败记录。
+	alternate := filepath.Join(t.TempDir(), "success.bin")
+	originalReader := io.NewSectionReader(temporary, 0, int64(len(body)))
+	if saved, err := account.saveStagedDownload(ctx, download, originalReader, alternate); err != nil || saved != alternate {
+		t.Fatalf("retry failed: %q, %v", saved, err)
+	}
+	if actual, err := os.ReadFile(alternate); err != nil || !bytes.Equal(actual, body) {
+		t.Fatalf("saved file differs from verified download: %v", err)
+	}
+	var remaining int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM download_failures`).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("failure record survived successful save: %d, %v", remaining, err)
 	}
 }

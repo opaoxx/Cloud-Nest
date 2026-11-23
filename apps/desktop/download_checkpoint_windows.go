@@ -20,6 +20,7 @@ type downloadCheckpoint struct {
 	sizeBytes int64
 	sha256    string
 	confirmed int64
+	failure   string
 }
 
 type downloadAuthorization struct {
@@ -31,7 +32,7 @@ type downloadAuthorization struct {
 func openDownloadCheckpoints(ctx context.Context, directory string) (*sql.DB, error) {
 	db, err := openTransferDatabase(filepath.Join(directory, "transfers.sqlite3"))
 	if err != nil {
-		return nil, errors.New("无法打开本机下载记录")
+		return nil, downloadStorageError(err, errStageDiskFull, "无法打开本机下载记录")
 	}
 	const schema = `CREATE TABLE IF NOT EXISTS download_checkpoints (
 		file_id TEXT PRIMARY KEY,
@@ -47,7 +48,15 @@ func openDownloadCheckpoints(ctx context.Context, directory string) (*sql.DB, er
 	) STRICT`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		db.Close()
-		return nil, errors.New("无法打开本机下载记录")
+		return nil, downloadStorageError(err, errStageDiskFull, "无法打开本机下载记录")
+	}
+	const failureSchema = `CREATE TABLE IF NOT EXISTS download_failures (
+		file_id TEXT PRIMARY KEY REFERENCES download_checkpoints(file_id) ON DELETE CASCADE,
+		failure_code TEXT NOT NULL
+	) STRICT`
+	if _, err := db.ExecContext(ctx, failureSchema); err != nil {
+		db.Close()
+		return nil, downloadStorageError(err, errStageDiskFull, "无法打开本机下载失败记录")
 	}
 	return db, nil
 }
@@ -55,10 +64,11 @@ func openDownloadCheckpoints(ctx context.Context, directory string) (*sql.DB, er
 func readDownloadCheckpoint(ctx context.Context, db *sql.DB, authorization downloadAuthorization) (downloadCheckpoint, error) {
 	var checkpoint downloadCheckpoint
 	grant := authorization.grant
-	err := db.QueryRowContext(ctx, `SELECT file_id, size_bytes, sha256, confirmed_bytes FROM download_checkpoints
-		WHERE server_address = ? AND user_id = ? AND entry_id = ? AND revision = ? AND object_id = ?`,
+	err := db.QueryRowContext(ctx, `SELECT c.file_id, c.size_bytes, c.sha256, c.confirmed_bytes, COALESCE(f.failure_code, '')
+		FROM download_checkpoints c LEFT JOIN download_failures f ON f.file_id = c.file_id
+		WHERE c.server_address = ? AND c.user_id = ? AND c.entry_id = ? AND c.revision = ? AND c.object_id = ?`,
 		authorization.owner.Address, authorization.owner.UserID, authorization.entryID, grant.Revision, grant.ObjectID).
-		Scan(&checkpoint.fileID, &checkpoint.sizeBytes, &checkpoint.sha256, &checkpoint.confirmed)
+		Scan(&checkpoint.fileID, &checkpoint.sizeBytes, &checkpoint.sha256, &checkpoint.confirmed, &checkpoint.failure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return checkpoint, err
 	}
@@ -84,7 +94,7 @@ func createDownloadCheckpoint(ctx context.Context, db *sql.DB, authorization dow
 		checkpoint.fileID, authorization.owner.Address, authorization.owner.UserID, authorization.entryID,
 		grant.Revision, grant.ObjectID, checkpoint.sizeBytes, checkpoint.sha256)
 	if err != nil {
-		return downloadCheckpoint{}, errors.New("无法保存本机下载记录")
+		return downloadCheckpoint{}, downloadStorageError(err, errStageDiskFull, "无法保存本机下载记录")
 	}
 	return checkpoint, nil
 }
@@ -98,7 +108,7 @@ func lockDownloadCheckpoints(directory string) (*os.File, error) {
 		return nil, errors.New("另一个窗口正在处理下载，请稍后重试")
 	}
 	if err != nil {
-		return nil, errors.New("无法锁定本机下载记录")
+		return nil, downloadStorageError(err, errStageDiskFull, "无法锁定本机下载记录")
 	}
 	return lock, nil
 }
@@ -116,7 +126,7 @@ func openDownloadCheckpointFile(directory, fileID string) (*os.File, error) {
 	handle, err := windows.CreateFile(nativePath, windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
-		return nil, errors.New("无法打开下载临时文件，请检查本机存储或稍后重试")
+		return nil, downloadStorageError(err, errStageDiskFull, "无法打开下载临时文件，请检查本机存储或稍后重试")
 	}
 	return os.NewFile(uintptr(handle), path), nil
 }
@@ -185,7 +195,7 @@ func (writer *downloadCheckpointWriter) flush() error {
 		return nil
 	}
 	if err := writer.file.Sync(); err != nil {
-		return errors.New("无法同步下载临时文件，请检查本机存储")
+		return downloadStorageError(err, errStageDiskFull, "无法同步下载临时文件，请检查本机存储")
 	}
 	return writer.storeOffset(writer.offset)
 }
@@ -197,7 +207,7 @@ func (writer *downloadCheckpointWriter) storeOffset(offset int64) error {
 	result, err := writer.db.ExecContext(writer.ctx, `UPDATE download_checkpoints SET confirmed_bytes = ?
 		WHERE file_id = ? AND confirmed_bytes = ?`, offset, writer.checkpoint.fileID, writer.checkpoint.confirmed)
 	if err != nil {
-		return errors.New("无法保存本机下载断点")
+		return downloadStorageError(err, errStageDiskFull, "无法保存本机下载断点")
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		return errors.New("本机下载断点已变化，请重试")
@@ -223,6 +233,12 @@ func stageDownloadCheckpoint(writer *downloadCheckpointWriter, grant client.Down
 			return writer, nil
 		})
 		if err != nil {
+			if errors.Is(err, client.ErrDownloadRangeMismatch) {
+				return errStageRangeInvalid
+			}
+			if errors.Is(err, errStageDiskFull) || downloadDiskFull(err) {
+				return errStageDiskFull
+			}
 			if writer.ctx.Err() == nil && writer.offset < size {
 				if flushError := writer.flush(); flushError != nil {
 					return flushError

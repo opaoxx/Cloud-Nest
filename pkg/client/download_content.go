@@ -11,6 +11,14 @@ import (
 	"time"
 )
 
+// ErrDownloadRangeMismatch 表示响应的范围与请求的剩余字节不一致。
+var ErrDownloadRangeMismatch = errors.New("存储端返回的下载范围与断点不符，请重试")
+
+type downloadBodyIOError struct{ cause error }
+
+func (err downloadBodyIOError) Error() string { return "读取或写入下载正文失败，请重试" }
+func (err downloadBodyIOError) Unwrap() error { return err.cause }
+
 // DownloadContent 流式写入授权对象并校验字节数和 SHA-256。失败时由调用方丢弃目标。
 func DownloadContent(ctx context.Context, grant DownloadGrant, destination io.Writer) error {
 	if destination == nil {
@@ -63,10 +71,10 @@ func DownloadContentFrom(ctx context.Context, grant DownloadGrant, offset int64,
 		offset = 0
 	case offset > 0 && response.StatusCode == http.StatusPartialContent &&
 		len(ranges) == 1 && ranges[0] == fmt.Sprintf("bytes %d-%d/%d", offset, size-1, size):
+	case response.StatusCode == http.StatusPartialContent || response.StatusCode == http.StatusRequestedRangeNotSatisfiable ||
+		(offset > 0 && response.StatusCode == http.StatusOK):
+		return ErrDownloadRangeMismatch
 	default:
-		if offset > 0 {
-			return errors.New("存储端返回的下载范围与断点不符，请重试")
-		}
 		return errors.New("存储端未返回完整文件正文，请重试")
 	}
 	for _, encoding := range response.Header.Values("Content-Encoding") {
@@ -77,6 +85,9 @@ func DownloadContentFrom(ctx context.Context, grant DownloadGrant, offset int64,
 
 	expectedSize := size - offset
 	if response.ContentLength >= 0 && response.ContentLength != expectedSize {
+		if response.StatusCode == http.StatusPartialContent {
+			return ErrDownloadRangeMismatch
+		}
 		return errors.New("下载正文大小与授权不符，请重试")
 	}
 	destination, err := prepare(offset)
@@ -93,7 +104,7 @@ func DownloadContentFrom(ctx context.Context, grant DownloadGrant, offset int64,
 		return errors.New("下载正文被截断，请重试")
 	}
 	if err != nil {
-		return errors.New("读取或写入下载正文失败，请重试")
+		return downloadBodyIOError{cause: err}
 	}
 
 	var extraByte [1]byte

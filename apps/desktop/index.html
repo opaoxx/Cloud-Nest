@@ -532,6 +532,9 @@
         if (grant.confirmed_bytes > 0) {
           downloadStatus.textContent += "\n本机已确认 " + grant.confirmed_bytes + " / " + grant.size_bytes + " B";
         }
+        if (grant.failure_message) {
+          downloadStatus.textContent += "\n上次暂停 · " + grant.failure_message;
+        }
         selectedDownload = {item, objectID: grant.object_id};
         stageDownload.textContent = grant.confirmed_bytes > 0 ? "继续下载" : "下载到临时文件";
         stageDownload.hidden = false;

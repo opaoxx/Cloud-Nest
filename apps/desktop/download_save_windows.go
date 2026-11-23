@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,8 +18,6 @@ type DownloadSaver struct {
 	account *Account
 	window  application.Window
 }
-
-var errSaveTargetExists = errors.New("目标已存在，请另存为其他名称")
 
 // Save returns the destination path after publishing, or an empty path on cancel.
 func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectID, suggestedName string) (string, error) {
@@ -54,6 +53,11 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 	if path == "" {
 		return "", nil
 	}
+	source := io.NewSectionReader(download.file, 0, int64(download.result.SizeBytes))
+	return account.saveStagedDownload(ctx, download, source, path)
+}
+
+func (account *Account) saveStagedDownload(ctx context.Context, download *stagedDownload, source io.Reader, path string) (string, error) {
 	directory := filepath.Dir(account.credentials.path)
 	lock, err := lockDownloadCheckpoints(directory)
 	if err != nil {
@@ -61,14 +65,14 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 	}
 	defer lock.Close()
 
-	// 2. 在目标目录复核一份完整副本，失败时保留原下载以便重试。
-	temporaryPath, err := copyForDownloadSave(ctx, download, path)
+	// 1. 在目标目录复核一份完整副本，失败时记录原因并保留原下载。
+	temporaryPath, err := copyForDownloadSave(ctx, source, int64(download.result.SizeBytes), download.result.SHA256, path)
 	if err != nil {
-		return "", err
+		return "", rememberDownloadSaveFailure(ctx, directory, download.checkpointID, err)
 	}
 	defer os.Remove(temporaryPath)
 
-	// 3. 交付前再次核对会话，以禁止覆盖的方式提交最终名称。
+	// 2. 交付前再次核对会话，以禁止覆盖的方式提交最终名称。
 	account.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		account.mu.Unlock()
@@ -80,11 +84,11 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 	}
 	if err := publishDownload(temporaryPath, path); err != nil {
 		account.mu.Unlock()
-		return "", err
+		return "", rememberDownloadSaveFailure(ctx, directory, download.checkpointID, err)
 	}
 	account.discardStagedDownload()
 	account.mu.Unlock()
-	// 成功交付后先清理临时文件。若未能清理，已发布到目标路径的结果仍然有效。
+	// 3. 成功交付后清理临时文件和记录。已发布的文件不依赖清理结果。
 	if err := os.Remove(download.file.Name()); err == nil || errors.Is(err, os.ErrNotExist) {
 		if db, err := openDownloadCheckpoints(context.WithoutCancel(ctx), directory); err == nil {
 			db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM download_checkpoints WHERE file_id = ?`, download.checkpointID)
@@ -94,12 +98,25 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 	return path, nil
 }
 
+func rememberDownloadSaveFailure(ctx context.Context, directory, fileID string, err error) error {
+	var failure *downloadFailure
+	if !errors.As(err, &failure) {
+		return err
+	}
+	db, openErr := openDownloadCheckpoints(ctx, directory)
+	if openErr != nil {
+		return fmt.Errorf("%w。本机暂时无法记录失败原因", err)
+	}
+	defer db.Close()
+	return rememberDownloadFailure(ctx, db, fileID, err)
+}
+
 func validSaveFilename(name string) bool {
 	return filepath.IsLocal(name) && filepath.Base(name) == name && strings.TrimRight(name, " .") == name &&
 		!strings.ContainsAny(name, "<>:\"/\\|?*") && !strings.ContainsFunc(name, func(character rune) bool { return character < 32 })
 }
 
-func copyForDownloadSave(ctx context.Context, download *stagedDownload, destination string) (string, error) {
+func copyForDownloadSave(ctx context.Context, source io.Reader, expectedSize int64, expectedSHA256, destination string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -115,7 +132,7 @@ func copyForDownloadSave(ctx context.Context, download *stagedDownload, destinat
 	// 1. 使用目标目录中的独立临时文件，用户指定的文件名此时还未占用。
 	temporaryFile, err := os.CreateTemp(filepath.Dir(destination), ".cloudnest-save-*.part")
 	if err != nil {
-		return "", errors.New("无法在目标目录创建临时文件，请检查可用空间和权限")
+		return "", downloadStorageError(err, errSaveDiskFull, "无法在目标目录创建临时文件，请检查可用空间和权限")
 	}
 	temporaryPath := temporaryFile.Name()
 	keepFile := false
@@ -125,13 +142,11 @@ func copyForDownloadSave(ctx context.Context, download *stagedDownload, destinat
 			os.Remove(temporaryPath)
 		}
 	}()
-	expectedSize := int64(download.result.SizeBytes)
-	source := io.NewSectionReader(download.file, 0, expectedSize)
 	if copied, err := io.Copy(temporaryFile, source); err != nil || copied != expectedSize {
-		return "", errors.New("无法完整复制下载文件，请检查可用空间后重试")
+		return "", downloadStorageError(err, errSaveDiskFull, "无法完整复制下载文件，请检查可用空间后重试")
 	}
 	if err := temporaryFile.Sync(); err != nil {
-		return "", errors.New("无法同步保存副本，请检查目标存储")
+		return "", downloadStorageError(err, errSaveDiskFull, "无法同步保存副本，请检查目标存储")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -146,11 +161,11 @@ func copyForDownloadSave(ctx context.Context, download *stagedDownload, destinat
 		return "", errors.New("无法读取保存副本，请重试")
 	}
 	digest, err := digestSourceSnapshot(temporaryFile, info)
-	if err != nil || digest.SHA256 != download.result.SHA256 {
+	if err != nil || digest.SHA256 != expectedSHA256 {
 		return "", errors.New("保存副本 SHA-256 校验失败，请重试")
 	}
 	if err := temporaryFile.Close(); err != nil {
-		return "", errors.New("无法关闭保存副本，请重试")
+		return "", downloadStorageError(err, errSaveDiskFull, "无法关闭保存副本，请重试")
 	}
 	keepFile = true
 	return temporaryPath, nil
@@ -176,5 +191,5 @@ func publishDownload(temporaryPath, destination string) error {
 	if _, statErr := os.Lstat(destination); statErr == nil {
 		return errSaveTargetExists
 	}
-	return errors.New("无法交付下载文件，请检查目标目录后重试")
+	return downloadStorageError(err, errSaveDiskFull, "无法交付下载文件，请检查目标目录后重试")
 }

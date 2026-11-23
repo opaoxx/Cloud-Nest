@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -112,7 +113,7 @@ func TestDownloadContentFromValidatesRangeBeforeOpeningWriter(t *testing.T) {
 				return &destination, nil
 			})
 			if fixture.start < 0 {
-				if err == nil || started != -1 || destination.Len() != 0 {
+				if !errors.Is(err, ErrDownloadRangeMismatch) || started != -1 || destination.Len() != 0 {
 					t.Fatalf("invalid headers opened the writer: %d, %q, %v", started, &destination, err)
 				}
 			} else if err != nil || started != fixture.start || destination.String() != fixture.body {

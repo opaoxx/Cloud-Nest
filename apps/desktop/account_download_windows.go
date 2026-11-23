@@ -17,6 +17,7 @@ type DownloadGrantResult struct {
 	SizeBytes      uint64 `json:"size_bytes"`
 	ConfirmedBytes uint64 `json:"confirmed_bytes"`
 	SHA256         string `json:"sha256"`
+	FailureMessage string `json:"failure_message,omitempty"`
 	LoginRequired  string `json:"loginRequired"`
 }
 
@@ -50,6 +51,7 @@ func (account *Account) AuthorizeDownload(ctx context.Context, entryID, revision
 	}
 	result := downloadGrantView(authorization.grant)
 	result.ConfirmedBytes = uint64(checkpoint.confirmed)
+	result.FailureMessage = downloadFailureMessage(checkpoint.failure)
 	return result, nil
 }
 
@@ -122,7 +124,7 @@ func (account *Account) StageDownload(ctx context.Context, entryID, revision, ob
 	}
 	file, err := openDownloadCheckpointFile(directory, checkpoint.fileID)
 	if err != nil {
-		return DownloadGrantResult{}, err
+		return DownloadGrantResult{}, rememberDownloadFailure(ctx, db, checkpoint.fileID, err)
 	}
 	keepFile := false
 	defer func() {
@@ -132,7 +134,16 @@ func (account *Account) StageDownload(ctx context.Context, entryID, revision, ob
 	}()
 	writer := downloadCheckpointWriter{ctx: ctx, db: db, file: file, checkpoint: checkpoint}
 	if err := stageDownloadCheckpoint(&writer, grant); err != nil {
-		return DownloadGrantResult{}, err
+		if errors.Is(err, errStageDiskFull) {
+			// 仅保留数据库已经确认的前缀，尽量释放本轮未确认字节占用的空间。
+			_ = file.Truncate(writer.checkpoint.confirmed)
+		}
+		return DownloadGrantResult{}, rememberDownloadFailure(ctx, db, checkpoint.fileID, err)
+	}
+	if checkpoint.failure == errStageRangeInvalid.code || checkpoint.failure == errStageDiskFull.code {
+		if _, err := db.ExecContext(ctx, `DELETE FROM download_failures WHERE file_id = ?`, checkpoint.fileID); err != nil {
+			return DownloadGrantResult{}, downloadStorageError(err, errStageDiskFull, "无法更新本机下载状态，请重试")
+		}
 	}
 
 	// 3. 完整校验后才交给同一会话。另存为仍会核对目标位置中的副本。
