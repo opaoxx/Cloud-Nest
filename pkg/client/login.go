@@ -19,11 +19,7 @@ type NativeSession struct {
 // LoginWindows 向指定服务建立 Windows 原生会话。
 func LoginWindows(ctx context.Context, address, installationID, username, password string) (NativeSession, error) {
 	// 1. 组装原生登录请求。密码保留输入原文，设备身份来自本机安装。
-	base, err := parseServiceAddress(address)
-	if err != nil {
-		return NativeSession{}, err
-	}
-	body, err := json.Marshal(struct {
+	payload := struct {
 		Username       string `json:"username"`
 		Password       string `json:"password"`
 		InstallationID string `json:"installation_id"`
@@ -33,24 +29,22 @@ func LoginWindows(ctx context.Context, address, installationID, username, passwo
 	}{
 		Username: username, Password: password, InstallationID: installationID,
 		DeviceName: "CloudNest Windows", Platform: "WINDOWS", ClientType: "native",
-	})
-	if err != nil {
-		return NativeSession{}, errors.New("无法编码登录请求")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base.JoinPath("api", "v1", "auth", "login").String(), bytes.NewReader(body))
-	if err != nil {
-		return NativeSession{}, errors.New("无法使用这个服务地址，请检查后重试")
+	var result struct {
+		Data struct {
+			User struct {
+				Username string `json:"username"`
+			} `json:"user"`
+			nativeTokens
+		} `json:"data"`
 	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-CloudNest-Client", "native")
 
-	// 2. 发出带超时的请求，不跟随重定向发送账号凭证。
-	response, err := serviceHTTPClient.Do(request)
+	// 2. 发出原生请求，按状态码给出可重试的提示。
+	status, err := postNativeAuth(ctx, address, "login", payload, &result)
 	if err != nil {
-		return NativeSession{}, errors.New("无法连接服务，请检查地址及后端是否已启动")
+		return NativeSession{}, err
 	}
-	defer response.Body.Close()
-	switch response.StatusCode {
+	switch status {
 	case http.StatusOK:
 	case http.StatusUnauthorized:
 		return NativeSession{}, errors.New("用户名或密码错误，请重试")
@@ -65,25 +59,79 @@ func LoginWindows(ctx context.Context, address, installationID, username, passwo
 	}
 
 	// 3. 校验原生登录响应，同时取得访问令牌和刷新凭证。
-	const maxLoginResponseBytes = 32 * 1024
-	reply, err := io.ReadAll(io.LimitReader(response.Body, maxLoginResponseBytes+1))
-	if err != nil || len(reply) > maxLoginResponseBytes {
-		return NativeSession{}, errors.New("无法读取登录响应，请重试")
-	}
-	var result struct {
-		Data struct {
-			User struct {
-				Username string `json:"username"`
-			} `json:"user"`
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(reply, &result); err != nil ||
-		result.Data.User.Username != username || result.Data.AccessToken == "" || result.Data.RefreshToken == "" {
+	if result.Data.User.Username != username || result.Data.AccessToken == "" || result.Data.RefreshToken == "" {
 		return NativeSession{}, errors.New("收到的响应与 CloudNest 原生登录接口不符，请核对服务地址")
 	}
 	return NativeSession{
 		Username: result.Data.User.Username, AccessToken: result.Data.AccessToken, RefreshToken: result.Data.RefreshToken,
 	}, nil
+}
+
+type nativeTokens struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// ErrRefreshRejected 表示后端已拒绝当前刷新凭证。
+var ErrRefreshRejected = errors.New("保存的会话已失效，请重新登录")
+
+// RefreshNative 轮换原生刷新凭证并返回新令牌。
+func RefreshNative(ctx context.Context, address, refreshToken string) (NativeSession, error) {
+	// 1. 使用原生 JSON 提交已保存的刷新凭证。
+	payload := struct {
+		ClientType   string `json:"client_type"`
+		RefreshToken string `json:"refresh_token"`
+	}{ClientType: "native", RefreshToken: refreshToken}
+	var result struct {
+		Data nativeTokens `json:"data"`
+	}
+	status, err := postNativeAuth(ctx, address, "refresh", payload, &result)
+	if err != nil {
+		return NativeSession{}, err
+	}
+
+	// 2. 识别已失效的凭证，其他失败由调用方保留记录并提示。
+	if status == http.StatusUnauthorized {
+		return NativeSession{}, ErrRefreshRejected
+	}
+	if status != http.StatusOK {
+		return NativeSession{}, errors.New("服务暂时无法恢复会话，请重新登录或稍后重启")
+	}
+
+	// 3. 确认后端交付了新访问令牌和已轮换的刷新凭证。
+	if result.Data.AccessToken == "" || result.Data.RefreshToken == "" || result.Data.RefreshToken == refreshToken {
+		return NativeSession{}, errors.New("收到无效的会话恢复响应，请重新登录")
+	}
+	return NativeSession{AccessToken: result.Data.AccessToken, RefreshToken: result.Data.RefreshToken}, nil
+}
+
+func postNativeAuth(ctx context.Context, address, operation string, payload, result any) (int, error) {
+	base, err := parseServiceAddress(address)
+	if err != nil {
+		return 0, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, errors.New("无法编码认证请求")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base.JoinPath("api", "v1", "auth", operation).String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, errors.New("无法使用这个服务地址，请检查后重试")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CloudNest-Client", "native")
+	response, err := serviceHTTPClient.Do(request)
+	if err != nil {
+		return 0, errors.New("无法连接服务，请检查地址及后端是否已启动")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return response.StatusCode, nil
+	}
+	const maxAuthResponseBytes = 32 * 1024
+	reply, err := io.ReadAll(io.LimitReader(response.Body, maxAuthResponseBytes+1))
+	if err != nil || len(reply) > maxAuthResponseBytes || json.Unmarshal(reply, result) != nil {
+		return 0, errors.New("无法读取认证响应，请核对服务地址后重试")
+	}
+	return response.StatusCode, nil
 }

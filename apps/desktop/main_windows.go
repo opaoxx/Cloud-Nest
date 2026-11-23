@@ -3,6 +3,8 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/opaoxx/cloud-nest/pkg/client"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -23,13 +25,19 @@ func main() {
 		aboutMessage = "CloudNest 桌面客户端\n\n安装标识不可用。\n" + installationError.Error()
 	}
 
-	// 2. 注册连接检查与原生登录，让内嵌页面通过 Go 请求后端。
+	// 2. 注册连接检查与原生登录，绑定当前安装的受保护会话文件。
 	app := application.New(application.Options{
 		Name:   "CloudNest",
 		Assets: application.AssetOptions{Handler: application.BundledAssetFileServer(desktopPage)},
 		Services: []application.Service{
 			application.NewService(&client.Readiness{}),
-			application.NewService(&Account{installationID: installationID}),
+			application.NewService(&Account{
+				installationID: installationID,
+				credentials: sessionFile{
+					path:           filepath.Join(os.Getenv("LOCALAPPDATA"), "CloudNest", "session.bin"),
+					installationID: installationID,
+				},
+			}),
 		},
 	})
 

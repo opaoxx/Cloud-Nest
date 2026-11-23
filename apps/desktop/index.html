@@ -63,6 +63,12 @@
       credentials.disabled = busy;
     }
 
+    function showSignedIn(name, restored) {
+      signedIn = true;
+      credentials.hidden = true;
+      loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
+    }
+
     checkConnection.addEventListener("click", async () => {
       setBusy(true);
       connectionStatus.textContent = "正在检查服务连接…";
@@ -92,15 +98,33 @@
         const login = Call.ByName("main.Account.Login", address.value.trim(), loginName, password.value);
         password.value = "";
         const signedInName = await login;
-        signedIn = true;
-        credentials.hidden = true;
-        loginStatus.textContent = "已登录：" + signedInName;
+        showSignedIn(signedInName, false);
       } catch (error) {
         loginStatus.textContent = error.message || "登录失败，请重试";
       } finally {
         setBusy(false);
       }
     });
+
+    async function restoreSession() {
+      setBusy(true);
+      loginStatus.textContent = "正在恢复会话…";
+      try {
+        const restored = await Call.ByName("main.Account.Restore");
+        if (restored.address) address.value = restored.address;
+        if (restored.username) {
+          showSignedIn(restored.username, true);
+        } else {
+          loginStatus.textContent = restored.notice || "";
+        }
+      } catch (error) {
+        loginStatus.textContent = error.message || "无法恢复会话，请重新登录";
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    restoreSession();
   </script>
 </body>
 </html>
