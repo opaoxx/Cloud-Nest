@@ -378,6 +378,63 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/sync/changes/confirm:
+    post:
+      tags: [Sync]
+      operationId: confirmSyncChanges
+      x-cloudnest-status: planned
+      summary: 确认设备已持久化处理的增量位置
+      description: |
+        计划端点。客户端持久化事件的处理结果或可恢复待办后，原样提交拉取响应的 next_cursor。
+        确认位置取自签名。账号事务内复核当前设备、完整代次、状态和可续读区间。
+        较高位置推进确认，等值位置记录同步活动，合法较旧位置返回当前确认值并保持设备行原样。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        description: 未压缩的 UTF-8 JSON，只允许一个 cursor 字段，无需幂等键。
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmSyncChangesRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SyncChangesConfirmed'
+        '400':
+          description: INVALID_ARGUMENT 用于非法 JSON、重复或未知字段。INVALID_CURSOR 定位缺失、无效、绑定不符或位置超出日志上界的 cursor。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: ACCOUNT_DISABLED 或 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: CURSOR_EXPIRED。当前同步行缺失、状态待重建、代次改变或位置低于可续读下界。保留本地未提交内容并重建快照。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/uploads:
     post:
       tags: [Uploads]
@@ -2279,6 +2336,13 @@ components:
       maxLength: 1024
       pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![\s\S])'
       description: 不透明的增量签名凭据，绑定账号、设备、完整代次及最后已交付位置。有效性受签名密钥、代次和日志范围约束。
+    ConfirmSyncChangesRequest:
+      type: object
+      additionalProperties: false
+      required: [cursor]
+      properties:
+        cursor:
+          $ref: '#/components/schemas/SyncChangeCursor'
     SyncChangeEntryPayload:
       type: object
       additionalProperties: false
@@ -4770,6 +4834,19 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/PullSyncChangesResponse'
+    SyncChangesConfirmed:
+      description: 设备增量确认事务已提交。返回当前确认位置和本次请求 ID。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ConfirmSyncSnapshotBaselineResponse'
     PurgeEntryProgressRejected:
       description: HTTP 400，路径 ID 格式或范围不合法，返回 INVALID_ARGUMENT，details.field 为 id。
       headers:
