@@ -83,7 +83,7 @@ func TestReadNextDirectoryPagePreservesCursor(t *testing.T) {
 					query.Get("parent_id") != "12" || query.Get("cursor") != cursor || len(query["cursor"]) != 1 {
 					t.Error("continuation request changed the directory ID or cursor")
 				}
-				fmt.Fprintf(writer, `{"data":{"items":[{"id":"42","parent_id":"12","name":"续页目录","entry_type":"DIR","size_bytes":0}],`+
+				fmt.Fprintf(writer, `{"data":{"items":[{"id":"42","parent_id":"12","name":"续页文件","entry_type":"FILE","revision":"18446744073709551615","size_bytes":0}],`+
 					`"breadcrumbs":[{"id":"1","name":""},{"id":"12","name":"资料"}],"next_cursor":%s}}`, fixture.nextCursor)
 			}))
 			defer server.Close()
@@ -94,7 +94,8 @@ func TestReadNextDirectoryPagePreservesCursor(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || page.NextCursor != nil || len(page.Items) != 1 || page.Items[0].ID != "42" {
+			if err != nil || page.NextCursor != nil || len(page.Items) != 1 || page.Items[0].ID != "42" ||
+				page.Items[0].Revision != "18446744073709551615" {
 				t.Fatalf("expected the last page: %+v, %v", page, err)
 			}
 		})

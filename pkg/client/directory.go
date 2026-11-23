@@ -13,6 +13,7 @@ type DirectoryEntry struct {
 	ParentID  string `json:"parent_id"`
 	Name      string `json:"name"`
 	EntryType string `json:"entry_type"`
+	Revision  string `json:"revision"`
 	SizeBytes uint64 `json:"size_bytes"`
 }
 
@@ -30,6 +31,7 @@ type DirectoryPage struct {
 }
 
 const maxDirectoryCursorBytes = 1024
+const maxJSONSafeInteger = 1<<53 - 1
 
 // ReadDirectoryPage 按真实父目录 ID 读取目录首页。
 func ReadDirectoryPage(ctx context.Context, address, accessToken, parentID string) (DirectoryPage, error) {
@@ -74,8 +76,8 @@ func readDirectoryPage(ctx context.Context, address, accessToken, parentID, curs
 		seen[crumb.ID] = true
 	}
 	for _, entry := range page.Items {
-		if !validEntryID(entry.ID) || entry.ParentID != parentID || entry.Name == "" ||
-			(entry.EntryType != "FILE" && entry.EntryType != "DIR") || entry.SizeBytes > 1<<53-1 {
+		if !validEntryID(entry.ID) || !validEntryID(entry.Revision) || entry.ParentID != parentID || entry.Name == "" ||
+			(entry.EntryType != "FILE" && entry.EntryType != "DIR") || entry.SizeBytes > maxJSONSafeInteger {
 			return DirectoryPage{}, errors.New("服务返回的目录项格式有误")
 		}
 	}

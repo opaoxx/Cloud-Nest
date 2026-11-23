@@ -18,7 +18,7 @@
     button:disabled { opacity: .65; cursor: wait; }
     output { display: block; margin-top: 1rem; line-height: 1.6; }
     output:empty { display: none; }
-    #fileSelection { white-space: pre-line; overflow-wrap: anywhere; }
+    #fileSelection, #downloadStatus { white-space: pre-line; overflow-wrap: anywhere; }
     section { margin-top: 1.25rem; border-top: 1px solid #cad7df; }
     h2 { font-size: 1.15rem; margin: 1rem 0 0; }
     ul { list-style: none; margin: .75rem 0 0; padding: 0; }
@@ -32,6 +32,7 @@
     #directoryPath li { min-width: 0; overflow-wrap: anywhere; }
     #directoryPath [aria-current="page"] { font-weight: 600; }
     .directory-link { margin: 0; padding: 0; color: #216080; background: none; text-align: left; text-decoration: underline; }
+    .download-action { margin: 0; padding: .35rem .55rem; }
   </style>
 </head>
 <body>
@@ -66,6 +67,7 @@
         <nav id="directoryPath" aria-label="目录路径" hidden><ol></ol></nav>
         <button id="refreshDirectory" type="button">刷新目录</button>
         <output id="directoryStatus" role="status" aria-live="polite"></output>
+        <output id="downloadStatus" role="status" aria-live="polite"></output>
         <ul id="directoryItems" aria-label="目录内容"></ul>
         <button id="loadMore" type="button" hidden>加载更多</button>
       </section>
@@ -94,6 +96,7 @@
     const breadcrumbs = directoryPath.querySelector("ol");
     const refreshDirectory = document.querySelector("#refreshDirectory");
     const directoryStatus = document.querySelector("#directoryStatus");
+    const downloadStatus = document.querySelector("#downloadStatus");
     const directoryItems = document.querySelector("#directoryItems");
     const loadMore = document.querySelector("#loadMore");
     const entryRows = new Map();
@@ -164,6 +167,7 @@
       currentDirectoryID = "";
       pendingPage = null;
       directoryStatus.textContent = "";
+      downloadStatus.textContent = "";
       clearDirectoryItems();
       breadcrumbs.replaceChildren();
       directoryPath.hidden = true;
@@ -319,6 +323,41 @@
       return button;
     }
 
+    function downloadButton(item) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "download-action";
+      button.textContent = "获取下载授权";
+      button.setAttribute("aria-label", "获取下载授权 · " + item.name);
+      button.addEventListener("click", () => authorizeDownload(item));
+      return button;
+    }
+
+    async function authorizeDownload(item) {
+      if (checkConnection.disabled || !signedIn) return;
+      setBusy(true);
+      downloadStatus.textContent = "正在取得下载授权…";
+      try {
+        // 1. 发送点击时读到的修订，冲突时由用户刷新后重新选择。
+        const grant = await Call.ByName("main.Account.AuthorizeDownload", item.id, item.revision);
+        if (!signedIn) return;
+        if (grant.loginRequired) {
+          showSignedOut(grant.loginRequired);
+          return;
+        }
+        // 2. 显示这一份授权的对象与内容身份。
+        downloadStatus.textContent = [
+          "已取得下载授权 · " + item.name + " · 修订 " + grant.revision,
+          "对象 ID " + grant.object_id + " · 大小 " + grant.size_bytes + " B",
+          "SHA-256 " + grant.sha256
+        ].join("\n");
+      } catch (error) {
+        if (signedIn) downloadStatus.textContent = error.message || "获取下载授权失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    }
+
     function renderDirectory(page, append) {
       breadcrumbs.replaceChildren();
       for (const [index, crumb] of page.breadcrumbs.entries()) {
@@ -349,6 +388,7 @@
         name.textContent = item.name;
         details.textContent = isDirectory ? "文件夹" : "文件 · " + item.size_bytes + " B";
         row.append(name, details);
+        if (!isDirectory) row.append(downloadButton(item));
         const previousRow = entryRows.get(item.id);
         if (previousRow) {
           previousRow.replaceWith(row);
@@ -371,6 +411,7 @@
     async function loadDirectory(targetID) {
       // 导航和刷新都让上一次续页失效，即使之后回到同一个目录。
       pendingPage = null;
+      downloadStatus.textContent = "";
       directoryStatus.textContent = "正在读取目录…";
       if (targetID === currentDirectoryID) clearDirectoryItems();
       try {
