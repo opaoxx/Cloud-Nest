@@ -44,7 +44,7 @@ func writeAndVerifyBackupSourceB5Manifest(t *testing.T, ctx context.Context, fix
 	t.Helper()
 
 	// 2. 生成清单并读回，确认实际导出文件的摘要与清单一致。
-	manifest, saved := writeBackupSourceManifest(t, ctx, fixture.backupSourceFixture, backupDir, dump)
+	manifest, saved := writeBackupSourceManifest(t, ctx, fixture.pool, fixture.bucket.name, backupDir, dump)
 	sqlOnDisk, err := os.ReadFile(filepath.Join(backupDir, "database.sql"))
 	if err != nil || manifest.DatabaseSHA256 != fmt.Sprintf("%x", sha256.Sum256(sqlOnDisk)) {
 		t.Fatal("清单没有绑定同一停写窗口的 SQL 文件", err)

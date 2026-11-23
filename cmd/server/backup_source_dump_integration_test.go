@@ -50,7 +50,7 @@ func stopAndExportBackupSourceSQL(t *testing.T, ctx context.Context, fixture bac
 		}
 		t.Logf("%s 容器 %s，镜像 %s", container.name, container.id, strings.TrimSpace(string(image)))
 	}
-	dump := exportBackupSourceSQL(t, ctx, fixture, backupDir)
+	dump := exportBackupSourceSQL(t, ctx, fixture.mysqlContainer, fixture.databaseName, backupDir)
 
 	// 3. 核对导出文件中的表、逐行记录和迁移摘要，保留可复验的日志。
 	verifyBackupSourceSQL(t, dump, tableRows)
@@ -128,25 +128,25 @@ func inspectBackupDatabase(t *testing.T, ctx context.Context, pool *sql.DB, user
 	return counts
 }
 
-func exportBackupSourceSQL(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string) []byte {
+func exportBackupSourceSQL(t *testing.T, ctx context.Context, containerID, databaseName, backupDir string) []byte {
 	t.Helper()
 	const containerPath = "/tmp/cloudnest-backup.sql"
-	export := exec.CommandContext(ctx, "docker", "exec", "--env", "MYSQL_PWD", fixture.mysqlContainer,
+	export := exec.CommandContext(ctx, "docker", "exec", "--env", "MYSQL_PWD", containerID,
 		"mysqldump", "--user=root", "--single-transaction", "--hex-blob", "--no-tablespaces", "--set-gtid-purged=OFF",
-		"--skip-add-drop-table", "--skip-extended-insert", "--result-file="+containerPath, fixture.databaseName)
+		"--skip-add-drop-table", "--skip-extended-insert", "--result-file="+containerPath, databaseName)
 	export.Env = append(export.Environ(), "MYSQL_PWD="+os.Getenv("CLOUDNEST_DB_PASSWORD"))
 	if output, err := export.CombinedOutput(); err != nil {
 		t.Fatalf("隔离源端导出失败，%v\n%s", err, output)
 	}
 	localPath := filepath.Join(backupDir, "database.sql")
-	if output, err := exec.CommandContext(ctx, "docker", "cp", fixture.mysqlContainer+":"+containerPath, localPath).CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, "docker", "cp", containerID+":"+containerPath, localPath).CombinedOutput(); err != nil {
 		t.Fatalf("复制隔离 SQL 快照失败，%v\n%s", err, output)
 	}
 	local, err := os.ReadFile(localPath)
 	if err != nil {
 		t.Fatal("读回临时 SQL 快照失败", err)
 	}
-	if err := verifyBackupSQLContainerDigest(ctx, fixture.mysqlContainer, containerPath, fmt.Sprintf("%x", sha256.Sum256(local))); err != nil {
+	if err := verifyBackupSQLContainerDigest(ctx, containerID, containerPath, fmt.Sprintf("%x", sha256.Sum256(local))); err != nil {
 		t.Fatal(err)
 	}
 	return local

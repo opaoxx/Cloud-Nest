@@ -78,18 +78,18 @@ func TestServerBackupSourceManifestIntegration(t *testing.T) {
 
 func writeAndVerifyBackupSourceManifest(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string, dump []byte) backupSourceManifest {
 	t.Helper()
-	decoded, saved := writeBackupSourceManifest(t, ctx, fixture, backupDir, dump)
+	decoded, saved := writeBackupSourceManifest(t, ctx, fixture.pool, fixture.bucket.name, backupDir, dump)
 	verifyBackupSourceManifest(t, ctx, fixture, decoded)
 	t.Logf("清单 %d B，SHA-256 %x，绑定 SQL SHA-256 %s，包含 %d 个目录、%d 条文件引用及 %d 个对象版本",
 		len(saved), sha256.Sum256(saved), decoded.DatabaseSHA256, len(decoded.Directories), len(decoded.FileReferences), len(decoded.Objects))
 	return decoded
 }
 
-func writeBackupSourceManifest(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string, dump []byte) (backupSourceManifest, []byte) {
+func writeBackupSourceManifest(t *testing.T, ctx context.Context, pool *sql.DB, bucket, backupDir string, dump []byte) (backupSourceManifest, []byte) {
 	t.Helper()
 	// 1. 使用同一次停写得到的 SQL 摘要和目录与对象记录。
 	databaseSHA256 := fmt.Sprintf("%x", sha256.Sum256(dump))
-	manifest, err := readBackupSourceManifest(ctx, fixture.pool, fixture.bucket.name, databaseSHA256)
+	manifest, err := readBackupSourceManifest(ctx, pool, bucket, databaseSHA256)
 	if err != nil {
 		t.Fatal("生成源端清单失败", err)
 	}

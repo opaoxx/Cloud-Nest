@@ -58,8 +58,16 @@ func stopAndExportBackupSourceB5SQL(t *testing.T, ctx context.Context, fixture r
 			t.Fatalf("停写基线表 %s 有 %d 行，预期 %d，错误 %v", table, count, expected, err)
 		}
 	}
-	dump := exportBackupSourceSQL(t, ctx, fixture.backupSourceFixture, backupDir)
+	dump := exportBackupSourceSQL(t, ctx, fixture.mysqlContainer, fixture.databaseName, backupDir)
 	verifyBackupSourceSQL(t, dump, tableRows)
+	verifyBackupB5SQLRows(t, dump, rows)
+	t.Logf("B5 同点导出，停写 UTC %s，SQL %d B，容器内外 SHA-256 %x，%d 张表逐表一致，确认位置 2，上界 4，历史 1 条",
+		stoppedAt.Format(time.RFC3339Nano), len(dump), sha256.Sum256(dump), len(tableRows))
+	return dump
+}
+
+func verifyBackupB5SQLRows(t *testing.T, dump []byte, rows []backupSourceSQLRowPrefix) {
+	t.Helper()
 	dumpLines := strings.Split(string(dump), "\n")
 	for _, row := range rows {
 		matches := 0
@@ -77,9 +85,6 @@ func stopAndExportBackupSourceB5SQL(t *testing.T, ctx context.Context, fixture r
 			t.Fatalf("SQL 快照中 %s 的关键行匹配 %d 次，预期一次", row.table, matches)
 		}
 	}
-	t.Logf("B5 同点导出，停写 UTC %s，SQL %d B，容器内外 SHA-256 %x，%d 张表逐表一致，确认位置 2，上界 4，历史 1 条",
-		stoppedAt.Format(time.RFC3339Nano), len(dump), sha256.Sum256(dump), len(tableRows))
-	return dump
 }
 
 func verifyBackupB5ServiceStopped(t *testing.T, baseURL, logs string) {
