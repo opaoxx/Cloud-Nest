@@ -322,6 +322,63 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/sync/changes/pull:
+    post:
+      tags: [Sync]
+      operationId: pullSyncChanges
+      x-cloudnest-status: planned
+      summary: 按设备游标读取账号已提交的变更
+      description: |
+        计划端点。首次使用已确认快照的有效末页凭据，从快照截止序号之后开始。后续使用已持久化的增量游标。
+        在同一只读视图复核账号、设备、代次和日志边界，再按序返回连续事件。读取不推进确认位置。
+        next_cursor 始终返回，包括没有新事件时。客户端先持久化其对应的事件结果或可恢复待办，再保存游标。
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        description: 未压缩的 UTF-8 JSON。baseline_token 和 cursor 二选一，字段名精确匹配且仅出现一次。
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PullSyncChangesRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SyncChangesPulled'
+        '400':
+          description: INVALID_ARGUMENT 用于非法正文或 page_size。INVALID_CURSOR 用于凭据无效、绑定不符或位置超出日志上界，并定位对应凭据字段。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthorizationRejected'
+        '403':
+          description: ACCOUNT_DISABLED 或 CORS_FORBIDDEN。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: CURSOR_EXPIRED。可信末页凭据过期、同步行缺失、状态待重建、旧代次或位置低于可续读下界。保留本地未提交内容并重建快照。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/RequestBodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/uploads:
     post:
       tags: [Uploads]
@@ -2199,6 +2256,117 @@ components:
               type: string
               pattern: '^(0|[1-9][0-9]{0,19})(?![\s\S])'
               description: 本次事务确认的设备位置，范围为 0～18446744073709551615。重试可读到已推进的位置，客户端仍按本地已持久化的位置拉取。
+        request_id:
+          $ref: '#/components/headers/RequestID/schema'
+    PullSyncChangesRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        baseline_token:
+          $ref: '#/components/schemas/SyncSnapshotToken'
+        cursor:
+          $ref: '#/components/schemas/SyncChangeCursor'
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      oneOf:
+        - required: [baseline_token]
+        - required: [cursor]
+    SyncChangeCursor:
+      type: string
+      minLength: 3
+      maxLength: 1024
+      pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![\s\S])'
+      description: 不透明的增量签名凭据，绑定账号、设备、完整代次及最后已交付位置。有效性受签名密钥、代次和日志范围约束。
+    SyncChangeEntryPayload:
+      type: object
+      additionalProperties: false
+      required: [entry_id, parent_id, name, revision]
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        parent_id:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/id'
+        name:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/name'
+        revision:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/revision'
+    SyncChangeContentPayload:
+      type: object
+      additionalProperties: false
+      required: [entry_id, parent_id, name, revision, size_bytes, sha256]
+      properties:
+        entry_id:
+          $ref: '#/components/schemas/SyncChangeEntryPayload/properties/entry_id'
+        parent_id:
+          $ref: '#/components/schemas/SyncChangeEntryPayload/properties/parent_id'
+        name:
+          $ref: '#/components/schemas/SyncChangeEntryPayload/properties/name'
+        revision:
+          $ref: '#/components/schemas/SyncChangeEntryPayload/properties/revision'
+        size_bytes:
+          $ref: '#/components/schemas/DirectoryEntrySummary/properties/size_bytes'
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}(?![\s\S])'
+    SyncChangeEvent:
+      type: object
+      additionalProperties: false
+      required: [sequence, entry_id, revision, event_type, payload]
+      properties:
+        sequence:
+          type: string
+          pattern: '^[1-9][0-9]{0,19}(?![\s\S])'
+          description: 当前账号的已提交事件序号，范围为 1～18446744073709551615。
+        entry_id:
+          $ref: '#/components/schemas/SyncChangeEntryPayload/properties/entry_id'
+        revision:
+          $ref: '#/components/schemas/SyncChangeEntryPayload/properties/revision'
+        event_type:
+          type: string
+        payload:
+          type: object
+          description: 事件提交时的载荷。entry_id 和 revision 与外层一致。
+      oneOf:
+        - properties:
+            event_type: {enum: [DIRECTORY_CREATED, ENTRY_RENAMED, ENTRY_MOVED, ENTRY_TRASHED, ENTRY_RESTORED, ENTRY_PURGE_STARTED, ENTRY_PURGED]}
+            payload:
+              $ref: '#/components/schemas/SyncChangeEntryPayload'
+        - properties:
+            event_type: {enum: [FILE_PUBLISHED, FILE_CONTENT_REPLACED]}
+            payload:
+              $ref: '#/components/schemas/SyncChangeContentPayload'
+    PullSyncChangesResponse:
+      type: object
+      additionalProperties: false
+      required: [data, request_id]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [events, high_water_sequence, next_cursor, has_more]
+          properties:
+            events:
+              type: array
+              maxItems: 100
+              description: 按账号序号严格升序连续交付。没有新事件时返回空数组。
+              items:
+                $ref: '#/components/schemas/SyncChangeEvent'
+            high_water_sequence:
+              $ref: '#/components/schemas/SyncSnapshotPageData/properties/high_water_sequence'
+            next_cursor:
+              $ref: '#/components/schemas/SyncChangeCursor'
+            has_more:
+              type: boolean
+              description: 本页最后交付位置低于本页账号日志上界时为 true。空页固定为 false。
+          oneOf:
+            - properties:
+                events: {maxItems: 0}
+                has_more: {enum: [false]}
+            - properties:
+                events: {minItems: 1}
         request_id:
           $ref: '#/components/headers/RequestID/schema'
     EntrySourceDeviceSummary:
@@ -4590,6 +4758,19 @@ components:
           example:
             error: {code: CURSOR_EXPIRED, message: 同步快照已失效，请重新建立基线, details: null}
             request_id: 28ee758a-0727-42de-ae7d-3bb33155e148
+    SyncChangesPulled:
+      description: 已提交事件的一页及可继续从该位置拉取的游标。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PullSyncChangesResponse'
     PurgeEntryProgressRejected:
       description: HTTP 400，路径 ID 格式或范围不合法，返回 INVALID_ARGUMENT，details.field 为 id。
       headers:
