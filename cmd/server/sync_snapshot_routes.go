@@ -75,7 +75,15 @@ func registerServerSyncSnapshotRoutes(
 			})
 		}, changeCursorSigner)
 
-	// 4. 在实际启动的路由器注册快照和增量拉取，共用 Bearer 授权。
+	// 4. 复用增量游标校验器，把确认服务绑定到账号事务。
+	changeConfirmer := service.NewSyncChangeConfirmationService(changeCursorVerifier,
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SyncChangeConfirmationTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		})
+
+	// 5. 在实际启动的路由器注册快照、增量拉取和增量确认，共用 Bearer 授权。
 	serverhttp.RegisterCreateSyncSnapshotRoute(router, authorize, creator.Create)
 	serverhttp.RegisterSyncSnapshotPageRoute(router, authorize,
 		func(ctx context.Context, actor domain.Actor, snapshotID uuid.UUID, cursor string) (*domain.SyncSnapshotPageResult, error) {
@@ -87,5 +95,6 @@ func registerServerSyncSnapshotRoutes(
 		})
 	serverhttp.RegisterConfirmSyncSnapshotBaselineRoute(router, authorize, confirmer.Confirm)
 	serverhttp.RegisterPullSyncChangesRoute(router, authorize, puller.Pull)
+	serverhttp.RegisterConfirmSyncChangesRoute(router, authorize, changeConfirmer.Confirm)
 	return nil
 }

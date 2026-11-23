@@ -8,6 +8,8 @@
 
 确认基线后，通过受 Bearer 认证保护的 `POST /api/v1/sync/changes/pull` 读取增量变更。首次使用有效的 `baseline_token`，之后提交已持久化的 `cursor`。空页也会返回续读游标，拉取保持设备确认位置不变。[B5 增量拉取协议](docs/B5-同步与历史协议.md#12-增量变更拉取)
 
+客户端持久化处理结果或可恢复待办后，把拉取响应的 `next_cursor` 原样放入 `cursor`，提交到受 Bearer 认证保护的 `POST /api/v1/sync/changes/confirm`。服务在账号事务提交后返回设备已确认的位置 `ack_sequence`。重复确认同一游标不会回退位置。[B5 增量确认协议](docs/B5-同步与历史协议.md#13-设备增量确认)
+
 ## 数据库迁移
 
 开发库 cloudnest 已应用版本 1，包含八张业务表和 schema_migrations。业务账号为 root，开发密码为 root，密码以 bcrypt 存储，配额为 100 GiB，根目录已创建。

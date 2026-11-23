@@ -139,7 +139,7 @@ servers:
   - url: http://127.0.0.1:18081
 tags:
   - name: Sync
-    description: B5 一致性快照和同步基线计划契约
+    description: B5 一致性快照、同步基线、增量拉取与设备确认。
   - name: Uploads
     description: 当前用户的持久上传任务。
   - name: Entries
@@ -382,10 +382,9 @@ paths:
     post:
       tags: [Sync]
       operationId: confirmSyncChanges
-      x-cloudnest-status: planned
       summary: 确认设备已持久化处理的增量位置
       description: |
-        计划端点。客户端持久化事件的处理结果或可恢复待办后，原样提交拉取响应的 next_cursor。
+        客户端持久化事件的处理结果或可恢复待办后，原样提交拉取响应的 next_cursor。
         确认位置取自签名。账号事务内复核当前设备、完整代次、状态和可续读区间。
         较高位置推进确认，等值位置记录同步活动，合法较旧位置返回当前确认值并保持设备行原样。
       security:

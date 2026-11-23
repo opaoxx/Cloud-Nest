@@ -201,7 +201,56 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 		t.Fatal("空页应保留续读位置，拉取过程应保持设备状态、确认位置和时间不变")
 	}
 
-	// 7. 从新快照确认非零序号，旧代次的确认和拉取凭据必须失效。
+	// 7. 通过正式接口确认拉取游标，核对推进、重复、较旧确认和日志边界。
+	const changeConfirmPath = "/api/v1/sync/changes/confirm"
+	changeConfirmBody := func(cursor string) *strings.Reader {
+		return strings.NewReader(`{"cursor":` + strconv.Quote(cursor) + `}`)
+	}
+	unauthorized.request(t, ctx, http.MethodPost, changeConfirmPath, "", changeConfirmBody(firstChanges.Data.NextCursor), http.StatusUnauthorized, &denied)
+	if denied.Error.Code != "AUTH_REQUIRED" || denied.RequestID == "" || readDeviceBaseline() != active {
+		t.Fatal("未授权的增量确认应返回 401 且保持设备记录")
+	}
+
+	confirmChange := func(cursor, want string) dto.ConfirmSyncSnapshotBaselineResponse {
+		t.Helper()
+		var result dto.ConfirmSyncSnapshotBaselineResponse
+		api.request(t, ctx, http.MethodPost, changeConfirmPath, "", changeConfirmBody(cursor), http.StatusOK, &result)
+		if result.RequestID == "" || result.Data.Status != "ACTIVE" || result.Data.AckSequence != want {
+			t.Fatalf("增量确认响应不符：%+v，期望序号 %s", result, want)
+		}
+		return result
+	}
+	firstAck := confirmChange(firstChanges.Data.NextCursor, "1")
+	atOne := readDeviceBaseline()
+	if atOne.status != "ACTIVE" || atOne.position != 1 || atOne.generation != active.generation ||
+		atOne.lastSeen.Before(active.lastSeen) || !atOne.lastSeen.Equal(atOne.updated) {
+		t.Fatalf("增量确认未正确提交位置和同步活动时间：%+v", atOne)
+	}
+	repeatedAck := confirmChange(firstChanges.Data.NextCursor, "1")
+	repeatedAtOne := readDeviceBaseline()
+	if repeatedAck.RequestID == firstAck.RequestID || repeatedAtOne.position != 1 ||
+		repeatedAtOne.generation != atOne.generation || repeatedAtOne.status != atOne.status ||
+		repeatedAtOne.lastSeen.Before(atOne.lastSeen) || !repeatedAtOne.lastSeen.Equal(repeatedAtOne.updated) {
+		t.Fatalf("等值确认未保持位置并记录活动：%+v", repeatedAtOne)
+	}
+	confirmChange(lastChanges.Data.NextCursor, "2")
+	atTwo := readDeviceBaseline()
+	if atTwo.position != 2 || atTwo.generation != active.generation || atTwo.status != "ACTIVE" ||
+		atTwo.lastSeen.Before(repeatedAtOne.lastSeen) || !atTwo.lastSeen.Equal(atTwo.updated) {
+		t.Fatalf("第二页的确认位置或活动时间不符：%+v", atTwo)
+	}
+	confirmChange(firstChanges.Data.NextCursor, "2")
+	if readDeviceBaseline() != atTwo {
+		t.Fatal("较旧的有效确认应返回当前位置并保持设备行")
+	}
+	var events uint64
+	if err := pool.QueryRowContext(ctx, `SELECT change_seq, (SELECT COUNT(*) FROM change_events WHERE user_id=1)
+		FROM users WHERE id=1`).Scan(&accountSequence, &events); err != nil || accountSequence != 2 || events != 2 {
+		t.Fatalf("确认后账号上界或事件条数不符：上界 %d，事件 %d，错误 %v", accountSequence, events, err)
+	}
+	t.Log("实际拉取游标确认到 1 和 2，重复确认保留 1，较旧游标返回 2 且设备行保持原样，变更事件仍为 2 条")
+
+	// 8. 从新快照确认非零序号，旧代次的确认和拉取凭据必须失效。
 	var nextBaseline dto.SyncSnapshotPageResponse
 	api.request(t, ctx, http.MethodPost, path, "startup-sync-snapshot-new-baseline", strings.NewReader(`{}`), http.StatusCreated, &nextBaseline)
 	if nextBaseline.Data.SnapshotID == "" || nextBaseline.Data.SnapshotID == first.Data.SnapshotID || nextBaseline.Data.HighWaterSequence != "2" ||
@@ -217,6 +266,10 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 	if expired.Error.Code != "CURSOR_EXPIRED" || expired.RequestID == "" || readDeviceBaseline() != newPending {
 		t.Fatalf("失效凭据的错误或持久状态不符：%+v", expired)
 	}
+	api.request(t, ctx, http.MethodPost, changeConfirmPath, "", changeConfirmBody(lastChanges.Data.NextCursor), http.StatusGone, &expired)
+	if expired.Error.Code != "CURSOR_EXPIRED" || expired.RequestID == "" || readDeviceBaseline() != newPending {
+		t.Fatal("待确认的新代次应拒绝旧的增量确认且保持设备记录")
+	}
 	confirm(path+"/"+nextBaseline.Data.SnapshotID+"/confirm", *nextBaseline.Data.BaselineToken, "2")
 	if state := readDeviceBaseline(); state.status != "ACTIVE" || state.position != 2 || state.generation != newPending.generation {
 		t.Fatalf("非零序号确认未提交：%+v", state)
@@ -227,8 +280,13 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 	if staleCursor.Error.Code != "CURSOR_EXPIRED" || staleCursor.RequestID == "" || readDeviceBaseline() != newActive {
 		t.Fatal("新代次生效后应拒绝旧代次的增量游标且保持设备记录")
 	}
+	var staleConfirmation dto.ErrorResponse
+	api.request(t, ctx, http.MethodPost, changeConfirmPath, "", changeConfirmBody(lastChanges.Data.NextCursor), http.StatusGone, &staleConfirmation)
+	if staleConfirmation.Error.Code != "CURSOR_EXPIRED" || staleConfirmation.RequestID == "" || readDeviceBaseline() != newActive {
+		t.Fatal("新代次生效后应拒绝旧的增量确认且保持设备记录")
+	}
 	if _, err := stop(); err != nil {
 		t.Fatal("隔离服务未正常退出", err)
 	}
-	t.Logf("独占库 %s，回环服务 %s。确认基线 0，拉取 1、2 和空页，确认位置原样，新代次拒绝旧游标并确认到 2", databaseName, api.baseURL)
+	t.Logf("独占库 %s，回环服务 %s。确认基线 0，拉取 1、2 和空页，增量确认落库至 2，新代次前后拒绝旧确认", databaseName, api.baseURL)
 }
