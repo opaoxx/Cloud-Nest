@@ -30,12 +30,13 @@ type SingleUploadTaskSnapshot struct {
 }
 
 type uploadTask struct {
-	ID            string `json:"id"`
-	ParentID      string `json:"parent_id"`
-	UploadMode    string `json:"upload_mode"`
-	SizeBytes     *int64 `json:"size_bytes"`
-	Status        string `json:"status"`
-	ResultEntryID string `json:"result_entry_id"`
+	ID            string    `json:"id"`
+	ParentID      string    `json:"parent_id"`
+	UploadMode    string    `json:"upload_mode"`
+	SizeBytes     *int64    `json:"size_bytes"`
+	Status        string    `json:"status"`
+	ResultEntryID string    `json:"result_entry_id"`
+	ExpiresAt     time.Time `json:"expires_at"`
 	LastError     *struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`

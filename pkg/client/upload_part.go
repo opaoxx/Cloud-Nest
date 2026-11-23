@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -21,6 +22,9 @@ const uploadPartChecksumHeader = "x-amz-checksum-sha256"
 const maxUploadPartGrantBatch = 20
 
 var uploadPartETagPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
+// ErrUploadPartURLExpired identifies a signed URL that expired before storage accepted the part.
+var ErrUploadPartURLExpired = errors.New("分片签名已过期")
 
 // UploadPartGrant holds a storage PUT authorization. Credentials stay inside this package.
 type UploadPartGrant struct {
@@ -55,6 +59,12 @@ func CheckMultipartUploadReady(ctx context.Context, address, accessToken, taskID
 	if task.ParentID != parentID {
 		return errors.New("远端任务的目标目录与本机记录不一致")
 	}
+	if task.ExpiresAt.IsZero() {
+		return errors.New("远端任务的有效期无效")
+	}
+	if !task.ExpiresAt.After(time.Now()) || task.Status == "EXPIRED" || task.Status == "EXPIRING" {
+		return errors.New("原分片上传任务已到期，无法继续")
+	}
 	switch task.Status {
 	case "UPLOADING":
 		return nil
@@ -73,6 +83,24 @@ func IssueUploadPartURL(ctx context.Context, address, accessToken, taskID string
 		return UploadPartGrant{}, err
 	}
 	return batch[0], nil
+}
+
+// RefreshUploadPartURL replaces the expired signature for the same part and storage session.
+func RefreshUploadPartURL(ctx context.Context, address, accessToken, taskID string, expired UploadPartGrant) (UploadPartGrant, error) {
+	renewed, err := IssueUploadPartURL(ctx, address, accessToken, taskID, expired.number, expired.sizeBytes, expired.digest)
+	if err != nil {
+		return UploadPartGrant{}, err
+	}
+	before, oldError := url.Parse(expired.url)
+	after, newError := url.Parse(renewed.url)
+	if oldError != nil || newError != nil || before.Scheme != after.Scheme || before.Host != after.Host ||
+		before.EscapedPath() != after.EscapedPath() || before.Query().Get("uploadId") != after.Query().Get("uploadId") {
+		return UploadPartGrant{}, errors.New("分片存储会话已变化，请重新核对任务")
+	}
+	if renewed.url == expired.url || !renewed.expiresAt.After(time.Now()) {
+		return UploadPartGrant{}, errors.New("未取得新的有效分片签名，请稍后重试")
+	}
+	return renewed, nil
 }
 
 // IssueUploadPartURLs requests a batch of storage PUT authorizations in declaration order.
@@ -144,14 +172,13 @@ func IssueUploadPartURLs(ctx context.Context, address, accessToken, taskID strin
 	if readBoundedJSON(response.Body, 256*1024, &result) != nil || len(result.Data.Parts) != len(parts) {
 		return nil, errors.New("服务返回的分片签名格式有误")
 	}
-	now := time.Now()
 	grants := make([]UploadPartGrant, 0, len(parts))
 	for index, part := range result.Data.Parts {
 		original := parts[index]
 		if part.Number != original.Number || part.SizeBytes != original.SizeBytes || !validStorageURL(part.URL) ||
 			len(part.Headers) != 1 || part.Headers[uploadPartChecksumHeader] != base64.StdEncoding.EncodeToString(original.Digest[:]) ||
-			part.ExpiresAt.After(result.Data.ExpiresAt) || !part.ExpiresAt.After(now) {
-			return nil, errors.New("分片签名与本机声明不一致或已过期")
+			part.ExpiresAt.IsZero() || part.ExpiresAt.After(result.Data.ExpiresAt) {
+			return nil, errors.New("分片签名与本机声明不一致")
 		}
 		signedURL, err := url.Parse(part.URL)
 		if err != nil || signedURL.Query().Get("partNumber") != strconv.Itoa(original.Number) || signedURL.Query().Get("uploadId") == "" {
@@ -167,8 +194,11 @@ func IssueUploadPartURLs(ctx context.Context, address, accessToken, taskID strin
 // SendUploadPart streams a part to storage and returns its normalized ETag.
 func SendUploadPart(ctx context.Context, grant UploadPartGrant, source io.Reader) (UploadPartReceipt, error) {
 	// 1. 对存储端只发送签名要求的长度与校验头，不携带业务令牌。
-	if !grant.expiresAt.After(time.Now()) || source == nil {
-		return UploadPartReceipt{}, errors.New("分片签名已过期或正文不可用，请重试")
+	if source == nil {
+		return UploadPartReceipt{}, errors.New("分片正文不可用，请重试")
+	}
+	if !grant.expiresAt.After(time.Now()) {
+		return UploadPartReceipt{}, ErrUploadPartURLExpired
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, grant.url, io.LimitReader(source, grant.sizeBytes))
 	if err != nil {
@@ -186,6 +216,9 @@ func SendUploadPart(ctx context.Context, grant UploadPartGrant, source io.Reader
 
 	// 2. 存储的成功状态和有效 ETag 共同构成可保存的回执。
 	if response.StatusCode != http.StatusOK {
+		if isExpiredUploadPartResponse(response.StatusCode, response.Body) {
+			return UploadPartReceipt{}, ErrUploadPartURLExpired
+		}
 		return UploadPartReceipt{}, errors.New("存储端未接受分片，请重新检查源文件后重试")
 	}
 	tags := response.Header.Values("ETag")
@@ -200,4 +233,26 @@ func SendUploadPart(ctx context.Context, grant UploadPartGrant, source io.Reader
 		return UploadPartReceipt{}, errors.New("存储端未返回有效的分片 ETag")
 	}
 	return UploadPartReceipt{Number: grant.number, SizeBytes: grant.sizeBytes, SHA256: hex.EncodeToString(grant.digest[:]), ETag: tag}, nil
+}
+
+func isExpiredUploadPartResponse(status int, body io.Reader) bool {
+	if status != http.StatusForbidden && status != http.StatusBadRequest {
+		return false
+	}
+	const maxErrorBytes = 8192
+	reply, err := io.ReadAll(io.LimitReader(body, maxErrorBytes+1))
+	if err != nil || len(reply) > maxErrorBytes {
+		return false
+	}
+	var rejection struct {
+		XMLName xml.Name `xml:"Error"`
+		Code    string   `xml:"Code"`
+		Message string   `xml:"Message"`
+	}
+	if xml.Unmarshal(reply, &rejection) != nil {
+		return false
+	}
+	// MinIO 的过期响应与一般权限错误共享 AccessDenied，须同时核对原因。
+	return rejection.Code == "RequestExpired" ||
+		(status == http.StatusForbidden && rejection.Code == "AccessDenied" && rejection.Message == "Request has expired")
 }

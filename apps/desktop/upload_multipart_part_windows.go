@@ -100,7 +100,7 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 		// 3. 一批最多两片，等待本批所有结果保存后才开始下一批。
 		for len(jobs) > 0 {
 			count := min(len(jobs), multipartParallelParts)
-			if err := sendMultipartBatch(ctx, intent, upload.taskID, source, jobs[:count]); err != nil {
+			if err := sendMultipartBatch(ctx, intent, upload, source, jobs[:count]); err != nil {
 				return err
 			}
 			jobs = jobs[count:]
@@ -179,13 +179,13 @@ func digestMultipartParts(ctx context.Context, source *os.File, upload multipart
 	return jobs, nil
 }
 
-func sendMultipartBatch(ctx context.Context, intent scopedUploadIntent, taskID string, source *os.File, jobs []multipartPartJob) error {
+func sendMultipartBatch(ctx context.Context, intent scopedUploadIntent, upload multipartUploadSource, source *os.File, jobs []multipartPartJob) error {
 	// 1. 整批签名验证通过后，再为每个字节段启动独立的流式 PUT。
 	declarations := make([]client.UploadPartDeclaration, len(jobs))
 	for index, job := range jobs {
 		declarations[index] = job.declaration
 	}
-	grants, err := client.IssueUploadPartURLs(ctx, intent.owner.Address, intent.accessToken, taskID, declarations)
+	grants, err := client.IssueUploadPartURLs(ctx, intent.owner.Address, intent.accessToken, upload.taskID, declarations)
 	if err != nil {
 		return err
 	}
@@ -197,8 +197,7 @@ func sendMultipartBatch(ctx context.Context, intent scopedUploadIntent, taskID s
 	results := make(chan partResult, len(jobs))
 	for index, job := range jobs {
 		go func() {
-			part := io.NewSectionReader(source, job.offsetBytes, job.declaration.SizeBytes)
-			receipt, err := client.SendUploadPart(ctx, grants[index], part)
+			receipt, err := sendMultipartPart(ctx, intent, upload, source, job, grants[index])
 			results <- partResult{number: job.declaration.Number, receipt: receipt, err: err}
 		}()
 	}
@@ -208,7 +207,7 @@ func sendMultipartBatch(ctx context.Context, intent scopedUploadIntent, taskID s
 	for range jobs {
 		result := <-results
 		if result.err == nil {
-			if err := recordMultipartPart(ctx, intent, taskID, result.receipt); err != nil {
+			if err := recordMultipartPart(ctx, intent, upload.taskID, result.receipt); err != nil {
 				result.err = errors.New("无法保存分片回执")
 			}
 		}
@@ -217,6 +216,30 @@ func sendMultipartBatch(ctx context.Context, intent scopedUploadIntent, taskID s
 		}
 	}
 	return firstError
+}
+
+func sendMultipartPart(ctx context.Context, intent scopedUploadIntent, upload multipartUploadSource, source *os.File, job multipartPartJob, grant client.UploadPartGrant) (client.UploadPartReceipt, error) {
+	send := func(current client.UploadPartGrant) (client.UploadPartReceipt, error) {
+		// 每次单独打开当前片的字节范围，重试时从原偏移开始读取。
+		return client.SendUploadPart(ctx, current, io.NewSectionReader(source, job.offsetBytes, job.declaration.SizeBytes))
+	}
+	receipt, err := send(grant)
+	if !errors.Is(err, client.ErrUploadPartURLExpired) {
+		return receipt, err
+	}
+
+	// 1. 区分任务期限与 URL 期限，确认原任务仍然允许接收分片。
+	if err := client.CheckMultipartUploadReady(ctx, intent.owner.Address, intent.accessToken,
+		upload.taskID, upload.parentID, upload.plan.SizeBytes); err != nil {
+		return client.UploadPartReceipt{}, err
+	}
+
+	// 2. 为同一片重新签发并只重试一次，结果仍交给原批次保存。
+	renewed, err := client.RefreshUploadPartURL(ctx, intent.owner.Address, intent.accessToken, upload.taskID, grant)
+	if err != nil {
+		return client.UploadPartReceipt{}, err
+	}
+	return send(renewed)
 }
 
 func recordMultipartPart(ctx context.Context, intent scopedUploadIntent, taskID string, receipt client.UploadPartReceipt) error {

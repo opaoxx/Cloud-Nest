@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,6 +74,29 @@ func TestUploadPartFollowsSignedHeadersAndValidatesETag(t *testing.T) {
 				}
 			} else if err != nil || receipt != (UploadPartReceipt{Number: 1, SizeBytes: int64(len(content)), SHA256: hex.EncodeToString(digest[:]), ETag: "part-etag"}) {
 				t.Fatalf("valid receipt not returned: %+v, %v", receipt, err)
+			}
+		})
+	}
+}
+
+func TestUploadPartExpiryRequiresStorageExpiryResponse(t *testing.T) {
+	for _, fixture := range []struct {
+		name, body string
+		status     int
+		expired    bool
+	}{
+		{"minio expired", "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>", 403, true},
+		{"explicit expired code", "<Error><Code>RequestExpired</Code></Error>", 400, true},
+		{"permission denied", "<Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>", 403, false},
+		{"invalid signature", "<Error><Code>SignatureDoesNotMatch</Code></Error>", 403, false},
+		{"temporary token expired", "<Error><Code>ExpiredToken</Code></Error>", 403, false},
+		{"untrusted body", "<page><Code>RequestExpired</Code></page>", 403, false},
+		{"oversized body", "<Error><Code>RequestExpired</Code></Error>" + strings.Repeat(" ", 8192), 403, false},
+		{"server unavailable", "<Error><Code>RequestExpired</Code></Error>", 503, false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			if got := isExpiredUploadPartResponse(fixture.status, strings.NewReader(fixture.body)); got != fixture.expired {
+				t.Fatalf("expiry classification = %v, expected %v", got, fixture.expired)
 			}
 		})
 	}
