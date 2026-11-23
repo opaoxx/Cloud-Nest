@@ -20,28 +20,39 @@ var errSessionChanged = errors.New("登录账号已更新，请重新读取资�
 
 // ReadProfile 使用当前会话读取本人资料，令牌过期时最多刷新并重试一次。
 func (account *Account) ReadProfile(ctx context.Context) (ProfileReadResult, error) {
+	username, err := readForAccount(ctx, account, func(address string, session client.NativeSession) (string, error) {
+		username, err := client.ReadCurrentUsername(ctx, address, session.AccessToken)
+		if err == nil && username != session.Username {
+			return "", errors.New("账号资料与当前会话不一致")
+		}
+		return username, err
+	})
+	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) {
+		return ProfileReadResult{LoginRequired: err.Error()}, nil
+	}
+	return ProfileReadResult{Username: username}, err
+}
+
+func readForAccount[Result any](ctx context.Context, account *Account, read func(string, client.NativeSession) (Result, error)) (Result, error) {
+	var empty Result
 	// 1. 在锁内取得会话快照，释放锁后允许各读取请求独立执行。
 	account.mu.Lock()
 	address, session, epoch := account.address, account.session, account.sessionEpoch
 	account.mu.Unlock()
 	if session.AccessToken == "" {
-		return ProfileReadResult{LoginRequired: errLoginRequired.Error()}, nil
+		return empty, errLoginRequired
 	}
-	username, err := client.ReadCurrentUsername(ctx, address, session.AccessToken)
+	result, err := read(address, session)
 
 	// 2. 只有 TOKEN_EXPIRED 触发刷新，后到的请求会复用已轮换的令牌。
 	if errors.Is(err, client.ErrAccessTokenExpired) {
-		var token string
-		token, err = account.refreshForRead(ctx, session.RefreshToken, epoch)
-		if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) {
-			return ProfileReadResult{LoginRequired: err.Error()}, nil
-		}
+		session.AccessToken, err = account.refreshForRead(ctx, session.RefreshToken, epoch)
 		if err == nil {
-			username, err = client.ReadCurrentUsername(ctx, address, token)
+			result, err = read(address, session)
 		}
 	}
 	if err != nil {
-		return ProfileReadResult{}, err
+		return empty, err
 	}
 
 	// 3. 只交付当前会话的结果，避免之前账号的请求在重新登录后写入窗口。
@@ -49,14 +60,11 @@ func (account *Account) ReadProfile(ctx context.Context) (ProfileReadResult, err
 	defer account.mu.Unlock()
 	if account.sessionEpoch != epoch {
 		if account.session.AccessToken != "" {
-			return ProfileReadResult{}, errSessionChanged
+			return empty, errSessionChanged
 		}
-		return ProfileReadResult{LoginRequired: errLoginRequired.Error()}, nil
+		return empty, errLoginRequired
 	}
-	if username != account.session.Username {
-		return ProfileReadResult{}, errors.New("账号资料与当前会话不一致")
-	}
-	return ProfileReadResult{Username: username}, nil
+	return result, nil
 }
 
 func (account *Account) refreshForRead(ctx context.Context, previousRefreshToken string, epoch uint64) (string, error) {

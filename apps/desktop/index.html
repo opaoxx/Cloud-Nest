@@ -18,6 +18,12 @@
     button:disabled { opacity: .65; cursor: wait; }
     output { display: block; margin-top: 1rem; line-height: 1.6; }
     output:empty { display: none; }
+    section { margin-top: 1.25rem; border-top: 1px solid #cad7df; }
+    h2 { font-size: 1.15rem; margin: 1rem 0 0; }
+    ul { list-style: none; margin: .75rem 0 0; padding: 0; }
+    li { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
+    li span:first-child { overflow-wrap: anywhere; }
+    li span:last-child { flex: none; color: #526977; }
   </style>
 </head>
 <body>
@@ -36,9 +42,13 @@
         <button type="submit">登录</button>
       </fieldset>
       <output id="loginStatus" role="status" aria-live="polite"></output>
-      <button id="readProfile" type="button" hidden>读取账号资料</button>
       <button id="logoutAccount" type="button" hidden>退出账号</button>
-      <output id="profileStatus" role="status" aria-live="polite"></output>
+      <section id="rootPanel" aria-labelledby="rootTitle" hidden>
+        <h2 id="rootTitle">根目录</h2>
+        <button id="refreshRoot" type="button">刷新根目录</button>
+        <output id="rootStatus" role="status" aria-live="polite"></output>
+        <ul id="rootItems" aria-label="根目录内容"></ul>
+      </section>
     </form>
   </main>
   <script type="module">
@@ -52,9 +62,11 @@
     const username = document.querySelector("#username");
     const password = document.querySelector("#password");
     const loginStatus = document.querySelector("#loginStatus");
-    const readProfile = document.querySelector("#readProfile");
     const logoutAccount = document.querySelector("#logoutAccount");
-    const profileStatus = document.querySelector("#profileStatus");
+    const rootPanel = document.querySelector("#rootPanel");
+    const refreshRoot = document.querySelector("#refreshRoot");
+    const rootStatus = document.querySelector("#rootStatus");
+    const rootItems = document.querySelector("#rootItems");
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -67,14 +79,14 @@
       address.readOnly = busy || signedIn;
       checkConnection.disabled = busy;
       credentials.disabled = busy;
-      readProfile.disabled = busy;
+      refreshRoot.disabled = busy;
       logoutAccount.disabled = busy;
     }
 
     function showSignedIn(name, restored) {
       signedIn = true;
       credentials.hidden = true;
-      readProfile.hidden = false;
+      rootPanel.hidden = false;
       logoutAccount.hidden = false;
       loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
     }
@@ -82,10 +94,11 @@
     function showSignedOut(notice) {
       signedIn = false;
       credentials.hidden = false;
-      readProfile.hidden = true;
+      rootPanel.hidden = true;
       logoutAccount.hidden = true;
       password.value = "";
-      profileStatus.textContent = "";
+      rootStatus.textContent = "";
+      rootItems.replaceChildren();
       loginStatus.textContent = notice;
     }
 
@@ -103,18 +116,36 @@
       }
     });
 
-    readProfile.addEventListener("click", async () => {
-      setBusy(true);
-      profileStatus.textContent = "正在读取账号资料…";
+    async function loadRootDirectory() {
+      rootStatus.textContent = "正在读取根目录…";
+      rootItems.replaceChildren();
       try {
-        const result = await Call.ByName("main.Account.ReadProfile");
+        const result = await Call.ByName("main.Account.ReadRootDirectory");
         if (result.loginRequired) {
           showSignedOut(result.loginRequired);
-        } else {
-          profileStatus.textContent = "当前账号：" + result.username;
+          return;
         }
+        const { items, next_cursor: nextCursor } = result.page;
+        for (const item of items) {
+          const row = document.createElement("li");
+          const name = document.createElement("span");
+          const details = document.createElement("span");
+          name.textContent = item.name;
+          details.textContent = item.entry_type === "DIR" ? "文件夹" : "文件 · " + item.size_bytes + " B";
+          row.append(name, details);
+          rootItems.append(row);
+        }
+        rootStatus.textContent = items.length === 0 ? "此目录为空。" :
+          nextCursor ? "已显示前 " + items.length + " 项。" : "";
       } catch (error) {
-        profileStatus.textContent = error.message || "读取账号资料失败，请重试";
+        rootStatus.textContent = error.message || "读取根目录失败，请重试";
+      }
+    }
+
+    refreshRoot.addEventListener("click", async () => {
+      setBusy(true);
+      try {
+        await loadRootDirectory();
       } finally {
         setBusy(false);
       }
@@ -150,6 +181,7 @@
         password.value = "";
         const signedInName = await login;
         showSignedIn(signedInName, false);
+        await loadRootDirectory();
       } catch (error) {
         loginStatus.textContent = error.message || "登录失败，请重试";
       } finally {
@@ -165,6 +197,7 @@
         if (restored.address) address.value = restored.address;
         if (restored.username) {
           showSignedIn(restored.username, true);
+          await loadRootDirectory();
         } else {
           loginStatus.textContent = restored.notice || "";
         }

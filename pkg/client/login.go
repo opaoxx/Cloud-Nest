@@ -143,8 +143,11 @@ func newNativeAuthRequest(ctx context.Context, address, operation string, payloa
 }
 
 func readSmallJSON(body io.Reader, result any) error {
-	const maxResponseBytes = 32 * 1024
-	reply, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	return readBoundedJSON(body, 32*1024, result)
+}
+
+func readBoundedJSON(body io.Reader, maxResponseBytes int, result any) error {
+	reply, err := io.ReadAll(io.LimitReader(body, int64(maxResponseBytes)+1))
 	if err != nil {
 		return err
 	}
