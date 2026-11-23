@@ -1,8 +1,12 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,10 +18,10 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
-	// 1. 准备两账号四条候选，在独占库的第二页注入可恢复的写入失败。
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
+func prepareRestoredSyncDevicesIntegration(t *testing.T, ctx context.Context) (
+	*Store, func(string, ...any), func() []domain.RestoredSyncDeviceCandidate,
+) {
+	t.Helper()
 	pool, store, _ := trashEntryTestDatabase(t, ctx)
 	execute := func(statement string, args ...any) {
 		t.Helper()
@@ -49,9 +53,17 @@ func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
 		}
 		return devices
 	}
-	before := readStates()
 	execute(`CREATE TRIGGER fixture_restore_sync_batch_failure BEFORE UPDATE ON sync_devices FOR EACH ROW
 		BEGIN IF OLD.device_id=21 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture reset failure'; END IF; END`)
+	return store, execute, readStates
+}
+
+func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
+	// 1. 准备两账号四条候选，在独占库的第二页注入可恢复的写入失败。
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	store, execute, readStates := prepareRestoredSyncDevicesIntegration(t, ctx)
+	before := readStates()
 
 	// 2. 调用实际仓储，核对每页参数和故障前已提交的设备。
 	type pageCall struct {
@@ -119,4 +131,64 @@ func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
 	}
 	t.Log("部分换代复核拒绝，全量换代后四条均通过，复核保持目标设备状态")
 	t.Log("故障前两项已提交，游标停在设备 20；修复夹具后从 20 继续处理 21 和 29")
+}
+
+func TestRunRestoredSyncDeviceResetIntegration(t *testing.T) {
+	// 1. 用独占库及临时文件记录写入前的清单，模拟第三台设备提交失败。
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	store, execute, readStates := prepareRestoredSyncDevicesIntegration(t, ctx)
+	before := readStates()
+	manifestPath := filepath.Join(t.TempDir(), "original-roster.json")
+	save := func(_ context.Context, original []domain.RestoredSyncDeviceCandidate) error {
+		if !slices.Equal(original, before) || !slices.Equal(readStates(), before) {
+			t.Fatal("保存原始清单时目标已经发生变化")
+		}
+		manifest, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		defer manifest.Close()
+		if err := json.NewEncoder(manifest).Encode(original); err != nil {
+			return err
+		}
+		return manifest.Sync()
+	}
+	first, err := service.RunRestoredSyncDeviceReset(ctx, nil, 2, 2, store.ListRestoredSyncDeviceCandidates, store.ResetRestoredSyncDevice, save)
+	var databaseError *mysql.MySQLError
+	if first != (service.RestoredSyncDeviceResetResult{Reset: 2}) ||
+		!errors.As(err, &databaseError) || databaseError.Number != 1644 {
+		t.Fatalf("故障应保留两次提交和原始错误：%+v，%v", first, err)
+	}
+	partial := readStates()
+	if partial[0].State.Generation == before[0].State.Generation || partial[1].State.Generation == before[1].State.Generation ||
+		!slices.Equal(partial[2:], before[2:]) {
+		t.Fatal("故障前后的数据库换代范围不符")
+	}
+
+	// 2. 从临时文件重新读取首次清单，使用新的流程调用从头读取目标。
+	saved, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original []domain.RestoredSyncDeviceCandidate
+	if err := json.Unmarshal(saved, &original); err != nil || !slices.Equal(original, before) {
+		t.Fatalf("仍应持有四条原始记录：%+v，%v", original, err)
+	}
+	execute("DROP TRIGGER fixture_restore_sync_batch_failure")
+	retry, err := service.RunRestoredSyncDeviceReset(ctx, original, 2, 2, store.ListRestoredSyncDeviceCandidates, store.ResetRestoredSyncDevice, nil)
+	if retry != (service.RestoredSyncDeviceResetResult{Reset: 4, Verified: 4}) || err != nil {
+		t.Fatalf("重跑应按原始清单全量通过：%+v，%v", retry, err)
+	}
+	finished := readStates()
+	for index, current := range finished {
+		if current.State.Status != domain.SyncDeviceStatusResetRequired || current.State.AckSequence != 0 ||
+			current.State.Generation == original[index].State.Generation || current.State.Generation == partial[index].State.Generation {
+			t.Fatalf("设备 %d 的实际换代结果不符：%+v", current.DeviceID, current)
+		}
+	}
+	if kept, err := os.ReadFile(manifestPath); err != nil || !bytes.Equal(saved, kept) {
+		t.Fatalf("重跑修改了首次保存的清单：%v", err)
+	}
+	t.Log("首次保存 4 条原始记录，设备 21 故障前确认提交 2 条；重新载入同一清单后提交并读回 4 条，清单字节一致")
 }
