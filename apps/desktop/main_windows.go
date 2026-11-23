@@ -45,9 +45,15 @@ func main() {
 	menu.Add("关于 CloudNest").OnClick(func(_ *application.Context) {
 		app.Dialog.Info().AttachToWindow(window).SetTitle("关于 CloudNest").SetMessage("CloudNest 桌面客户端").Show()
 	})
+
+	// 5. 用户选择退出时结束整个应用，窗口隐藏后也能通过托盘退出。
+	menu.AddSeparator()
+	menu.Add("退出 CloudNest").OnClick(func(_ *application.Context) {
+		app.Quit()
+	})
 	tray.SetMenu(menu)
 
-	// 5. 运行事件循环，窗口隐藏后继续接收托盘操作，启动失败时报告原因。
+	// 6. 运行事件循环，应用退出后返回，启动失败时报告原因。
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
