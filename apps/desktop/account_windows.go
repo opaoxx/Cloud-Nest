@@ -17,6 +17,8 @@ type Account struct {
 	session        client.NativeSession
 	address        string
 	sessionEpoch   uint64
+	downloadMu     sync.Mutex
+	stagedDownload *os.File
 }
 
 // RestoredAccount 是启动时可交给桌面页面的会话恢复信息。

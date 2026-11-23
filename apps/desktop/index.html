@@ -68,6 +68,7 @@
         <button id="refreshDirectory" type="button">刷新目录</button>
         <output id="directoryStatus" role="status" aria-live="polite"></output>
         <output id="downloadStatus" role="status" aria-live="polite"></output>
+        <button id="stageDownload" type="button" hidden>下载到临时文件</button>
         <ul id="directoryItems" aria-label="目录内容"></ul>
         <button id="loadMore" type="button" hidden>加载更多</button>
       </section>
@@ -97,6 +98,7 @@
     const refreshDirectory = document.querySelector("#refreshDirectory");
     const directoryStatus = document.querySelector("#directoryStatus");
     const downloadStatus = document.querySelector("#downloadStatus");
+    const stageDownload = document.querySelector("#stageDownload");
     const directoryItems = document.querySelector("#directoryItems");
     const loadMore = document.querySelector("#loadMore");
     const entryRows = new Map();
@@ -104,6 +106,7 @@
     let nextCursor = null;
     let pendingPage = null;
     let selectionKey = "";
+    let selectedDownload = null;
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -167,7 +170,7 @@
       currentDirectoryID = "";
       pendingPage = null;
       directoryStatus.textContent = "";
-      downloadStatus.textContent = "";
+      clearDownloadSelection();
       clearDirectoryItems();
       breadcrumbs.replaceChildren();
       directoryPath.hidden = true;
@@ -333,9 +336,16 @@
       return button;
     }
 
+    function clearDownloadSelection() {
+      selectedDownload = null;
+      stageDownload.hidden = true;
+      downloadStatus.textContent = "";
+    }
+
     async function authorizeDownload(item) {
       if (checkConnection.disabled || !signedIn) return;
       setBusy(true);
+      clearDownloadSelection();
       downloadStatus.textContent = "正在取得下载授权…";
       try {
         // 1. 发送点击时读到的修订，冲突时由用户刷新后重新选择。
@@ -351,12 +361,41 @@
           "对象 ID " + grant.object_id + " · 大小 " + grant.size_bytes + " B",
           "SHA-256 " + grant.sha256
         ].join("\n");
+        selectedDownload = {item, objectID: grant.object_id};
+        stageDownload.hidden = false;
       } catch (error) {
         if (signedIn) downloadStatus.textContent = error.message || "获取下载授权失败，请重试";
       } finally {
         setBusy(false);
       }
     }
+
+    stageDownload.addEventListener("click", async () => {
+      if (checkConnection.disabled || !signedIn || !selectedDownload) return;
+      setBusy(true);
+      const {item, objectID} = selectedDownload;
+      downloadStatus.textContent = "正在下载并校验 " + item.name + "…";
+      try {
+        // 1. 将选定的条目、修订和对象一起交给 Go 暂存。
+        const result = await Call.ByName("main.Account.StageDownload", item.id, item.revision, objectID);
+        if (!signedIn) return;
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        // 2. Go 确认大小和摘要后才显示可保存。
+        stageDownload.hidden = true;
+        downloadStatus.textContent = [
+          "已校验，可以保存 · " + item.name + " · 修订 " + result.revision,
+          "对象 ID " + result.object_id + " · 大小 " + result.size_bytes + " B",
+          "SHA-256 " + result.sha256
+        ].join("\n");
+      } catch (error) {
+        if (signedIn) downloadStatus.textContent = error.message || "下载未完成，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
 
     function renderDirectory(page, append) {
       breadcrumbs.replaceChildren();
@@ -411,7 +450,7 @@
     async function loadDirectory(targetID) {
       // 导航和刷新都让上一次续页失效，即使之后回到同一个目录。
       pendingPage = null;
-      downloadStatus.textContent = "";
+      clearDownloadSelection();
       directoryStatus.textContent = "正在读取目录…";
       if (targetID === currentDirectoryID) clearDirectoryItems();
       try {

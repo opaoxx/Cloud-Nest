@@ -115,6 +115,7 @@ func (account *Account) refreshForRead(ctx context.Context, previousRefreshToken
 
 // forgetSession 清空内存，并让持有旧会话编号的读取失效。调用方需要持有账户锁。
 func (account *Account) forgetSession() {
+	account.discardStagedDownload()
 	account.session = client.NativeSession{}
 	account.address = ""
 	account.sessionEpoch++
