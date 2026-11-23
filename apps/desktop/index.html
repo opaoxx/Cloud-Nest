@@ -215,19 +215,28 @@
         summary.textContent = intent.name + " · " + intent.size_bytes + " B · 目录 " + intent.parent_id;
         row.append(summary);
         if (intent.status === "PENDING_CREATE") {
-          const submit = document.createElement("button");
-          submit.type = "button";
-          submit.textContent = "创建上传任务";
-          submit.disabled = checkConnection.disabled;
-          submit.addEventListener("click", () => submitUploadIntent(intent.id));
-          row.append(submit);
+          row.append(uploadActionButton("创建上传任务", () =>
+            runUploadAction("Submit", intent.id, "正在创建上传任务…", "已创建 SINGLE 上传任务。")));
         } else if (intent.status === "CREATED") {
           summary.textContent += " · 待发送正文 · 任务 " + intent.task_id;
+          row.append(uploadActionButton("发送正文", () =>
+            runUploadAction("SendContent", intent.id, "正在发送正文…", "正文已接收，等待查看校验结果。")));
+        } else if (intent.status === "VERIFYING") {
+          summary.textContent += " · 正文已接收 · 待查看校验结果 · 任务 " + intent.task_id;
         }
         uploadItems.append(row);
       }
       uploadStatus.textContent = result.items.length ? "" : "暂无上传记录。";
       return true;
+    }
+
+    function uploadActionButton(label, action) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.disabled = checkConnection.disabled;
+      button.addEventListener("click", action);
+      return button;
     }
 
     async function loadUploadIntents() {
@@ -239,16 +248,16 @@
       }
     }
 
-    async function submitUploadIntent(intentID) {
+    async function runUploadAction(method, intentID, progress, success) {
       if (checkConnection.disabled) return;
       setBusy(true);
-      uploadStatus.textContent = "正在创建上传任务…";
+      uploadStatus.textContent = progress;
       try {
-        if (renderUploadIntents(await Call.ByName("main.UploadIntents.Submit", intentID))) {
-          uploadStatus.textContent = "已创建 SINGLE 上传任务。";
+        if (renderUploadIntents(await Call.ByName("main.UploadIntents." + method, intentID))) {
+          uploadStatus.textContent = success;
         }
       } catch (error) {
-        uploadStatus.textContent = error.message || "创建任务失败，请重试同一条记录";
+        uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
       } finally {
         setBusy(false);
       }

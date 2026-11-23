@@ -18,6 +18,44 @@ type uploadSubmission struct {
 
 // Submit 创建已有本机意图对应的 SINGLE 任务，确认回执后更新本机记录。
 func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (UploadIntentResult, error) {
+	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
+		submission, err := readUploadSubmission(ctx, intent.db, intent.owner, intent.id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("当前账号找不到这条上传记录")
+		}
+		if err != nil {
+			return errors.New("无法读取本机上传声明")
+		}
+
+		// 1. 待提交记录才发送请求。令牌过期由会话层用原声明重试一次。
+		switch submission.Status {
+		case "CREATED", "VERIFYING":
+			return nil
+		case "PENDING_CREATE":
+		default:
+			return errors.New("当前上传记录无法创建任务")
+		}
+		receipt, err := client.CreateSingleUpload(ctx, intent.owner.Address, intent.accessToken, submission.CreationKey, submission.Declaration)
+		if err != nil {
+			return err
+		}
+
+		// 2. 在事务内持久化回执及状态。失败后仍可用原键找回任务。
+		if err := recordUploadCreation(ctx, intent.db, intent.owner, intent.id, receipt); err != nil {
+			return errors.New("无法保存上传创建回执，请重试同一条记录")
+		}
+		return nil
+	})
+}
+
+type scopedUploadIntent struct {
+	db          *sql.DB
+	owner       uploadOwner
+	id          int64
+	accessToken string
+}
+
+func (uploads *UploadIntents) actOnUploadIntent(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
 	// 1. 用当前会话确认归属，读取已保存的创建参数和幂等键。
 	id, err := strconv.ParseInt(intentID, 10, 64)
 	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != intentID {
@@ -33,28 +71,9 @@ func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (Uplo
 			return nil, errors.New("无法打开本机上传记录")
 		}
 		defer db.Close()
-		submission, err := readUploadSubmission(ctx, db, owner, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("当前账号找不到这条上传记录")
-		}
-		if err != nil {
-			return nil, errors.New("无法读取本机上传声明")
-		}
-
-		// 2. 待提交记录才发送请求。令牌过期由会话层用原声明重试一次。
-		switch submission.Status {
-		case "PENDING_CREATE":
-			receipt, err := client.CreateSingleUpload(ctx, address, session.AccessToken, submission.CreationKey, submission.Declaration)
-			if err != nil {
-				return nil, err
-			}
-			// 3. 在事务内持久化回执及状态。失败后仍可用原键找回任务。
-			if err := recordUploadCreation(ctx, db, owner, id, receipt); err != nil {
-				return nil, errors.New("无法保存上传创建回执，请重试同一条记录")
-			}
-		case "CREATED":
-		default:
-			return nil, errors.New("当前上传记录无法创建任务")
+		// 2. 以已确认的账号作用域执行本次操作，再刷新这组本机记录。
+		if err := action(scopedUploadIntent{db: db, owner: owner, id: id, accessToken: session.AccessToken}); err != nil {
+			return nil, err
 		}
 		items, err := listUploadIntents(ctx, db, owner)
 		if err != nil {

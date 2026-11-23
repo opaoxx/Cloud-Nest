@@ -17,7 +17,19 @@ type SourceFileDigest struct {
 }
 
 func readSourceFileDigest(path string) (*SourceFileDigest, error) {
-	// 1. 打开所选普通文件，记录读取前的大小和修改时间。
+	source, err := openSourceFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close()
+	before, err := source.Stat()
+	if err != nil || !before.Mode().IsRegular() {
+		return nil, errors.New("无法检查所选文件，请重新选择一个普通文件")
+	}
+	return digestSourceSnapshot(source, before)
+}
+
+func openSourceFile(path string) (*os.File, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("无法识别所选文件的位置，请重新选择")
 	}
@@ -25,20 +37,18 @@ func readSourceFileDigest(path string) (*SourceFileDigest, error) {
 	if err != nil {
 		return nil, errors.New("无法打开所选文件，请重新选择")
 	}
-	defer source.Close()
-	before, err := source.Stat()
-	if err != nil || !before.Mode().IsRegular() {
-		return nil, errors.New("无法检查所选文件，请重新选择一个普通文件")
-	}
+	return source, nil
+}
 
-	// 2. 以初始大小为读取边界，分块更新摘要，并累计实际读出的字节数。
+func digestSourceSnapshot(source *os.File, before os.FileInfo) (*SourceFileDigest, error) {
+	// 1. 以初始大小为读取边界，分块更新摘要，并累计实际读出的字节数。
 	hasher := sha256.New()
 	sizeBytes, err := io.Copy(hasher, io.LimitReader(source, before.Size()))
 	if err != nil {
 		return nil, errors.New("无法读取所选文件的内容，请重新选择")
 	}
 
-	// 3. 复核大小和修改时间，发现文件在读取期间变化时要求重新选择。
+	// 2. 复核大小和修改时间，发现文件在读取期间变化时要求重新选择。
 	after, err := source.Stat()
 	if err != nil {
 		return nil, errors.New("无法复查所选文件，请重新选择")
