@@ -30,9 +30,17 @@ func prepareBackupTargetB5Remap(t *testing.T, ctx context.Context) backupTargetR
 	source := prepareBackupSource(t, ctx)
 	backupDir := t.TempDir()
 	manifest := prepareBackupSourceB5Manifest(t, ctx, source, backupDir)
+	backupState := readBackupB5DatabaseState(t, ctx, source.pool, backupFixtureID(t, source.login.User.ID))
+	return restoreBackupTargetB5Remap(t, ctx, source, backupDir, manifest, backupState)
+}
+
+func restoreBackupTargetB5Remap(t *testing.T, ctx context.Context, source backupSourceFixture,
+	backupDir string, manifest backupSourceManifest, backupState backupB5DatabaseState,
+) backupTargetRemapFixture {
+	t.Helper()
 	root := openBackupSourceBundleRoot(t, backupDir)
 	saveAndVerifyBackupSourcePayloads(t, ctx, source.bucket, root, manifest.Objects)
-	database := restoreBackupTargetB5Database(t, ctx, source, backupDir, manifest)
+	database := restoreBackupTargetB5Database(t, ctx, source, backupDir, manifest, backupState)
 	targetBucket, mapping := restoreBackupTargetB5Objects(t, ctx, source, root, manifest)
 	return backupTargetRemapFixture{source: source, database: database, targetBucket: targetBucket, manifest: manifest, mapping: mapping}
 }

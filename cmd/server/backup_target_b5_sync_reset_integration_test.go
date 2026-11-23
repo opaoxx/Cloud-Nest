@@ -49,6 +49,7 @@ func resetBackupTargetB5SyncDevices(t *testing.T, ctx context.Context, fixture b
 	}
 	userID := backupFixtureID(t, fixture.source.login.User.ID)
 	before := readBackupB5DatabaseState(t, ctx, target.pool, userID)
+	sourceBefore := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID)
 	if len(before.devices) != 1 || before.devices[0].State.Status != domain.SyncDeviceStatusActive ||
 		before.devices[0].State.AckSequence != 2 {
 		t.Fatal("恢复目标在换代前应保留活动设备及确认位置 2")
@@ -103,7 +104,7 @@ func resetBackupTargetB5SyncDevices(t *testing.T, ctx context.Context, fixture b
 		readBackupB5SyncDeviceTimes(t, ctx, target.pool, userID, deviceID) != timesBefore {
 		t.Fatal("离线换代改变了同步活动时间、目录、日志、对象引用或配额", err)
 	}
-	if source := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID); !reflect.DeepEqual(source, before) {
+	if source := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID); !reflect.DeepEqual(source, sourceBefore) {
 		t.Fatal("目标换代后停写的源库状态不符")
 	}
 	roster, err := os.ReadFile(rosterPath)

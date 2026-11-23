@@ -25,12 +25,13 @@ func TestServerBackupTargetB5SQLIntegration(t *testing.T) {
 	source := prepareBackupSource(t, ctx)
 	backupDir := t.TempDir()
 	manifest := prepareBackupSourceB5Manifest(t, ctx, source, backupDir)
-	restoreBackupTargetB5Database(t, ctx, source, backupDir, manifest)
+	backupState := readBackupB5DatabaseState(t, ctx, source.pool, backupFixtureID(t, source.login.User.ID))
+	restoreBackupTargetB5Database(t, ctx, source, backupDir, manifest, backupState)
 	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", source.mysqlContainer, source.minioContainer)
 }
 
 func restoreBackupTargetB5Database(t *testing.T, ctx context.Context, source backupSourceFixture,
-	backupDir string, manifest backupSourceManifest,
+	backupDir string, manifest backupSourceManifest, backupState backupB5DatabaseState,
 ) backupTargetDatabase {
 	t.Helper()
 	target := prepareBackupTargetDatabase(t, ctx, source)
@@ -72,9 +73,8 @@ func restoreBackupTargetB5Database(t *testing.T, ctx context.Context, source bac
 	}
 	userID := backupFixtureID(t, source.login.User.ID)
 	deviceID := backupFixtureID(t, source.login.Device.ID)
-	sourceState := readBackupB5DatabaseState(t, ctx, source.pool, userID)
 	targetState := readBackupB5DatabaseState(t, ctx, target.pool, userID)
-	if !reflect.DeepEqual(targetState, sourceState) || targetState.high != 4 || targetState.used != 72 || targetState.reserved != 0 ||
+	if !reflect.DeepEqual(targetState, backupState) || targetState.high != 4 || targetState.used != 72 || targetState.reserved != 0 ||
 		len(targetState.devices) != 1 || targetState.devices[0].UserID != userID || targetState.devices[0].DeviceID != deviceID ||
 		targetState.devices[0].State.Status != domain.SyncDeviceStatusActive || targetState.devices[0].State.AckSequence != 2 ||
 		len(targetState.events) != 4 || targetState.events[0].sequence != 1 || targetState.events[3].sequence != 4 {
