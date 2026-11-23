@@ -264,10 +264,9 @@ paths:
     post:
       tags: [Sync]
       operationId: confirmSyncSnapshotBaseline
-      x-cloudnest-status: planned
       summary: 确认设备已持久化的一致性快照基线
       description: |
-        计划契约，待服务接入。客户端保存同一份完整基线或可恢复待办后，原样提交末页的 baseline_token。
+        客户端保存同一份完整基线或可恢复待办后，原样提交末页的 baseline_token。
         服务端核对签名及账号、设备、快照 ID 的绑定。在账号锁内复核当前授权、完整代次、原到期时间及截止序号的可续读范围。
         首次成功将当前代次的设备从 RESET_REQUIRED 置为 ACTIVE。合法重试保持已有确认位置并返回该位置，无需 Idempotency-Key。
         末页凭据可在缓存丢失后用于确认，仍须通过原期限及账号事务内的全部检查。客户端按本地已持久化的位置继续拉取。

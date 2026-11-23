@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -89,7 +90,7 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 		page = next
 	}
 
-	// 4. 确认设备仍待确认、只保存一份创建回执，并正常关闭隔离服务。
+	// 4. 核对读页结束后设备仍待确认，且创建同键重试只保存一份回执。
 	var status string
 	var ack, receipts, accountSequence uint64
 	if err := pool.QueryRowContext(ctx, `SELECT devices.status,devices.ack_sequence,accounts.change_seq,
@@ -99,8 +100,76 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 		status != "RESET_REQUIRED" || ack != 0 || accountSequence != 1 || receipts != 1 {
 		t.Fatalf("设备状态=%s，确认位置=%d，当前序号=%d，回执数=%d，错误=%v", status, ack, accountSequence, receipts, err)
 	}
+
+	// 5. 通过正式路由确认零序号。未授权的请求不会推进设备，同一凭据重试保持原位置和时间。
+	type deviceBaselineState struct {
+		status, generation string
+		position           uint64
+		lastSeen, updated  time.Time
+	}
+	readDeviceBaseline := func() deviceBaselineState {
+		t.Helper()
+		var state deviceBaselineState
+		err := pool.QueryRowContext(ctx, `SELECT status,HEX(cursor_generation),ack_sequence,last_seen_at,updated_at
+			FROM sync_devices WHERE user_id=1`).Scan(&state.status, &state.generation, &state.position, &state.lastSeen, &state.updated)
+		if err != nil {
+			t.Fatal("读取隔离设备基线失败", err)
+		}
+		return state
+	}
+	baselineBody := func(token string) *strings.Reader {
+		return strings.NewReader(`{"baseline_token":` + strconv.Quote(token) + `}`)
+	}
+	firstConfirmPath := path + "/" + page.Data.SnapshotID + "/confirm"
+	firstBaselineToken := *page.Data.BaselineToken
+	pending := readDeviceBaseline()
+	unauthorized := api
+	unauthorized.accessToken = ""
+	var denied dto.ErrorResponse
+	unauthorized.request(t, ctx, http.MethodPost, firstConfirmPath, "", baselineBody(firstBaselineToken), http.StatusUnauthorized, &denied)
+	if denied.Error.Code != "AUTH_REQUIRED" || denied.RequestID == "" || readDeviceBaseline() != pending {
+		t.Fatalf("未授权确认的错误或持久状态不符：%+v", denied)
+	}
+	confirm := func(target, token, want string) dto.ConfirmSyncSnapshotBaselineResponse {
+		t.Helper()
+		var result dto.ConfirmSyncSnapshotBaselineResponse
+		api.request(t, ctx, http.MethodPost, target, "", baselineBody(token), http.StatusOK, &result)
+		if result.RequestID == "" || result.Data.Status != "ACTIVE" || result.Data.AckSequence != want {
+			t.Fatalf("确认响应不符：%+v，期望序号 %s", result, want)
+		}
+		return result
+	}
+	confirmed := confirm(firstConfirmPath, firstBaselineToken, "0")
+	active := readDeviceBaseline()
+	if active.status != "ACTIVE" || active.position != 0 || active.generation != pending.generation {
+		t.Fatalf("零序号确认未提交：%+v", active)
+	}
+	if replay := confirm(firstConfirmPath, firstBaselineToken, "0"); replay.RequestID == confirmed.RequestID || readDeviceBaseline() != active {
+		t.Fatal("同一凭据重试未保留已提交的设备记录")
+	}
+
+	// 6. 从新快照确认非零序号，旧代次的凭据必须失效，并正常关闭隔离服务。
+	var nextBaseline dto.SyncSnapshotPageResponse
+	api.request(t, ctx, http.MethodPost, path, "startup-sync-snapshot-new-baseline", strings.NewReader(`{}`), http.StatusCreated, &nextBaseline)
+	if nextBaseline.Data.SnapshotID == "" || nextBaseline.Data.SnapshotID == first.Data.SnapshotID || nextBaseline.Data.HighWaterSequence != "1" ||
+		nextBaseline.Data.BaselineToken == nil || nextBaseline.Data.NextCursor != nil {
+		t.Fatal("新快照未提供非零截止序号的末页凭据")
+	}
+	newPending := readDeviceBaseline()
+	if newPending.status != "RESET_REQUIRED" || newPending.position != 0 || newPending.generation == active.generation {
+		t.Fatalf("新快照未建立待确认的新代次：%+v", newPending)
+	}
+	var expired dto.ErrorResponse
+	api.request(t, ctx, http.MethodPost, firstConfirmPath, "", baselineBody(firstBaselineToken), http.StatusGone, &expired)
+	if expired.Error.Code != "CURSOR_EXPIRED" || expired.RequestID == "" || readDeviceBaseline() != newPending {
+		t.Fatalf("失效凭据的错误或持久状态不符：%+v", expired)
+	}
+	confirm(path+"/"+nextBaseline.Data.SnapshotID+"/confirm", *nextBaseline.Data.BaselineToken, "1")
+	if state := readDeviceBaseline(); state.status != "ACTIVE" || state.position != 1 || state.generation != newPending.generation {
+		t.Fatalf("非零序号确认未提交：%+v", state)
+	}
 	if _, err := stop(); err != nil {
 		t.Fatal("隔离服务未正常退出", err)
 	}
-	t.Logf("独占库 %s，回环服务 %s。三页均为截止序号 0，目录写入后账号序号为 1", databaseName, api.baseURL)
+	t.Logf("独占库 %s，回环服务 %s。三页保持截止序号 0，随后确认 0 并重试，新代次拒绝旧凭据且确认到 1", databaseName, api.baseURL)
 }

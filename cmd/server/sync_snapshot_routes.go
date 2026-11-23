@@ -17,7 +17,7 @@ func registerServerSyncSnapshotRoutes(
 	router *gin.Engine, store *repository.Store, masterKey []byte,
 	authorize func(context.Context, string) (*domain.Actor, error),
 ) error {
-	// 1. 装配只读快照构建、共享缓存和分页签发器。
+	// 1. 装配快照构建、共享缓存、分页签发与末页验签。
 	cursorSigner, err := service.NewSyncSnapshotCursorSigner(masterKey)
 	if err != nil {
 		return err
@@ -30,6 +30,10 @@ func registerServerSyncSnapshotRoutes(
 	if err != nil {
 		return err
 	}
+	baselineVerifier, err := service.NewSyncSnapshotBaselineVerifier(masterKey)
+	if err != nil {
+		return err
+	}
 	delivery := service.NewSyncSnapshotPageDelivery(cursorSigner.Sign, baselineSigner.Sign)
 	cache := service.NewSyncSnapshotCache(time.Now)
 	builder := service.NewSyncSnapshotBuilder(
@@ -39,7 +43,7 @@ func registerServerSyncSnapshotRoutes(
 			})
 		}, dto.EncodeSyncSnapshotEntries)
 
-	// 2. 绑定创建事务与续页读取，共用本次启动的缓存和交付器。
+	// 2. 绑定创建、续页及确认服务。确认在已认证账号事务内复核和更新。
 	creator := service.NewSyncSnapshotCreationService(service.NewSyncSnapshotPreparation(builder.Build, cache),
 		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SyncSnapshotFinalizationTransaction) error) error {
 			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
@@ -47,8 +51,14 @@ func registerServerSyncSnapshotRoutes(
 			})
 		}, store.FindSyncDeviceGeneration, delivery, dto.EncodeCreateSyncSnapshotReceipt, dto.DecodeCreateSyncSnapshotReceipt, time.Now)
 	continuation := service.NewSyncSnapshotContinuationService(cursorVerifier.Verify, store.FindSyncDeviceGeneration, cache.Get, time.Now)
+	confirmer := service.NewSyncSnapshotBaselineConfirmationService(baselineVerifier,
+		func(ctx context.Context, actor domain.Actor, action func(context.Context, service.SyncSnapshotBaselineConfirmationTransaction) error) error {
+			return store.WithUserTransaction(ctx, actor, func(txContext context.Context, txStore *repository.Store) error {
+				return action(txContext, txStore)
+			})
+		}, time.Now)
 
-	// 3. 把创建和续页挂到实际启动的 HTTP 路由器，共用 Bearer 授权。
+	// 3. 在实际启动的路由器注册创建、续页和确认，共用 Bearer 授权。
 	serverhttp.RegisterCreateSyncSnapshotRoute(router, authorize, creator.Create)
 	serverhttp.RegisterSyncSnapshotPageRoute(router, authorize,
 		func(ctx context.Context, actor domain.Actor, snapshotID uuid.UUID, cursor string) (*domain.SyncSnapshotPageResult, error) {
@@ -58,5 +68,6 @@ func registerServerSyncSnapshotRoutes(
 			}
 			return delivery.Build(ctx, page.Binding, page.Header, page.ExpiresAt, &page.Page)
 		})
+	serverhttp.RegisterConfirmSyncSnapshotBaselineRoute(router, authorize, confirmer.Confirm)
 	return nil
 }
