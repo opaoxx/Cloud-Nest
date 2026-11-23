@@ -22,7 +22,7 @@ type DirectoryBreadcrumb struct {
 	Name string `json:"name"`
 }
 
-// DirectoryPage 保存服务返回的目录首页和续页信息。
+// DirectoryPage 保存服务返回的目录项、路径和续页信息。
 type DirectoryPage struct {
 	Items       []DirectoryEntry      `json:"items"`
 	Breadcrumbs []DirectoryBreadcrumb `json:"breadcrumbs"`
@@ -44,8 +44,16 @@ func ReadDirectoryPage(ctx context.Context, address, accessToken, parentID strin
 
 	// 2. 确认路径终点和子项归属与请求一致，空数组是可展示的空页。
 	page := result.Data
-	if page.Items == nil || len(page.Breadcrumbs) == 0 || page.Breadcrumbs[len(page.Breadcrumbs)-1].ID != parentID {
+	if page.Items == nil || len(page.Breadcrumbs) == 0 || len(page.Breadcrumbs) > 33 ||
+		page.Breadcrumbs[len(page.Breadcrumbs)-1].ID != parentID {
 		return DirectoryPage{}, errors.New("服务返回的目录页与请求不一致")
+	}
+	seen := make(map[string]bool, len(page.Breadcrumbs))
+	for index, crumb := range page.Breadcrumbs {
+		if !validEntryID(crumb.ID) || seen[crumb.ID] || (index == 0) != (crumb.Name == "") {
+			return DirectoryPage{}, errors.New("服务返回的目录路径有误")
+		}
+		seen[crumb.ID] = true
 	}
 	for _, entry := range page.Items {
 		if !validEntryID(entry.ID) || entry.ParentID != parentID || entry.Name == "" ||

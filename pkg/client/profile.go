@@ -68,6 +68,9 @@ func getAuthenticatedJSON(ctx context.Context, address, accessToken, resource st
 	if response.StatusCode == http.StatusUnauthorized && authErrorCode(response.Body) == "TOKEN_EXPIRED" {
 		return ErrAccessTokenExpired
 	}
+	if response.StatusCode == http.StatusNotFound && resource == "entries" && authErrorCode(response.Body) == "ENTRY_NOT_FOUND" {
+		return errors.New("目录不存在或已不可访问")
+	}
 	if response.StatusCode != http.StatusOK {
 		return errors.New("服务未能返回请求的资料")
 	}

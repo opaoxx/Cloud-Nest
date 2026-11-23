@@ -21,9 +21,13 @@
     section { margin-top: 1.25rem; border-top: 1px solid #cad7df; }
     h2 { font-size: 1.15rem; margin: 1rem 0 0; }
     ul { list-style: none; margin: .75rem 0 0; padding: 0; }
-    li { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
-    li span:first-child { overflow-wrap: anywhere; }
-    li span:last-child { flex: none; color: #526977; }
+    #directoryItems li { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
+    #directoryItems li > :first-child { min-width: 0; overflow-wrap: anywhere; }
+    #directoryItems li > :last-child { flex: none; color: #526977; }
+    #directoryPath ol { display: flex; flex-wrap: wrap; gap: .35rem .6rem; list-style: none; padding: 0; margin: .8rem 0 0; }
+    #directoryPath li { min-width: 0; overflow-wrap: anywhere; }
+    #directoryPath [aria-current="page"] { font-weight: 600; }
+    .directory-link { margin: 0; padding: 0; color: #216080; background: none; text-align: left; text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -43,11 +47,12 @@
       </fieldset>
       <output id="loginStatus" role="status" aria-live="polite"></output>
       <button id="logoutAccount" type="button" hidden>退出账号</button>
-      <section id="rootPanel" aria-labelledby="rootTitle" hidden>
-        <h2 id="rootTitle">根目录</h2>
-        <button id="refreshRoot" type="button">刷新根目录</button>
-        <output id="rootStatus" role="status" aria-live="polite"></output>
-        <ul id="rootItems" aria-label="根目录内容"></ul>
+      <section id="directoryPanel" aria-labelledby="directoryTitle" hidden>
+        <h2 id="directoryTitle">目录</h2>
+        <nav id="directoryPath" aria-label="目录路径" hidden><ol></ol></nav>
+        <button id="refreshDirectory" type="button">刷新目录</button>
+        <output id="directoryStatus" role="status" aria-live="polite"></output>
+        <ul id="directoryItems" aria-label="目录内容"></ul>
       </section>
     </form>
   </main>
@@ -63,10 +68,13 @@
     const password = document.querySelector("#password");
     const loginStatus = document.querySelector("#loginStatus");
     const logoutAccount = document.querySelector("#logoutAccount");
-    const rootPanel = document.querySelector("#rootPanel");
-    const refreshRoot = document.querySelector("#refreshRoot");
-    const rootStatus = document.querySelector("#rootStatus");
-    const rootItems = document.querySelector("#rootItems");
+    const directoryPanel = document.querySelector("#directoryPanel");
+    const directoryPath = document.querySelector("#directoryPath");
+    const breadcrumbs = directoryPath.querySelector("ol");
+    const refreshDirectory = document.querySelector("#refreshDirectory");
+    const directoryStatus = document.querySelector("#directoryStatus");
+    const directoryItems = document.querySelector("#directoryItems");
+    let currentDirectoryID = "";
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -79,14 +87,16 @@
       address.readOnly = busy || signedIn;
       checkConnection.disabled = busy;
       credentials.disabled = busy;
-      refreshRoot.disabled = busy;
+      for (const button of directoryPanel.querySelectorAll("button")) {
+        button.disabled = busy;
+      }
       logoutAccount.disabled = busy;
     }
 
     function showSignedIn(name, restored) {
       signedIn = true;
       credentials.hidden = true;
-      rootPanel.hidden = false;
+      directoryPanel.hidden = false;
       logoutAccount.hidden = false;
       loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
     }
@@ -94,11 +104,14 @@
     function showSignedOut(notice) {
       signedIn = false;
       credentials.hidden = false;
-      rootPanel.hidden = true;
+      directoryPanel.hidden = true;
       logoutAccount.hidden = true;
       password.value = "";
-      rootStatus.textContent = "";
-      rootItems.replaceChildren();
+      currentDirectoryID = "";
+      directoryStatus.textContent = "";
+      directoryItems.replaceChildren();
+      breadcrumbs.replaceChildren();
+      directoryPath.hidden = true;
       loginStatus.textContent = notice;
     }
 
@@ -116,40 +129,79 @@
       }
     });
 
-    async function loadRootDirectory() {
-      rootStatus.textContent = "正在读取根目录…";
-      rootItems.replaceChildren();
+    function directoryButton(label, id) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "directory-link";
+      button.textContent = label;
+      button.disabled = refreshDirectory.disabled;
+      button.addEventListener("click", () => navigateTo(id));
+      return button;
+    }
+
+    function renderDirectory(page) {
+      breadcrumbs.replaceChildren();
+      for (const [index, crumb] of page.breadcrumbs.entries()) {
+        const part = document.createElement("li");
+        if (index > 0) {
+          const separator = document.createElement("span");
+          separator.textContent = " / ";
+          separator.setAttribute("aria-hidden", "true");
+          part.append(separator);
+        }
+        const label = index === 0 ? "根目录" : crumb.name;
+        if (index === page.breadcrumbs.length - 1) {
+          part.setAttribute("aria-current", "page");
+          part.append(document.createTextNode(label));
+        } else {
+          part.append(directoryButton(label, crumb.id));
+        }
+        breadcrumbs.append(part);
+      }
+      directoryPath.hidden = false;
+
+      directoryItems.replaceChildren();
+      for (const item of page.items) {
+        const row = document.createElement("li");
+        const isDirectory = item.entry_type === "DIR";
+        const name = isDirectory ? directoryButton(item.name, item.id) : document.createElement("span");
+        const details = document.createElement("span");
+        name.textContent = item.name;
+        details.textContent = isDirectory ? "文件夹" : "文件 · " + item.size_bytes + " B";
+        row.append(name, details);
+        directoryItems.append(row);
+      }
+      currentDirectoryID = page.breadcrumbs.at(-1).id;
+      directoryStatus.textContent = page.items.length === 0 ? "此目录为空。" :
+        page.next_cursor ? "已显示前 " + page.items.length + " 项。" : "";
+    }
+
+    async function loadDirectory(targetID) {
+      directoryStatus.textContent = "正在读取目录…";
+      if (targetID === currentDirectoryID) directoryItems.replaceChildren();
       try {
-        const result = await Call.ByName("main.Account.ReadRootDirectory");
+        const result = await Call.ByName("main.Account.ReadDirectory", targetID);
         if (result.loginRequired) {
           showSignedOut(result.loginRequired);
           return;
         }
-        const { items, next_cursor: nextCursor } = result.page;
-        for (const item of items) {
-          const row = document.createElement("li");
-          const name = document.createElement("span");
-          const details = document.createElement("span");
-          name.textContent = item.name;
-          details.textContent = item.entry_type === "DIR" ? "文件夹" : "文件 · " + item.size_bytes + " B";
-          row.append(name, details);
-          rootItems.append(row);
-        }
-        rootStatus.textContent = items.length === 0 ? "此目录为空。" :
-          nextCursor ? "已显示前 " + items.length + " 项。" : "";
+        renderDirectory(result.page);
       } catch (error) {
-        rootStatus.textContent = error.message || "读取根目录失败，请重试";
+        directoryStatus.textContent = error.message || "读取目录失败，请重试";
       }
     }
 
-    refreshRoot.addEventListener("click", async () => {
+    async function navigateTo(targetID) {
+      if (refreshDirectory.disabled) return;
       setBusy(true);
       try {
-        await loadRootDirectory();
+        await loadDirectory(targetID);
       } finally {
         setBusy(false);
       }
-    });
+    }
+
+    refreshDirectory.addEventListener("click", () => navigateTo(currentDirectoryID));
 
     checkConnection.addEventListener("click", async () => {
       setBusy(true);
@@ -181,7 +233,7 @@
         password.value = "";
         const signedInName = await login;
         showSignedIn(signedInName, false);
-        await loadRootDirectory();
+        await loadDirectory("");
       } catch (error) {
         loginStatus.textContent = error.message || "登录失败，请重试";
       } finally {
@@ -197,7 +249,7 @@
         if (restored.address) address.value = restored.address;
         if (restored.username) {
           showSignedIn(restored.username, true);
-          await loadRootDirectory();
+          await loadDirectory("");
         } else {
           loginStatus.textContent = restored.notice || "";
         }
