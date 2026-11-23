@@ -60,9 +60,7 @@ func (store *Store) ListOfflineSyncDeviceCandidates(
 		}
 		candidate.Generation = domain.SyncCursorGeneration(generation)
 		candidate.LastSeenAt = candidate.LastSeenAt.UTC()
-		if candidate.UserID == 0 || candidate.DeviceID <= previousDeviceID ||
-			candidate.Generation == (domain.SyncCursorGeneration{}) ||
-			candidate.LastSeenAt.IsZero() || !candidate.LastSeenAt.Before(cutoff) {
+		if !candidate.IsValid() || candidate.DeviceID <= previousDeviceID || !candidate.LastSeenAt.Before(cutoff) {
 			return nil, domain.ErrInvalidSyncDeviceData
 		}
 		candidates = append(candidates, candidate)
