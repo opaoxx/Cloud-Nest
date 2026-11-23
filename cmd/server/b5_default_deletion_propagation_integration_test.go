@@ -21,9 +21,9 @@ import (
 )
 
 type b5DeletionTestClient struct {
-	api       backupSourceClient
-	local     *os.Root
-	propagate func(context.Context, b5DeletionCheckpoint) error
+	api                   backupSourceClient
+	local                 *os.Root
+	propagateLocalDeletes bool
 }
 
 type b5DeletionCheckpoint struct {
@@ -79,7 +79,7 @@ func TestServerB5DefaultDeletionPropagationIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	snapshot := establishB5DeletionTestBaseline(t, ctx, fixture.api, local, fixture.login.RootEntryID)
+	snapshot := establishB5DeletionTestBaseline(t, ctx, fixture.api, local, fixture.login.RootEntryID, 2)
 	before := readBackupB5DatabaseState(t, ctx, fixture.pool, userID)
 	if before.high != 2 || len(before.events) != 2 || len(before.devices) != 1 ||
 		before.devices[0].DeviceID != backupFixtureID(t, fixture.login.Device.ID) ||
@@ -163,15 +163,18 @@ func TestServerB5DefaultDeletionPropagationIntegration(t *testing.T) {
 	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", fixture.mysqlContainer, fixture.minioContainer)
 }
 
-func establishB5DeletionTestBaseline(t *testing.T, ctx context.Context, api backupSourceClient, local *os.Root, rootID string) dto.SyncSnapshotPageData {
+func establishB5DeletionTestBaseline(t *testing.T, ctx context.Context, api backupSourceClient, local *os.Root,
+	rootID string, publishedFiles int,
+) dto.SyncSnapshotPageData {
 	t.Helper()
-	// 1. 读回正式快照并核对两份本地合成文件，再确认末页。
+	// 1. 读回正式快照并核对本地合成文件，再确认末页。
 	const path = "/api/v1/sync/snapshots"
+	sequence := strconv.Itoa(publishedFiles)
 	var snapshot dto.SyncSnapshotPageResponse
-	api.request(t, ctx, http.MethodPost, path, "b5-deletion-default-baseline", strings.NewReader("{}"), http.StatusCreated, &snapshot)
+	api.request(t, ctx, http.MethodPost, path, "b5-deletion-test-baseline", strings.NewReader("{}"), http.StatusCreated, &snapshot)
 	if snapshot.RequestID == "" || snapshot.Data.SnapshotID == "" || snapshot.Data.RootEntryID != rootID ||
-		snapshot.Data.HighWaterSequence != "2" || snapshot.Data.NextCursor != nil ||
-		snapshot.Data.BaselineToken == nil || *snapshot.Data.BaselineToken == "" || len(snapshot.Data.Items) != 2 {
+		snapshot.Data.HighWaterSequence != sequence || snapshot.Data.NextCursor != nil ||
+		snapshot.Data.BaselineToken == nil || *snapshot.Data.BaselineToken == "" || len(snapshot.Data.Items) != publishedFiles {
 		t.Fatal("合成文件未进入同一完整快照")
 	}
 	var saved dto.SyncSnapshotPageData
@@ -192,29 +195,34 @@ func establishB5DeletionTestBaseline(t *testing.T, ctx context.Context, api back
 	var confirmed dto.ConfirmSyncSnapshotBaselineResponse
 	api.request(t, ctx, http.MethodPost, path+"/"+saved.SnapshotID+"/confirm", "",
 		strings.NewReader(fmt.Sprintf(`{"baseline_token":%q}`, *saved.BaselineToken)), http.StatusOK, &confirmed)
-	if confirmed.RequestID == "" || confirmed.Data.Status != "ACTIVE" || confirmed.Data.AckSequence != "2" {
+	if confirmed.RequestID == "" || confirmed.Data.Status != "ACTIVE" || confirmed.Data.AckSequence != sequence {
 		t.Fatal("原设备未确认已保存的基线")
 	}
 	return saved
 }
 
-func (client b5DeletionTestClient) saveObservations(t *testing.T, ctx context.Context, snapshot dto.SyncSnapshotPageData) b5DeletionCheckpoint {
+func (client b5DeletionTestClient) missingLocalEntries(t *testing.T, snapshot dto.SyncSnapshotPageData) []dto.SyncSnapshotEntry {
 	t.Helper()
 	// 1. 比对基线与本地文件，记录已缺失的条目。
-	var checkpoint b5DeletionCheckpoint
+	var missing []dto.SyncSnapshotEntry
 	for _, raw := range snapshot.Items {
 		var entry dto.SyncSnapshotEntry
 		if err := json.Unmarshal(raw, &entry); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := client.local.Stat(entry.Name); errors.Is(err, os.ErrNotExist) {
-			checkpoint.MissingLocal = append(checkpoint.MissingLocal, entry)
+			missing = append(missing, entry)
 		} else if err != nil {
 			t.Fatal("检查本地合成文件失败", err)
 		}
 	}
+	return missing
+}
 
-	// 2. 拉取真实回收事件。测试客户端默认未配置传播动作，仍然保存事件。
+func (client b5DeletionTestClient) saveObservations(t *testing.T, ctx context.Context, snapshot dto.SyncSnapshotPageData) b5DeletionCheckpoint {
+	t.Helper()
+	// 1. 扫描本地缺项并拉取真实回收事件。
+	checkpoint := b5DeletionCheckpoint{MissingLocal: client.missingLocalEntries(t, snapshot)}
 	var page dto.PullSyncChangesResponse
 	client.api.request(t, ctx, http.MethodPost, "/api/v1/sync/changes/pull", "",
 		strings.NewReader(fmt.Sprintf(`{"baseline_token":%q}`, *snapshot.BaselineToken)), http.StatusOK, &page)
@@ -223,10 +231,9 @@ func (client b5DeletionTestClient) saveObservations(t *testing.T, ctx context.Co
 		t.Fatal("增量页未交付唯一的正式回收事件")
 	}
 	checkpoint.RemoteTrash, checkpoint.Cursor = page.Data.Events[0], page.Data.NextCursor
-	if client.propagate != nil {
-		if err := client.propagate(ctx, checkpoint); err != nil {
-			t.Fatal("删除传播动作失败", err)
-		}
+	// 2. 按配置处理本地缺项。收到的远端墓碑继续保存在检查点。
+	for _, entry := range checkpoint.MissingLocal {
+		client.propagateLocalDeletion(t, ctx, entry)
 	}
 	var saved b5DeletionCheckpoint
 	saveAndReadB5DeletionFixtureJSON(t, client.local, "deletion-checkpoint.json", checkpoint, &saved)
