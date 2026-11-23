@@ -794,9 +794,10 @@ func runWithServerDependencies(
 	stopExpiredFileVersions := startServerExpiredFileVersionWorker(ctx, expiredFileVersions.RunOnce, logger)
 	defer stopExpiredFileVersions()
 
-	// 48. 复用仓储启动离线重建，关停时先等待任务汇报与退出，再释放连接。
-	stopOfflineSyncDevices := startServerOfflineSyncDeviceWorker(ctx, store, logger)
-	defer stopOfflineSyncDevices()
+	// 48. 启动共用同步维护任务，依次执行离线重建和日志裁剪。
+	stopSyncMaintenance := startServerSyncMaintenanceWorker(ctx, store, logger)
+	// 关停时先等待两个阶段汇报和退出，再释放存储与数据库连接。
+	defer stopSyncMaintenance()
 
 	// 49. 启动 HTTP 并处理退出通知。
 	logger.Info("准备启动 HTTP 服务", "address", listenAddress)

@@ -156,7 +156,7 @@ func TestServerOfflineSyncDeviceStartupIntegration(t *testing.T) {
 
 	logText := logs.String()
 	lastPosition := -1
-	for _, message := range []string{"HTTP 服务已停止", reportMessage, "离线设备重建 worker 已停止",
+	for _, message := range []string{"HTTP 服务已停止", reportMessage, "同步维护 worker 已停止",
 		"MinIO 空闲连接已释放", "MySQL 连接池已关闭"} {
 		position := strings.Index(logText, message)
 		if position <= lastPosition {
@@ -164,8 +164,8 @@ func TestServerOfflineSyncDeviceStartupIntegration(t *testing.T) {
 		}
 		lastPosition = position
 	}
-	if strings.Count(logText, reportMessage) != 1 ||
-		!strings.Contains(logText, `"interval_ms":3600000,"batch_limit":100,"page_size":50`) ||
+	if strings.Count(logText, reportMessage) != 1 || strings.Contains(logText, "同步日志裁剪轮次结束") ||
+		!strings.Contains(logText, `"interval_ms":3600000,"offline_batch_limit":100,"offline_page_size":50`) ||
 		!strings.Contains(logText, `"scanned":100,"marked":100,"stale_candidates":0,"candidate_errors":0,"next_after_device_id":100`) {
 		t.Fatalf("首轮汇报或启动参数不符：%s", logText)
 	}
