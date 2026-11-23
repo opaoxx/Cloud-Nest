@@ -26,18 +26,20 @@ func main() {
 	}
 
 	// 2. 注册连接检查与原生登录，绑定当前安装的受保护会话文件。
+	dataDirectory := filepath.Join(os.Getenv("LOCALAPPDATA"), "CloudNest")
+	account := &Account{
+		installationID: installationID,
+		credentials: sessionFile{
+			path:           filepath.Join(dataDirectory, "session.bin"),
+			installationID: installationID,
+		},
+	}
 	app := application.New(application.Options{
 		Name:   "CloudNest",
 		Assets: application.AssetOptions{Handler: application.BundledAssetFileServer(desktopPage)},
 		Services: []application.Service{
 			application.NewService(&client.Readiness{}),
-			application.NewService(&Account{
-				installationID: installationID,
-				credentials: sessionFile{
-					path:           filepath.Join(os.Getenv("LOCALAPPDATA"), "CloudNest", "session.bin"),
-					installationID: installationID,
-				},
-			}),
+			application.NewService(account),
 		},
 	})
 
@@ -47,7 +49,13 @@ func main() {
 		Width:  960,
 		Height: 640,
 	})
-	app.RegisterService(application.NewService(&LocalFilePicker{window: window}))
+	picker := &LocalFilePicker{window: window}
+	app.RegisterService(application.NewService(picker))
+	app.RegisterService(application.NewService(&UploadIntents{
+		account:      account,
+		picker:       picker,
+		databasePath: filepath.Join(dataDirectory, "transfers.sqlite3"),
+	}))
 
 	// 4. 取消默认关闭动作，隐藏主窗口，保留窗口和页面状态。
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {

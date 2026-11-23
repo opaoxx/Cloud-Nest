@@ -19,6 +19,7 @@ func ReadCurrentUsername(ctx context.Context, address, accessToken string) (stri
 
 // CurrentProfile 保存桌面端读取根目录所需的账号资料。
 type CurrentProfile struct {
+	UserID      string
 	Username    string
 	RootEntryID string
 }
@@ -29,6 +30,7 @@ func ReadCurrentProfile(ctx context.Context, address, accessToken string) (Curre
 	var result struct {
 		Data struct {
 			User struct {
+				ID       string `json:"id"`
 				Username string `json:"username"`
 			} `json:"user"`
 			RootEntryID string `json:"root_entry_id"`
@@ -42,7 +44,7 @@ func ReadCurrentProfile(ctx context.Context, address, accessToken string) (Curre
 	if result.Data.User.Username == "" {
 		return CurrentProfile{}, errors.New("服务返回的账号资料格式有误")
 	}
-	return CurrentProfile{Username: result.Data.User.Username, RootEntryID: result.Data.RootEntryID}, nil
+	return CurrentProfile{UserID: result.Data.User.ID, Username: result.Data.User.Username, RootEntryID: result.Data.RootEntryID}, nil
 }
 
 func getAuthenticatedJSON(ctx context.Context, address, accessToken, resource string, query url.Values, result any) error {

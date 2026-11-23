@@ -50,7 +50,13 @@
       <button id="logoutAccount" type="button" hidden>退出账号</button>
       <section aria-label="本机文件">
         <button id="chooseFile" type="button">选择文件</button>
+        <button id="saveUploadIntent" type="button" hidden disabled>保存上传意图</button>
         <output id="fileSelection" role="status" aria-live="polite"></output>
+      </section>
+      <section id="uploadPanel" aria-labelledby="uploadTitle" hidden>
+        <h2 id="uploadTitle">待提交上传</h2>
+        <output id="uploadStatus" role="status" aria-live="polite"></output>
+        <ul id="uploadItems" aria-label="待提交上传列表"></ul>
       </section>
       <section id="directoryPanel" aria-labelledby="directoryTitle" hidden>
         <h2 id="directoryTitle">目录</h2>
@@ -75,7 +81,11 @@
     const loginStatus = document.querySelector("#loginStatus");
     const logoutAccount = document.querySelector("#logoutAccount");
     const chooseFile = document.querySelector("#chooseFile");
+    const saveUploadIntent = document.querySelector("#saveUploadIntent");
     const fileSelection = document.querySelector("#fileSelection");
+    const uploadPanel = document.querySelector("#uploadPanel");
+    const uploadStatus = document.querySelector("#uploadStatus");
+    const uploadItems = document.querySelector("#uploadItems");
     const directoryPanel = document.querySelector("#directoryPanel");
     const directoryPath = document.querySelector("#directoryPath");
     const breadcrumbs = directoryPath.querySelector("ol");
@@ -87,6 +97,7 @@
     let currentDirectoryID = "";
     let nextCursor = null;
     let pendingPage = null;
+    let selectionKey = "";
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -104,6 +115,13 @@
       }
       logoutAccount.disabled = busy;
       updateLoadMore();
+      updateSaveUploadIntent();
+    }
+
+    function updateSaveUploadIntent() {
+      saveUploadIntent.hidden = !signedIn;
+      saveUploadIntent.disabled = checkConnection.disabled || chooseFile.disabled ||
+        !signedIn || !currentDirectoryID || !selectionKey;
     }
 
     function updateLoadMore() {
@@ -121,6 +139,7 @@
       signedIn = true;
       credentials.hidden = true;
       directoryPanel.hidden = false;
+      uploadPanel.hidden = false;
       logoutAccount.hidden = false;
       loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
     }
@@ -129,9 +148,13 @@
       signedIn = false;
       credentials.hidden = false;
       directoryPanel.hidden = true;
+      uploadPanel.hidden = true;
       logoutAccount.hidden = true;
       password.value = "";
       fileSelection.textContent = "";
+      selectionKey = "";
+      uploadStatus.textContent = "";
+      uploadItems.replaceChildren();
       currentDirectoryID = "";
       pendingPage = null;
       directoryStatus.textContent = "";
@@ -139,6 +162,7 @@
       breadcrumbs.replaceChildren();
       directoryPath.hidden = true;
       loginStatus.textContent = notice;
+      updateSaveUploadIntent();
     }
 
     logoutAccount.addEventListener("click", async () => {
@@ -157,9 +181,12 @@
 
     chooseFile.addEventListener("click", async () => {
       chooseFile.disabled = true;
+      selectionKey = "";
+      updateSaveUploadIntent();
       fileSelection.textContent = "正在准备文件…";
       try {
         const source = await Call.ByName("main.LocalFilePicker.SelectFile");
+        selectionKey = source?.creation_key || "";
         fileSelection.textContent = source
           ? ["已选择 " + source.name, "大小 " + source.size_bytes + " B", "SHA-256 " + source.sha256].join("\n")
           : "已取消选择。";
@@ -167,6 +194,50 @@
         fileSelection.textContent = error.message || "选择文件失败，请重试";
       } finally {
         chooseFile.disabled = false;
+        updateSaveUploadIntent();
+      }
+    });
+
+    function renderUploadIntents(result) {
+      if (result.loginRequired) {
+        showSignedOut(result.loginRequired);
+        return false;
+      }
+      uploadItems.replaceChildren();
+      for (const intent of result.items) {
+        const row = document.createElement("li");
+        row.textContent = intent.name + " · " + intent.size_bytes + " B · 目录 " + intent.parent_id;
+        uploadItems.append(row);
+      }
+      uploadStatus.textContent = result.items.length ? "" : "暂无待提交上传。";
+      return true;
+    }
+
+    async function loadUploadIntents() {
+      if (!signedIn) return;
+      try {
+        renderUploadIntents(await Call.ByName("main.UploadIntents.List"));
+      } catch (error) {
+        uploadStatus.textContent = error.message || "读取本机上传记录失败";
+      }
+    }
+
+    saveUploadIntent.addEventListener("click", async () => {
+      if (saveUploadIntent.disabled) return;
+      setBusy(true);
+      chooseFile.disabled = true;
+      uploadStatus.textContent = "正在保存…";
+      try {
+        const result = await Call.ByName("main.UploadIntents.Save", currentDirectoryID, selectionKey);
+        if (renderUploadIntents(result)) {
+          selectionKey = "";
+          uploadStatus.textContent = "已保存到本机。";
+        }
+      } catch (error) {
+        uploadStatus.textContent = error.message || "保存失败，请重试";
+      } finally {
+        chooseFile.disabled = false;
+        setBusy(false);
       }
     });
 
@@ -316,6 +387,7 @@
         const signedInName = await login;
         showSignedIn(signedInName, false);
         await loadDirectory("");
+        await loadUploadIntents();
       } catch (error) {
         loginStatus.textContent = error.message || "登录失败，请重试";
       } finally {
@@ -332,6 +404,7 @@
         if (restored.username) {
           showSignedIn(restored.username, true);
           await loadDirectory("");
+          await loadUploadIntents();
         } else {
           loginStatus.textContent = restored.notice || "";
         }
