@@ -226,7 +226,13 @@ func startBackupFixtureServer(t *testing.T, ctx context.Context, databaseName st
 func startBackupFixtureServerWithRun(t *testing.T, ctx context.Context, databaseName string,
 	runServer func(context.Context, *slog.Logger) error) (backupSourceClient, func() (string, error)) {
 	t.Helper()
-	address := configureBackupFixtureServer(t, databaseName)
+	return startConfiguredBackupFixtureServer(t, ctx, configureBackupFixtureServer(t, databaseName), runServer)
+}
+
+// startConfiguredBackupFixtureServer 启动已配置的隔离服务，供重启测试保留签名密钥。
+func startConfiguredBackupFixtureServer(t *testing.T, ctx context.Context, address string,
+	runServer func(context.Context, *slog.Logger) error) (backupSourceClient, func() (string, error)) {
+	t.Helper()
 	serverContext, cancelServer := context.WithCancel(ctx)
 	done := make(chan struct{})
 	var serverLogs bytes.Buffer
