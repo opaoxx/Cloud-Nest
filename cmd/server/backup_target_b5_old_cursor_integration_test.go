@@ -137,7 +137,7 @@ func startBackupTargetB5WithSourceSession(t *testing.T, ctx context.Context, fix
 	return target, stop
 }
 
-func confirmBackupTargetB5Baseline(t *testing.T, ctx context.Context, target backupSourceClient, rootID, sequence string) {
+func confirmBackupTargetB5Baseline(t *testing.T, ctx context.Context, target backupSourceClient, rootID, sequence string) string {
 	t.Helper()
 	// 1. 取完整新快照并保存，再用末页凭据确认。
 	const path = "/api/v1/sync/snapshots"
@@ -160,4 +160,5 @@ func confirmBackupTargetB5Baseline(t *testing.T, ctx context.Context, target bac
 	if confirmed.RequestID == "" || confirmed.Data.Status != "ACTIVE" || confirmed.Data.AckSequence != sequence {
 		t.Fatal("目标新基线确认不符")
 	}
+	return *snapshot.Data.BaselineToken
 }
