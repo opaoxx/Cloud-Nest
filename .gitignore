@@ -14,3 +14,4 @@ scripts/minio/minio-source.tar.gz
 .project/
 .playwright-cli/
 output/
+/docs/

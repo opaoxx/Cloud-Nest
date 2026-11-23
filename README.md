@@ -1,10 +1,10 @@
 # CloudNest
 
-CloudNest 是一套面向学习和个人文件管理的私有云盘。它提供可独立体验的 Web 演示、连接真实存储的 Web 文件管理界面，以及供客户端接入的传输与同步 API。
+CloudNest 是一套以个人电脑为数据中心的私有云盘。文件集中保存在运行服务的电脑上，手机、平板和其他电脑可通过浏览器访问网盘并下载文件。项目提供独立的 Web 演示、连接真实存储的文件管理界面，以及供客户端接入的传输与同步 API。
 
 后端使用 Go、Gin 和 GORM，Web 使用 React、TypeScript、Vite 和 Ant Design。MySQL 保存目录、权限和任务状态，MinIO 保存文件正文。
 
-[首版功能](#首版功能) · [快速开始](#快速开始) · [API 概览](#api-概览) · [仓库结构](#仓库结构)
+[首版功能](#首版功能) · [数据存储位置](#数据存储位置) · [快速开始](#快速开始) · [局域网访问](#局域网访问) · [API 概览](#api-概览) · [仓库结构](#仓库结构)
 
 ## 首版功能
 
@@ -34,6 +34,32 @@ flowchart LR
 - **分片上传**。客户端按服务端给定的分片计划申请短期签名 URL，直接向 MinIO 上传分片。中断后查询已保存分片，再补传缺失内容。合并与整文件校验通过后才发布。
 - **同步与冲突**。设备从一致性快照建立基线，随后拉取并确认增量位置。带预期修订号的内容替换会检查当前文件版本，旧修订号无法覆盖已提交的新内容。
 
+## 数据存储位置
+
+**用电脑长期保存文件时，请使用 Docker Desktop 的 Linux 容器和 WSL 2 后端，并在首次启动前把 Docker 数据磁盘设到有足够空间的非系统盘。** Compose 使用 Docker 管理的命名卷。仓库所在盘和 Docker Desktop 程序安装盘可以独立选择，镜像、容器和命名卷的数据由 Docker Desktop 的数据磁盘位置决定。
+
+| 存储内容 | Compose 命名卷 | 容器内挂载点 |
+| --- | --- | --- |
+| 上传完成后的文件正文 | `cloudnest_minio_data` | `/data` |
+| 目录、账号、配额和上传任务等元数据 | `cloudnest_mysql_data` | `/var/lib/mysql` |
+| Redis 数据 | `cloudnest_redis_data` | `/data` |
+
+在 Docker Desktop 打开 **Settings → Resources → Advanced**，将磁盘映像位置设在 D 盘、F 盘等非系统盘，再启动 CloudNest 的基础设施。WSL 2 后端默认会将数据放在用户目录下的系统盘，数据磁盘位置也可以通过 Docker Desktop 设置迁移。[Docker Desktop 的 WSL 2 存储说明](https://docs.docker.com/desktop/features/wsl/)
+
+本项目开发机将 Docker 数据放在 F 盘，实际磁盘映像如下。你的电脑使用自己配置的路径。
+
+```text
+F:\Docker\wsl\DockerDesktopWSL\disk\docker_data.vhdx
+```
+
+上传正文由 MinIO 写入上述命名卷，Windows 侧的磁盘空间因此由该映像所在盘承担。启动后可以用以下命令核对 MinIO 的卷，输出的挂载点是 Docker Linux 环境内的路径。
+
+```powershell
+docker volume inspect cloudnest_minio_data --format '{{.Name}} -> {{.Mountpoint}}'
+```
+
+Go 后端接收小文件时还会在 Windows 主机上暂存正文。默认目录是系统临时目录下的 `CloudNest\uploads`，要把这部分写入也放到非系统盘，在启动 API 前设置 `CLOUDNEST_TEMP_DIR`，见下方命令。长期保存的文件正文与目录元数据分别依赖 MinIO 和 MySQL 卷，执行 `docker compose down -v` 会删除这些项目卷及其中的数据。
+
 ## 快速开始
 
 以下命令在仓库根目录使用 PowerShell 执行。前端使用 Node.js 24 和 pnpm 11.21.0。运行完整环境另需 Go 1.27.2、Python 3.11 或更新版本，以及已启动的 Docker 和 Docker Compose。
@@ -50,24 +76,25 @@ pnpm --dir apps/web dev
 
 ### 启动真实文件管理
 
-**1. 启动基础设施并准备存储桶**
+**1. 一键构建并启动 Docker 环境**
 
 ```powershell
 ./scripts/Start-Infra.ps1
 python scripts/verify_infra.py --service minio
 ```
 
-启动脚本从 [示例配置](scripts/.env.example) 生成本地 `scripts/.env`，并启动 MySQL、MinIO 和 Redis。首次运行需要下载依赖并构建固定版本的 MinIO。验证脚本会准备 `cloudnest` 私有桶并检查存储读写。
+打开 Docker Desktop 并确认数据磁盘位置后，在仓库根目录运行 [一键启动脚本](scripts/Start-Infra.ps1)。脚本首次从 [示例配置](scripts/.env.example) 生成本地 `scripts/.env`，检查 Compose 配置、端口和子网，下载并校验固定版本的 MinIO 源码，构建镜像，再启动 MySQL、MinIO 和 Redis 并等待健康检查通过。第二条命令准备 `cloudnest` 私有桶并检查存储读写，API 和 Web 按后续步骤启动。
 
 **2. 应用数据库迁移并启动 API**
 
 ```powershell
+$env:CLOUDNEST_TEMP_DIR = 'F:\CloudNestData\uploads-temp'
 $env:CLOUDNEST_ADMIN_PASSWORD = '<替换为你的本地登录密码>'
 go run ./cmd/database -database cloudnest -seed
 go run ./cmd/server
 ```
 
-`-seed` 首次创建业务账号 `root` 和根目录。已有业务账号沿用原密码。API 默认监听 `127.0.0.1:18081`，可在另一个终端检查就绪状态。
+将示例中的 F 盘路径换成电脑上的非系统盘目录。`-seed` 首次创建业务账号 `root` 和根目录。已有业务账号沿用原密码。API 默认监听 `127.0.0.1:18081`，可在另一个终端检查就绪状态。
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:18081/health/ready
@@ -95,8 +122,17 @@ pnpm --dir apps/web dev
 | `CLOUDNEST_DB_ADDRESS`、`CLOUDNEST_DB_USER`、`CLOUDNEST_DB_PASSWORD` | Go 进程的 MySQL 连接配置，默认地址为 `127.0.0.1:13309`。修改 Compose 端口或数据库凭据后同步调整。 |
 | `CLOUDNEST_S3_ENDPOINT`、`CLOUDNEST_S3_PUBLIC_ENDPOINT` | Go 访问 MinIO 的地址和客户端访问签名 URL 的地址。默认使用 `127.0.0.1:19000`。 |
 | `CLOUDNEST_S3_ACCESS_KEY`、`CLOUDNEST_S3_SECRET_KEY` | Go 访问 MinIO 的凭据，需与本地存储配置匹配。 |
+| `CLOUDNEST_TEMP_DIR` | Go 接收小文件时使用的本地暂存目录，可设置为有写入权限的非系统盘路径。 |
 
 示例配置用于回环地址上的开发环境。Compose 从本地配置文件读取基础设施设置，`go run` 从当前终端环境读取应用设置。
+
+## 局域网访问
+
+默认配置供部署电脑本机使用。手机、平板或另一台电脑访问时，部署电脑须保持开机，Web、API 和存储服务须在运行。
+
+- 让 Web 入口在局域网可访问，其他设备使用部署电脑的局域网 IP 或域名打开页面。通过同源 `/api` 代理访问 Go API，并在 `CLOUDNEST_ALLOWED_ORIGINS` 中配置浏览器实际访问的 Web 来源。
+- 浏览器从 MinIO 直接读取签名下载和预览链接。文件端点也须能从局域网访问，并将浏览器实际访问的文件端点填入 `CLOUDNEST_S3_PUBLIC_ENDPOINT`。Go 访问 MinIO 的内部地址由 `CLOUDNEST_S3_ENDPOINT` 控制。
+- MySQL、Redis 可以继续使用默认的本机回环绑定。其他设备日常访问的是 Web 入口，预览和下载时另外访问签名链接中的文件端点。
 
 ## API 概览
 
