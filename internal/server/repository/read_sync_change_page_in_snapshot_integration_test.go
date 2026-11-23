@@ -1,13 +1,16 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 	"github.com/opaoxx/cloud-nest/migrations"
@@ -39,6 +42,60 @@ func TestReadSyncChangePageInSnapshotIntegration(t *testing.T) {
 	execute(insertEvent, 18, 1, "DIRECTORY_CREATED", `{"entry_id":"12","parent_id":"11","name":"合成目录","revision":"1"}`)
 	execute(insertEvent, 19, 2, "ENTRY_RENAMED", `{"entry_id":"12","parent_id":"11","name":"第一次改名","revision":"2"}`)
 	execute(insertEvent, 20, 3, "ENTRY_RENAMED", `{"entry_id":"12","parent_id":"11","name":"第二次改名","revision":"3"}`)
+
+	t.Run("pull service from signed baseline through empty page", func(t *testing.T) {
+		// 1. 用合成密钥签发起点，并把服务绑定到真实只读事务。
+		key := bytes.Repeat([]byte{0x42}, sha256.Size)
+		baselineSigner, err := service.NewSyncSnapshotBaselineSigner(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		baselineVerifier, err := service.NewSyncSnapshotBaselineVerifier(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursorSigner, err := service.NewSyncChangeCursorSigner(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursorVerifier, err := service.NewSyncChangeCursorVerifier(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding := service.SyncSnapshotCacheBinding{
+			SnapshotID: uuid.MustParse("315f8253-c80c-4c35-a821-7efece392508"),
+			UserID:     actor.UserID, DeviceID: actor.DeviceID, Generation: generation, PageSize: 2,
+		}
+		token, err := baselineSigner.Sign(binding, 17, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver := service.NewSyncChangePullStartResolver(baselineVerifier, cursorVerifier, time.Now)
+		puller := service.NewSyncChangePullService(resolver, func(ctx context.Context, actor domain.Actor,
+			read func(context.Context, service.SyncChangePageReader, domain.SyncDeviceState) error,
+		) error {
+			return store.WithSyncChangePullSnapshot(ctx, actor, func(readContext context.Context, reader *Store, state domain.SyncDeviceState) error {
+				return read(readContext, reader, state)
+			})
+		}, cursorSigner)
+
+		// 2. 依次使用末页凭据和签出的游标，读到末尾再轮询空页。
+		first, err := puller.Pull(ctx, actor, token, "", 2)
+		if err != nil || first == nil || !first.HasMore || first.HighWaterSequence != 20 || len(first.Events) != 2 ||
+			first.Events[0].Sequence != 18 || first.Events[1].Sequence != 19 {
+			t.Fatalf("首次拉取结果不符：%+v，错误 %v", first, err)
+		}
+		next, err := puller.Pull(ctx, actor, "", first.NextCursor, 2)
+		if err != nil || next == nil || next.HasMore || next.HighWaterSequence != 20 ||
+			len(next.Events) != 1 || next.Events[0].Sequence != 20 {
+			t.Fatalf("末页拉取结果不符：%+v，错误 %v", next, err)
+		}
+		empty, err := puller.Pull(ctx, actor, "", next.NextCursor, 2)
+		if err != nil || empty == nil || empty.HasMore || empty.HighWaterSequence != 20 ||
+			empty.Events == nil || len(empty.Events) != 0 || empty.NextCursor != next.NextCursor {
+			t.Fatalf("空页轮询结果不符：%+v，错误 %v", empty, err)
+		}
+	})
 
 	start := service.SyncChangePullStart{Position: domain.SyncChangeCursorPosition{
 		UserID: actor.UserID, DeviceID: actor.DeviceID, Generation: generation, Sequence: 17,
