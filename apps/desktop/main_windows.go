@@ -1,9 +1,10 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"log"
 
+	"github.com/opaoxx/cloud-nest/pkg/client"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -11,16 +12,22 @@ import (
 //go:embed tray.png
 var trayIcon []byte
 
-func main() {
-	// 1. 创建桌面应用，作为窗口和事件循环的入口。
-	app := application.New(application.Options{Name: "CloudNest"})
+//go:embed index.html
+var desktopPage embed.FS
 
-	// 2. 设置首个窗口，用本地内容验证 WebView2 已完成加载。
+func main() {
+	// 1. 注册服务连接检查，让内嵌页面能调用 Go 原生 HTTP 客户端。
+	app := application.New(application.Options{
+		Name:     "CloudNest",
+		Assets:   application.AssetOptions{Handler: application.BundledAssetFileServer(desktopPage)},
+		Services: []application.Service{application.NewService(&client.Readiness{})},
+	})
+
+	// 2. 主窗口加载打包在程序中的连接检查页面。
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:  "CloudNest",
 		Width:  960,
 		Height: 640,
-		HTML:   `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>CloudNest</title></head><body><main><h1>CloudNest</h1></main></body></html>`,
 	})
 
 	// 3. 取消默认关闭动作，隐藏主窗口，保留窗口和页面状态。
