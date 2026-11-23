@@ -29,13 +29,21 @@ func (store *Store) FindCurrentSyncDeviceState(ctx context.Context) (domain.Sync
 		return empty, err
 	}
 
-	// 2. 按账号和设备锁读当前行，使用最新已提交状态而非已有的一致性视图。
+	// 2. 按账号和设备锁读当前行，取得当前已提交状态。
+	return store.readSyncDeviceState(ctx, actor, true)
+}
+
+func (store *Store) readSyncDeviceState(ctx context.Context, actor domain.Actor, forUpdate bool) (domain.SyncDeviceState, error) {
+	// 1. 读取指定账号与设备的同步记录，写事务需要对该行加锁。
+	var empty domain.SyncDeviceState
 	var state domain.SyncDeviceState
 	var generation []byte
-	err := store.database.WithContext(ctx).Raw(
-		"SELECT status, cursor_generation, ack_sequence FROM sync_devices WHERE user_id = ? AND device_id = ? FOR UPDATE",
-		actor.UserID, actor.DeviceID,
-	).Row().Scan(&state.Status, &generation, &state.AckSequence)
+	query := "SELECT status, cursor_generation, ack_sequence FROM sync_devices WHERE user_id = ? AND device_id = ?"
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	err := store.database.WithContext(ctx).Raw(query, actor.UserID, actor.DeviceID).
+		Row().Scan(&state.Status, &generation, &state.AckSequence)
 	if contextError := ctx.Err(); contextError != nil {
 		return empty, contextError
 	}
@@ -43,10 +51,10 @@ func (store *Store) FindCurrentSyncDeviceState(ctx context.Context) (domain.Sync
 		return empty, domain.ErrSyncDeviceNotFound
 	}
 	if err != nil {
-		return empty, fmt.Errorf("锁读当前同步设备状态失败: %w", err)
+		return empty, fmt.Errorf("读取同步设备状态失败: %w", err)
 	}
 
-	// 3. 核对状态和完整代次。待确认记录必须仍在零位置。
+	// 2. 核对状态和完整代次。待确认记录必须仍在零位置。
 	if len(generation) != len(state.Generation) {
 		return empty, domain.ErrInvalidSyncDeviceData
 	}
