@@ -22,7 +22,7 @@ func TestReadSourceFileDigest(t *testing.T) {
 			if err := os.WriteFile(path, sample.content, 0600); err != nil {
 				t.Fatal(err)
 			}
-			got, err := readSourceFileDigest(path)
+			got, err := readSourceFileDigest(t.Context(), path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,7 +41,7 @@ func TestReadSourceFileDigest(t *testing.T) {
 func TestReadSourceFileDigestRejectsInvalidPaths(t *testing.T) {
 	directory := t.TempDir()
 	for _, path := range []string{"relative.txt", directory, filepath.Join(directory, "missing.txt")} {
-		if digest, err := readSourceFileDigest(path); err == nil || digest != nil {
+		if digest, err := readSourceFileDigest(t.Context(), path); err == nil || digest != nil {
 			t.Fatalf("accepted invalid source %q: %+v, %v", path, digest, err)
 		}
 	}

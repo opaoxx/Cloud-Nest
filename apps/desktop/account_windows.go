@@ -19,6 +19,7 @@ type Account struct {
 	sessionEpoch   uint64
 	downloadMu     sync.Mutex
 	stagedDownload *stagedDownload
+	transfers      *transferLifecycle
 }
 
 // RestoredAccount 是启动时可交给桌面页面的会话恢复信息。

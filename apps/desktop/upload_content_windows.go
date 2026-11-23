@@ -20,7 +20,7 @@ type uploadContentSource struct {
 
 // SendContent 发送当前账号的已创建任务正文，并保存待查看校验结果的状态。
 func (uploads *UploadIntents) SendContent(ctx context.Context, intentID string) (UploadIntentResult, error) {
-	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		// 1. 读取持久化的任务地址和源文件，查询服务端是否已经收过正文。
 		content, err := readUploadContentSource(ctx, intent)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -43,7 +43,7 @@ func (uploads *UploadIntents) SendContent(ctx context.Context, intentID string) 
 		// 2. 只有远端仍接收正文时才复核源文件并发送。
 		switch status {
 		case "UPLOADING":
-			source, err := openVerifiedUploadSource(content)
+			source, err := openVerifiedUploadSource(ctx, content)
 			if err != nil {
 				return err
 			}
@@ -58,7 +58,7 @@ func (uploads *UploadIntents) SendContent(ctx context.Context, intentID string) 
 		}
 
 		// 3. 在同一事务保存阶段和已确认字节，供重启后读取。
-		if err := recordUploadOutcome(ctx, intent, content.target.TaskID, client.SingleUploadTaskSnapshot{Status: "VERIFYING"}); err != nil {
+		if err := recordUploadOutcome(transferCheckpointContext(ctx), intent, content.target.TaskID, client.SingleUploadTaskSnapshot{Status: "VERIFYING"}); err != nil {
 			return errors.New("无法保存正文接收状态，再次发送前会查询远端状态")
 		}
 		return nil
@@ -75,7 +75,7 @@ func readUploadContentSource(ctx context.Context, intent scopedUploadIntent) (up
 	return content, err
 }
 
-func openVerifiedUploadSource(content uploadContentSource) (*os.File, error) {
+func openVerifiedUploadSource(ctx context.Context, content uploadContentSource) (*os.File, error) {
 	source, err := openSourceFile(content.path)
 	if err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func openVerifiedUploadSource(content uploadContentSource) (*os.File, error) {
 		source.Close()
 		return nil, errors.New("源文件大小或类型已变化，请重新选择")
 	}
-	digest, err := digestSourceSnapshot(source, before)
+	digest, err := digestSourceSnapshot(ctx, source, before)
 	if err != nil {
 		source.Close()
 		return nil, err

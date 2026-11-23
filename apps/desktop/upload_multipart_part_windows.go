@@ -41,7 +41,7 @@ func (uploads *UploadIntents) SendRemainingParts(ctx context.Context, intentID s
 }
 
 func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID string, firstOnly bool, resumePauseID string) (UploadIntentResult, error) {
-	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		// 1. 读取当前账号的计划，用同一数据目录中的文件锁防止窗口间重复派发。
 		upload, err := readMultipartUploadSource(ctx, intent)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -150,7 +150,7 @@ func digestMultipartParts(ctx context.Context, source *os.File, upload multipart
 
 	// 1. 一次顺序扫描复核整文件，同时为待发字节段累计摘要，跳过段也计入整文件。
 	whole := sha256.New()
-	stream := io.TeeReader(io.NewSectionReader(source, 0, before.Size()), whole)
+	stream := io.TeeReader(transferReader{ctx: ctx, source: io.NewSectionReader(source, 0, before.Size())}, whole)
 	jobs := make([]multipartPartJob, 0, len(numbers))
 	var offset int64
 	for _, number := range numbers {
@@ -217,7 +217,7 @@ func sendMultipartBatch(ctx context.Context, intent scopedUploadIntent, upload m
 	for range jobs {
 		result := <-results
 		if result.err == nil {
-			if err := recordMultipartPart(ctx, intent, upload.taskID, result.receipt); err != nil {
+			if err := recordMultipartPart(transferCheckpointContext(ctx), intent, upload.taskID, result.receipt); err != nil {
 				result.err = errors.New("无法保存分片回执")
 			}
 		}

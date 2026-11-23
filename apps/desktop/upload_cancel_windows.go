@@ -21,7 +21,7 @@ func (uploads *UploadIntents) CheckUploadCancellation(ctx context.Context, inten
 }
 
 func (uploads *UploadIntents) handleUploadCancellation(ctx context.Context, intentID string, submit bool) (UploadIntentResult, error) {
-	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		// 1. 只使用当前账号已保存的原任务，不需要原文件或分片签名。
 		target, state, err := readUploadCancellationTarget(ctx, intent)
 		if err != nil {
@@ -35,7 +35,11 @@ func (uploads *UploadIntents) handleUploadCancellation(ctx context.Context, inte
 			if target.Mode == "MULTIPART" {
 				record = recordMultipartOutcome
 			}
-			if err := record(ctx, intent, target.TaskID, snapshot); err != nil {
+			checkpointCtx := ctx
+			if snapshot.Status != uploadCancelPending {
+				checkpointCtx = transferCheckpointContext(ctx)
+			}
+			if err := record(checkpointCtx, intent, target.TaskID, snapshot); err != nil {
 				return errors.New("无法保存取消状态，请查看原任务的取消结果")
 			}
 			return nil

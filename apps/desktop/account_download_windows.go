@@ -74,6 +74,12 @@ func downloadGrantView(grant client.DownloadGrant) DownloadGrantResult {
 
 // StageDownload 从本机断点恢复原文件，在校验完成后交给当前会话保存。
 func (account *Account) StageDownload(ctx context.Context, entryID, revision, objectID string) (DownloadGrantResult, error) {
+	return runDesktopTransfer(ctx, account.transfers, func(ctx context.Context) (DownloadGrantResult, error) {
+		return account.stageDownload(ctx, entryID, revision, objectID)
+	})
+}
+
+func (account *Account) stageDownload(ctx context.Context, entryID, revision, objectID string) (DownloadGrantResult, error) {
 	account.downloadMu.Lock()
 	defer account.downloadMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -124,7 +130,7 @@ func (account *Account) StageDownload(ctx context.Context, entryID, revision, ob
 	}
 	file, err := openDownloadCheckpointFile(directory, checkpoint.fileID)
 	if err != nil {
-		return DownloadGrantResult{}, rememberDownloadFailure(ctx, db, checkpoint.fileID, err)
+		return DownloadGrantResult{}, rememberDownloadFailure(transferCheckpointContext(ctx), db, checkpoint.fileID, err)
 	}
 	keepFile := false
 	defer func() {
@@ -138,10 +144,12 @@ func (account *Account) StageDownload(ctx context.Context, entryID, revision, ob
 			// 仅保留数据库已经确认的前缀，尽量释放本轮未确认字节占用的空间。
 			_ = file.Truncate(writer.checkpoint.confirmed)
 		}
-		return DownloadGrantResult{}, rememberDownloadFailure(ctx, db, checkpoint.fileID, err)
+		return DownloadGrantResult{}, rememberDownloadFailure(transferCheckpointContext(ctx), db, checkpoint.fileID,
+			downloadFailureAfterInterruption(ctx, err))
 	}
-	if checkpoint.failure == errStageRangeInvalid.code || checkpoint.failure == errStageDiskFull.code {
-		if _, err := db.ExecContext(ctx, `DELETE FROM download_failures WHERE file_id = ?`, checkpoint.fileID); err != nil {
+	if checkpoint.failure == errStageRangeInvalid.code || checkpoint.failure == errStageDiskFull.code ||
+		checkpoint.failure == errDownloadExited.code || checkpoint.failure == errDownloadWoke.code {
+		if _, err := db.ExecContext(transferCheckpointContext(ctx), `DELETE FROM download_failures WHERE file_id = ?`, checkpoint.fileID); err != nil {
 			return DownloadGrantResult{}, downloadStorageError(err, errStageDiskFull, "无法更新本机下载状态，请重试")
 		}
 	}

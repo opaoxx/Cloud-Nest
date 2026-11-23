@@ -20,7 +20,7 @@ func (uploads *UploadIntents) CheckMultipartStatus(ctx context.Context, intentID
 }
 
 func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID string, submit bool) (UploadIntentResult, error) {
-	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		// 1. 先查询原任务。已受理或已进入终态时直接保存观察结果。
 		upload, err := readMultipartUploadSource(ctx, intent)
 		if err != nil {
@@ -44,7 +44,7 @@ func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID stri
 			return err
 		}
 		if snapshot.Status != "UPLOADING" || !submit {
-			return recordMultipartOutcome(ctx, intent, upload.taskID, snapshot)
+			return recordMultipartOutcome(transferCheckpointContext(ctx), intent, upload.taskID, snapshot)
 		}
 
 		// 2. 本机记录先进入待确认。即使部署重启或响应丢失，也能查询同一任务。
@@ -58,7 +58,7 @@ func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID stri
 		snapshot, submitError := client.CompleteMultipartUpload(ctx, intent.owner.Address, intent.accessToken,
 			upload.taskID, upload.parentID, upload.plan, receipts)
 		if submitError == nil {
-			return recordMultipartOutcome(ctx, intent, upload.taskID, snapshot)
+			return recordMultipartOutcome(transferCheckpointContext(ctx), intent, upload.taskID, snapshot)
 		}
 		if errors.Is(submitError, client.ErrAccessTokenExpired) {
 			return submitError
@@ -69,7 +69,7 @@ func (uploads *UploadIntents) finishMultipart(ctx context.Context, intentID stri
 		if err != nil || (snapshot.Status == "UPLOADING" && errors.Is(submitError, client.ErrMultipartCompletionUnknown)) {
 			return submitError
 		}
-		if err := recordMultipartOutcome(ctx, intent, upload.taskID, snapshot); err != nil {
+		if err := recordMultipartOutcome(transferCheckpointContext(ctx), intent, upload.taskID, snapshot); err != nil {
 			return err
 		}
 		if snapshot.Status == "COMPLETING" || snapshot.Status == "VERIFYING" || snapshot.Status == "CANCELLING" || uploadTerminal(snapshot.Status) {

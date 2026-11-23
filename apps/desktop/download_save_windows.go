@@ -54,7 +54,9 @@ func (saver *DownloadSaver) Save(ctx context.Context, entryID, revision, objectI
 		return "", nil
 	}
 	source := io.NewSectionReader(download.file, 0, int64(download.result.SizeBytes))
-	return account.saveStagedDownload(ctx, download, source, path)
+	return runDesktopTransfer(ctx, account.transfers, func(ctx context.Context) (string, error) {
+		return account.saveStagedDownload(ctx, download, source, path)
+	})
 }
 
 func (account *Account) saveStagedDownload(ctx context.Context, download *stagedDownload, source io.Reader, path string) (string, error) {
@@ -99,16 +101,18 @@ func (account *Account) saveStagedDownload(ctx context.Context, download *staged
 }
 
 func rememberDownloadSaveFailure(ctx context.Context, directory, fileID string, err error) error {
+	err = downloadFailureAfterInterruption(ctx, err)
 	var failure *downloadFailure
 	if !errors.As(err, &failure) {
 		return err
 	}
-	db, openErr := openDownloadCheckpoints(ctx, directory)
+	checkpointCtx := transferCheckpointContext(ctx)
+	db, openErr := openDownloadCheckpoints(checkpointCtx, directory)
 	if openErr != nil {
 		return fmt.Errorf("%w。本机暂时无法记录失败原因", err)
 	}
 	defer db.Close()
-	return rememberDownloadFailure(ctx, db, fileID, err)
+	return rememberDownloadFailure(checkpointCtx, db, fileID, err)
 }
 
 func validSaveFilename(name string) bool {
@@ -142,7 +146,7 @@ func copyForDownloadSave(ctx context.Context, source io.Reader, expectedSize int
 			os.Remove(temporaryPath)
 		}
 	}()
-	if copied, err := io.Copy(temporaryFile, source); err != nil || copied != expectedSize {
+	if copied, err := io.Copy(temporaryFile, transferReader{ctx: ctx, source: source}); err != nil || copied != expectedSize {
 		return "", downloadStorageError(err, errSaveDiskFull, "无法完整复制下载文件，请检查可用空间后重试")
 	}
 	if err := temporaryFile.Sync(); err != nil {
@@ -160,7 +164,7 @@ func copyForDownloadSave(ctx context.Context, source io.Reader, expectedSize int
 	if _, err := temporaryFile.Seek(0, io.SeekStart); err != nil {
 		return "", errors.New("无法读取保存副本，请重试")
 	}
-	digest, err := digestSourceSnapshot(temporaryFile, info)
+	digest, err := digestSourceSnapshot(ctx, temporaryFile, info)
 	if err != nil || digest.SHA256 != expectedSHA256 {
 		return "", errors.New("保存副本 SHA-256 校验失败，请重试")
 	}

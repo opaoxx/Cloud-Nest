@@ -160,7 +160,7 @@ func (writer *downloadCheckpointWriter) restore() error {
 
 func (writer *downloadCheckpointWriter) restart() error {
 	// 1. 先降低已确认偏移。即使此时退出，下次也会丢弃未经确认的旧字节。
-	if err := writer.storeOffset(0); err != nil {
+	if err := writer.storeOffset(writer.ctx, 0); err != nil {
 		return err
 	}
 	writer.offset = 0
@@ -197,14 +197,14 @@ func (writer *downloadCheckpointWriter) flush() error {
 	if err := writer.file.Sync(); err != nil {
 		return downloadStorageError(err, errStageDiskFull, "无法同步下载临时文件，请检查本机存储")
 	}
-	return writer.storeOffset(writer.offset)
+	return writer.storeOffset(transferCheckpointContext(writer.ctx), writer.offset)
 }
 
-func (writer *downloadCheckpointWriter) storeOffset(offset int64) error {
+func (writer *downloadCheckpointWriter) storeOffset(ctx context.Context, offset int64) error {
 	if offset == writer.checkpoint.confirmed {
 		return nil
 	}
-	result, err := writer.db.ExecContext(writer.ctx, `UPDATE download_checkpoints SET confirmed_bytes = ?
+	result, err := writer.db.ExecContext(ctx, `UPDATE download_checkpoints SET confirmed_bytes = ?
 		WHERE file_id = ? AND confirmed_bytes = ?`, offset, writer.checkpoint.fileID, writer.checkpoint.confirmed)
 	if err != nil {
 		return downloadStorageError(err, errStageDiskFull, "无法保存本机下载断点")
@@ -239,7 +239,7 @@ func stageDownloadCheckpoint(writer *downloadCheckpointWriter, grant client.Down
 			if errors.Is(err, errStageDiskFull) || downloadDiskFull(err) {
 				return errStageDiskFull
 			}
-			if writer.ctx.Err() == nil && writer.offset < size {
+			if (writer.ctx.Err() == nil || transferInterruption(writer.ctx) != nil) && writer.offset < size {
 				if flushError := writer.flush(); flushError != nil {
 					return flushError
 				}
@@ -256,7 +256,7 @@ func stageDownloadCheckpoint(writer *downloadCheckpointWriter, grant client.Down
 	if err != nil || info.Size() != size {
 		return errors.New("下载临时文件大小与授权不符")
 	}
-	digest, err := digestSourceSnapshot(writer.file, info)
+	digest, err := digestSourceSnapshot(writer.ctx, writer.file, info)
 	if err != nil {
 		return err
 	}

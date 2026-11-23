@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -16,7 +17,7 @@ type SourceFileDigest struct {
 	SHA256    string `json:"sha256"`
 }
 
-func readSourceFileDigest(path string) (*SourceFileDigest, error) {
+func readSourceFileDigest(ctx context.Context, path string) (*SourceFileDigest, error) {
 	source, err := openSourceFile(path)
 	if err != nil {
 		return nil, err
@@ -26,7 +27,7 @@ func readSourceFileDigest(path string) (*SourceFileDigest, error) {
 	if err != nil || !before.Mode().IsRegular() {
 		return nil, errors.New("无法检查所选文件，请重新选择一个普通文件")
 	}
-	return digestSourceSnapshot(source, before)
+	return digestSourceSnapshot(ctx, source, before)
 }
 
 func openSourceFile(path string) (*os.File, error) {
@@ -40,10 +41,10 @@ func openSourceFile(path string) (*os.File, error) {
 	return source, nil
 }
 
-func digestSourceSnapshot(source *os.File, before os.FileInfo) (*SourceFileDigest, error) {
+func digestSourceSnapshot(ctx context.Context, source *os.File, before os.FileInfo) (*SourceFileDigest, error) {
 	// 1. 以初始大小为读取边界，分块更新摘要，并累计实际读出的字节数。
 	hasher := sha256.New()
-	sizeBytes, err := io.Copy(hasher, io.LimitReader(source, before.Size()))
+	sizeBytes, err := io.Copy(hasher, io.LimitReader(transferReader{ctx: ctx, source: source}, before.Size()))
 	if err != nil {
 		return nil, errors.New("无法读取所选文件的内容，请重新选择")
 	}

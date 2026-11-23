@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"sync"
 
@@ -27,7 +28,7 @@ type FileSelection struct {
 }
 
 // SelectFile 返回所选文件的摘要，取消时返回 nil。
-func (picker *LocalFilePicker) SelectFile() (*FileSelection, error) {
+func (picker *LocalFilePicker) SelectFile(ctx context.Context) (*FileSelection, error) {
 	// 1. 同一时刻只打开一个对话框，将它挂在当前桌面主窗口上。
 	if !picker.mu.TryLock() {
 		return nil, errors.New("文件正在选择或计算摘要")
@@ -53,7 +54,7 @@ func (picker *LocalFilePicker) SelectFile() (*FileSelection, error) {
 	}
 
 	// 3. 为此次选择生成固定创建键，源路径留在 Go 层。
-	digest, err := readSourceFileDigest(path)
+	digest, err := readSourceFileDigest(ctx, path)
 	if err != nil {
 		return nil, err
 	}

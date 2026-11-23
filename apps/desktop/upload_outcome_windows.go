@@ -10,7 +10,7 @@ import (
 
 // CheckStatus 查询当前账号上传任务的校验和发布结果。
 func (uploads *UploadIntents) CheckStatus(ctx context.Context, intentID string) (UploadIntentResult, error) {
-	return uploads.actOnUploadTransfer(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadTransfer(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		// 1. 按账号和本机记录 ID 读取远端任务。已有终态直接使用本机结果。
 		content, err := readUploadContentSource(ctx, intent)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -30,7 +30,7 @@ func (uploads *UploadIntents) CheckStatus(ctx context.Context, intentID string) 
 		}
 		switch snapshot.Status {
 		case "VERIFYING", "CANCELLING", "COMPLETED", "FAILED", "CANCELLED", "EXPIRED":
-			if err := recordUploadOutcome(ctx, intent, content.target.TaskID, snapshot); err != nil {
+			if err := recordUploadOutcome(transferCheckpointContext(ctx), intent, content.target.TaskID, snapshot); err != nil {
 				return errors.New("无法保存上传结果，请重新查看")
 			}
 		}

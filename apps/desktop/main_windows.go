@@ -27,8 +27,10 @@ func main() {
 
 	// 2. 注册连接检查与原生登录，绑定当前安装的受保护会话文件。
 	dataDirectory := filepath.Join(os.Getenv("LOCALAPPDATA"), "CloudNest")
+	transfers := &transferLifecycle{}
 	account := &Account{
 		installationID: installationID,
+		transfers:      transfers,
 		credentials: sessionFile{
 			path:           filepath.Join(dataDirectory, "session.bin"),
 			installationID: installationID,
@@ -63,6 +65,9 @@ func main() {
 		event.Cancel()
 		window.Hide()
 	})
+	app.Event.OnApplicationEvent(events.Windows.APMResumeAutomatic, func(_ *application.ApplicationEvent) {
+		transfers.pauseAfterWake()
+	})
 
 	// 5. 托盘入口用于显示主窗口或打开包含安装标识的应用信息。
 	showMainWindow := func() {
@@ -81,10 +86,16 @@ func main() {
 		app.Dialog.Info().AttachToWindow(window).SetTitle("关于 CloudNest").SetMessage(aboutMessage).Show()
 	})
 
-	// 6. 用户选择退出时结束整个应用，窗口隐藏后也能通过托盘退出。
+	// 6. 托盘退出先停止并等待传输收尾，避免阻塞 Windows 事件循环。
 	menu.AddSeparator()
 	menu.Add("退出 CloudNest").OnClick(func(_ *application.Context) {
-		app.Quit()
+		drained, started := transfers.stop()
+		if started {
+			go func() {
+				<-drained
+				app.Quit()
+			}()
+		}
 	})
 	tray.SetMenu(menu)
 

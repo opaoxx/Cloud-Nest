@@ -10,7 +10,7 @@ import (
 // PauseMultipart 持久化暂停请求，正在处理的分片批次仍可完成。
 func (uploads *UploadIntents) PauseMultipart(ctx context.Context, intentID string) (UploadIntentResult, error) {
 	// 1. 核对当前账号，但跳过派发锁，让暂停可在上传进行时登记。
-	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadIntent(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		pauseID, err := uuid.NewRandom()
 		if err != nil {
 			return errors.New("无法生成暂停请求，请重试")

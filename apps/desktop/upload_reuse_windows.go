@@ -11,7 +11,7 @@ import (
 func tryUploadReuse(ctx context.Context, intent scopedUploadIntent, submission uploadSubmission) error {
 	// 1. 首次提交复核源文件并保存待确认状态，之后只用原声明找回回执。
 	if submission.Status == "PENDING_REUSE" {
-		source, err := readSourceFileDigest(submission.SourcePath)
+		source, err := readSourceFileDigest(ctx, submission.SourcePath)
 		if err != nil {
 			return err
 		}
@@ -36,7 +36,7 @@ func tryUploadReuse(ctx context.Context, intent scopedUploadIntent, submission u
 	}
 
 	// 3. 将复用结果和已发布阶段一同保存，终态无需再发网络请求。
-	if err := recordUploadReuse(ctx, intent, receipt); err != nil {
+	if err := recordUploadReuse(transferCheckpointContext(ctx), intent, receipt); err != nil {
 		return errors.New("无法保存文件复用回执，请重试同一条记录")
 	}
 	return nil

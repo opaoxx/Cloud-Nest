@@ -34,7 +34,7 @@ func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (Uplo
 	}
 	defer lock.Close()
 
-	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
+	return uploads.actOnUploadIntent(ctx, intentID, func(ctx context.Context, intent scopedUploadIntent) error {
 		submission, err := readUploadSubmission(ctx, intent.db, intent.owner, intent.id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("当前账号找不到这条上传记录")
@@ -62,10 +62,11 @@ func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (Uplo
 		}
 
 		// 2. 在事务内持久化回执及状态。失败后仍可用原键找回任务。
+		checkpointCtx := transferCheckpointContext(ctx)
 		if receipt.Multipart != nil {
-			err = recordMultipartUploadCreation(ctx, intent, receipt)
+			err = recordMultipartUploadCreation(checkpointCtx, intent, receipt)
 		} else {
-			err = recordUploadCreation(ctx, intent.db, intent.owner, intent.id, client.SingleUploadCreation{
+			err = recordUploadCreation(checkpointCtx, intent.db, intent.owner, intent.id, client.SingleUploadCreation{
 				TaskID: receipt.TaskID, ContentPath: receipt.ContentPath, ExpiresAt: receipt.ExpiresAt,
 			})
 		}
@@ -83,7 +84,7 @@ type scopedUploadIntent struct {
 	accessToken string
 }
 
-func (uploads *UploadIntents) actOnUploadTransfer(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
+func (uploads *UploadIntents) actOnUploadTransfer(ctx context.Context, intentID string, action func(context.Context, scopedUploadIntent) error) (UploadIntentResult, error) {
 	// 正文、分片、完成和取消共享原有的分片锁，同一数据目录一次执行一个操作。
 	if !filepath.IsAbs(uploads.databasePath) {
 		return UploadIntentResult{}, errors.New("无法打开本机上传记录")
@@ -99,13 +100,23 @@ func (uploads *UploadIntents) actOnUploadTransfer(ctx context.Context, intentID 
 	return uploads.actOnUploadIntent(ctx, intentID, action)
 }
 
-func (uploads *UploadIntents) actOnUploadIntent(ctx context.Context, intentID string, action func(scopedUploadIntent) error) (UploadIntentResult, error) {
+func (uploads *UploadIntents) actOnUploadIntent(ctx context.Context, intentID string, action func(context.Context, scopedUploadIntent) error) (UploadIntentResult, error) {
 	// 1. 用当前会话确认归属，读取已保存的创建参数和幂等键。
 	id, err := strconv.ParseInt(intentID, 10, 64)
 	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != intentID {
 		return UploadIntentResult{}, errors.New("无效的本机上传记录")
 	}
-	items, err := readForAccount(ctx, uploads.account, func(address string, session client.NativeSession) ([]UploadIntentView, error) {
+	items, err := runDesktopTransfer(ctx, uploads.account.transfers, func(ctx context.Context) ([]UploadIntentView, error) {
+		return uploads.runScopedUploadAction(ctx, id, action)
+	})
+	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) {
+		return UploadIntentResult{LoginRequired: err.Error()}, nil
+	}
+	return UploadIntentResult{Items: items}, err
+}
+
+func (uploads *UploadIntents) runScopedUploadAction(ctx context.Context, id int64, action func(context.Context, scopedUploadIntent) error) ([]UploadIntentView, error) {
+	return readForAccount(ctx, uploads.account, func(address string, session client.NativeSession) ([]UploadIntentView, error) {
 		owner, err := resolveUploadOwner(ctx, address, session)
 		if err != nil {
 			return nil, err
@@ -116,19 +127,15 @@ func (uploads *UploadIntents) actOnUploadIntent(ctx context.Context, intentID st
 		}
 		defer db.Close()
 		// 2. 以已确认的账号作用域执行本次操作，再刷新这组本机记录。
-		if err := action(scopedUploadIntent{db: db, owner: owner, id: id, accessToken: session.AccessToken}); err != nil {
+		if err := action(ctx, scopedUploadIntent{db: db, owner: owner, id: id, accessToken: session.AccessToken}); err != nil {
 			return nil, err
 		}
-		items, err := listUploadIntents(ctx, db, owner)
+		items, err := listUploadIntents(transferCheckpointContext(ctx), db, owner)
 		if err != nil {
 			return nil, errors.New("无法读取本机上传记录")
 		}
 		return items, nil
 	})
-	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) {
-		return UploadIntentResult{LoginRequired: err.Error()}, nil
-	}
-	return UploadIntentResult{Items: items}, err
 }
 
 func readUploadSubmission(ctx context.Context, db *sql.DB, owner uploadOwner, id int64) (uploadSubmission, error) {

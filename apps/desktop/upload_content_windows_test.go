@@ -22,7 +22,7 @@ func TestOpenVerifiedUploadSourceChecksDigestAndRewinds(t *testing.T) {
 		path:   path,
 		sha256: fmt.Sprintf("%x", sha256.Sum256(expected)),
 	}
-	source, err := openVerifiedUploadSource(content)
+	source, err := openVerifiedUploadSource(t.Context(), content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestOpenVerifiedUploadSourceChecksDigestAndRewinds(t *testing.T) {
 	if err := os.WriteFile(path, []byte("xyz"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	source, err = openVerifiedUploadSource(content)
+	source, err = openVerifiedUploadSource(t.Context(), content)
 	if source != nil {
 		source.Close()
 		t.Fatal("same-size changed file reached the sender")
