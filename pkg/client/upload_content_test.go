@@ -52,3 +52,35 @@ func TestSendSingleUploadContentRejectsUnexpectedPath(t *testing.T) {
 		}
 	}
 }
+
+func TestReadSingleUploadTaskChecksPublicationBinding(t *testing.T) {
+	for _, fixture := range []struct {
+		name string
+		data string
+		want SingleUploadTaskSnapshot
+	}{
+		{"waiting", `"parent_id":"20","status":"VERIFYING","result_entry_id":null`, SingleUploadTaskSnapshot{Status: "VERIFYING"}},
+		{"published", `"parent_id":"20","status":"COMPLETED","result_entry_id":"18446744073709551615"`, SingleUploadTaskSnapshot{Status: "COMPLETED", ResultEntryID: "18446744073709551615"}},
+		{"failed", `"parent_id":"20","status":"FAILED","last_error":{"code":"TARGET_UNAVAILABLE","message":"目标目录已不可用"}`,
+			SingleUploadTaskSnapshot{Status: "FAILED", ErrorCode: "TARGET_UNAVAILABLE", ErrorMessage: "目标目录已不可用"}},
+		{"wrong destination", `"parent_id":"21","status":"COMPLETED","result_entry_id":"33"`, SingleUploadTaskSnapshot{}},
+		{"missing published entry", `"parent_id":"20","status":"COMPLETED","result_entry_id":null`, SingleUploadTaskSnapshot{}},
+		{"entry before publication", `"parent_id":"20","status":"VERIFYING","result_entry_id":"33"`, SingleUploadTaskSnapshot{}},
+		{"unknown status", `"parent_id":"20","status":"UNEXPECTED"`, SingleUploadTaskSnapshot{}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodGet || request.URL.RequestURI() != "/api/v1/uploads/19" ||
+					request.Header.Get("Authorization") != "Bearer sample" {
+					t.Error("request did not match the authenticated task query")
+				}
+				fmt.Fprintf(writer, `{"data":{"id":"19","upload_mode":"SINGLE","size_bytes":0,%s}}`, fixture.data)
+			}))
+			defer server.Close()
+			snapshot, err := ReadSingleUploadTask(t.Context(), server.URL, "sample", SingleUploadContentTarget{TaskID: "19"}, "20")
+			if (err != nil) != (fixture.want.Status == "") || snapshot != fixture.want {
+				t.Fatalf("unexpected task snapshot: %+v, %v", snapshot, err)
+			}
+		})
+	}
+}

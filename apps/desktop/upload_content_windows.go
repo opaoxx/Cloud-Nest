@@ -12,6 +12,7 @@ import (
 
 type uploadContentSource struct {
 	target     client.SingleUploadContentTarget
+	parentID   string
 	path       string
 	sha256     string
 	localState string
@@ -74,10 +75,11 @@ func (uploads *UploadIntents) SendContent(ctx context.Context, intentID string) 
 
 func readUploadContentSource(ctx context.Context, intent scopedUploadIntent) (uploadContentSource, error) {
 	var content uploadContentSource
-	err := intent.db.QueryRowContext(ctx, `SELECT c.task_id, c.content_path, i.size_bytes, i.source_path, i.sha256, i.status
+	err := intent.db.QueryRowContext(ctx, `SELECT c.task_id, c.content_path, i.size_bytes, i.parent_id, i.source_path, i.sha256, i.status
 		FROM upload_intents i JOIN single_upload_creations c ON c.intent_id = i.id
 		WHERE i.id = ? AND i.server_address = ? AND i.user_id = ?`, intent.id, intent.owner.Address, intent.owner.UserID).
-		Scan(&content.target.TaskID, &content.target.ContentPath, &content.target.SizeBytes, &content.path, &content.sha256, &content.localState)
+		Scan(&content.target.TaskID, &content.target.ContentPath, &content.target.SizeBytes, &content.parentID,
+			&content.path, &content.sha256, &content.localState)
 	return content, err
 }
 

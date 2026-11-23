@@ -17,26 +17,76 @@ type SingleUploadContentTarget struct {
 
 // ReadSingleUploadStatus 在发送前对账，避免重发已经接收的正文。
 func ReadSingleUploadStatus(ctx context.Context, address, accessToken string, target SingleUploadContentTarget) (string, error) {
+	task, err := readSingleUploadTask(ctx, address, accessToken, target)
+	return task.Status, err
+}
+
+// SingleUploadTaskSnapshot 保存校验和发布阶段供客户端使用的公开字段。
+type SingleUploadTaskSnapshot struct {
+	Status        string
+	ResultEntryID string
+	ErrorCode     string
+	ErrorMessage  string
+}
+
+type singleUploadTask struct {
+	ID            string `json:"id"`
+	ParentID      string `json:"parent_id"`
+	UploadMode    string `json:"upload_mode"`
+	SizeBytes     *int64 `json:"size_bytes"`
+	Status        string `json:"status"`
+	ResultEntryID string `json:"result_entry_id"`
+	LastError     *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"last_error"`
+}
+
+// ReadSingleUploadTask 查询一个 SINGLE 任务并核对发布结果。
+func ReadSingleUploadTask(ctx context.Context, address, accessToken string, target SingleUploadContentTarget, parentID string) (SingleUploadTaskSnapshot, error) {
+	// 1. 复用同一任务的认证查询，再核对已保存的目标目录。
+	task, err := readSingleUploadTask(ctx, address, accessToken, target)
+	if err != nil {
+		return SingleUploadTaskSnapshot{}, err
+	}
+	if !validEntryID(parentID) || parentID != task.ParentID {
+		return SingleUploadTaskSnapshot{}, errors.New("远端任务的目标目录与本机记录不一致")
+	}
+
+	// 2. COMPLETED 必须有有效条目 ID，其余阶段不得宣告已发布。
+	switch task.Status {
+	case "CREATING", "UPLOADING", "COMPLETING", "VERIFYING", "COMPLETED", "CANCELLING", "CANCELLED", "EXPIRING", "EXPIRED", "FAILED":
+	default:
+		return SingleUploadTaskSnapshot{}, errors.New("远端上传任务状态不受支持")
+	}
+	if (task.Status == "COMPLETED" && !validEntryID(task.ResultEntryID)) ||
+		(task.Status != "COMPLETED" && task.ResultEntryID != "") {
+		return SingleUploadTaskSnapshot{}, errors.New("远端任务的发布条目无效")
+	}
+	snapshot := SingleUploadTaskSnapshot{Status: task.Status, ResultEntryID: task.ResultEntryID}
+	if task.LastError != nil {
+		snapshot.ErrorCode = task.LastError.Code
+		snapshot.ErrorMessage = task.LastError.Message
+	}
+	return snapshot, nil
+}
+
+func readSingleUploadTask(ctx context.Context, address, accessToken string, target SingleUploadContentTarget) (singleUploadTask, error) {
 	if !validEntryID(target.TaskID) {
-		return "", errors.New("无效的上传任务 ID")
+		return singleUploadTask{}, errors.New("无效的上传任务 ID")
 	}
 	var result struct {
-		Data struct {
-			ID         string `json:"id"`
-			UploadMode string `json:"upload_mode"`
-			SizeBytes  *int64 `json:"size_bytes"`
-			Status     string `json:"status"`
-		} `json:"data"`
+		Data singleUploadTask `json:"data"`
 	}
 	if err := getAuthenticatedJSON(ctx, address, accessToken, "uploads/"+target.TaskID, nil, &result); err != nil {
-		return "", err
+		return singleUploadTask{}, err
 	}
 	task := result.Data
 	if task.ID != target.TaskID || task.UploadMode != "SINGLE" ||
 		task.SizeBytes == nil || *task.SizeBytes != target.SizeBytes || task.Status == "" {
-		return "", errors.New("远端任务与本机正文声明不一致")
+		return singleUploadTask{}, errors.New("远端任务与本机正文声明不一致")
 	}
-	return task.Status, nil
+	return task, nil
 }
 
 // SendSingleUploadContent 流式发送原始文件字节，并核对接收回执。

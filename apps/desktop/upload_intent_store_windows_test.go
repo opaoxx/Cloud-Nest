@@ -108,3 +108,65 @@ func TestUploadCreationKeepsTheFirstConfirmedReceipt(t *testing.T) {
 		t.Fatalf("the first confirmed receipt was not preserved: %+v, %v", items, err)
 	}
 }
+
+func TestUploadOutcomeIsAtomicAndDoesNotRegress(t *testing.T) {
+	ctx := t.Context()
+	db, err := openUploadIntents(ctx, filepath.Join(t.TempDir(), "outcomes.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	owner := uploadOwner{Address: "http://127.0.0.1:18081", UserID: "1"}
+	if err := insertUploadIntent(ctx, db, owner, uploadIntentDraft{
+		ParentID: "20",
+		Source: selectedUploadSource{
+			Path: filepath.Join(t.TempDir(), "source.txt"),
+			File: FileSelection{SourceFileDigest: SourceFileDigest{Name: "source.txt", SHA256: strings.Repeat("a", 64)},
+				CreationKey: "test-outcome-key"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordUploadCreation(ctx, db, owner, 1, client.SingleUploadCreation{
+		TaskID: "33", ContentPath: "/api/v1/uploads/33/content", ExpiresAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	intent := scopedUploadIntent{db: db, owner: owner, id: 1}
+	waiting := client.SingleUploadTaskSnapshot{Status: "VERIFYING"}
+	published := client.SingleUploadTaskSnapshot{Status: "COMPLETED", ResultEntryID: "51"}
+	if err := recordUploadOutcome(ctx, intent, "34", published); err == nil {
+		t.Fatal("another remote task recorded an outcome")
+	}
+	if err := recordUploadOutcome(ctx, intent, "33", waiting); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_outcome BEFORE INSERT ON single_upload_outcomes
+		BEGIN SELECT RAISE(ABORT, 'test outcome insert failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordUploadOutcome(ctx, intent, "33", published); err == nil {
+		t.Fatal("expected outcome insert to fail")
+	}
+	items, err := listUploadIntents(ctx, db, owner)
+	if err != nil || len(items) != 1 || items[0].Status != "VERIFYING" || items[0].ResultEntryID != "" {
+		t.Fatalf("failed insert left a partial outcome: %+v, %v", items, err)
+	}
+	if _, err := db.ExecContext(ctx, "DROP TRIGGER fail_outcome"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := recordUploadOutcome(ctx, intent, "33", published); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := recordUploadOutcome(ctx, intent, "33", waiting); err == nil {
+		t.Fatal("late verification snapshot overwrote a terminal state")
+	}
+	items, err = listUploadIntents(ctx, db, owner)
+	if err != nil || len(items) != 1 || items[0].Status != "COMPLETED" || items[0].ResultEntryID != "51" {
+		t.Fatalf("terminal state and entry were not preserved: %+v, %v", items, err)
+	}
+}

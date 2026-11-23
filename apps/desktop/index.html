@@ -25,6 +25,7 @@
     #directoryItems li, #uploadItems li { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
     #uploadItems span { overflow-wrap: anywhere; }
     #uploadItems button { flex: none; margin: 0; }
+    .upload-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
     #directoryItems li > :first-child { min-width: 0; overflow-wrap: anywhere; }
     #directoryItems li > :last-child { flex: none; color: #526977; }
     #directoryPath ol { display: flex; flex-wrap: wrap; gap: .35rem .6rem; list-style: none; padding: 0; margin: .8rem 0 0; }
@@ -219,10 +220,22 @@
             runUploadAction("Submit", intent.id, "正在创建上传任务…", "已创建 SINGLE 上传任务。")));
         } else if (intent.status === "CREATED") {
           summary.textContent += " · 待发送正文 · 任务 " + intent.task_id;
-          row.append(uploadActionButton("发送正文", () =>
-            runUploadAction("SendContent", intent.id, "正在发送正文…", "正文已接收，等待查看校验结果。")));
+          const actions = document.createElement("div");
+          actions.className = "upload-actions";
+          actions.append(uploadActionButton("发送正文", () =>
+            runUploadAction("SendContent", intent.id, "正在发送正文…", "正文已接收，等待查看校验结果。")),
+            uploadActionButton("查看校验结果", () => checkUploadStatus(intent.id)));
+          row.append(actions);
         } else if (intent.status === "VERIFYING") {
           summary.textContent += " · 正文已接收 · 待查看校验结果 · 任务 " + intent.task_id;
+          row.append(uploadActionButton("查看校验结果", () => checkUploadStatus(intent.id)));
+        } else if (intent.status === "COMPLETED") {
+          summary.textContent += " · 已发布 · 任务 " + intent.task_id + " · 条目 " + intent.result_entry_id;
+        } else {
+          const outcome = { FAILED: "上传失败", CANCELLED: "已取消", EXPIRED: "任务已过期" }[intent.status];
+          summary.textContent += " · " + outcome + " · 任务 " + intent.task_id;
+          if (intent.error_message) summary.textContent += " · " + intent.error_message;
+          if (intent.error_code) summary.textContent += "（" + intent.error_code + "）";
         }
         uploadItems.append(row);
       }
@@ -248,19 +261,33 @@
       }
     }
 
-    async function runUploadAction(method, intentID, progress, success) {
+    async function runUploadAction(method, intentID, progress, success, afterAction) {
       if (checkConnection.disabled) return;
       setBusy(true);
       uploadStatus.textContent = progress;
       try {
-        if (renderUploadIntents(await Call.ByName("main.UploadIntents." + method, intentID))) {
+        const result = await Call.ByName("main.UploadIntents." + method, intentID);
+        if (renderUploadIntents(result)) {
           uploadStatus.textContent = success;
+          if (afterAction) await afterAction(result.items.find(item => item.id === intentID));
         }
       } catch (error) {
         uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
       } finally {
         setBusy(false);
       }
+    }
+
+    function checkUploadStatus(intentID) {
+      return runUploadAction("CheckStatus", intentID, "正在查询校验结果…", "", async (intent) => {
+        // 3. 只在确认发布后重新读取当前目录，沿用原位置及续页失效规则。
+        if (intent.status === "COMPLETED") {
+          uploadStatus.textContent = "文件已发布。";
+          if (currentDirectoryID) await loadDirectory(currentDirectoryID);
+        } else if (intent.status === "VERIFYING" || intent.status === "CREATED") {
+          uploadStatus.textContent = "发布结果尚未确认，可以再次查看。";
+        }
+      });
     }
 
     saveUploadIntent.addEventListener("click", async () => {
