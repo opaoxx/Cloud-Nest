@@ -69,6 +69,7 @@
         <output id="directoryStatus" role="status" aria-live="polite"></output>
         <output id="downloadStatus" role="status" aria-live="polite"></output>
         <button id="stageDownload" type="button" hidden>下载到临时文件</button>
+        <button id="saveDownload" type="button" hidden>另存为…</button>
         <ul id="directoryItems" aria-label="目录内容"></ul>
         <button id="loadMore" type="button" hidden>加载更多</button>
       </section>
@@ -99,6 +100,7 @@
     const directoryStatus = document.querySelector("#directoryStatus");
     const downloadStatus = document.querySelector("#downloadStatus");
     const stageDownload = document.querySelector("#stageDownload");
+    const saveDownload = document.querySelector("#saveDownload");
     const directoryItems = document.querySelector("#directoryItems");
     const loadMore = document.querySelector("#loadMore");
     const entryRows = new Map();
@@ -339,6 +341,7 @@
     function clearDownloadSelection() {
       selectedDownload = null;
       stageDownload.hidden = true;
+      saveDownload.hidden = true;
       downloadStatus.textContent = "";
     }
 
@@ -385,6 +388,7 @@
         }
         // 2. Go 确认大小和摘要后才显示可保存。
         stageDownload.hidden = true;
+        saveDownload.hidden = false;
         downloadStatus.textContent = [
           "已校验，可以保存 · " + item.name + " · 修订 " + result.revision,
           "对象 ID " + result.object_id + " · 大小 " + result.size_bytes + " B",
@@ -392,6 +396,28 @@
         ].join("\n");
       } catch (error) {
         if (signedIn) downloadStatus.textContent = error.message || "下载未完成，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    saveDownload.addEventListener("click", async () => {
+      if (checkConnection.disabled || !signedIn || !selectedDownload || saveDownload.hidden) return;
+      setBusy(true);
+      const {item, objectID} = selectedDownload;
+      downloadStatus.textContent = "正在另存 " + item.name + "…";
+      try {
+        // 1. 使用同一条目、修订和对象交付暂存，取消选择时可再次另存。
+        const path = await Call.ByName("main.DownloadSaver.Save", item.id, item.revision, objectID, item.name);
+        if (!signedIn) return;
+        if (path) {
+          clearDownloadSelection();
+          downloadStatus.textContent = "已保存 · " + path;
+        } else {
+          downloadStatus.textContent = "已取消另存为，仍可保存已校验的文件。";
+        }
+      } catch (error) {
+        if (signedIn) downloadStatus.textContent = error.message || "保存未完成，请重试";
       } finally {
         setBusy(false);
       }

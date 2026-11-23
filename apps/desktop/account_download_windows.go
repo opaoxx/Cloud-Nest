@@ -21,6 +21,12 @@ type DownloadGrantResult struct {
 	LoginRequired string `json:"loginRequired"`
 }
 
+type stagedDownload struct {
+	file    *os.File
+	entryID string
+	result  DownloadGrantResult
+}
+
 // AuthorizeDownload 按窗口所选修订为当前账号取得下载授权。
 func (account *Account) AuthorizeDownload(ctx context.Context, entryID, revision string) (DownloadGrantResult, error) {
 	// 1. 沿用共享会话。令牌过期时最多刷新一次，并在同一修订上重试。
@@ -102,15 +108,16 @@ func (account *Account) StageDownload(ctx context.Context, entryID, revision, ob
 	if account.sessionEpoch != epoch {
 		return DownloadGrantResult{}, errSessionChanged
 	}
-	account.stagedDownload = file
+	result := downloadGrantView(grant)
+	account.stagedDownload = &stagedDownload{file: file, entryID: entryID, result: result}
 	keepFile = true
-	return downloadGrantView(grant), nil
+	return result, nil
 }
 
 // discardStagedDownload 必须在持有 account.mu 时调用。
 func (account *Account) discardStagedDownload() {
 	if account.stagedDownload != nil {
-		account.stagedDownload.Close()
+		account.stagedDownload.file.Close()
 		account.stagedDownload = nil
 	}
 }

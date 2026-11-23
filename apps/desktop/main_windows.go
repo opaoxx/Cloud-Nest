@@ -51,6 +51,7 @@ func main() {
 	})
 	picker := &LocalFilePicker{window: window}
 	app.RegisterService(application.NewService(picker))
+	app.RegisterService(application.NewService(&DownloadSaver{account: account, window: window}))
 	app.RegisterService(application.NewService(&UploadIntents{
 		account:      account,
 		picker:       picker,
