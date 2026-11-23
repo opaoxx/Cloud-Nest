@@ -42,14 +42,7 @@ func stopAndExportBackupSourceB5SQL(t *testing.T, ctx context.Context, fixture r
 	if err != nil {
 		t.Fatal("B5 隔离源端关停失败", err)
 	}
-	verifyBackupSourceStopped(t, fixture.api.baseURL, logs)
-	storageClosed := strings.Index(logs, "MinIO 空闲连接已释放")
-	for _, worker := range []string{"分片合并", "分片校验", "分片上传取消", "分片上传到期", "历史到期结算", "同步维护"} {
-		workerStopped := strings.Index(logs, worker+" worker 已停止")
-		if workerStopped < 0 || workerStopped >= storageClosed {
-			t.Fatal("B5 worker 未在依赖关闭前退出", worker)
-		}
-	}
+	verifyBackupB5ServiceStopped(t, fixture.api.baseURL, logs)
 	stoppedAt := time.Now().UTC()
 	rows := inspectB5BackupSourceRows(t, ctx, fixture)
 
@@ -87,6 +80,19 @@ func stopAndExportBackupSourceB5SQL(t *testing.T, ctx context.Context, fixture r
 	t.Logf("B5 同点导出，停写 UTC %s，SQL %d B，容器内外 SHA-256 %x，%d 张表逐表一致，确认位置 2，上界 4，历史 1 条",
 		stoppedAt.Format(time.RFC3339Nano), len(dump), sha256.Sum256(dump), len(tableRows))
 	return dump
+}
+
+func verifyBackupB5ServiceStopped(t *testing.T, baseURL, logs string) {
+	t.Helper()
+	// 1. 核对既有 HTTP 和 worker 关停，再核对 B5 扩展 worker 的退出顺序。
+	verifyBackupSourceStopped(t, baseURL, logs)
+	storageClosed := strings.Index(logs, "MinIO 空闲连接已释放")
+	for _, worker := range []string{"分片合并", "分片校验", "分片上传取消", "分片上传到期", "历史到期结算", "同步维护"} {
+		workerStopped := strings.Index(logs, worker+" worker 已停止")
+		if workerStopped < 0 || workerStopped >= storageClosed {
+			t.Fatal("B5 worker 未在依赖关闭前退出", worker)
+		}
+	}
 }
 
 func inspectB5BackupSourceRows(t *testing.T, ctx context.Context, fixture replacementPublicationFixture) []backupSourceSQLRowPrefix {
