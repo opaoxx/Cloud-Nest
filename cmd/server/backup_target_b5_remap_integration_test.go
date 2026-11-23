@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"maps"
 	"os"
@@ -47,36 +48,55 @@ func restoreBackupTargetB5Remap(t *testing.T, ctx context.Context, source backup
 
 func verifyAndApplyBackupTargetB5ObjectMap(t *testing.T, ctx context.Context, fixture backupTargetRemapFixture) {
 	t.Helper()
-	pool, bucket, manifest, mapping := fixture.database.pool, fixture.targetBucket.name, fixture.manifest, fixture.mapping
-	userID := backupFixtureID(t, fixture.source.login.User.ID)
-	before := snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, 2)
+	if len(fixture.manifest.Objects) != 2 || len(fixture.manifest.HistoryReferences) != 1 {
+		t.Fatal("隔离目标样本应包含一份当前及一份历史对象")
+	}
+	verifyBackupB5ObjectMapTransaction(t, ctx, fixture.database.pool, fixture.targetBucket.name, fixture.manifest, fixture.mapping)
+}
+
+func verifyBackupB5ObjectMapTransaction(t *testing.T, ctx context.Context, pool *sql.DB, bucket string,
+	manifest backupSourceManifest, mapping backupTargetObjectMap,
+) {
+	t.Helper()
+	// 1. 核对映射更新顺序和持久化基线，确保注入的错误发生在最后一行。
+	count := len(manifest.Objects)
+	if len(manifest.FileReferences) != 1 || len(manifest.HistoryReferences) == 0 ||
+		count != 1+len(manifest.HistoryReferences) || len(mapping.Objects) != count ||
+		manifest.Objects[0].ID != manifest.FileReferences[0].ObjectID {
+		t.Fatal("事务夹具需要按当前对象、历史对象的顺序更新")
+	}
+	for index, location := range mapping.Objects {
+		if location.ObjectID != manifest.Objects[index].ID ||
+			(index > 0 && location.ObjectID != manifest.HistoryReferences[index-1].ObjectID) {
+			t.Fatal("对象映射顺序与当前和历史引用不符", location.ObjectID)
+		}
+	}
+	userID := manifest.FileReferences[0].UserID
+	before := snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, count)
 	stateBefore := readBackupB5DatabaseState(t, ctx, pool, userID)
 
-	// 2. 复验第二条源版本失配时整批回滚。
-	historicalID := manifest.HistoryReferences[0].ObjectID
-	if len(mapping.Objects) != 2 || mapping.Objects[0].ObjectID != manifest.FileReferences[0].ObjectID ||
-		mapping.Objects[1].ObjectID != historicalID || manifest.Objects[1].ID != historicalID {
-		t.Fatal("回滚夹具需要先更新当前对象，再命中历史对象的失败条件")
-	}
+	// 2. 让最后一条历史源版本失配，在数据库中读回整批回滚结果。
+	last := count - 1
+	historicalID := mapping.Objects[last].ObjectID
 	staleManifest, staleMapping := manifest, mapping
 	staleManifest.Objects = slices.Clone(manifest.Objects)
 	staleMapping.Objects = slices.Clone(mapping.Objects)
 	staleVersion := "stale-source-version"
-	staleManifest.Objects[1].VersionID = &staleVersion
-	staleMapping.Objects[1].SourceVersionID = &staleVersion
+	staleManifest.Objects[last].VersionID = &staleVersion
+	staleMapping.Objects[last].SourceVersionID = &staleVersion
 	updated, err := applyBackupTargetObjectMap(ctx, pool, bucket, staleManifest, staleMapping)
 	if updated != 0 || err == nil || !strings.Contains(err.Error(), fmt.Sprintf("对象 %d 的预期源定位未匹配", historicalID)) {
 		t.Fatalf("历史对象源版本失配时应回滚整批，已提交 %d 行，错误 %v", updated, err)
 	}
-	if afterFailure := snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, 2); !reflect.DeepEqual(afterFailure, before) {
+	if afterFailure := snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, count); !reflect.DeepEqual(afterFailure, before) {
 		t.Fatal("事务失败后目标对象仍有部分更新")
 	}
-	t.Log("B5 目标历史对象源版本不符，整批回滚，当前对象仍保留原定位")
+	t.Logf("B5 对象定位回滚，第 %d 条历史对象 %d 的源版本失配，全部 %d 条保持原定位", count, historicalID, count)
 
 	// 3. 提交真实映射，核对对象字段、业务引用和配额。
 	updated, err = applyBackupTargetObjectMap(ctx, pool, bucket, manifest, mapping)
-	if err != nil || updated != 2 {
-		t.Fatalf("目标库应一次提交两条对象定位，已提交 %d 行，错误 %v", updated, err)
+	if err != nil || updated != count {
+		t.Fatalf("目标库应一次提交 %d 条对象定位，已提交 %d 行，错误 %v", count, updated, err)
 	}
 	expectedRows := maps.Clone(before)
 	expectedManifest := manifest
@@ -88,16 +108,16 @@ func verifyAndApplyBackupTargetB5ObjectMap(t *testing.T, ctx context.Context, fi
 		expectedManifest.Objects[index].Bucket = location.TargetBucket
 		expectedManifest.Objects[index].VersionID = &location.TargetVersionID
 	}
-	if after := snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, 2); !reflect.DeepEqual(after, expectedRows) {
+	if after := snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, count); !reflect.DeepEqual(after, expectedRows) {
 		t.Fatal("目标对象定位与版本映射不符，或其他对象字段发生变化")
 	}
 	actualManifest, err := readBackupSourceManifest(ctx, pool, bucket, manifest.DatabaseSHA256)
 	if err != nil || !reflect.DeepEqual(actualManifest, expectedManifest) {
 		t.Fatal("目标库的当前引用、历史引用或物理对象字段不符", err)
 	}
-	if stateAfter := readBackupB5DatabaseState(t, ctx, pool, userID); !reflect.DeepEqual(stateAfter, stateBefore) ||
-		stateAfter.used != 72 || stateAfter.reserved != 0 {
+	if stateAfter := readBackupB5DatabaseState(t, ctx, pool, userID); !reflect.DeepEqual(stateAfter, stateBefore) {
 		t.Fatal("目标库配额或同步状态发生变化")
 	}
-	t.Logf("B5 目标提交 2 条对象定位，当前和历史引用一致，已用 72 B、预占 0 B，映射绑定清单 SHA-256 %s", mapping.ManifestSHA256)
+	t.Logf("B5 目标提交 %d 条对象定位，当前和历史引用一致，已用 %d B、预占 %d B，映射绑定清单 SHA-256 %s",
+		count, stateBefore.used, stateBefore.reserved, mapping.ManifestSHA256)
 }
