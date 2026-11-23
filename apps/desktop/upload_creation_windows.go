@@ -11,12 +11,12 @@ import (
 )
 
 type uploadSubmission struct {
-	Declaration client.SingleUploadDeclaration
+	Declaration client.UploadDeclaration
 	CreationKey string
 	Status      string
 }
 
-// Submit 创建已有本机意图对应的 SINGLE 任务，确认回执后更新本机记录。
+// Submit 创建已有本机意图对应的上传任务，确认回执后更新本机记录。
 func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (UploadIntentResult, error) {
 	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
 		submission, err := readUploadSubmission(ctx, intent.db, intent.owner, intent.id)
@@ -29,19 +29,26 @@ func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (Uplo
 
 		// 1. 待提交记录才发送请求。令牌过期由会话层用原声明重试一次。
 		switch submission.Status {
-		case "CREATED", "VERIFYING":
+		case "CREATED", "VERIFYING", "MULTIPART_CREATED":
 			return nil
 		case "PENDING_CREATE":
 		default:
 			return errors.New("当前上传记录无法创建任务")
 		}
-		receipt, err := client.CreateSingleUpload(ctx, intent.owner.Address, intent.accessToken, submission.CreationKey, submission.Declaration)
+		receipt, err := client.CreateUpload(ctx, intent.owner.Address, intent.accessToken, submission.CreationKey, submission.Declaration)
 		if err != nil {
 			return err
 		}
 
 		// 2. 在事务内持久化回执及状态。失败后仍可用原键找回任务。
-		if err := recordUploadCreation(ctx, intent.db, intent.owner, intent.id, receipt); err != nil {
+		if receipt.Multipart != nil {
+			err = recordMultipartUploadCreation(ctx, intent, receipt)
+		} else {
+			err = recordUploadCreation(ctx, intent.db, intent.owner, intent.id, client.SingleUploadCreation{
+				TaskID: receipt.TaskID, ContentPath: receipt.ContentPath, ExpiresAt: receipt.ExpiresAt,
+			})
+		}
+		if err != nil {
 			return errors.New("无法保存上传创建回执，请重试同一条记录")
 		}
 		return nil

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/opaoxx/cloud-nest/pkg/client"
 	_ "modernc.org/sqlite"
 )
 
@@ -23,16 +24,17 @@ type uploadIntentDraft struct {
 
 // UploadIntentView 是窗口展示的一条本地上传记录。
 type UploadIntentView struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	SizeBytes      int64  `json:"size_bytes,string"`
-	ConfirmedBytes int64  `json:"confirmed_bytes,string"`
-	ParentID       string `json:"parent_id"`
-	Status         string `json:"status"`
-	TaskID         string `json:"task_id"`
-	ResultEntryID  string `json:"result_entry_id,omitempty"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	ErrorMessage   string `json:"error_message,omitempty"`
+	ID             string             `json:"id"`
+	Name           string             `json:"name"`
+	SizeBytes      int64              `json:"size_bytes,string"`
+	ConfirmedBytes int64              `json:"confirmed_bytes,string"`
+	ParentID       string             `json:"parent_id"`
+	Status         string             `json:"status"`
+	TaskID         string             `json:"task_id"`
+	ResultEntryID  string             `json:"result_entry_id,omitempty"`
+	ErrorCode      string             `json:"error_code,omitempty"`
+	ErrorMessage   string             `json:"error_message,omitempty"`
+	MultipartPlan  *MultipartPlanView `json:"multipart_plan,omitempty"`
 }
 
 var errUploadKeyConflict = errors.New("本次文件选择已保存到其他目标，请重新选择文件")
@@ -102,6 +104,19 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// 6. 分片计划单独保存，原有 SINGLE 回执按旧结构读取。
+	const multipartSchema = `CREATE TABLE IF NOT EXISTS multipart_upload_creations (
+		intent_id INTEGER PRIMARY KEY REFERENCES upload_intents(id),
+		task_id TEXT NOT NULL,
+		part_size_bytes INTEGER NOT NULL CHECK (part_size_bytes > 0),
+		part_count INTEGER NOT NULL CHECK (part_count BETWEEN 1 AND 10000),
+		expires_at TEXT NOT NULL
+	) STRICT`
+	if _, err := db.ExecContext(ctx, multipartSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -137,13 +152,15 @@ func insertUploadIntent(ctx context.Context, db *sql.DB, owner uploadOwner, draf
 
 func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]UploadIntentView, error) {
 	// 1. 读取当前账号的确认字节。旧版本的待校验及已发布任务已有完整正文。
-	rows, err := db.QueryContext(ctx, `SELECT CAST(i.id AS TEXT), i.name, i.size_bytes, i.parent_id, i.status, COALESCE(c.task_id, ''),
+	rows, err := db.QueryContext(ctx, `SELECT CAST(i.id AS TEXT), i.name, i.size_bytes, i.parent_id, i.status, COALESCE(c.task_id, m.task_id, ''),
 		COALESCE(o.result_entry_id, ''), COALESCE(o.error_code, ''), COALESCE(o.error_message, ''),
-		COALESCE(p.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END)
+		COALESCE(p.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END),
+		COALESCE(m.part_size_bytes, 0), COALESCE(m.part_count, 0)
 		FROM upload_intents i
 		LEFT JOIN single_upload_creations c ON c.intent_id = i.id
 		LEFT JOIN single_upload_outcomes o ON o.intent_id = i.id
 		LEFT JOIN single_upload_confirmations p ON p.intent_id = i.id
+		LEFT JOIN multipart_upload_creations m ON m.intent_id = i.id
 		WHERE i.server_address = ? AND i.user_id = ? ORDER BY i.id DESC`, owner.Address, owner.UserID)
 	if err != nil {
 		return nil, err
@@ -154,9 +171,21 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 	intents := make([]UploadIntentView, 0)
 	for rows.Next() {
 		var intent UploadIntentView
+		var plan client.MultipartPlan
 		if err := rows.Scan(&intent.ID, &intent.Name, &intent.SizeBytes, &intent.ParentID, &intent.Status, &intent.TaskID,
-			&intent.ResultEntryID, &intent.ErrorCode, &intent.ErrorMessage, &intent.ConfirmedBytes); err != nil {
+			&intent.ResultEntryID, &intent.ErrorCode, &intent.ErrorMessage, &intent.ConfirmedBytes, &plan.PartSizeBytes, &plan.PartCount); err != nil {
 			return nil, err
+		}
+		if plan.PartCount > 0 || intent.Status == "MULTIPART_CREATED" {
+			plan.SizeBytes = intent.SizeBytes
+			lastPart, err := plan.PartRange(plan.PartCount)
+			if err != nil {
+				return nil, err
+			}
+			intent.MultipartPlan = &MultipartPlanView{
+				PartCount: plan.PartCount, PartSizeBytes: plan.PartSizeBytes,
+				LastPartOffsetBytes: lastPart.OffsetBytes, LastPartSizeBytes: lastPart.SizeBytes,
+			}
 		}
 		intents = append(intents, intent)
 	}
