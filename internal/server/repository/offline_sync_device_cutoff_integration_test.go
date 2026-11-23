@@ -8,6 +8,15 @@ import (
 )
 
 func TestReadOfflineSyncDeviceCutoffIntegration(t *testing.T) {
+	verifyDatabaseNinetyDayCutoff(t, (*Store).ReadOfflineSyncDeviceCutoff)
+}
+
+func TestReadSyncChangePruneCutoffIntegration(t *testing.T) {
+	verifyDatabaseNinetyDayCutoff(t, (*Store).ReadSyncChangePruneCutoff)
+}
+
+func verifyDatabaseNinetyDayCutoff(t *testing.T, readCutoff func(*Store, context.Context) (time.Time, error)) {
+	t.Helper()
 	// 1. 在独占数据库连接中固定非 UTC 会话和带微秒的数据库时钟。
 	pool := loginTransactionDatabase(t)
 	pool.SetMaxOpenConns(1)
@@ -36,13 +45,13 @@ func TestReadOfflineSyncDeviceCutoffIntegration(t *testing.T) {
 	}
 
 	// 2. 核对从 UTC 减 90 天的结果。再次读取可得到下一轮的截止点。
-	cutoff, err := store.ReadOfflineSyncDeviceCutoff(ctx)
+	cutoff, err := readCutoff(store, ctx)
 	want := reference.AddDate(0, 0, -90)
 	if err != nil || cutoff != want {
 		t.Fatalf("UTC 截止点不符：实际 %v，期望 %v，错误 %v", cutoff, want, err)
 	}
 	execute("SET timestamp = ?", float64(reference.Unix())+1.015625)
-	next, err := store.ReadOfflineSyncDeviceCutoff(ctx)
+	next, err := readCutoff(store, ctx)
 	if err != nil || next != want.Add(time.Second) || cutoff != want {
 		t.Fatalf("重新读取的截止点不符：本轮 %v，下一轮 %v，错误 %v", cutoff, next, err)
 	}
@@ -50,7 +59,7 @@ func TestReadOfflineSyncDeviceCutoffIntegration(t *testing.T) {
 	// 3. 取消时交付原错误，不返回可被下一轮误用的时间。
 	canceled, stop := context.WithCancel(ctx)
 	stop()
-	if result, err := store.ReadOfflineSyncDeviceCutoff(canceled); !result.IsZero() || !errors.Is(err, context.Canceled) {
+	if result, err := readCutoff(store, canceled); !result.IsZero() || !errors.Is(err, context.Canceled) {
 		t.Fatalf("取消时应返回零值和取消原因：%v，错误 %v", result, err)
 	}
 	t.Logf("非 UTC 会话 +05:30，数据库 UTC %s，截止点 %s，时钟推进一秒后为 %s",
