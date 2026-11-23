@@ -22,7 +22,9 @@
     section { margin-top: 1.25rem; border-top: 1px solid #cad7df; }
     h2 { font-size: 1.15rem; margin: 1rem 0 0; }
     ul { list-style: none; margin: .75rem 0 0; padding: 0; }
-    #directoryItems li { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
+    #directoryItems li, #uploadItems li { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
+    #uploadItems span { overflow-wrap: anywhere; }
+    #uploadItems button { flex: none; margin: 0; }
     #directoryItems li > :first-child { min-width: 0; overflow-wrap: anywhere; }
     #directoryItems li > :last-child { flex: none; color: #526977; }
     #directoryPath ol { display: flex; flex-wrap: wrap; gap: .35rem .6rem; list-style: none; padding: 0; margin: .8rem 0 0; }
@@ -54,9 +56,9 @@
         <output id="fileSelection" role="status" aria-live="polite"></output>
       </section>
       <section id="uploadPanel" aria-labelledby="uploadTitle" hidden>
-        <h2 id="uploadTitle">待提交上传</h2>
+        <h2 id="uploadTitle">上传任务</h2>
         <output id="uploadStatus" role="status" aria-live="polite"></output>
-        <ul id="uploadItems" aria-label="待提交上传列表"></ul>
+        <ul id="uploadItems" aria-label="上传任务列表"></ul>
       </section>
       <section id="directoryPanel" aria-labelledby="directoryTitle" hidden>
         <h2 id="directoryTitle">目录</h2>
@@ -111,6 +113,9 @@
       checkConnection.disabled = busy;
       credentials.disabled = busy;
       for (const button of directoryPanel.querySelectorAll("button")) {
+        button.disabled = busy;
+      }
+      for (const button of uploadItems.querySelectorAll("button")) {
         button.disabled = busy;
       }
       logoutAccount.disabled = busy;
@@ -206,10 +211,22 @@
       uploadItems.replaceChildren();
       for (const intent of result.items) {
         const row = document.createElement("li");
-        row.textContent = intent.name + " · " + intent.size_bytes + " B · 目录 " + intent.parent_id;
+        const summary = document.createElement("span");
+        summary.textContent = intent.name + " · " + intent.size_bytes + " B · 目录 " + intent.parent_id;
+        row.append(summary);
+        if (intent.status === "PENDING_CREATE") {
+          const submit = document.createElement("button");
+          submit.type = "button";
+          submit.textContent = "创建上传任务";
+          submit.disabled = checkConnection.disabled;
+          submit.addEventListener("click", () => submitUploadIntent(intent.id));
+          row.append(submit);
+        } else if (intent.status === "CREATED") {
+          summary.textContent += " · 待发送正文 · 任务 " + intent.task_id;
+        }
         uploadItems.append(row);
       }
-      uploadStatus.textContent = result.items.length ? "" : "暂无待提交上传。";
+      uploadStatus.textContent = result.items.length ? "" : "暂无上传记录。";
       return true;
     }
 
@@ -219,6 +236,21 @@
         renderUploadIntents(await Call.ByName("main.UploadIntents.List"));
       } catch (error) {
         uploadStatus.textContent = error.message || "读取本机上传记录失败";
+      }
+    }
+
+    async function submitUploadIntent(intentID) {
+      if (checkConnection.disabled) return;
+      setBusy(true);
+      uploadStatus.textContent = "正在创建上传任务…";
+      try {
+        if (renderUploadIntents(await Call.ByName("main.UploadIntents.Submit", intentID))) {
+          uploadStatus.textContent = "已创建 SINGLE 上传任务。";
+        }
+      } catch (error) {
+        uploadStatus.textContent = error.message || "创建任务失败，请重试同一条记录";
+      } finally {
+        setBusy(false);
       }
     }
 

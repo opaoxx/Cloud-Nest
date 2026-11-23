@@ -47,14 +47,7 @@ func (uploads *UploadIntents) load(ctx context.Context, draft *uploadIntentDraft
 	epoch := account.sessionEpoch
 	account.mu.Unlock()
 	owner, err := readForAccount(ctx, account, func(address string, session client.NativeSession) (uploadOwner, error) {
-		profile, err := client.ReadCurrentProfile(ctx, address, session.AccessToken)
-		if err != nil {
-			return uploadOwner{}, err
-		}
-		if profile.Username != session.Username || !validUploadID(profile.UserID) {
-			return uploadOwner{}, errors.New("无法确认上传记录所属的账号")
-		}
-		return uploadOwner{Address: strings.TrimSuffix(strings.TrimSpace(address), "/"), UserID: profile.UserID}, nil
+		return resolveUploadOwner(ctx, address, session)
 	})
 	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) {
 		return UploadIntentResult{LoginRequired: err.Error()}, nil
@@ -89,6 +82,17 @@ func (uploads *UploadIntents) load(ctx context.Context, draft *uploadIntentDraft
 		return UploadIntentResult{}, errors.New("无法读取本机上传记录")
 	}
 	return UploadIntentResult{Items: items}, nil
+}
+
+func resolveUploadOwner(ctx context.Context, address string, session client.NativeSession) (uploadOwner, error) {
+	profile, err := client.ReadCurrentProfile(ctx, address, session.AccessToken)
+	if err != nil {
+		return uploadOwner{}, err
+	}
+	if profile.Username != session.Username || !validUploadID(profile.UserID) {
+		return uploadOwner{}, errors.New("无法确认上传记录所属的账号")
+	}
+	return uploadOwner{Address: strings.TrimSuffix(strings.TrimSpace(address), "/"), UserID: profile.UserID}, nil
 }
 
 func validUploadID(text string) bool {

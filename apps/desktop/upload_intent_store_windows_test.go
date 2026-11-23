@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/opaoxx/cloud-nest/pkg/client"
 )
 
 func TestUploadIntentPersistsOnceAndIsScoped(t *testing.T) {
@@ -47,7 +50,7 @@ func TestUploadIntentPersistsOnceAndIsScoped(t *testing.T) {
 	}
 	defer db.Close()
 	items, err := listUploadIntents(ctx, db, owner)
-	if err != nil || len(items) != 1 || items[0] != (UploadIntentView{Name: draft.Source.File.Name, ParentID: draft.ParentID}) {
+	if err != nil || len(items) != 1 || items[0] != (UploadIntentView{ID: "1", Name: draft.Source.File.Name, ParentID: draft.ParentID, Status: "PENDING_CREATE"}) {
 		t.Fatalf("saved intent did not survive reopen: %+v, %v", items, err)
 	}
 	var sourcePath, sha256, status string
@@ -64,5 +67,44 @@ func TestUploadIntentPersistsOnceAndIsScoped(t *testing.T) {
 		if err != nil || len(items) != 0 {
 			t.Fatalf("another scope saw the intent: %+v, %v", items, err)
 		}
+	}
+}
+
+func TestUploadCreationKeepsTheFirstConfirmedReceipt(t *testing.T) {
+	ctx := t.Context()
+	db, err := openUploadIntents(ctx, filepath.Join(t.TempDir(), "drafts.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	owner := uploadOwner{Address: "http://127.0.0.1:18081", UserID: "1"}
+	if err := insertUploadIntent(ctx, db, owner, uploadIntentDraft{
+		ParentID: "20",
+		Source: selectedUploadSource{
+			Path: filepath.Join(t.TempDir(), "source.txt"),
+			File: FileSelection{SourceFileDigest: SourceFileDigest{Name: "source.txt", SizeBytes: 5, SHA256: strings.Repeat("a", 64)},
+				CreationKey: "test-create-key"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	receipt := client.SingleUploadCreation{TaskID: "33", ContentPath: "/api/v1/uploads/33/content", ExpiresAt: time.Now().UTC()}
+	outsider := uploadOwner{Address: owner.Address, UserID: "2"}
+	if err := recordUploadCreation(ctx, db, outsider, 1, receipt); err == nil {
+		t.Fatal("another account recorded a receipt")
+	}
+	for range 2 {
+		if err := recordUploadCreation(ctx, db, owner, 1, receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conflicting := receipt
+	conflicting.TaskID = "34"
+	if err := recordUploadCreation(ctx, db, owner, 1, conflicting); err == nil {
+		t.Fatal("confirmed receipt was replaced")
+	}
+	items, err := listUploadIntents(ctx, db, owner)
+	if err != nil || len(items) != 1 || items[0].Status != "CREATED" || items[0].TaskID != "33" {
+		t.Fatalf("the first confirmed receipt was not preserved: %+v, %v", items, err)
 	}
 }

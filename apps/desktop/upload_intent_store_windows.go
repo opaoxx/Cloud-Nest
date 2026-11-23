@@ -21,11 +21,14 @@ type uploadIntentDraft struct {
 	ParentID string
 }
 
-// UploadIntentView 是窗口展示的一条本地待提交上传记录。
+// UploadIntentView 是窗口展示的一条本地上传记录。
 type UploadIntentView struct {
+	ID        string `json:"id"`
 	Name      string `json:"name"`
 	SizeBytes int64  `json:"size_bytes,string"`
 	ParentID  string `json:"parent_id"`
+	Status    string `json:"status"`
+	TaskID    string `json:"task_id"`
 }
 
 var errUploadKeyConflict = errors.New("本次文件选择已保存到其他目标，请重新选择文件")
@@ -39,7 +42,7 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
 	}
-	dsn := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_busy_timeout=3000"}
+	dsn := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_busy_timeout=3000&_foreign_keys=1"}
 	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, err
@@ -59,6 +62,17 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		status TEXT NOT NULL DEFAULT 'PENDING_CREATE'
 	) STRICT`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 3. 独立保存确认回执，已有上传意图按原结构继续使用。
+	const creationSchema = `CREATE TABLE IF NOT EXISTS single_upload_creations (
+		intent_id INTEGER PRIMARY KEY REFERENCES upload_intents(id),
+		task_id TEXT NOT NULL,
+		content_path TEXT NOT NULL,
+		expires_at TEXT NOT NULL
+	) STRICT`
+	if _, err := db.ExecContext(ctx, creationSchema); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -96,9 +110,10 @@ func insertUploadIntent(ctx context.Context, db *sql.DB, owner uploadOwner, draf
 }
 
 func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]UploadIntentView, error) {
-	// 1. 只读取当前服务和当前账号的待提交记录。
-	rows, err := db.QueryContext(ctx, `SELECT name, size_bytes, parent_id FROM upload_intents
-		WHERE server_address = ? AND user_id = ? AND status = 'PENDING_CREATE' ORDER BY id DESC`, owner.Address, owner.UserID)
+	// 1. 只读取当前服务和当前账号的上传记录及已确认的远端任务 ID。
+	rows, err := db.QueryContext(ctx, `SELECT CAST(i.id AS TEXT), i.name, i.size_bytes, i.parent_id, i.status, COALESCE(c.task_id, '')
+		FROM upload_intents i LEFT JOIN single_upload_creations c ON c.intent_id = i.id
+		WHERE i.server_address = ? AND i.user_id = ? ORDER BY i.id DESC`, owner.Address, owner.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +123,7 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 	intents := make([]UploadIntentView, 0)
 	for rows.Next() {
 		var intent UploadIntentView
-		if err := rows.Scan(&intent.Name, &intent.SizeBytes, &intent.ParentID); err != nil {
+		if err := rows.Scan(&intent.ID, &intent.Name, &intent.SizeBytes, &intent.ParentID, &intent.Status, &intent.TaskID); err != nil {
 			return nil, err
 		}
 		intents = append(intents, intent)
