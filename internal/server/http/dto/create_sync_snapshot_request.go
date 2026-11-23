@@ -26,14 +26,19 @@ func (request *CreateSyncSnapshotRequest) UnmarshalJSON(body []byte) error {
 
 // ParseCreateSyncSnapshotPageSize 返回创建快照时固定的页大小。
 func ParseCreateSyncSnapshotPageSize(request CreateSyncSnapshotRequest) (int, *FieldError) {
+	return parseSyncPageSize(request.PageSize)
+}
+
+// parseSyncPageSize 校验快照创建和增量拉取共用的页大小规则。
+func parseSyncPageSize(rawPageSize json.RawMessage) (int, *FieldError) {
 	// 1. 只有字段省略时使用默认页大小。
-	if request.PageSize == nil {
+	if rawPageSize == nil {
 		return 50, nil
 	}
 
 	// 2. 显式值须为 JSON 整数，且位于闭区间 1～100。
 	var pageSize *int
-	if err := json.Unmarshal(request.PageSize, &pageSize); err != nil || pageSize == nil || *pageSize < 1 || *pageSize > 100 {
+	if err := json.Unmarshal(rawPageSize, &pageSize); err != nil || pageSize == nil || *pageSize < 1 || *pageSize > 100 {
 		return 0, &FieldError{Field: "page_size", Message: "每页数量须为 1～100 的 JSON 整数"}
 	}
 	return *pageSize, nil
