@@ -1,0 +1,113 @@
+package repository
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/opaoxx/cloud-nest/internal/server/domain"
+	"github.com/opaoxx/cloud-nest/internal/server/service"
+	"github.com/opaoxx/cloud-nest/migrations"
+)
+
+func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
+	// 1. 准备两账号四条候选，在独占库的第二页注入可恢复的写入失败。
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	pool, store, _ := trashEntryTestDatabase(t, ctx)
+	execute := func(statement string, args ...any) {
+		t.Helper()
+		if _, err := pool.ExecContext(ctx, statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, deviceDDL, found := strings.Cut(migrations.Ordered()[2].SQL, ";\n")
+	if !found {
+		t.Fatal("未找到正式同步设备表")
+	}
+	execute(deviceDDL)
+	execute("UPDATE users SET change_seq=7 WHERE id IN (1,2)")
+	execute("UPDATE users SET status='DISABLED' WHERE id=2")
+	execute(`INSERT INTO user_devices(id,user_id,installation_id,name,platform,revoked_at) VALUES
+		(20,1,'28ee758a-0727-42de-ae7d-3bb33155e150','待重建','WEB',NULL),
+		(21,1,'28ee758a-0727-42de-ae7d-3bb33155e151','故障项','WEB',NULL),
+		(29,2,'28ee758a-0727-42de-ae7d-3bb33155e159','已撤销','WEB',UTC_TIMESTAMP(6))`)
+	generation := domain.SyncCursorGeneration{0xa1, 0, 3, 4, 0, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0xfe}
+	execute(`INSERT INTO sync_devices(device_id,user_id,status,cursor_generation,ack_sequence,last_seen_at) VALUES
+		(19,1,'ACTIVE',?,7,UTC_TIMESTAMP(6)),(20,1,'RESET_REQUIRED',?,0,UTC_TIMESTAMP(6)),
+		(21,1,'ACTIVE',?,5,UTC_TIMESTAMP(6)),(29,2,'ACTIVE',?,7,UTC_TIMESTAMP(6))`,
+		generation[:], generation[:], generation[:], generation[:])
+	readStates := func() []domain.RestoredSyncDeviceCandidate {
+		t.Helper()
+		devices, err := store.ListRestoredSyncDeviceCandidates(ctx, 0, 5)
+		if err != nil || len(devices) != 4 {
+			t.Fatalf("恢复同步设备范围不符：%+v，%v", devices, err)
+		}
+		return devices
+	}
+	before := readStates()
+	execute(`CREATE TRIGGER fixture_restore_sync_batch_failure BEFORE UPDATE ON sync_devices FOR EACH ROW
+		BEGIN IF OLD.device_id=21 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture reset failure'; END IF; END`)
+
+	// 2. 调用实际仓储，核对每页参数和故障前已提交的设备。
+	type pageCall struct {
+		after uint64
+		limit int
+	}
+	var pages []pageCall
+	var attempts []uint64
+	batch := service.NewRestoredSyncDeviceBatch(
+		func(queryContext context.Context, after uint64, limit int) ([]domain.RestoredSyncDeviceCandidate, error) {
+			pages = append(pages, pageCall{after, limit})
+			return store.ListRestoredSyncDeviceCandidates(queryContext, after, limit)
+		},
+		func(txContext context.Context, candidate domain.RestoredSyncDeviceCandidate) error {
+			attempts = append(attempts, candidate.DeviceID)
+			return store.ResetRestoredSyncDevice(txContext, candidate)
+		},
+	)
+	first, err := batch.RunOnce(ctx, 0, 3, 2)
+	wantFirst := service.RestoredSyncDeviceBatchResult{Scanned: 3, Reset: 2, NextAfterDeviceID: 20, FailedUserID: 1, FailedDeviceID: 21}
+	var databaseError *mysql.MySQLError
+	if first != wantFirst || !errors.As(err, &databaseError) || databaseError.Number != 1644 ||
+		!slices.Equal(pages, []pageCall{{0, 2}, {20, 1}}) || !slices.Equal(attempts, []uint64{19, 20, 21}) {
+		t.Fatalf("首批结果或失败位置不符：%+v，%v，页 %v，尝试 %v", first, err, pages, attempts)
+	}
+	partial := readStates()
+	assertRotated := func(previous, current domain.RestoredSyncDeviceCandidate) {
+		t.Helper()
+		if current.UserID != previous.UserID || current.DeviceID != previous.DeviceID ||
+			current.State.Status != domain.SyncDeviceStatusResetRequired || current.State.AckSequence != 0 ||
+			current.State.Generation == previous.State.Generation || current.State.Generation == (domain.SyncCursorGeneration{}) {
+			t.Fatalf("设备 %d 的已提交换代不符：%+v", previous.DeviceID, current)
+		}
+	}
+	for index := 0; index < 2; index++ {
+		assertRotated(before[index], partial[index])
+	}
+	if !slices.Equal(partial[2:], before[2:]) {
+		t.Fatal("失败设备或其后记录发生了改变")
+	}
+
+	// 3. 移除测试故障，从已提交位置续跑，保留前批已取得的代次。
+	execute("DROP TRIGGER fixture_restore_sync_batch_failure")
+	remainder, err := batch.RunOnce(ctx, first.NextAfterDeviceID, 3, 2)
+	wantRemainder := service.RestoredSyncDeviceBatchResult{Scanned: 2, Reset: 2, NextAfterDeviceID: 29, ReachedEnd: true}
+	if err != nil || remainder != wantRemainder ||
+		!slices.Equal(pages, []pageCall{{0, 2}, {20, 1}, {20, 2}, {29, 1}}) ||
+		!slices.Equal(attempts, []uint64{19, 20, 21, 21, 29}) {
+		t.Fatalf("续跑范围或结果不符：%+v，%v，页 %v，尝试 %v", remainder, err, pages, attempts)
+	}
+	finished := readStates()
+	if !slices.Equal(finished[:2], partial[:2]) {
+		t.Fatal("续跑重复修改了前批已提交的设备")
+	}
+	for index := 2; index < 4; index++ {
+		assertRotated(before[index], finished[index])
+	}
+	t.Log("故障前两项已提交，游标停在设备 20；修复夹具后从 20 继续处理 21 和 29")
+}
