@@ -18,6 +18,7 @@ import (
 )
 
 const uploadPartChecksumHeader = "x-amz-checksum-sha256"
+const maxUploadPartGrantBatch = 20
 
 var uploadPartETagPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
@@ -36,6 +37,13 @@ type UploadPartReceipt struct {
 	SizeBytes int64
 	SHA256    string
 	ETag      string
+}
+
+// UploadPartDeclaration binds a planned part number to its bytes and digest.
+type UploadPartDeclaration struct {
+	Number    int
+	SizeBytes int64
+	Digest    [sha256.Size]byte
 }
 
 // CheckMultipartUploadReady checks the current state of the task saved in the queue.
@@ -59,45 +67,64 @@ func CheckMultipartUploadReady(ctx context.Context, address, accessToken, taskID
 
 // IssueUploadPartURL requests a single signed PUT using the calculated part digest.
 func IssueUploadPartURL(ctx context.Context, address, accessToken, taskID string, number int, sizeBytes int64, digest [sha256.Size]byte) (UploadPartGrant, error) {
-	// 1. 向业务 API 申报片号和十六进制摘要。
-	if !validEntryID(taskID) || number < 1 || number > maxUploadParts || sizeBytes < 1 || sizeBytes > maxJSONSafeInteger {
-		return UploadPartGrant{}, errors.New("无效的分片声明")
-	}
-	base, err := parseServiceAddress(address)
+	batch, err := IssueUploadPartURLs(ctx, address, accessToken, taskID,
+		[]UploadPartDeclaration{{Number: number, SizeBytes: sizeBytes, Digest: digest}})
 	if err != nil {
 		return UploadPartGrant{}, err
+	}
+	return batch[0], nil
+}
+
+// IssueUploadPartURLs requests a batch of storage PUT authorizations in declaration order.
+func IssueUploadPartURLs(ctx context.Context, address, accessToken, taskID string, parts []UploadPartDeclaration) ([]UploadPartGrant, error) {
+	// 1. 向业务 API 申报不同的片号和各自的十六进制摘要。
+	if !validEntryID(taskID) || len(parts) == 0 || len(parts) > maxUploadPartGrantBatch {
+		return nil, errors.New("无效的分片签名批次")
 	}
 	type partDeclaration struct {
 		Number int    `json:"part_number"`
 		SHA256 string `json:"sha256"`
 	}
+	declarations := make([]partDeclaration, 0, len(parts))
+	seen := make(map[int]bool, len(parts))
+	for _, part := range parts {
+		if part.Number < 1 || part.Number > maxUploadParts || part.SizeBytes < 1 || part.SizeBytes > maxJSONSafeInteger || seen[part.Number] {
+			return nil, errors.New("无效或重复的分片声明")
+		}
+		seen[part.Number] = true
+		declarations = append(declarations, partDeclaration{Number: part.Number, SHA256: hex.EncodeToString(part.Digest[:])})
+	}
+	base, err := parseServiceAddress(address)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(struct {
 		Parts []partDeclaration `json:"parts"`
-	}{Parts: []partDeclaration{{Number: number, SHA256: hex.EncodeToString(digest[:])}}})
+	}{Parts: declarations})
 	if err != nil {
-		return UploadPartGrant{}, errors.New("无法编码分片签名请求")
+		return nil, errors.New("无法编码分片签名请求")
 	}
 	endpoint := base.JoinPath("api", "v1", "uploads", taskID, "part-urls")
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
-		return UploadPartGrant{}, errors.New("无法构造分片签名请求")
+		return nil, errors.New("无法构造分片签名请求")
 	}
 	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := serviceHTTPClient.Do(request)
 	if err != nil {
-		return UploadPartGrant{}, errors.New("未取得分片签名，请重试")
+		return nil, errors.New("未取得分片签名，请重试")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		code := authErrorCode(response.Body)
 		switch {
 		case response.StatusCode == http.StatusUnauthorized && code == "TOKEN_EXPIRED":
-			return UploadPartGrant{}, ErrAccessTokenExpired
+			return nil, ErrAccessTokenExpired
 		case code == "TASK_NOT_READY" || code == "UPLOAD_BUSY":
-			return UploadPartGrant{}, errors.New("远端任务暂不可签发分片，请稍后重试")
+			return nil, errors.New("远端任务暂不可签发分片，请稍后重试")
 		default:
-			return UploadPartGrant{}, errors.New("服务端未交付分片签名")
+			return nil, errors.New("服务端未交付分片签名")
 		}
 	}
 
@@ -114,20 +141,27 @@ func IssueUploadPartURL(ctx context.Context, address, accessToken, taskID string
 			} `json:"parts"`
 		} `json:"data"`
 	}
-	if readSmallJSON(response.Body, &result) != nil || len(result.Data.Parts) != 1 {
-		return UploadPartGrant{}, errors.New("服务返回的分片签名格式有误")
+	if readBoundedJSON(response.Body, 256*1024, &result) != nil || len(result.Data.Parts) != len(parts) {
+		return nil, errors.New("服务返回的分片签名格式有误")
 	}
-	part := result.Data.Parts[0]
-	if part.Number != number || part.SizeBytes != sizeBytes || !validStorageURL(part.URL) ||
-		len(part.Headers) != 1 || part.Headers[uploadPartChecksumHeader] != base64.StdEncoding.EncodeToString(digest[:]) ||
-		part.ExpiresAt.After(result.Data.ExpiresAt) || !part.ExpiresAt.After(time.Now()) {
-		return UploadPartGrant{}, errors.New("分片签名与本机声明不一致或已过期")
+	now := time.Now()
+	grants := make([]UploadPartGrant, 0, len(parts))
+	for index, part := range result.Data.Parts {
+		original := parts[index]
+		if part.Number != original.Number || part.SizeBytes != original.SizeBytes || !validStorageURL(part.URL) ||
+			len(part.Headers) != 1 || part.Headers[uploadPartChecksumHeader] != base64.StdEncoding.EncodeToString(original.Digest[:]) ||
+			part.ExpiresAt.After(result.Data.ExpiresAt) || !part.ExpiresAt.After(now) {
+			return nil, errors.New("分片签名与本机声明不一致或已过期")
+		}
+		signedURL, err := url.Parse(part.URL)
+		if err != nil || signedURL.Query().Get("partNumber") != strconv.Itoa(original.Number) || signedURL.Query().Get("uploadId") == "" {
+			return nil, errors.New("分片签名的存储会话或片号无效")
+		}
+		grants = append(grants, UploadPartGrant{
+			url: part.URL, expiresAt: part.ExpiresAt, number: original.Number, sizeBytes: original.SizeBytes, digest: original.Digest,
+		})
 	}
-	signedURL, err := url.Parse(part.URL)
-	if err != nil || signedURL.Query().Get("partNumber") != strconv.Itoa(number) || signedURL.Query().Get("uploadId") == "" {
-		return UploadPartGrant{}, errors.New("分片签名的存储会话或片号无效")
-	}
-	return UploadPartGrant{url: part.URL, expiresAt: part.ExpiresAt, number: number, sizeBytes: sizeBytes, digest: digest}, nil
+	return grants, nil
 }
 
 // SendUploadPart streams a part to storage and returns its normalized ETag.

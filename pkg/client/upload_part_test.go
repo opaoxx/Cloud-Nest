@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -74,5 +75,57 @@ func TestUploadPartFollowsSignedHeadersAndValidatesETag(t *testing.T) {
 				t.Fatalf("valid receipt not returned: %+v, %v", receipt, err)
 			}
 		})
+	}
+}
+
+func TestUploadPartBatchRequiresUniqueNumbersAndMatchingOrder(t *testing.T) {
+	digest := sha256.Sum256([]byte("part"))
+	parts := []UploadPartDeclaration{{Number: 2, SizeBytes: 4, Digest: digest}, {Number: 3, SizeBytes: 4, Digest: digest}}
+	for _, reorder := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			var payload struct {
+				Parts []struct {
+					Number int    `json:"part_number"`
+					SHA256 string `json:"sha256"`
+				} `json:"parts"`
+			}
+			digestHex := hex.EncodeToString(digest[:])
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || len(payload.Parts) != 2 ||
+				payload.Parts[0].Number != 2 || payload.Parts[1].Number != 3 ||
+				payload.Parts[0].SHA256 != digestHex || payload.Parts[1].SHA256 != digestHex {
+				t.Error("batch did not contain exactly the requested part declarations")
+			}
+			numbers := []int{2, 3}
+			if reorder {
+				numbers[0], numbers[1] = numbers[1], numbers[0]
+			}
+			var grants []map[string]any
+			for _, number := range numbers {
+				grants = append(grants, map[string]any{
+					"part_number": number, "size_bytes": 4,
+					"url":              fmt.Sprintf("http://storage.invalid/object?partNumber=%d&uploadId=session", number),
+					"required_headers": map[string]string{uploadPartChecksumHeader: base64.StdEncoding.EncodeToString(digest[:])},
+					"url_expires_at":   time.Now().Add(time.Minute),
+				})
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{"parts": grants, "expires_at": time.Now().Add(time.Hour)}})
+		}))
+		grants, err := IssueUploadPartURLs(t.Context(), server.URL, "sample", "33", parts)
+		server.Close()
+		if reorder {
+			if err == nil || len(grants) > 0 {
+				t.Fatal("reordered grants were returned to the sender")
+			}
+		} else if err != nil || len(grants) != 2 || grants[0].number != 2 || grants[1].number != 3 {
+			t.Fatalf("expected both grants, got %v", err)
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("duplicate part number reached the server")
+	}))
+	defer server.Close()
+	if _, err := IssueUploadPartURLs(t.Context(), server.URL, "sample", "33", []UploadPartDeclaration{parts[0], parts[0]}); err == nil {
+		t.Fatal("duplicate part number was accepted")
 	}
 }

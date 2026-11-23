@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/pkg/client"
+	"golang.org/x/sys/windows"
 )
 
 func TestUploadMultipartPlanSurvivesReopenAndIsScoped(t *testing.T) {
@@ -87,4 +89,28 @@ func TestUploadMultipartPlanSurvivesReopenAndIsScoped(t *testing.T) {
 		items[0].MultipartPlan == nil || items[0].MultipartPlan.ConfirmedParts != 1 {
 		t.Fatalf("progress did not account for the one saved receipt: %+v, %v", items, err)
 	}
+}
+
+func TestUploadMultipartQueueLockPreventsSecondDispatcher(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transfers.sqlite3.parts.lock")
+	first, err := openExclusiveFileLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := openExclusiveFileLock(path)
+	if second != nil {
+		second.Close()
+	}
+	if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		t.Fatalf("second dispatcher should fail, got %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err = openExclusiveFileLock(path)
+	if err != nil {
+		t.Fatalf("dispatcher could not reacquire the lock: %v", err)
+	}
+	second.Close()
 }

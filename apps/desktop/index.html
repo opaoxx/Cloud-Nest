@@ -250,6 +250,9 @@
           if (plan.confirmed_parts === 0) {
             row.append(uploadActionButton("上传第一片", () =>
               runUploadAction("SendFirstPart", intent.id, "正在上传第一片…", "第一片已确认。")));
+          } else if (plan.confirmed_parts < plan.part_count) {
+            row.append(uploadActionButton("上传剩余分片", () =>
+              runUploadAction("SendRemainingParts", intent.id, "正在上传剩余分片…", "全部分片已确认。")));
           }
         } else if (intent.status === "COMPLETED") {
           summary.textContent += " · 已发布 · 任务 " + intent.task_id + " · 条目 " + intent.result_entry_id;
@@ -295,7 +298,8 @@
           if (afterAction) await afterAction(result.items.find(item => item.id === intentID));
         }
       } catch (error) {
-        uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
+        if (method === "SendRemainingParts") await loadUploadIntents();
+        if (signedIn) uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
       } finally {
         setBusy(false);
       }

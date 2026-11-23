@@ -25,17 +25,29 @@ type sessionFile struct {
 
 // lock 串行化同一安装的登录与恢复，覆盖读取、请求和更新文件。
 func (file sessionFile) lock() (*os.File, error) {
-	lock, err := os.OpenFile(file.path+".lock", os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
+	lock, err := openExclusiveFileLock(file.path + ".lock")
+	if err == nil {
+		return lock, nil
+	}
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return nil, errors.New("另一个 CloudNest 窗口正在登录或恢复，请稍后重试")
+	}
+	var openError *os.PathError
+	if errors.As(err, &openError) {
 		return nil, errors.New("无法打开会话保存目录")
+	}
+	return nil, errors.New("无法锁定本机的会话记录")
+}
+
+func openExclusiveFileLock(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
 	}
 	var offset windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(lock.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &offset); err != nil {
 		lock.Close()
-		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return nil, errors.New("另一个 CloudNest 窗口正在登录或恢复，请稍后重试")
-		}
-		return nil, errors.New("无法锁定本机的会话记录")
+		return nil, err
 	}
 	return lock, nil
 }
