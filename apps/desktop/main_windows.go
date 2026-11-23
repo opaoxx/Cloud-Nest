@@ -47,6 +47,7 @@ func main() {
 		Width:  960,
 		Height: 640,
 	})
+	app.RegisterService(application.NewService(&LocalFilePicker{window: window}))
 
 	// 4. 取消默认关闭动作，隐藏主窗口，保留窗口和页面状态。
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {

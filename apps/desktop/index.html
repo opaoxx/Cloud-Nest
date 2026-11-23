@@ -47,6 +47,10 @@
       </fieldset>
       <output id="loginStatus" role="status" aria-live="polite"></output>
       <button id="logoutAccount" type="button" hidden>退出账号</button>
+      <section aria-label="本机文件">
+        <button id="chooseFile" type="button">选择文件</button>
+        <output id="fileSelection" role="status" aria-live="polite"></output>
+      </section>
       <section id="directoryPanel" aria-labelledby="directoryTitle" hidden>
         <h2 id="directoryTitle">目录</h2>
         <nav id="directoryPath" aria-label="目录路径" hidden><ol></ol></nav>
@@ -69,6 +73,8 @@
     const password = document.querySelector("#password");
     const loginStatus = document.querySelector("#loginStatus");
     const logoutAccount = document.querySelector("#logoutAccount");
+    const chooseFile = document.querySelector("#chooseFile");
+    const fileSelection = document.querySelector("#fileSelection");
     const directoryPanel = document.querySelector("#directoryPanel");
     const directoryPath = document.querySelector("#directoryPath");
     const breadcrumbs = directoryPath.querySelector("ol");
@@ -124,6 +130,7 @@
       directoryPanel.hidden = true;
       logoutAccount.hidden = true;
       password.value = "";
+      fileSelection.textContent = "";
       currentDirectoryID = "";
       pendingPage = null;
       directoryStatus.textContent = "";
@@ -144,6 +151,19 @@
         loginStatus.textContent = error.message || "退出失败，请重试";
       } finally {
         setBusy(false);
+      }
+    });
+
+    chooseFile.addEventListener("click", async () => {
+      chooseFile.disabled = true;
+      fileSelection.textContent = "";
+      try {
+        const name = await Call.ByName("main.LocalFilePicker.SelectFile");
+        fileSelection.textContent = name ? "已选择 " + name : "已取消选择。";
+      } catch (error) {
+        fileSelection.textContent = error.message || "选择文件失败，请重试";
+      } finally {
+        chooseFile.disabled = false;
       }
     });
 
