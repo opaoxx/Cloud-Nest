@@ -50,13 +50,13 @@ func TestUploadIntentPersistsOnceAndIsScoped(t *testing.T) {
 	}
 	defer db.Close()
 	items, err := listUploadIntents(ctx, db, owner)
-	if err != nil || len(items) != 1 || items[0] != (UploadIntentView{ID: "1", Name: draft.Source.File.Name, ParentID: draft.ParentID, Status: "PENDING_CREATE"}) {
+	if err != nil || len(items) != 1 || items[0] != (UploadIntentView{ID: "1", Name: draft.Source.File.Name, ParentID: draft.ParentID, Status: "PENDING_REUSE"}) {
 		t.Fatalf("saved intent did not survive reopen: %+v, %v", items, err)
 	}
 	var sourcePath, sha256, status string
 	err = db.QueryRowContext(ctx, `SELECT source_path, sha256, status FROM upload_intents WHERE creation_key = ?`,
 		draft.Source.File.CreationKey).Scan(&sourcePath, &sha256, &status)
-	if err != nil || sourcePath != draft.Source.Path || sha256 != draft.Source.File.SHA256 || status != "PENDING_CREATE" {
+	if err != nil || sourcePath != draft.Source.Path || sha256 != draft.Source.File.SHA256 || status != "PENDING_REUSE" {
 		t.Fatalf("source metadata or initial status was not preserved: %v", err)
 	}
 	for _, outsider := range []uploadOwner{
@@ -89,6 +89,9 @@ func TestUploadCreationKeepsTheFirstConfirmedReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	receipt := client.SingleUploadCreation{TaskID: "33", ContentPath: "/api/v1/uploads/33/content", ExpiresAt: time.Now().UTC()}
+	if _, err := db.ExecContext(ctx, "UPDATE upload_intents SET status = 'PENDING_CREATE' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
 	outsider := uploadOwner{Address: owner.Address, UserID: "2"}
 	if err := recordUploadCreation(ctx, db, outsider, 1, receipt); err == nil {
 		t.Fatal("another account recorded a receipt")
@@ -126,6 +129,9 @@ func TestUploadOutcomeIsAtomicAndDoesNotRegress(t *testing.T) {
 				CreationKey: "test-outcome-key"},
 		},
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE upload_intents SET status = 'PENDING_CREATE' WHERE id = 1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := recordUploadCreation(ctx, db, owner, 1, client.SingleUploadCreation{

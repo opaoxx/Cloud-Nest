@@ -4,20 +4,36 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/opaoxx/cloud-nest/pkg/client"
+	"golang.org/x/sys/windows"
 )
 
 type uploadSubmission struct {
 	Declaration client.UploadDeclaration
 	CreationKey string
 	Status      string
+	SourcePath  string
 }
 
 // Submit 创建已有本机意图对应的上传任务，确认回执后更新本机记录。
 func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (UploadIntentResult, error) {
+	// 同一数据目录只能有一个创建提交，防止复用请求与回退上传交叉。
+	if !filepath.IsAbs(uploads.databasePath) {
+		return UploadIntentResult{}, errors.New("无法打开本机上传记录")
+	}
+	lock, err := openExclusiveFileLock(uploads.databasePath + ".submit.lock")
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return UploadIntentResult{}, errors.New("正在提交上传记录，请稍后重试")
+	}
+	if err != nil {
+		return UploadIntentResult{}, errors.New("无法锁定本机上传记录")
+	}
+	defer lock.Close()
+
 	return uploads.actOnUploadIntent(ctx, intentID, func(intent scopedUploadIntent) error {
 		submission, err := readUploadSubmission(ctx, intent.db, intent.owner, intent.id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -27,10 +43,15 @@ func (uploads *UploadIntents) Submit(ctx context.Context, intentID string) (Uplo
 			return errors.New("无法读取本机上传声明")
 		}
 
-		// 1. 待提交记录才发送请求。令牌过期由会话层用原声明重试一次。
+		// 1. 新记录先尝试复用，只有明确未命中时才允许普通创建。
 		switch submission.Status {
-		case "CREATED", "VERIFYING", "MULTIPART_CREATED":
+		case "CREATED", "VERIFYING", "MULTIPART_CREATED", "REUSED":
 			return nil
+		case "PENDING_REUSE", "REUSE_PENDING":
+			err := tryUploadReuse(ctx, intent, submission)
+			if !errors.Is(err, client.ErrReusableContentNotFound) {
+				return err
+			}
 		case "PENDING_CREATE":
 		default:
 			return errors.New("当前上传记录无法创建任务")
@@ -96,10 +117,10 @@ func (uploads *UploadIntents) actOnUploadIntent(ctx context.Context, intentID st
 
 func readUploadSubmission(ctx context.Context, db *sql.DB, owner uploadOwner, id int64) (uploadSubmission, error) {
 	var submission uploadSubmission
-	err := db.QueryRowContext(ctx, `SELECT parent_id, name, size_bytes, sha256, creation_key, status
+	err := db.QueryRowContext(ctx, `SELECT parent_id, name, size_bytes, sha256, creation_key, status, source_path
 		FROM upload_intents WHERE id = ? AND server_address = ? AND user_id = ?`, id, owner.Address, owner.UserID).
 		Scan(&submission.Declaration.ParentID, &submission.Declaration.Name, &submission.Declaration.SizeBytes,
-			&submission.Declaration.SHA256, &submission.CreationKey, &submission.Status)
+			&submission.Declaration.SHA256, &submission.CreationKey, &submission.Status, &submission.SourcePath)
 	return submission, err
 }
 
