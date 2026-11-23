@@ -25,6 +25,7 @@ type loginTransactionScript struct {
 	deviceQueryError                                   func(context.Context) error
 	deviceQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	sessionQuery                                       func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
+	syncDeviceQuery                                    func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	entryQuery                                         func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	objectQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
 	uploadQuery                                        func(context.Context, string, []driver.NamedValue) (driver.Rows, error)
@@ -250,6 +251,10 @@ func loginTransactionTestStore(t *testing.T, script *loginTransactionScript) *St
 		if strings.Contains(query, "auth_sessions") && script.sessionQuery != nil {
 			script.record("session")
 			return script.sessionQuery(ctx, query, arguments)
+		}
+		if strings.Contains(query, "sync_devices") && script.syncDeviceQuery != nil {
+			script.record("sync_device")
+			return script.syncDeviceQuery(ctx, query, arguments)
 		}
 		if strings.Contains(query, "user_devices") {
 			script.record("device")

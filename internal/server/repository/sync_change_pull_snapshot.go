@@ -46,7 +46,7 @@ func (store *Store) WithSyncChangePullSnapshot(ctx context.Context, actor domain
 		if !authorization.SessionExpiresAt.After(time.Now()) {
 			return domain.ErrSessionExpired
 		}
-		state, err := reader.readSyncDeviceState(readContext, actor, false)
+		state, err := reader.readSyncDeviceState(readContext, actor.UserID, actor.DeviceID, false)
 		if err != nil {
 			return err
 		}

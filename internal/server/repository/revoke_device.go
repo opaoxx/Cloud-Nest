@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// RevokeUserDevice 在已认证用户事务中撤销自己的目标设备及其未撤销会话。
+// RevokeUserDevice 在已认证用户事务中撤销目标设备及其会话，并使该设备同步基线失效。
 // 重复调用保留已有撤销时间，缺失或其他账号的目标返回 ErrDeviceNotFound。
 // ctx 与 Store 来自 WithUserTransaction，外层事务提交成功后确认生效。
 func (store *Store) RevokeUserDevice(ctx context.Context, targetDeviceID uint64) error {
@@ -90,7 +91,6 @@ func (store *Store) RevokeUserDevice(ctx context.Context, targetDeviceID uint64)
 		"UPDATE auth_sessions SET revoked_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6) "+
 			"WHERE user_id = ? AND device_id = ? AND revoked_at IS NULL", actor.UserID, targetDeviceID)
 
-	// 5. 检查结果，交由外层事务提交或回滚。
 	if err := updateContext.Err(); err != nil {
 		return err
 	}
@@ -99,6 +99,45 @@ func (store *Store) RevokeUserDevice(ctx context.Context, targetDeviceID uint64)
 	}
 	if result.RowsAffected < 0 {
 		return domain.ErrInvalidSessionData
+	}
+
+	// 5. 在同一事务使目标同步代次失效，外层负责提交或回滚。
+	return store.invalidateRevokedDeviceSyncState(updateContext, target.UserID, target.ID)
+}
+
+// invalidateRevokedDeviceSyncState 仅由已持有账号和目标设备锁的撤销事务调用。
+func (store *Store) invalidateRevokedDeviceSyncState(ctx context.Context, userID, deviceID uint64) error {
+	// 1. 锁读目标设备的同步行。尚未同步过的设备可以直接完成撤销。
+	current, err := store.readSyncDeviceState(ctx, userID, deviceID, true)
+	if errors.Is(err, domain.ErrSyncDeviceNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// 2. 换代并清零位置。重复撤销时也使已有待确认快照失效。
+	var generation domain.SyncCursorGeneration
+	rand.Read(generation[:])
+	if generation == (domain.SyncCursorGeneration{}) || generation == current.Generation {
+		return domain.ErrInvalidSyncDeviceData
+	}
+	result := store.database.WithContext(ctx).Exec(`
+		UPDATE sync_devices
+		SET status = ?, ack_sequence = 0, cursor_generation = ?, updated_at = UTC_TIMESTAMP(6)
+		WHERE user_id = ? AND device_id = ? AND status = ? AND cursor_generation = ? AND ack_sequence = ?`,
+		domain.SyncDeviceStatusResetRequired, generation[:], userID, deviceID,
+		current.Status, current.Generation[:], current.AckSequence)
+
+	// 3. 核对更新结果，由外层确认三类写入一起提交。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if result.Error != nil {
+		return fmt.Errorf("使已撤销设备的同步基线失效失败: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return domain.ErrInvalidSyncDeviceData
 	}
 	return nil
 }

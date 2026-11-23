@@ -53,7 +53,7 @@ func (store *Store) RecordSyncChangeConfirmation(
 	}
 
 	// 3. 等值更新无变化时复核同一行，确认条件是否仍然满足。
-	state, err := store.readSyncDeviceState(ctx, actor, true)
+	state, err := store.readSyncDeviceState(ctx, actor.UserID, actor.DeviceID, true)
 	if errors.Is(err, domain.ErrSyncDeviceNotFound) {
 		return false, nil
 	}

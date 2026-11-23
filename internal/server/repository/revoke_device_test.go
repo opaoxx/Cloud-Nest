@@ -12,15 +12,22 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/domain"
 )
 
+type revokedSyncDeviceRows struct{ *idempotencyRecordRows }
+
+func (*revokedSyncDeviceRows) Columns() []string {
+	return []string{"status", "cursor_generation", "ack_sequence"}
+}
+
 func TestRevokeUserDeviceResults(t *testing.T) {
 	queryFault, deviceFault, sessionFault := errors.New("query fault"), errors.New("device write fault"), errors.New("sessions write fault")
+	syncFault := errors.New("sync device read fault")
 	callbackFault, commitFault := errors.New("callback fault"), errors.New("commit fault")
 	for _, testCase := range []struct {
-		name                                                                                       string
-		current, maximum, alreadyRevoked, scopeMissing, scopeInvalid, targetMissing, targetInvalid bool
-		scopeError, targetError, deviceError, sessionError, callbackError, commitError, want       error
-		deviceRows, sessionRows                                                                    int64
-		deviceWrites, sessionWrites, targetQueries                                                 int
+		name                                                                                            string
+		current, maximum, alreadyRevoked, scopeMissing, scopeInvalid, targetMissing, targetInvalid      bool
+		scopeError, targetError, deviceError, sessionError, syncError, callbackError, commitError, want error
+		deviceRows, sessionRows                                                                         int64
+		deviceWrites, sessionWrites, targetQueries                                                      int
 	}{
 		{name: "other device", deviceRows: 1, sessionRows: 3, deviceWrites: 1, sessionWrites: 1, targetQueries: 1},
 		{name: "current device", current: true, deviceRows: 1, sessionRows: 2, deviceWrites: 1, sessionWrites: 1, targetQueries: 1},
@@ -40,11 +47,12 @@ func TestRevokeUserDeviceResults(t *testing.T) {
 		{name: "device write fault", deviceError: deviceFault, deviceWrites: 1, targetQueries: 1, want: deviceFault},
 		{name: "session write fault", deviceRows: 1, deviceWrites: 1, sessionWrites: 1, targetQueries: 1, sessionError: sessionFault, want: sessionFault},
 		{name: "negative session rows", deviceRows: 1, sessionRows: -1, deviceWrites: 1, sessionWrites: 1, targetQueries: 1, want: domain.ErrInvalidSessionData},
+		{name: "sync read fault", deviceRows: 1, sessionRows: 1, deviceWrites: 1, sessionWrites: 1, targetQueries: 1, syncError: syncFault, want: syncFault},
 		{name: "callback fault", deviceRows: 1, sessionRows: 3, deviceWrites: 1, sessionWrites: 1, targetQueries: 1, callbackError: callbackFault, want: callbackFault},
 		{name: "commit fault", deviceRows: 1, sessionRows: 3, deviceWrites: 1, sessionWrites: 1, targetQueries: 1, commitError: commitFault, want: commitFault},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			// 1. 使用现有事务驱动，分别记录当前身份、目标查询和两类写入。
+			// 1. 使用现有事务驱动，记录身份、目标查询、认证写入及同步锁读。
 			actor := domain.Actor{UserID: 7, DeviceID: 11, SessionID: 17}
 			targetID := uint64(19)
 			if testCase.current {
@@ -117,6 +125,15 @@ func TestRevokeUserDeviceResults(t *testing.T) {
 				}
 				return driver.RowsAffected(testCase.sessionRows), testCase.sessionError
 			}
+			syncQueries := 0
+			script.syncDeviceQuery = func(_ context.Context, statement string, arguments []driver.NamedValue) (driver.Rows, error) {
+				syncQueries++
+				if statement != "SELECT status, cursor_generation, ack_sequence FROM sync_devices WHERE user_id = ? AND device_id = ? FOR UPDATE" ||
+					len(arguments) != 2 || arguments[0].Value != actor.UserID || arguments[1].Value != targetID {
+					t.Error("同步行锁读未绑定目标设备和账号")
+				}
+				return &revokedSyncDeviceRows{&idempotencyRecordRows{}}, testCase.syncError
+			}
 			// 2. 把所有写入与故障交给同一个外层事务。
 			err := store.WithUserTransaction(context.Background(), actor, func(ctx context.Context, txStore *Store) error {
 				transactionContext = ctx
@@ -137,6 +154,13 @@ func TestRevokeUserDeviceResults(t *testing.T) {
 			}
 			if deviceWrites == 1 && sessionWrites == 1 && !strings.Contains(script.sequence(), "restore,revoke") {
 				t.Fatal("设备与会话写入顺序错误")
+			}
+			wantSyncQueries := testCase.sessionWrites
+			if testCase.sessionError != nil || testCase.sessionRows < 0 {
+				wantSyncQueries = 0
+			}
+			if syncQueries != wantSyncQueries || (syncQueries == 1 && !strings.Contains(script.sequence(), "revoke,sync_device")) {
+				t.Fatal("同步行没有在会话撤销后复核", script.sequence())
 			}
 		})
 	}

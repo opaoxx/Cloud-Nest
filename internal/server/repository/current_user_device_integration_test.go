@@ -14,6 +14,7 @@ func TestFindCurrentUserDeviceIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
 	pool, store, actor := trashEntryTestDatabase(t, ctx)
+	installSyncDeviceFixtureTable(t, ctx, pool)
 
 	// 1. 准备同账号其他设备和另一账号设备，固定当前设备的时间字段。
 	if _, err := pool.ExecContext(ctx, `INSERT INTO user_devices(id,user_id,installation_id,name,platform) VALUES

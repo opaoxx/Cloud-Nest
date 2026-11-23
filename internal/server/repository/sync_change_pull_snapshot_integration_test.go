@@ -84,7 +84,7 @@ func TestWithSyncChangePullSnapshotIntegration(t *testing.T) {
 			if _, err := pool.ExecContext(readContext, "UPDATE sync_devices SET status='ACTIVE',ack_sequence=17,cursor_generation=? WHERE device_id=19", otherGeneration[:]); err != nil {
 				return err
 			}
-			state, err := reader.readSyncDeviceState(readContext, actor, false)
+			state, err := reader.readSyncDeviceState(readContext, actor.UserID, actor.DeviceID, false)
 			if err != nil || state != pending {
 				t.Fatalf("原事务混入并发更新：%+v，错误 %v", state, err)
 			}

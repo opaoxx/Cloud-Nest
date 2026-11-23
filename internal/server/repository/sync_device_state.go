@@ -30,10 +30,10 @@ func (store *Store) FindCurrentSyncDeviceState(ctx context.Context) (domain.Sync
 	}
 
 	// 2. 按账号和设备锁读当前行，取得当前已提交状态。
-	return store.readSyncDeviceState(ctx, actor, true)
+	return store.readSyncDeviceState(ctx, actor.UserID, actor.DeviceID, true)
 }
 
-func (store *Store) readSyncDeviceState(ctx context.Context, actor domain.Actor, forUpdate bool) (domain.SyncDeviceState, error) {
+func (store *Store) readSyncDeviceState(ctx context.Context, userID, deviceID uint64, forUpdate bool) (domain.SyncDeviceState, error) {
 	// 1. 读取指定账号与设备的同步记录，写事务需要对该行加锁。
 	var empty domain.SyncDeviceState
 	var state domain.SyncDeviceState
@@ -42,7 +42,7 @@ func (store *Store) readSyncDeviceState(ctx context.Context, actor domain.Actor,
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
-	err := store.database.WithContext(ctx).Raw(query, actor.UserID, actor.DeviceID).
+	err := store.database.WithContext(ctx).Raw(query, userID, deviceID).
 		Row().Scan(&state.Status, &generation, &state.AckSequence)
 	if contextError := ctx.Err(); contextError != nil {
 		return empty, contextError
