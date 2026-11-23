@@ -11,7 +11,11 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
-const offlineSyncDeviceInterval = time.Hour
+const (
+	offlineSyncDeviceInterval   = time.Hour
+	offlineSyncDeviceBatchLimit = domain.MaxOfflineSyncDeviceCandidates
+	offlineSyncDevicePageSize   = 50
+)
 
 type offlineSyncDeviceWorkerStore interface {
 	ReadOfflineSyncDeviceCutoff(context.Context) (time.Time, error)
@@ -30,10 +34,8 @@ func startServerOfflineSyncDeviceWorker(ctx context.Context, store offlineSyncDe
 	done := make(chan struct{})
 
 	// 2. 运行串行循环，记录轮次汇总和固定错误码。
-	const batchLimit = domain.MaxOfflineSyncDeviceCandidates
-	const pageSize = 50
 	logger.Info("离线设备重建 worker 已启动", "interval_ms", offlineSyncDeviceInterval.Milliseconds(),
-		"batch_limit", batchLimit, "page_size", pageSize)
+		"batch_limit", offlineSyncDeviceBatchLimit, "page_size", offlineSyncDevicePageSize)
 	go func() {
 		defer close(done)
 		defer cancel()
@@ -42,7 +44,7 @@ func startServerOfflineSyncDeviceWorker(ctx context.Context, store offlineSyncDe
 		err := service.RunOfflineSyncDeviceLoop(workerContext, offlineSyncDeviceInterval,
 			func(roundContext context.Context, afterDeviceID uint64) (service.OfflineSyncDeviceBatchResult, error) {
 				roundStartedAt = time.Now()
-				return batch.RunOnce(roundContext, afterDeviceID, batchLimit, pageSize)
+				return batch.RunOnce(roundContext, afterDeviceID, offlineSyncDeviceBatchLimit, offlineSyncDevicePageSize)
 			},
 			func(summary service.OfflineSyncDeviceBatchResult, roundError error) {
 				reportOfflineSyncDeviceRound(logger, summary, roundError, workerContext.Err(), time.Since(roundStartedAt))

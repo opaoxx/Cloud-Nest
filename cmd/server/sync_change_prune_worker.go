@@ -21,15 +21,19 @@ type syncChangePruneWorkerStore interface {
 
 var _ syncChangePruneWorkerStore = (*repository.Store)(nil)
 
-// startServerSyncChangePruneWorker 装配同步日志裁剪循环，返回取消并等待退出的方法。
-func startServerSyncChangePruneWorker(ctx context.Context, store syncChangePruneWorkerStore, logger *slog.Logger) func() {
-	// 1. 绑定仓储入口和默认参数，创建取消信号。
-	batch := service.NewSyncChangePruneBatch(store.ReadSyncChangePruneCutoff, store.ListSyncChangePruneCandidates, store.PruneSyncChangeLogBatch)
-	limits := service.SyncChangePruneBatchLimits{
+func syncChangePruneWorkerLimits() service.SyncChangePruneBatchLimits {
+	return service.SyncChangePruneBatchLimits{
 		ScanLimit:          service.MaxSyncChangePruneAccountsPerRound,
 		PageSize:           50,
 		AccountDeleteLimit: domain.MaxSyncChangePruneBatchSize,
 	}
+}
+
+// startServerSyncChangePruneWorker 装配同步日志裁剪循环，返回取消并等待退出的方法。
+func startServerSyncChangePruneWorker(ctx context.Context, store syncChangePruneWorkerStore, logger *slog.Logger) func() {
+	// 1. 绑定仓储入口和默认参数，创建取消信号。
+	batch := service.NewSyncChangePruneBatch(store.ReadSyncChangePruneCutoff, store.ListSyncChangePruneCandidates, store.PruneSyncChangeLogBatch)
+	limits := syncChangePruneWorkerLimits()
 	workerContext, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 
