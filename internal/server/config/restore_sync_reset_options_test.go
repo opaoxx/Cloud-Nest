@@ -6,7 +6,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
+
+const fixtureRestoreServerUUID = "4d835961-c21b-4910-8c42-0808c8f03362"
 
 func TestParseRestoreSyncResetOptionsAcceptsExplicitOptions(t *testing.T) {
 	for _, fixture := range []struct {
@@ -21,10 +25,11 @@ func TestParseRestoreSyncResetOptionsAcceptsExplicitOptions(t *testing.T) {
 		t.Run(fixture.name, func(t *testing.T) {
 			const roster = "backup files/original roster.json"
 			args := []string{"-db-address", fixture.address, "-database=cloudnest_restore_fixture",
-				"-roster", roster, "-mode", string(fixture.mode)}
+				"-roster", roster, "-mode", string(fixture.mode), "-server-uuid", fixtureRestoreServerUUID}
 			options, err := ParseRestoreSyncResetOptions(args)
 			expected := RestoreSyncResetOptions{
 				DatabaseAddress: fixture.normalized, DatabaseName: "cloudnest_restore_fixture", RosterPath: roster, Mode: fixture.mode,
+				ServerUUID: uuid.MustParse(fixtureRestoreServerUUID),
 			}
 			if err != nil || options != expected {
 				t.Fatalf("解析结果为 %+v、%v，预期 %+v", options, err, expected)
@@ -37,7 +42,7 @@ func TestParseRestoreSyncResetOptionsRequiresExplicitArguments(t *testing.T) {
 	t.Setenv("CLOUDNEST_DB_ADDRESS", "127.0.0.1:54123")
 	t.Setenv("CLOUDNEST_DB_NAME", "cloudnest_restore_fixture")
 	arguments := []string{"-db-address", "127.0.0.1:54123", "-database", "cloudnest_restore_fixture",
-		"-roster", "original.json", "-mode", "initial"}
+		"-roster", "original.json", "-mode", "initial", "-server-uuid", fixtureRestoreServerUUID}
 	for index := 0; index < len(arguments); index += 2 {
 		name := arguments[index]
 		t.Run(name, func(t *testing.T) {
@@ -51,7 +56,8 @@ func TestParseRestoreSyncResetOptionsRequiresExplicitArguments(t *testing.T) {
 }
 
 func TestParseRestoreSyncResetOptionsRejectsInvalidArguments(t *testing.T) {
-	valid := []string{"-db-address", "127.0.0.1:54123", "-database", "cloudnest_restore_fixture", "-roster", "original.json", "-mode", "initial"}
+	valid := []string{"-db-address", "127.0.0.1:54123", "-database", "cloudnest_restore_fixture", "-roster", "original.json",
+		"-mode", "initial", "-server-uuid", fixtureRestoreServerUUID}
 	for _, fixture := range []struct {
 		name      string
 		replaceAt int
@@ -69,6 +75,8 @@ func TestParseRestoreSyncResetOptionsRejectsInvalidArguments(t *testing.T) {
 		{name: "database whitespace", replaceAt: 3, value: "cloudnest_restore_fixture ", wantInErr: "-database"},
 		{name: "blank roster", replaceAt: 5, value: "\t ", wantInErr: "-roster"},
 		{name: "unknown mode", replaceAt: 7, value: "restart", wantInErr: "-mode"},
+		{name: "invalid UUID", replaceAt: 9, value: "bad-uuid", wantInErr: "-server-uuid"},
+		{name: "zero UUID", replaceAt: 9, value: uuid.Nil.String(), wantInErr: "-server-uuid"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			args := slices.Clone(valid)

@@ -14,14 +14,16 @@ import (
 // CheckSchema 在最多 5 秒内只读核对迁移记录是否符合当前程序预期。
 // 所有已记录版本必须与内嵌清单一致且为 clean 状态。本方法不执行迁移或修复。
 // 检查不验证实际表结构，也不代替迁移期间的停机维护流程。
-func CheckSchema(ctx context.Context, connectionPool *sql.DB) error {
+func CheckSchema(ctx context.Context, connection interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) error {
 	// 1. 设置检查期限，并取得内嵌文件对应的有序迁移清单。
 	checkContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	expectedMigrations := migrations.Ordered()
 
 	// 2. 按版本读取，最多多读一条以识别清单之外的记录。
-	rows, err := connectionPool.QueryContext(checkContext,
+	rows, err := connection.QueryContext(checkContext,
 		"SELECT version, checksum, dirty FROM schema_migrations ORDER BY version LIMIT ?", len(expectedMigrations)+1)
 	if err != nil {
 		var mysqlError *mysql.MySQLError
