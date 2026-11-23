@@ -281,8 +281,14 @@ func waitForBackupFixtureClient(t *testing.T, ctx context.Context, address strin
 
 func loginBackupFixture(t *testing.T, ctx context.Context, client *backupSourceClient, password string) dto.LoginData {
 	t.Helper()
+	return loginBackupFixtureWithInstallation(t, ctx, client, password, uuid.NewString())
+}
+
+// loginBackupFixtureWithInstallation 供同一安装标识的重新登录测试复用。
+func loginBackupFixtureWithInstallation(t *testing.T, ctx context.Context, client *backupSourceClient, password, installationID string) dto.LoginData {
+	t.Helper()
 	body, err := json.Marshal(dto.LoginRequest{Username: "root", Password: password, DeviceName: "隔离备份夹具",
-		InstallationID: uuid.NewString(), ClientType: "native", Platform: "WINDOWS"})
+		InstallationID: installationID, ClientType: "native", Platform: "WINDOWS"})
 	if err != nil {
 		t.Fatal(err)
 	}
