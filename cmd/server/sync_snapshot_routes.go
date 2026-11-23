@@ -58,7 +58,24 @@ func registerServerSyncSnapshotRoutes(
 			})
 		}, time.Now)
 
-	// 3. 在实际启动的路由器注册创建、续页和确认，共用 Bearer 授权。
+	// 3. 从同一主密钥装配增量游标签发与校验，将拉取绑定到只读一致性事务。
+	changeCursorSigner, err := service.NewSyncChangeCursorSigner(masterKey)
+	if err != nil {
+		return err
+	}
+	changeCursorVerifier, err := service.NewSyncChangeCursorVerifier(masterKey)
+	if err != nil {
+		return err
+	}
+	pullResolver := service.NewSyncChangePullStartResolver(baselineVerifier, changeCursorVerifier, time.Now)
+	puller := service.NewSyncChangePullService(pullResolver,
+		func(ctx context.Context, actor domain.Actor, read func(context.Context, service.SyncChangePageReader, domain.SyncDeviceState) error) error {
+			return store.WithSyncChangePullSnapshot(ctx, actor, func(readContext context.Context, snapshotStore *repository.Store, state domain.SyncDeviceState) error {
+				return read(readContext, snapshotStore, state)
+			})
+		}, changeCursorSigner)
+
+	// 4. 在实际启动的路由器注册快照和增量拉取，共用 Bearer 授权。
 	serverhttp.RegisterCreateSyncSnapshotRoute(router, authorize, creator.Create)
 	serverhttp.RegisterSyncSnapshotPageRoute(router, authorize,
 		func(ctx context.Context, actor domain.Actor, snapshotID uuid.UUID, cursor string) (*domain.SyncSnapshotPageResult, error) {
@@ -69,5 +86,6 @@ func registerServerSyncSnapshotRoutes(
 			return delivery.Build(ctx, page.Binding, page.Header, page.ExpiresAt, &page.Page)
 		})
 	serverhttp.RegisterConfirmSyncSnapshotBaselineRoute(router, authorize, confirmer.Confirm)
+	serverhttp.RegisterPullSyncChangesRoute(router, authorize, puller.Pull)
 	return nil
 }

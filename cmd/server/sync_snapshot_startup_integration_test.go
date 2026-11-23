@@ -122,6 +122,10 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 	}
 	firstConfirmPath := path + "/" + page.Data.SnapshotID + "/confirm"
 	firstBaselineToken := *page.Data.BaselineToken
+	const pullPath = "/api/v1/sync/changes/pull"
+	pullBody := func(field, token string) *strings.Reader {
+		return strings.NewReader(`{"` + field + `":` + strconv.Quote(token) + `,"page_size":1}`)
+	}
 	pending := readDeviceBaseline()
 	unauthorized := api
 	unauthorized.accessToken = ""
@@ -129,6 +133,15 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 	unauthorized.request(t, ctx, http.MethodPost, firstConfirmPath, "", baselineBody(firstBaselineToken), http.StatusUnauthorized, &denied)
 	if denied.Error.Code != "AUTH_REQUIRED" || denied.RequestID == "" || readDeviceBaseline() != pending {
 		t.Fatalf("未授权确认的错误或持久状态不符：%+v", denied)
+	}
+	unauthorized.request(t, ctx, http.MethodPost, pullPath, "", pullBody("baseline_token", firstBaselineToken), http.StatusUnauthorized, &denied)
+	if denied.Error.Code != "AUTH_REQUIRED" || denied.RequestID == "" || readDeviceBaseline() != pending {
+		t.Fatal("未授权拉取应被拒绝且设备记录保持原值")
+	}
+	var pendingPull dto.ErrorResponse
+	api.request(t, ctx, http.MethodPost, pullPath, "", pullBody("baseline_token", firstBaselineToken), http.StatusGone, &pendingPull)
+	if pendingPull.Error.Code != "CURSOR_EXPIRED" || readDeviceBaseline() != pending {
+		t.Fatal("未确认的快照凭据应失效且设备记录保持原值")
 	}
 	confirm := func(target, token, want string) dto.ConfirmSyncSnapshotBaselineResponse {
 		t.Helper()
@@ -148,10 +161,50 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 		t.Fatal("同一凭据重试未保留已提交的设备记录")
 	}
 
-	// 6. 从新快照确认非零序号，旧代次的凭据必须失效，并正常关闭隔离服务。
+	// 6. 再创建一条合成目录，从确认的基线拉取、续读并轮询空页。
+	var later dto.CreateDirectoryResponse
+	api.request(t, ctx, http.MethodPost, "/api/v1/directories", "startup-sync-fixture-second-directory",
+		strings.NewReader(`{"parent_id":"11","name":"确认之后创建"}`), http.StatusCreated, &later)
+	pull := func(field, token string) dto.PullSyncChangesResponse {
+		t.Helper()
+		var result dto.PullSyncChangesResponse
+		api.request(t, ctx, http.MethodPost, pullPath, "", pullBody(field, token), http.StatusOK, &result)
+		if result.RequestID == "" || result.Data.Events == nil || result.Data.HighWaterSequence != "2" || result.Data.NextCursor == "" {
+			t.Fatal("增量页缺少有效的上界、请求 ID、数组或续读游标")
+		}
+		return result
+	}
+	assertDirectoryEvent := func(page dto.PullSyncChangesResponse, sequence string, entry dto.CreatedDirectorySummary, hasMore bool) {
+		t.Helper()
+		if len(page.Data.Events) != 1 || page.Data.HasMore != hasMore {
+			t.Fatalf("增量页序号 %s 的条数或后续标记不符", sequence)
+		}
+		event := page.Data.Events[0]
+		var payload map[string]string
+		wantPayload := map[string]string{"entry_id": entry.ID, "parent_id": entry.ParentID, "name": entry.Name, "revision": entry.Revision}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || event.Sequence != sequence ||
+			event.EntryID != entry.ID || event.Revision != entry.Revision || event.EventType != "DIRECTORY_CREATED" ||
+			!reflect.DeepEqual(payload, wantPayload) {
+			t.Fatalf("拉取的目录事件和已提交目录不符，期望序号 %s，错误 %v", sequence, err)
+		}
+	}
+	firstChanges := pull("baseline_token", firstBaselineToken)
+	assertDirectoryEvent(firstChanges, "1", added.Data.Entry, true)
+	again := pull("baseline_token", firstBaselineToken)
+	if again.RequestID == firstChanges.RequestID || !reflect.DeepEqual(again.Data, firstChanges.Data) {
+		t.Fatal("重复拉取应交付同一页与新请求 ID")
+	}
+	lastChanges := pull("cursor", firstChanges.Data.NextCursor)
+	assertDirectoryEvent(lastChanges, "2", later.Data.Entry, false)
+	empty := pull("cursor", lastChanges.Data.NextCursor)
+	if len(empty.Data.Events) != 0 || empty.Data.HasMore || empty.Data.NextCursor != lastChanges.Data.NextCursor || readDeviceBaseline() != active {
+		t.Fatal("空页应保留续读位置，拉取过程应保持设备状态、确认位置和时间不变")
+	}
+
+	// 7. 从新快照确认非零序号，旧代次的确认和拉取凭据必须失效。
 	var nextBaseline dto.SyncSnapshotPageResponse
 	api.request(t, ctx, http.MethodPost, path, "startup-sync-snapshot-new-baseline", strings.NewReader(`{}`), http.StatusCreated, &nextBaseline)
-	if nextBaseline.Data.SnapshotID == "" || nextBaseline.Data.SnapshotID == first.Data.SnapshotID || nextBaseline.Data.HighWaterSequence != "1" ||
+	if nextBaseline.Data.SnapshotID == "" || nextBaseline.Data.SnapshotID == first.Data.SnapshotID || nextBaseline.Data.HighWaterSequence != "2" ||
 		nextBaseline.Data.BaselineToken == nil || nextBaseline.Data.NextCursor != nil {
 		t.Fatal("新快照未提供非零截止序号的末页凭据")
 	}
@@ -164,12 +217,18 @@ func TestServerSyncSnapshotStartupIntegration(t *testing.T) {
 	if expired.Error.Code != "CURSOR_EXPIRED" || expired.RequestID == "" || readDeviceBaseline() != newPending {
 		t.Fatalf("失效凭据的错误或持久状态不符：%+v", expired)
 	}
-	confirm(path+"/"+nextBaseline.Data.SnapshotID+"/confirm", *nextBaseline.Data.BaselineToken, "1")
-	if state := readDeviceBaseline(); state.status != "ACTIVE" || state.position != 1 || state.generation != newPending.generation {
+	confirm(path+"/"+nextBaseline.Data.SnapshotID+"/confirm", *nextBaseline.Data.BaselineToken, "2")
+	if state := readDeviceBaseline(); state.status != "ACTIVE" || state.position != 2 || state.generation != newPending.generation {
 		t.Fatalf("非零序号确认未提交：%+v", state)
+	}
+	newActive := readDeviceBaseline()
+	var staleCursor dto.ErrorResponse
+	api.request(t, ctx, http.MethodPost, pullPath, "", pullBody("cursor", lastChanges.Data.NextCursor), http.StatusGone, &staleCursor)
+	if staleCursor.Error.Code != "CURSOR_EXPIRED" || staleCursor.RequestID == "" || readDeviceBaseline() != newActive {
+		t.Fatal("新代次生效后应拒绝旧代次的增量游标且保持设备记录")
 	}
 	if _, err := stop(); err != nil {
 		t.Fatal("隔离服务未正常退出", err)
 	}
-	t.Logf("独占库 %s，回环服务 %s。三页保持截止序号 0，随后确认 0 并重试，新代次拒绝旧凭据且确认到 1", databaseName, api.baseURL)
+	t.Logf("独占库 %s，回环服务 %s。确认基线 0，拉取 1、2 和空页，确认位置原样，新代次拒绝旧游标并确认到 2", databaseName, api.baseURL)
 }

@@ -326,10 +326,9 @@ paths:
     post:
       tags: [Sync]
       operationId: pullSyncChanges
-      x-cloudnest-status: planned
       summary: 按设备游标读取账号已提交的变更
       description: |
-        计划端点。首次使用已确认快照的有效末页凭据，从快照截止序号之后开始。后续使用已持久化的增量游标。
+        首次使用已确认快照的有效末页凭据，从快照截止序号之后开始。后续使用已持久化的增量游标。
         在同一只读视图复核账号、设备、代次和日志边界，再按序返回连续事件。读取不推进确认位置。
         next_cursor 始终返回，包括没有新事件时。客户端先持久化其对应的事件结果或可恢复待办，再保存游标。
       security:

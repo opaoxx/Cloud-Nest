@@ -650,7 +650,7 @@ func runWithServerDependencies(
 	healthService := service.NewHealthService(connectionPool.PingContext, storageClient.CheckBucket)
 	router := serverhttp.NewRouter(logger, allowedOrigins, healthService.Ready)
 	if err := registerServerSyncSnapshotRoutes(router, store, jwtConfig.SigningKey, authorizationService.Authorize); err != nil {
-		logger.Error("装配一致性快照路由失败", "stage", "application", "error", err)
+		logger.Error("装配同步路由失败", "stage", "application", "error", err)
 		return err
 	}
 	serverhttp.RegisterSizeEntryPageRoute(router, authorizationService.Authorize, directoryPageService.List, globalPageService.List, recentPageService.List, namePageService.List, sizePageService.List)

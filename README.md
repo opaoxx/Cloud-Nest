@@ -6,6 +6,8 @@
 
 同步快照支持 `POST /api/v1/sync/snapshots` 创建首页、`GET /api/v1/sync/snapshots/{snapshot_id}` 读取续页，以及 `POST /api/v1/sync/snapshots/{snapshot_id}/confirm` 确认设备基线。三个端点均需 Bearer 认证。创建使用幂等键，续页使用分页凭据，客户端保存整份基线后使用末页的 `baseline_token` 确认。[B5 快照协议](docs/B5-同步与历史协议.md#10-一致性快照的创建与分页)
 
+确认基线后，通过受 Bearer 认证保护的 `POST /api/v1/sync/changes/pull` 读取增量变更。首次使用有效的 `baseline_token`，之后提交已持久化的 `cursor`。空页也会返回续读游标，拉取保持设备确认位置不变。[B5 增量拉取协议](docs/B5-同步与历史协议.md#12-增量变更拉取)
+
 ## 数据库迁移
 
 开发库 cloudnest 已应用版本 1，包含八张业务表和 schema_migrations。业务账号为 root，开发密码为 root，密码以 bcrypt 存储，配额为 100 GiB，根目录已创建。
