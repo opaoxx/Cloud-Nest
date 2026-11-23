@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"time"
@@ -116,27 +115,14 @@ func (store *Store) invalidateRevokedDeviceSyncState(ctx context.Context, userID
 		return err
 	}
 
-	// 2. 换代并清零位置，已有待确认快照也随代次变化失效。
-	var generation domain.SyncCursorGeneration
-	rand.Read(generation[:])
-	if generation == (domain.SyncCursorGeneration{}) || generation == current.Generation {
-		return domain.ErrInvalidSyncDeviceData
-	}
-	result := store.database.WithContext(ctx).Exec(`
-		UPDATE sync_devices
-		SET status = ?, ack_sequence = 0, cursor_generation = ?, updated_at = UTC_TIMESTAMP(6)
-		WHERE user_id = ? AND device_id = ? AND status = ? AND cursor_generation = ? AND ack_sequence = ?`,
-		domain.SyncDeviceStatusResetRequired, generation[:], userID, deviceID,
-		current.Status, current.Generation[:], current.AckSequence)
-
-	// 3. 核对更新结果，交由外层事务统一提交或回滚。
-	if err := ctx.Err(); err != nil {
+	// 2. 用锁内原状态换代，已有待确认快照也随代次变化失效。
+	updated, err := store.markLockedSyncDeviceResetRequired(ctx, userID, deviceID, current, "使已撤销设备的同步基线失效失败")
+	if err != nil {
 		return err
 	}
-	if result.Error != nil {
-		return fmt.Errorf("使已撤销设备的同步基线失效失败: %w", result.Error)
-	}
-	if result.RowsAffected != 1 {
+
+	// 3. 核对同步行必须更新成功，由外层事务提交或回滚。
+	if !updated {
 		return domain.ErrInvalidSyncDeviceData
 	}
 	return nil

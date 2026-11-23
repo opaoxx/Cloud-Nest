@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -63,4 +64,51 @@ func (store *Store) readSyncDeviceState(ctx context.Context, userID, deviceID ui
 		return empty, domain.ErrInvalidSyncDeviceData
 	}
 	return state, nil
+}
+
+// markLockedSyncDeviceResetRequired 仅用于持有账号和同步行锁的事务。
+// 若旧状态与条件不符，返回 false 供调用方按本次操作的错误语义处理。
+func (store *Store) markLockedSyncDeviceResetRequired(
+	ctx context.Context, userID, deviceID uint64, current domain.SyncDeviceState, failureMessage string,
+) (bool, error) {
+	// 1. 校验事务归属，为已锁定的同步行生成新代次。
+	if ctx == nil || store == nil || store.database == nil || userID == 0 ||
+		userID != store.loginUserID || deviceID == 0 || !current.IsValid() {
+		return false, domain.ErrInvalidSyncDeviceData
+	}
+	if _, transactional := store.database.Statement.ConnPool.(gorm.TxCommitter); !transactional {
+		return false, domain.ErrInvalidSyncDeviceData
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	var generation domain.SyncCursorGeneration
+	rand.Read(generation[:])
+	if generation == (domain.SyncCursorGeneration{}) || generation == current.Generation {
+		return false, domain.ErrInvalidSyncDeviceData
+	}
+
+	// 2. 以原状态、代次和位置为条件，换代并清零确认位置。
+	result := store.database.WithContext(ctx).Exec(`
+		UPDATE sync_devices
+		SET status = ?, ack_sequence = 0, cursor_generation = ?, updated_at = UTC_TIMESTAMP(6)
+		WHERE user_id = ? AND device_id = ? AND status = ? AND cursor_generation = ? AND ack_sequence = ?`,
+		domain.SyncDeviceStatusResetRequired, generation[:], userID, deviceID,
+		current.Status, current.Generation[:], current.AckSequence)
+
+	// 3. 回传实际命中结果，外层事务负责提交或回滚。
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if result.Error != nil {
+		return false, fmt.Errorf("%s: %w", failureMessage, result.Error)
+	}
+	switch result.RowsAffected {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, domain.ErrInvalidSyncDeviceData
+	}
 }
