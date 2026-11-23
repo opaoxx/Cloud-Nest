@@ -78,6 +78,10 @@ func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
 		t.Fatalf("首批结果或失败位置不符：%+v，%v，页 %v，尝试 %v", first, err, pages, attempts)
 	}
 	partial := readStates()
+	if verified, err := service.VerifyRestoredSyncDeviceReset(ctx, before, 2, store.ListRestoredSyncDeviceCandidates); verified != 2 ||
+		!errors.Is(err, service.ErrRestoredSyncDeviceResetIncomplete) || !slices.Equal(readStates(), partial) {
+		t.Fatalf("部分换代目标应被只读复核拒绝：%d，%v", verified, err)
+	}
 	assertRotated := func(previous, current domain.RestoredSyncDeviceCandidate) {
 		t.Helper()
 		if current.UserID != previous.UserID || current.DeviceID != previous.DeviceID ||
@@ -109,5 +113,10 @@ func TestRestoredSyncDeviceBatchIntegration(t *testing.T) {
 	for index := 2; index < 4; index++ {
 		assertRotated(before[index], finished[index])
 	}
+	if verified, err := service.VerifyRestoredSyncDeviceReset(ctx, before, 2, store.ListRestoredSyncDeviceCandidates); verified != 4 ||
+		err != nil || !slices.Equal(readStates(), finished) {
+		t.Fatalf("完成换代的目标未通过全量只读复核：%d，%v", verified, err)
+	}
+	t.Log("部分换代复核拒绝，全量换代后四条均通过，复核保持目标设备状态")
 	t.Log("故障前两项已提交，游标停在设备 20；修复夹具后从 20 继续处理 21 和 29")
 }
