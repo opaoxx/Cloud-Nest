@@ -44,11 +44,23 @@ type backupManifestObject struct {
 	PayloadPath string  `json:"payload_path"`
 }
 
+type backupManifestHistory struct {
+	ID            uint64    `json:"id,string"`
+	UserID        uint64    `json:"user_id,string"`
+	EntryID       uint64    `json:"entry_id,string"`
+	Revision      uint64    `json:"revision,string"`
+	ObjectID      uint64    `json:"object_id,string"`
+	SizeBytes     uint64    `json:"size_bytes"`
+	CreatedAt     time.Time `json:"created_at"`
+	RetainedUntil time.Time `json:"retained_until"`
+}
+
 type backupSourceManifest struct {
-	DatabaseSHA256 string                 `json:"database_sha256"`
-	Directories    []backupManifestEntry  `json:"directories"`
-	FileReferences []backupManifestFile   `json:"file_references"`
-	Objects        []backupManifestObject `json:"objects"`
+	DatabaseSHA256    string                  `json:"database_sha256"`
+	Directories       []backupManifestEntry   `json:"directories"`
+	FileReferences    []backupManifestFile    `json:"file_references"`
+	HistoryReferences []backupManifestHistory `json:"history_references,omitempty"`
+	Objects           []backupManifestObject  `json:"objects"`
 }
 
 func TestServerBackupSourceManifestIntegration(t *testing.T) {
@@ -65,6 +77,15 @@ func TestServerBackupSourceManifestIntegration(t *testing.T) {
 }
 
 func writeAndVerifyBackupSourceManifest(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string, dump []byte) backupSourceManifest {
+	t.Helper()
+	decoded, saved := writeBackupSourceManifest(t, ctx, fixture, backupDir, dump)
+	verifyBackupSourceManifest(t, ctx, fixture, decoded)
+	t.Logf("清单 %d B，SHA-256 %x，绑定 SQL SHA-256 %s，包含 %d 个目录、%d 条文件引用及 %d 个对象版本",
+		len(saved), sha256.Sum256(saved), decoded.DatabaseSHA256, len(decoded.Directories), len(decoded.FileReferences), len(decoded.Objects))
+	return decoded
+}
+
+func writeBackupSourceManifest(t *testing.T, ctx context.Context, fixture backupSourceFixture, backupDir string, dump []byte) (backupSourceManifest, []byte) {
 	t.Helper()
 	// 1. 使用同一次停写得到的 SQL 摘要和目录与对象记录。
 	databaseSHA256 := fmt.Sprintf("%x", sha256.Sum256(dump))
@@ -90,18 +111,24 @@ func writeAndVerifyBackupSourceManifest(t *testing.T, ctx context.Context, fixtu
 	if err := json.Unmarshal(saved, &decoded); err != nil || decoded.DatabaseSHA256 != databaseSHA256 {
 		t.Fatal("清单未绑定本轮 SQL 快照", err)
 	}
-	verifyBackupSourceManifest(t, ctx, fixture, decoded)
-	t.Logf("清单 %d B，SHA-256 %x，绑定 SQL SHA-256 %s，包含 %d 个目录、%d 条文件引用及 %d 个对象版本",
-		len(saved), sha256.Sum256(saved), decoded.DatabaseSHA256, len(decoded.Directories), len(decoded.FileReferences), len(decoded.Objects))
-	return decoded
+	return decoded, saved
 }
 
 func readBackupSourceManifest(ctx context.Context, pool *sql.DB, bucket, databaseSHA256 string) (backupSourceManifest, error) {
-	// 1. 在一个只读查询里保留目录及所有未永久清理的文件，包括回收目录内的活动子项。
-	rows, err := pool.QueryContext(ctx, `SELECT e.id,e.user_id,e.parent_id,e.name,e.entry_type,e.status,e.revision,e.deleted_at,
-		e.object_id,e.file_size,o.status,o.provider,o.bucket,o.object_key,o.storage_version_id,o.file_size,LOWER(HEX(o.verified_sha256))
-		FROM file_entries e LEFT JOIN stored_objects o ON o.owner_user_id=e.user_id AND o.id=e.object_id
-		WHERE e.status<>'PURGED' ORDER BY e.user_id,e.id`)
+	// 1. 在同一只读查询中读取当前条目及仍保留的历史行。
+	rows, err := pool.QueryContext(ctx, `WITH manifest_references AS (
+		SELECT id AS entry_id,user_id,parent_id,name,entry_type,status,revision,deleted_at,object_id,file_size,
+			CAST(NULL AS UNSIGNED) AS history_id,NULL AS history_created_at,NULL AS retained_until
+		FROM file_entries WHERE status<>'PURGED'
+		UNION ALL
+		SELECT entry_id,user_id,NULL,'','FILE','',revision,NULL,object_id,file_size,id,created_at,retained_until
+		FROM file_versions
+	)
+	SELECT r.entry_id,r.user_id,r.parent_id,r.name,r.entry_type,r.status,r.revision,r.deleted_at,
+		r.object_id,r.file_size,r.history_id,r.history_created_at,r.retained_until,
+		o.status,o.provider,o.bucket,o.object_key,o.storage_version_id,o.file_size,LOWER(HEX(o.verified_sha256))
+	FROM manifest_references r LEFT JOIN stored_objects o ON o.owner_user_id=r.user_id AND o.id=r.object_id
+	ORDER BY r.user_id,r.history_id IS NOT NULL,r.entry_id,r.revision,r.history_id`)
 	if err != nil {
 		return backupSourceManifest{}, err
 	}
@@ -115,10 +142,12 @@ func readBackupSourceManifest(ctx context.Context, pool *sql.DB, bucket, databas
 		var entry backupManifestEntry
 		var entryType string
 		var entryBytes uint64
-		var objectID, objectBytes sql.Null[uint64]
+		var objectID, objectBytes, historyID sql.Null[uint64]
+		var historyCreatedAt, retainedUntil sql.Null[time.Time]
 		var objectStatus, provider, storedBucket, key, version, digest sql.NullString
 		if err := rows.Scan(&entry.ID, &entry.UserID, &entry.ParentID, &entry.Name, &entryType, &entry.Status, &entry.Revision, &entry.DeletedAt,
-			&objectID, &entryBytes, &objectStatus, &provider, &storedBucket, &key, &version, &objectBytes, &digest); err != nil {
+			&objectID, &entryBytes, &historyID, &historyCreatedAt, &retainedUntil,
+			&objectStatus, &provider, &storedBucket, &key, &version, &objectBytes, &digest); err != nil {
 			return backupSourceManifest{}, err
 		}
 		if entryType == "DIR" {
@@ -126,7 +155,7 @@ func readBackupSourceManifest(ctx context.Context, pool *sql.DB, bucket, databas
 			continue
 		}
 
-		// 2. LEFT JOIN 保留缺失引用。必须先验证同归属的 READY 对象和定位，才能登记文件。
+		// 2. 核对每条引用的同归属 READY 对象和完整定位，再登记当前或历史引用。
 		hash, hashErr := hex.DecodeString(digest.String)
 		if entryType != "FILE" || !objectID.Valid || objectID.V == 0 || objectStatus.String != "READY" ||
 			provider.String != "local_minio" || storedBucket.String != bucket || key.String == "" ||
@@ -134,9 +163,19 @@ func readBackupSourceManifest(ctx context.Context, pool *sql.DB, bucket, databas
 			hashErr != nil || len(hash) != sha256.Size {
 			return backupSourceManifest{}, fmt.Errorf("文件 %d 的对象定位、状态、大小或摘要不完整", entry.ID)
 		}
-		manifest.FileReferences = append(manifest.FileReferences, backupManifestFile{
-			backupManifestEntry: entry, ObjectID: objectID.V, SizeBytes: entryBytes,
-		})
+		if historyID.Valid {
+			if historyID.V == 0 || !historyCreatedAt.Valid || !retainedUntil.Valid || !retainedUntil.V.After(historyCreatedAt.V) {
+				return backupSourceManifest{}, fmt.Errorf("文件 %d 的历史引用或保留时间无效", entry.ID)
+			}
+			manifest.HistoryReferences = append(manifest.HistoryReferences, backupManifestHistory{
+				ID: historyID.V, UserID: entry.UserID, EntryID: entry.ID, Revision: entry.Revision,
+				ObjectID: objectID.V, SizeBytes: entryBytes, CreatedAt: historyCreatedAt.V, RetainedUntil: retainedUntil.V,
+			})
+		} else {
+			manifest.FileReferences = append(manifest.FileReferences, backupManifestFile{
+				backupManifestEntry: entry, ObjectID: objectID.V, SizeBytes: entryBytes,
+			})
+		}
 
 		// 3. 同一个物理对象只登记一次。使用对象 ID 生成正文相对路径。
 		if !seenObjects[objectID.V] {
@@ -158,7 +197,7 @@ func readBackupSourceManifest(ctx context.Context, pool *sql.DB, bucket, databas
 func verifyBackupSourceManifest(t *testing.T, ctx context.Context, fixture backupSourceFixture, manifest backupSourceManifest) {
 	t.Helper()
 	// 1. 核对目录树和文件引用。回收目录子项保留自身状态，仍指向原父目录。
-	if len(manifest.Directories) != 2 || len(manifest.FileReferences) != 3 || len(manifest.Objects) != 3 {
+	if len(manifest.Directories) != 2 || len(manifest.FileReferences) != 3 || len(manifest.HistoryReferences) != 0 || len(manifest.Objects) != 3 {
 		t.Fatalf("清单条目数不符，目录=%d 文件引用=%d 对象=%d", len(manifest.Directories), len(manifest.FileReferences), len(manifest.Objects))
 	}
 	userID := backupFixtureID(t, fixture.login.User.ID)
@@ -193,16 +232,21 @@ func verifyBackupSourceManifest(t *testing.T, ctx context.Context, fixture backu
 	}
 
 	// 2. 只读列举版本，确保所有列出的正文都能按桶、键、版本和大小定位。
+	verifyBackupManifestObjectVersions(t, ctx, fixture.bucket, manifest.Objects)
+}
+
+func verifyBackupManifestObjectVersions(t *testing.T, ctx context.Context, bucket *serverUploadContentBucket, objects []backupManifestObject) {
+	t.Helper()
 	byKey := make(map[string]backupManifestObject)
-	for _, object := range manifest.Objects {
-		if object.Provider != "local_minio" || object.Bucket != fixture.bucket.name || object.Key == "" ||
+	for _, object := range objects {
+		if object.Provider != "local_minio" || object.Bucket != bucket.name || object.Key == "" ||
 			object.VersionID == nil || *object.VersionID == "" || *object.VersionID == "null" ||
 			object.PayloadPath != fmt.Sprintf("objects/%d.bin", object.ID) {
 			t.Fatal("清单的对象定位或正文路径不符", object.ID)
 		}
 		byKey[object.Key] = object
 	}
-	for info := range fixture.bucket.client.ListObjects(ctx, fixture.bucket.name, minio.ListObjectsOptions{Recursive: true, WithVersions: true}) {
+	for info := range bucket.client.ListObjects(ctx, bucket.name, minio.ListObjectsOptions{Recursive: true, WithVersions: true}) {
 		object, ok := byKey[info.Key]
 		if info.Err != nil || !ok || info.IsDeleteMarker || info.Size < 0 || uint64(info.Size) != object.SizeBytes || info.VersionID != *object.VersionID {
 			t.Fatal("隔离 MinIO 版本与清单不符", info.Key, info.Err)
