@@ -10,6 +10,11 @@ import (
 
 // ConfirmSyncSnapshotBaselineSuccess 交付服务已确认提交的设备位置。
 func ConfirmSyncSnapshotBaselineSuccess(requestContext *gin.Context, ackSequence uint64) {
+	writeSyncConfirmationSuccess(requestContext, ackSequence)
+}
+
+// writeSyncConfirmationSuccess 使用快照基线与增量确认共用的响应结构。
+func writeSyncConfirmationSuccess(requestContext *gin.Context, ackSequence uint64) {
 	writeEntrySnapshotSuccess(requestContext, http.StatusOK, func(requestID string) ([]byte, error) {
 		// 1. 用确认序号和当次请求 ID 组装公开响应。
 		response := dto.ConfirmSyncSnapshotBaselineResponse{
