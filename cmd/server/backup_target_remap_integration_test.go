@@ -189,6 +189,11 @@ func applyBackupTargetObjectMap(ctx context.Context, pool *sql.DB, targetBucket 
 
 func snapshotBackupTargetObjects(t *testing.T, ctx context.Context, pool *sql.DB, userID uint64) map[uint64]domain.StoredObject {
 	t.Helper()
+	return snapshotBackupTargetObjectsWithCount(t, ctx, pool, userID, 4)
+}
+
+func snapshotBackupTargetObjectsWithCount(t *testing.T, ctx context.Context, pool *sql.DB, userID uint64, expectedCount int) map[uint64]domain.StoredObject {
+	t.Helper()
 	rows, err := pool.QueryContext(ctx, "SELECT id FROM stored_objects WHERE owner_user_id=?", userID)
 	if err != nil {
 		t.Fatal(err)
@@ -202,8 +207,8 @@ func snapshotBackupTargetObjects(t *testing.T, ctx context.Context, pool *sql.DB
 		}
 		ids = append(ids, id)
 	}
-	if err := rows.Err(); err != nil || len(ids) != 4 {
-		t.Fatal("目标库应包含三条已发布记录和一条暂存记录", err)
+	if err := rows.Err(); err != nil || len(ids) != expectedCount {
+		t.Fatalf("目标库有 %d 条对象记录，预期 %d，错误 %v", len(ids), expectedCount, err)
 	}
 	store, err := repository.NewStore(pool)
 	if err != nil {
