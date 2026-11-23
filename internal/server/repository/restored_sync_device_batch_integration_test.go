@@ -3,7 +3,6 @@ package repository
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -144,15 +143,7 @@ func TestRunRestoredSyncDeviceResetIntegration(t *testing.T) {
 		if !slices.Equal(original, before) || !slices.Equal(readStates(), before) {
 			t.Fatal("保存原始清单时目标已经发生变化")
 		}
-		manifest, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return err
-		}
-		defer manifest.Close()
-		if err := json.NewEncoder(manifest).Encode(original); err != nil {
-			return err
-		}
-		return manifest.Sync()
+		return service.SaveRestoredSyncDeviceRoster(manifestPath, original)
 	}
 	first, err := service.RunRestoredSyncDeviceReset(ctx, nil, 2, 2, store.ListRestoredSyncDeviceCandidates, store.ResetRestoredSyncDevice, save)
 	var databaseError *mysql.MySQLError
@@ -171,8 +162,8 @@ func TestRunRestoredSyncDeviceResetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var original []domain.RestoredSyncDeviceCandidate
-	if err := json.Unmarshal(saved, &original); err != nil || !slices.Equal(original, before) {
+	original, err := service.LoadRestoredSyncDeviceRoster(manifestPath)
+	if err != nil || !slices.Equal(original, before) {
 		t.Fatalf("仍应持有四条原始记录：%+v，%v", original, err)
 	}
 	execute("DROP TRIGGER fixture_restore_sync_batch_failure")
