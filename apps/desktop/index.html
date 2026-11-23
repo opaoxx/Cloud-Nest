@@ -245,7 +245,12 @@
           const plan = intent.multipart_plan;
           summary.textContent += " · 已取得分片计划 · 任务 " + intent.task_id +
             " · " + plan.part_count + " 片 · 标准片长 " + plan.part_size_bytes +
-            " B · 末片偏移 " + plan.last_part_offset_bytes + " B · 末片大小 " + plan.last_part_size_bytes + " B";
+            " B · 末片偏移 " + plan.last_part_offset_bytes + " B · 末片大小 " + plan.last_part_size_bytes +
+            " B · 已确认 " + plan.confirmed_parts + " / " + plan.part_count + " 片";
+          if (plan.confirmed_parts === 0) {
+            row.append(uploadActionButton("上传第一片", () =>
+              runUploadAction("SendFirstPart", intent.id, "正在上传第一片…", "第一片已确认。")));
+          }
         } else if (intent.status === "COMPLETED") {
           summary.textContent += " · 已发布 · 任务 " + intent.task_id + " · 条目 " + intent.result_entry_id;
         } else {

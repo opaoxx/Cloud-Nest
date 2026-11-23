@@ -17,7 +17,7 @@ type SingleUploadContentTarget struct {
 
 // ReadSingleUploadStatus 在发送前对账，避免重发已经接收的正文。
 func ReadSingleUploadStatus(ctx context.Context, address, accessToken string, target SingleUploadContentTarget) (string, error) {
-	task, err := readSingleUploadTask(ctx, address, accessToken, target)
+	task, err := readUploadTask(ctx, address, accessToken, target.TaskID, "SINGLE", target.SizeBytes)
 	return task.Status, err
 }
 
@@ -29,7 +29,7 @@ type SingleUploadTaskSnapshot struct {
 	ErrorMessage  string
 }
 
-type singleUploadTask struct {
+type uploadTask struct {
 	ID            string `json:"id"`
 	ParentID      string `json:"parent_id"`
 	UploadMode    string `json:"upload_mode"`
@@ -45,7 +45,7 @@ type singleUploadTask struct {
 // ReadSingleUploadTask 查询一个 SINGLE 任务并核对发布结果。
 func ReadSingleUploadTask(ctx context.Context, address, accessToken string, target SingleUploadContentTarget, parentID string) (SingleUploadTaskSnapshot, error) {
 	// 1. 复用同一任务的认证查询，再核对已保存的目标目录。
-	task, err := readSingleUploadTask(ctx, address, accessToken, target)
+	task, err := readUploadTask(ctx, address, accessToken, target.TaskID, "SINGLE", target.SizeBytes)
 	if err != nil {
 		return SingleUploadTaskSnapshot{}, err
 	}
@@ -71,20 +71,20 @@ func ReadSingleUploadTask(ctx context.Context, address, accessToken string, targ
 	return snapshot, nil
 }
 
-func readSingleUploadTask(ctx context.Context, address, accessToken string, target SingleUploadContentTarget) (singleUploadTask, error) {
-	if !validEntryID(target.TaskID) {
-		return singleUploadTask{}, errors.New("无效的上传任务 ID")
+func readUploadTask(ctx context.Context, address, accessToken, taskID, mode string, sizeBytes int64) (uploadTask, error) {
+	if !validEntryID(taskID) {
+		return uploadTask{}, errors.New("无效的上传任务 ID")
 	}
 	var result struct {
-		Data singleUploadTask `json:"data"`
+		Data uploadTask `json:"data"`
 	}
-	if err := getAuthenticatedJSON(ctx, address, accessToken, "uploads/"+target.TaskID, nil, &result); err != nil {
-		return singleUploadTask{}, err
+	if err := getAuthenticatedJSON(ctx, address, accessToken, "uploads/"+taskID, nil, &result); err != nil {
+		return uploadTask{}, err
 	}
 	task := result.Data
-	if task.ID != target.TaskID || task.UploadMode != "SINGLE" ||
-		task.SizeBytes == nil || *task.SizeBytes != target.SizeBytes || task.Status == "" {
-		return singleUploadTask{}, errors.New("远端任务与本机正文声明不一致")
+	if task.ID != taskID || task.UploadMode != mode ||
+		task.SizeBytes == nil || *task.SizeBytes != sizeBytes || task.Status == "" {
+		return uploadTask{}, errors.New("远端任务与本机正文声明不一致")
 	}
 	return task, nil
 }

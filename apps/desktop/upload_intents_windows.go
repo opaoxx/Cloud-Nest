@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/opaoxx/cloud-nest/pkg/client"
 )
@@ -14,6 +15,7 @@ type UploadIntents struct {
 	account      *Account
 	picker       *LocalFilePicker
 	databasePath string
+	partUploadMu sync.Mutex
 }
 
 // UploadIntentResult 将本机队列或重新登录提示交给窗口。

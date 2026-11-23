@@ -13,7 +13,7 @@ import (
 // DownloadContent 流式写入授权对象并校验字节数和 SHA-256。失败时由调用方丢弃目标。
 func DownloadContent(ctx context.Context, grant DownloadGrant, destination io.Writer) error {
 	// 1. 用原签名地址发起完整 GET，独立于业务接口的 Bearer 认证。
-	if destination == nil || grant.SizeBytes > maxJSONSafeInteger || !validDownloadURL(grant.URL) {
+	if destination == nil || grant.SizeBytes > maxJSONSafeInteger || !validStorageURL(grant.URL) {
 		return errors.New("无效的下载目标")
 	}
 	if !grant.ExpiresAt.After(time.Now()) {

@@ -91,7 +91,7 @@ func CreateDownloadGrant(ctx context.Context, address, accessToken, entryID, exp
 	if data.Revision != expectedRevision || !validEntryID(data.ObjectID) ||
 		data.SizeBytes == nil || *data.SizeBytes > maxJSONSafeInteger ||
 		digestErr != nil || len(digest) != 32 || data.SHA256 != strings.ToLower(data.SHA256) ||
-		!validDownloadURL(data.URL) || dispositionErr != nil || disposition != "attachment" || parameters["filename"] == "" {
+		!validStorageURL(data.URL) || dispositionErr != nil || disposition != "attachment" || parameters["filename"] == "" {
 		return DownloadGrant{}, errors.New("服务返回的下载授权有误")
 	}
 	if !data.ExpiresAt.After(time.Now()) {
@@ -103,7 +103,7 @@ func CreateDownloadGrant(ctx context.Context, address, accessToken, entryID, exp
 	}, nil
 }
 
-func validDownloadURL(rawURL string) bool {
+func validStorageURL(rawURL string) bool {
 	if strings.ContainsFunc(rawURL, func(character rune) bool {
 		return character <= 32 || character >= 127 || character == '#' || character == '\\'
 	}) {

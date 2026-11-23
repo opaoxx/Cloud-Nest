@@ -117,6 +117,20 @@ func openUploadIntents(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// 7. 分片回执随已确认进度持久化，同一任务的同一片只有一行。
+	const multipartPartsSchema = `CREATE TABLE IF NOT EXISTS multipart_upload_parts (
+		intent_id INTEGER NOT NULL REFERENCES multipart_upload_creations(intent_id),
+		part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
+		size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+		sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+		etag TEXT NOT NULL CHECK (length(etag) BETWEEN 1 AND 64),
+		PRIMARY KEY (intent_id, part_number)
+	) STRICT`
+	if _, err := db.ExecContext(ctx, multipartPartsSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -154,13 +168,15 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 	// 1. 读取当前账号的确认字节。旧版本的待校验及已发布任务已有完整正文。
 	rows, err := db.QueryContext(ctx, `SELECT CAST(i.id AS TEXT), i.name, i.size_bytes, i.parent_id, i.status, COALESCE(c.task_id, m.task_id, ''),
 		COALESCE(o.result_entry_id, ''), COALESCE(o.error_code, ''), COALESCE(o.error_message, ''),
-		COALESCE(p.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END),
-		COALESCE(m.part_size_bytes, 0), COALESCE(m.part_count, 0)
+		COALESCE(p.confirmed_bytes, mp.confirmed_bytes, CASE WHEN c.intent_id IS NOT NULL AND i.status IN ('VERIFYING', 'COMPLETED') THEN i.size_bytes ELSE 0 END),
+		COALESCE(m.part_size_bytes, 0), COALESCE(m.part_count, 0), COALESCE(mp.confirmed_parts, 0)
 		FROM upload_intents i
 		LEFT JOIN single_upload_creations c ON c.intent_id = i.id
 		LEFT JOIN single_upload_outcomes o ON o.intent_id = i.id
 		LEFT JOIN single_upload_confirmations p ON p.intent_id = i.id
 		LEFT JOIN multipart_upload_creations m ON m.intent_id = i.id
+		LEFT JOIN (SELECT intent_id, COUNT(*) AS confirmed_parts, SUM(size_bytes) AS confirmed_bytes
+			FROM multipart_upload_parts GROUP BY intent_id) mp ON mp.intent_id = m.intent_id
 		WHERE i.server_address = ? AND i.user_id = ? ORDER BY i.id DESC`, owner.Address, owner.UserID)
 	if err != nil {
 		return nil, err
@@ -172,8 +188,10 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 	for rows.Next() {
 		var intent UploadIntentView
 		var plan client.MultipartPlan
+		var confirmedParts int
 		if err := rows.Scan(&intent.ID, &intent.Name, &intent.SizeBytes, &intent.ParentID, &intent.Status, &intent.TaskID,
-			&intent.ResultEntryID, &intent.ErrorCode, &intent.ErrorMessage, &intent.ConfirmedBytes, &plan.PartSizeBytes, &plan.PartCount); err != nil {
+			&intent.ResultEntryID, &intent.ErrorCode, &intent.ErrorMessage, &intent.ConfirmedBytes,
+			&plan.PartSizeBytes, &plan.PartCount, &confirmedParts); err != nil {
 			return nil, err
 		}
 		if plan.PartCount > 0 || intent.Status == "MULTIPART_CREATED" {
@@ -183,7 +201,7 @@ func listUploadIntents(ctx context.Context, db *sql.DB, owner uploadOwner) ([]Up
 				return nil, err
 			}
 			intent.MultipartPlan = &MultipartPlanView{
-				PartCount: plan.PartCount, PartSizeBytes: plan.PartSizeBytes,
+				PartCount: plan.PartCount, PartSizeBytes: plan.PartSizeBytes, ConfirmedParts: confirmedParts,
 				LastPartOffsetBytes: lastPart.OffsetBytes, LastPartSizeBytes: lastPart.SizeBytes,
 			}
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,5 +63,28 @@ func TestUploadMultipartPlanSurvivesReopenAndIsScoped(t *testing.T) {
 	}
 	if items, err := listUploadIntents(ctx, db, other); err != nil || len(items) != 0 {
 		t.Fatalf("different account saw the saved plan: %+v, %v", items, err)
+	}
+
+	intent.db = db
+	part := client.UploadPartReceipt{Number: 1, SizeBytes: client.MaxSingleUploadBytes, SHA256: strings.Repeat("a", 64), ETag: "part-etag"}
+	incorrect := part
+	incorrect.SizeBytes--
+	if err := recordMultipartPart(ctx, intent, receipt.TaskID, incorrect); err == nil {
+		t.Fatal("receipt with the wrong size was accepted")
+	}
+	for range 2 {
+		if err := recordMultipartPart(ctx, intent, receipt.TaskID, part); err != nil {
+			t.Fatal(err)
+		}
+	}
+	incorrect = part
+	incorrect.ETag = "different"
+	if err := recordMultipartPart(ctx, intent, receipt.TaskID, incorrect); err == nil {
+		t.Fatal("first receipt was replaced")
+	}
+	items, err = listUploadIntents(ctx, db, owner)
+	if err != nil || len(items) != 1 || items[0].ConfirmedBytes != part.SizeBytes ||
+		items[0].MultipartPlan == nil || items[0].MultipartPlan.ConfirmedParts != 1 {
+		t.Fatalf("progress did not account for the one saved receipt: %+v, %v", items, err)
 	}
 }
