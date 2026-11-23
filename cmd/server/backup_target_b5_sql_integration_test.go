@@ -34,7 +34,7 @@ func restoreBackupTargetB5Database(t *testing.T, ctx context.Context, source bac
 	backupDir string, manifest backupSourceManifest, backupState backupB5DatabaseState,
 ) backupTargetDatabase {
 	t.Helper()
-	target := prepareBackupTargetDatabase(t, ctx, source)
+	target := prepareBackupTargetDatabase(t, ctx, source.mysqlContainer, source.databaseName)
 	var sourceUUID, targetUUID string
 	if err := source.pool.QueryRowContext(ctx, "SELECT @@GLOBAL.server_uuid").Scan(&sourceUUID); err != nil || sourceUUID == "" {
 		t.Fatal("无法核对隔离源 MySQL 实例", err)

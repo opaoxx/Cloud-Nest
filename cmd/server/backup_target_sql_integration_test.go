@@ -34,7 +34,7 @@ func TestServerBackupTargetSQLIntegration(t *testing.T) {
 	backupDir := t.TempDir()
 	dump := stopAndExportBackupSourceSQL(t, ctx, source, backupDir)
 	manifest := writeAndVerifyBackupSourceManifest(t, ctx, source, backupDir, dump)
-	target := prepareBackupTargetDatabase(t, ctx, source)
+	target := prepareBackupTargetDatabase(t, ctx, source.mysqlContainer, source.databaseName)
 
 	// 2. 检查摘要错误会被拒绝，然后将原样 SQL 导入目标空库。
 	backupPath := filepath.Join(backupDir, "database.sql")
@@ -64,16 +64,16 @@ func TestServerBackupTargetSQLIntegration(t *testing.T) {
 	t.Logf("目标库核对通过：迁移历史完整，%d 张表，2 个目录、3 条文件引用及原对象版本，已用 10 B、预占 3 B", tableCount)
 }
 
-func prepareBackupTargetDatabase(t *testing.T, ctx context.Context, source backupSourceFixture) backupTargetDatabase {
+func prepareBackupTargetDatabase(t *testing.T, ctx context.Context, sourceContainerID, sourceDatabaseName string) backupTargetDatabase {
 	t.Helper()
 	sourceAddress := os.Getenv("CLOUDNEST_DB_ADDRESS")
 	containerID := startIsolatedWebMySQL(t, ctx)
 	address := os.Getenv("CLOUDNEST_DB_ADDRESS")
-	if containerID == source.mysqlContainer || address == sourceAddress {
+	if containerID == sourceContainerID || address == sourceAddress {
 		t.Fatal("恢复目标与源端未分离")
 	}
 	pool, name := prepareEmptyServerIntegrationDatabase(t, ctx)
-	if name == source.databaseName {
+	if name == sourceDatabaseName {
 		t.Fatal("恢复目标没有使用独立库名")
 	}
 	t.Logf("目标 MySQL 容器 %s，回环地址 %s，独占库 %s", containerID, address, name)

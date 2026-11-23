@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -39,17 +40,7 @@ func exportBackupTargetB5RollbackBundle(t *testing.T, ctx context.Context, sampl
 		os.Getenv("CLOUDNEST_S3_BUCKET") != bucket.name || bucket.name == sample.fixture.source.bucket.name {
 		t.Fatal("导出未绑定到本轮切换后独占库和桶", err)
 	}
-	tableRows := map[string]int{
-		"users": 1, "user_devices": 2, "auth_sessions": 2, "stored_objects": 3,
-		"file_entries": 4, "user_entry_preferences": 0, "upload_tasks": 3, "idempotency_records": 6,
-		"upload_parts": 0, "change_events": 5, "sync_devices": 1, "file_versions": 2, "schema_migrations": len(migrations.Ordered()),
-	}
-	for table, expected := range tableRows {
-		var count int
-		if err := target.pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+table+"`").Scan(&count); err != nil || count != expected {
-			t.Fatalf("停写目标的表 %s 行数 %d，预期 %d，错误 %v", table, count, expected, err)
-		}
-	}
+	tableRows := verifyBackupTargetB5RollbackTableRows(t, ctx, target.pool)
 	dump := exportBackupSourceSQL(t, ctx, target.containerID, target.name, backupDir)
 	verifyBackupSourceSQL(t, dump, tableRows)
 	verifyBackupTargetB5RollbackSQLRows(t, dump, sample)
@@ -84,6 +75,23 @@ func exportBackupTargetB5RollbackBundle(t *testing.T, ctx context.Context, sampl
 	t.Logf("B5 切换后备份，SQL %d B，SHA-256 %s，%d 张表，清单 SHA-256 %x，当前 v3 和历史 v1/v2 三份正文合计 %d B，日志 1～%d",
 		len(savedSQL), decoded.DatabaseSHA256, len(tableRows), sha256.Sum256(savedManifest), sample.state.used, sample.state.high)
 	return decoded
+}
+
+func verifyBackupTargetB5RollbackTableRows(t *testing.T, ctx context.Context, pool *sql.DB) map[string]int {
+	t.Helper()
+	// 1. 对停写源库和回退库使用同一份预期行数。
+	tableRows := map[string]int{
+		"users": 1, "user_devices": 2, "auth_sessions": 2, "stored_objects": 3,
+		"file_entries": 4, "user_entry_preferences": 0, "upload_tasks": 3, "idempotency_records": 6,
+		"upload_parts": 0, "change_events": 5, "sync_devices": 1, "file_versions": 2, "schema_migrations": len(migrations.Ordered()),
+	}
+	for table, expected := range tableRows {
+		var count int
+		if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+table+"`").Scan(&count); err != nil || count != expected {
+			t.Fatalf("回退样本的表 %s 行数 %d，预期 %d，错误 %v", table, count, expected, err)
+		}
+	}
+	return tableRows
 }
 
 func verifyBackupTargetB5RollbackSQLRows(t *testing.T, dump []byte, sample backupTargetB5RollbackSample) {
