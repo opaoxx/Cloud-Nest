@@ -21,6 +21,15 @@ import (
 	"github.com/opaoxx/cloud-nest/internal/server/service"
 )
 
+type runningBackupTargetB5RollbackBaseline struct {
+	source   backupSourceFixture
+	database backupTargetDatabase
+	api      backupSourceClient
+	stop     func() (string, error)
+	snapshot dto.SyncSnapshotPageData
+	state    backupB5DatabaseState
+}
+
 func TestServerBackupTargetB5RollbackBaselineIntegration(t *testing.T) {
 	if os.Getenv("CLOUDNEST_BACKUP_SOURCE_TEST") != "1" {
 		t.Skip("设置 CLOUDNEST_BACKUP_SOURCE_TEST=1 后验证 B5 回退后的同步基线")
@@ -28,6 +37,17 @@ func TestServerBackupTargetB5RollbackBaselineIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 
+	running := startBackupTargetB5RollbackBaseline(t, ctx)
+	logs, err := running.stop()
+	if err != nil {
+		t.Fatal("隔离回退服务关停失败", err)
+	}
+	verifyBackupB5ServiceStopped(t, running.api.baseURL, logs)
+	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", running.source.mysqlContainer, running.source.minioContainer)
+}
+
+func startBackupTargetB5RollbackBaseline(t *testing.T, ctx context.Context) runningBackupTargetB5RollbackBaseline {
+	t.Helper()
 	// 1. 启动已换代的隔离回退服务，沿用原设备登录。
 	sample := prepareBackupTargetB5RollbackSample(t, ctx)
 	backupDir := t.TempDir()
@@ -101,14 +121,9 @@ func TestServerBackupTargetB5RollbackBaselineIntegration(t *testing.T) {
 	if after := readBackupB5DatabaseState(t, ctx, database.pool, userID); !reflect.DeepEqual(after, expected) {
 		t.Fatal("确认后的设备代次、日志或配额与预期不符")
 	}
-	logs, err := stop()
-	if err != nil {
-		t.Fatal("隔离回退服务关停失败", err)
-	}
-	verifyBackupB5ServiceStopped(t, api.baseURL, logs)
 	t.Logf("B5 回退服务新基线，设备 %d，快照 %s，%d 个条目含 v3，确认位置 5，日志 1～5，已用 %d B，末页凭据 SHA-256 %x",
 		deviceID, snapshot.SnapshotID, len(snapshot.Items), before.used, sha256.Sum256([]byte(*snapshot.BaselineToken)))
-	t.Logf("本轮专用容器 MySQL %s，MinIO %s，后端已关停", source.mysqlContainer, source.minioContainer)
+	return runningBackupTargetB5RollbackBaseline{source: source, database: database, api: api, stop: stop, snapshot: snapshot, state: expected}
 }
 
 func saveBackupTargetB5RollbackSnapshot(t *testing.T, ctx context.Context, api backupSourceClient, rootID string,
