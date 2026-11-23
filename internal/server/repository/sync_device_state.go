@@ -59,16 +59,8 @@ func (store *Store) readSyncDeviceState(ctx context.Context, userID, deviceID ui
 		return empty, domain.ErrInvalidSyncDeviceData
 	}
 	state.Generation = domain.SyncCursorGeneration(generation)
-	if state.Generation == empty.Generation {
+	if !state.IsValid() {
 		return empty, domain.ErrInvalidSyncDeviceData
 	}
-	switch state.Status {
-	case domain.SyncDeviceStatusActive:
-		return state, nil
-	case domain.SyncDeviceStatusResetRequired:
-		if state.AckSequence == 0 {
-			return state, nil
-		}
-	}
-	return empty, domain.ErrInvalidSyncDeviceData
+	return state, nil
 }

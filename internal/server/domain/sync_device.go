@@ -24,3 +24,12 @@ type SyncDeviceState struct {
 	Generation  SyncCursorGeneration
 	AckSequence uint64
 }
+
+// IsValid 核对同步行的状态、完整代次和待重建时的零确认位置。
+func (state SyncDeviceState) IsValid() bool {
+	if state.Generation == (SyncCursorGeneration{}) {
+		return false
+	}
+	return state.Status == SyncDeviceStatusActive ||
+		(state.Status == SyncDeviceStatusResetRequired && state.AckSequence == 0)
+}
