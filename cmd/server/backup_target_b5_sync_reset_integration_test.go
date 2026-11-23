@@ -33,7 +33,29 @@ func TestServerBackupTargetB5SyncResetIntegration(t *testing.T) {
 
 func resetBackupTargetB5SyncDevices(t *testing.T, ctx context.Context, fixture backupTargetRemapFixture) {
 	t.Helper()
-	target := fixture.database
+	userID := backupFixtureID(t, fixture.source.login.User.ID)
+	before := readBackupB5DatabaseState(t, ctx, fixture.database.pool, userID)
+	sourceBefore := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID)
+	if len(before.devices) != 1 || before.devices[0].UserID != userID ||
+		before.devices[0].State.Status != domain.SyncDeviceStatusActive || before.devices[0].State.AckSequence != 2 {
+		t.Fatal("恢复目标在换代前应保留活动设备及确认位置 2")
+	}
+	address, instanceUUID, rosterDigest := verifyBackupB5OfflineSyncReset(t, ctx, fixture.database, fixture.targetBucket.name, fixture.manifest, before)
+	if source := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID); !reflect.DeepEqual(source, sourceBefore) {
+		t.Fatal("目标换代后停写的源库状态不符")
+	}
+	t.Logf("B5 目标 %s UUID %s 离线换代，提交 1 条并复核 1 条，设备 %d 待重建、确认位置 0、新代次有效，原清单 SHA-256 %x",
+		address, instanceUUID, before.devices[0].DeviceID, rosterDigest)
+}
+
+func verifyBackupB5OfflineSyncReset(t *testing.T, ctx context.Context, target backupTargetDatabase, bucket string,
+	manifest backupSourceManifest, before backupB5DatabaseState,
+) (address, instanceUUID string, rosterDigest [sha256.Size]byte) {
+	t.Helper()
+	// 1. 校对专用目标的实例、回环端口和换代前的数据基线。
+	if len(before.devices) != 1 || !before.devices[0].State.IsValid() {
+		t.Fatal("离线换代夹具需要一个有效的同步设备记录")
+	}
 	var targetUUID, targetName string
 	if err := target.pool.QueryRowContext(ctx, "SELECT @@GLOBAL.server_uuid, DATABASE()").Scan(&targetUUID, &targetName); err != nil ||
 		targetUUID == "" || targetName != target.name {
@@ -47,17 +69,10 @@ func resetBackupTargetB5SyncDevices(t *testing.T, ctx context.Context, fixture b
 		user == "" || !passwordSet || password == "" {
 		t.Fatal("离线命令的地址或凭据未明确指向本轮专用目标", err)
 	}
-	userID := backupFixtureID(t, fixture.source.login.User.ID)
-	before := readBackupB5DatabaseState(t, ctx, target.pool, userID)
-	sourceBefore := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID)
-	if len(before.devices) != 1 || before.devices[0].State.Status != domain.SyncDeviceStatusActive ||
-		before.devices[0].State.AckSequence != 2 {
-		t.Fatal("恢复目标在换代前应保留活动设备及确认位置 2")
-	}
-	deviceID := before.devices[0].DeviceID
+	userID, deviceID := before.devices[0].UserID, before.devices[0].DeviceID
 	timesBefore := readBackupB5SyncDeviceTimes(t, ctx, target.pool, userID, deviceID)
-	objectsBefore := snapshotBackupTargetObjectsWithCount(t, ctx, target.pool, userID, 2)
-	manifestBefore, err := readBackupSourceManifest(ctx, target.pool, fixture.targetBucket.name, fixture.manifest.DatabaseSHA256)
+	objectsBefore := snapshotBackupTargetObjectsWithCount(t, ctx, target.pool, userID, len(manifest.Objects))
+	manifestBefore, err := readBackupSourceManifest(ctx, target.pool, bucket, manifest.DatabaseSHA256)
 	if err != nil {
 		t.Fatal("读取已对齐的目标引用失败", err)
 	}
@@ -98,21 +113,17 @@ func resetBackupTargetB5SyncDevices(t *testing.T, ctx context.Context, fixture b
 	}
 	expected := before
 	expected.devices = after.devices
-	manifestAfter, err := readBackupSourceManifest(ctx, target.pool, fixture.targetBucket.name, fixture.manifest.DatabaseSHA256)
+	manifestAfter, err := readBackupSourceManifest(ctx, target.pool, bucket, manifest.DatabaseSHA256)
 	if err != nil || !reflect.DeepEqual(manifestAfter, manifestBefore) || !reflect.DeepEqual(after, expected) ||
-		!reflect.DeepEqual(snapshotBackupTargetObjectsWithCount(t, ctx, target.pool, userID, 2), objectsBefore) ||
+		!reflect.DeepEqual(snapshotBackupTargetObjectsWithCount(t, ctx, target.pool, userID, len(manifest.Objects)), objectsBefore) ||
 		readBackupB5SyncDeviceTimes(t, ctx, target.pool, userID, deviceID) != timesBefore {
 		t.Fatal("离线换代改变了同步活动时间、目录、日志、对象引用或配额", err)
-	}
-	if source := readBackupB5DatabaseState(t, ctx, fixture.source.pool, userID); !reflect.DeepEqual(source, sourceBefore) {
-		t.Fatal("目标换代后停写的源库状态不符")
 	}
 	roster, err := os.ReadFile(rosterPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("B5 目标 %s UUID %s 离线换代，提交 1 条并复核 1 条，设备 %d 待重建、确认位置 0、新代次有效，原清单 SHA-256 %x",
-		targetAddress, targetUUID, deviceID, sha256.Sum256(roster))
+	return targetAddress, targetUUID, sha256.Sum256(roster)
 }
 
 type backupB5SyncDeviceTimes struct {
