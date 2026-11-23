@@ -105,9 +105,9 @@ func (store *Store) RevokeUserDevice(ctx context.Context, targetDeviceID uint64)
 	return store.invalidateRevokedDeviceSyncState(updateContext, target.UserID, target.ID)
 }
 
-// invalidateRevokedDeviceSyncState 仅由已持有账号和目标设备锁的撤销事务调用。
+// invalidateRevokedDeviceSyncState 供持有账号和目标设备锁的撤销及重新激活事务共用。
 func (store *Store) invalidateRevokedDeviceSyncState(ctx context.Context, userID, deviceID uint64) error {
-	// 1. 锁读目标设备的同步行。尚未同步过的设备可以直接完成撤销。
+	// 1. 锁读目标设备的同步行。尚未同步过的设备直接继续外层事务。
 	current, err := store.readSyncDeviceState(ctx, userID, deviceID, true)
 	if errors.Is(err, domain.ErrSyncDeviceNotFound) {
 		return nil
@@ -116,7 +116,7 @@ func (store *Store) invalidateRevokedDeviceSyncState(ctx context.Context, userID
 		return err
 	}
 
-	// 2. 换代并清零位置。重复撤销时也使已有待确认快照失效。
+	// 2. 换代并清零位置，已有待确认快照也随代次变化失效。
 	var generation domain.SyncCursorGeneration
 	rand.Read(generation[:])
 	if generation == (domain.SyncCursorGeneration{}) || generation == current.Generation {
@@ -129,7 +129,7 @@ func (store *Store) invalidateRevokedDeviceSyncState(ctx context.Context, userID
 		domain.SyncDeviceStatusResetRequired, generation[:], userID, deviceID,
 		current.Status, current.Generation[:], current.AckSequence)
 
-	// 3. 核对更新结果，由外层确认三类写入一起提交。
+	// 3. 核对更新结果，交由外层事务统一提交或回滚。
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -16,22 +16,25 @@ func TestEnsureLoginDeviceOutcomes(t *testing.T) {
 	const installationID = "28ee758a-0727-42de-ae7d-3bb33155e148"
 	revokedAt := time.Date(2026, 11, 10, 3, 0, 0, 123456000, time.UTC)
 	queryFailure, restoreFailure := errors.New("query fixture fault"), errors.New("restore fixture fault")
+	syncFailure := errors.New("sync fixture fault")
 	duplicate := &mysql.MySQLError{Number: 1062, Message: "private installation"}
 	for _, testCase := range []struct {
-		name, sequence                        string
-		record                                []driver.Value
-		queryError, insertError, restoreError error
-		restoredRows                          int64
-		wantError                             error
-		wantID                                uint64
+		name, sequence                                   string
+		record                                           []driver.Value
+		queryError, insertError, restoreError, syncError error
+		restoredRows                                     int64
+		wantError                                        error
+		wantID                                           uint64
 	}{
 		{name: "create missing", sequence: "begin,lock,device,insert,commit", wantID: 101},
 		{name: "reuse existing", sequence: "begin,lock,device,commit", record: []driver.Value{int64(11), int64(7), installationID, "用户改过的名称", "WINDOWS", nil}, wantID: 11},
-		{name: "restore existing", sequence: "begin,lock,device,restore,commit", record: []driver.Value{int64(11), int64(7), installationID, "用户改过的名称", "WINDOWS", revokedAt}, restoredRows: 1, wantID: 11},
-		{name: "unsigned existing id", sequence: "begin,lock,device,restore,commit", record: []driver.Value{"18446744073709551615", int64(7), installationID, "用户改过的名称", "WINDOWS", revokedAt}, restoredRows: 1, wantID: ^uint64(0)},
+		{name: "restore existing", sequence: "begin,lock,device,restore,sync_device,commit", record: []driver.Value{int64(11), int64(7), installationID, "用户改过的名称", "WINDOWS", revokedAt}, restoredRows: 1, wantID: 11},
+		{name: "unsigned existing id", sequence: "begin,lock,device,restore,sync_device,commit", record: []driver.Value{"18446744073709551615", int64(7), installationID, "用户改过的名称", "WINDOWS", revokedAt}, restoredRows: 1, wantID: ^uint64(0)},
 		{name: "query failure", sequence: "begin,lock,device,rollback", queryError: queryFailure, wantError: queryFailure},
 		{name: "create conflict", sequence: "begin,lock,device,insert,rollback", insertError: duplicate, wantError: domain.ErrDeviceAlreadyExists},
 		{name: "restore failure", sequence: "begin,lock,device,restore,rollback", record: []driver.Value{int64(11), int64(7), installationID, "original", "WEB", revokedAt}, restoreError: restoreFailure, wantError: restoreFailure},
+		{name: "sync failure", sequence: "begin,lock,device,restore,sync_device,rollback", record: []driver.Value{int64(11), int64(7), installationID, "original", "WEB", revokedAt},
+			restoredRows: 1, syncError: syncFailure, wantError: syncFailure},
 		{name: "restore zero rows", sequence: "begin,lock,device,restore,rollback", record: []driver.Value{int64(11), int64(7), installationID, "original", "WEB", revokedAt}, wantError: domain.ErrInvalidDeviceData},
 		{name: "restore multiple rows", sequence: "begin,lock,device,restore,rollback", record: []driver.Value{int64(11), int64(7), installationID, "original", "WEB", revokedAt}, restoredRows: 2, wantError: domain.ErrInvalidDeviceData},
 		{name: "zero device id", sequence: "begin,lock,device,rollback", record: []driver.Value{int64(0), int64(7), installationID, "original", "WEB", nil}, wantError: domain.ErrInvalidDeviceData},
@@ -70,6 +73,17 @@ func TestEnsureLoginDeviceOutcomes(t *testing.T) {
 					t.Error("恢复操作缺少期限")
 				}
 				return driver.RowsAffected(testCase.restoredRows), testCase.restoreError
+			}
+			script.syncDeviceQuery = func(_ context.Context, statement string, arguments []driver.NamedValue) (driver.Rows, error) {
+				expectedID := testCase.wantID
+				if expectedID == 0 {
+					expectedID = 11
+				}
+				if statement != "SELECT status, cursor_generation, ack_sequence FROM sync_devices WHERE user_id = ? AND device_id = ? FOR UPDATE" ||
+					len(arguments) != 2 || arguments[0].Value != uint64(7) || arguments[1].Value != expectedID {
+					t.Error("同步锁读未绑定重新激活的账号和设备 ID")
+				}
+				return &revokedSyncDeviceRows{&idempotencyRecordRows{}}, testCase.syncError
 			}
 			store := loginTransactionTestStore(t, script)
 			var device *domain.LoginDevice

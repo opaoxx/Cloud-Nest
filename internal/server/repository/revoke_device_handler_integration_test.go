@@ -32,7 +32,6 @@ func TestRevokeDeviceHandlerIntegration(t *testing.T) {
 	pool := loginSessionDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	installSyncDeviceFixtureTable(t, ctx, pool)
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)

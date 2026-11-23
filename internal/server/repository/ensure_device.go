@@ -47,7 +47,7 @@ func (store *Store) EnsureLoginDevice(ctx context.Context, installationID, name,
 		return device, nil
 	}
 
-	// 4. 恢复已撤销设备，保留设备 ID，并返回设备。
+	// 4. 恢复已撤销设备，条件更新同时锁住该设备行。
 	result := store.database.WithContext(deviceContext).Exec(
 		"UPDATE user_devices SET revoked_at = NULL, updated_at = UTC_TIMESTAMP(6) WHERE user_id = ? AND id = ? AND revoked_at IS NOT NULL",
 		store.loginUserID, device.ID)
@@ -59,6 +59,11 @@ func (store *Store) EnsureLoginDevice(ctx context.Context, installationID, name,
 	}
 	if result.RowsAffected != 1 {
 		return nil, domain.ErrInvalidDeviceData
+	}
+
+	// 5. 在同一事务使旧同步代次失效，错误交给外层回滚。
+	if err := store.invalidateRevokedDeviceSyncState(deviceContext, device.UserID, device.ID); err != nil {
+		return nil, err
 	}
 	restoredDevice := *device
 	restoredDevice.RevokedAt = nil

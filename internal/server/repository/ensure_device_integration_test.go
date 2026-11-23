@@ -14,7 +14,7 @@ import (
 	"github.com/opaoxx/cloud-nest/migrations"
 )
 
-// loginSessionDatabase 安装正式会话表，复用独占设备测试库的生命周期。
+// loginSessionDatabase 安装正式会话表和同步设备表，复用独占设备测试库。
 func loginSessionDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	pool := loginDeviceDatabase(t)
@@ -31,6 +31,7 @@ func loginSessionDatabase(t *testing.T) *sql.DB {
 	if _, err := pool.ExecContext(ctx, migrations.InitialSQL[start:start+end]); err != nil {
 		t.Fatal(err)
 	}
+	installSyncDeviceFixtureTable(t, ctx, pool)
 	return pool
 }
 
