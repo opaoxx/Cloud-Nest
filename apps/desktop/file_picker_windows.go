@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -15,11 +13,11 @@ type LocalFilePicker struct {
 	mu     sync.Mutex
 }
 
-// SelectFile 返回所选文件的名称，取消时返回空字符串。
-func (picker *LocalFilePicker) SelectFile() (string, error) {
+// SelectFile 返回所选文件的摘要，取消时返回 nil。
+func (picker *LocalFilePicker) SelectFile() (*SourceFileDigest, error) {
 	// 1. 同一时刻只打开一个对话框，将它挂在当前桌面主窗口上。
 	if !picker.mu.TryLock() {
-		return "", errors.New("文件选择窗口已打开")
+		return nil, errors.New("文件正在选择或计算摘要")
 	}
 	defer picker.mu.Unlock()
 	path, err := application.Get().Dialog.OpenFile().
@@ -32,21 +30,14 @@ func (picker *LocalFilePicker) SelectFile() (string, error) {
 	// 2. Wails v3.0.0 的 Windows 对话框以内部错误文本表达用户取消。
 	if err != nil {
 		if err.Error() == "cancelled by user" {
-			return "", nil
+			return nil, nil
 		}
-		return "", errors.New("无法打开文件选择窗口，请重试")
+		return nil, errors.New("无法打开文件选择窗口，请重试")
 	}
 	if path == "" {
-		return "", nil
+		return nil, nil
 	}
 
-	// 3. 仅检查所选绝对路径的元数据，向页面返回文件名称。
-	if !filepath.IsAbs(path) {
-		return "", errors.New("无法识别所选文件的位置，请重新选择")
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", errors.New("无法访问所选文件，请重新选择一个普通文件")
-	}
-	return info.Name(), nil
+	// 3. 在 Go 中读取所选文件，只将文件名、实际大小和摘要交给页面。
+	return readSourceFileDigest(path)
 }
