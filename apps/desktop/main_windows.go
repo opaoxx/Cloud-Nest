@@ -23,14 +23,17 @@ func main() {
 		aboutMessage = "CloudNest 桌面客户端\n\n安装标识不可用。\n" + installationError.Error()
 	}
 
-	// 2. 注册服务连接检查，让内嵌页面能调用 Go 原生 HTTP 客户端。
+	// 2. 注册连接检查与原生登录，让内嵌页面通过 Go 请求后端。
 	app := application.New(application.Options{
-		Name:     "CloudNest",
-		Assets:   application.AssetOptions{Handler: application.BundledAssetFileServer(desktopPage)},
-		Services: []application.Service{application.NewService(&client.Readiness{})},
+		Name:   "CloudNest",
+		Assets: application.AssetOptions{Handler: application.BundledAssetFileServer(desktopPage)},
+		Services: []application.Service{
+			application.NewService(&client.Readiness{}),
+			application.NewService(&Account{installationID: installationID}),
+		},
 	})
 
-	// 3. 主窗口加载打包在程序中的连接检查页面。
+	// 3. 主窗口加载打包在程序中的连接和登录页面。
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:  "CloudNest",
 		Width:  960,

@@ -6,12 +6,14 @@
   <title>CloudNest</title>
   <style>
     :root { font-family: Inter, "Microsoft YaHei UI", sans-serif; color: #19354a; background: #f5f8fa; }
-    main { max-width: 36rem; margin: 9vh auto; padding: 1.5rem; }
-    h1 { margin: 0 0 2rem; }
+    main { max-width: 36rem; margin: 3vh auto; padding: 1.5rem; }
+    h1 { margin: 0 0 1rem; }
     form { padding: 1.5rem; background: white; border: 1px solid #cad7df; border-radius: .75rem; }
     label { display: block; margin-bottom: .5rem; font-weight: 600; }
     input, button { box-sizing: border-box; padding: .6rem .8rem; font: inherit; border-radius: .35rem; }
     input { width: 100%; border: 1px solid #8599a7; }
+    fieldset { padding: 1rem 0 0; margin: 1rem 0 0; border: 0; border-top: 1px solid #cad7df; }
+    fieldset input + label { margin-top: .75rem; }
     button { margin-top: 1rem; border: 0; color: white; background: #216080; cursor: pointer; }
     button:disabled { opacity: .65; cursor: wait; }
     output { display: block; margin-top: 1rem; line-height: 1.6; }
@@ -21,11 +23,19 @@
 <body>
   <main>
     <h1>CloudNest</h1>
-    <form>
+    <form autocomplete="off">
       <label for="address">服务地址</label>
       <input id="address" type="text" inputmode="url" spellcheck="false" value="http://127.0.0.1:18081">
-      <button type="submit">检查连接</button>
-      <output role="status" aria-live="polite"></output>
+      <button id="checkConnection" type="button">检查连接</button>
+      <output id="connectionStatus" role="status" aria-live="polite"></output>
+      <fieldset id="credentials">
+        <label for="username">用户名</label>
+        <input id="username" type="text" spellcheck="false">
+        <label for="password">密码</label>
+        <input id="password" type="password">
+        <button type="submit">登录</button>
+      </fieldset>
+      <output id="loginStatus" role="status" aria-live="polite"></output>
     </form>
   </main>
   <script type="module">
@@ -33,28 +43,62 @@
 
     const form = document.querySelector("form");
     const address = document.querySelector("#address");
-    const button = form.querySelector("button");
-    const status = form.querySelector("output");
+    const checkConnection = document.querySelector("#checkConnection");
+    const connectionStatus = document.querySelector("#connectionStatus");
+    const credentials = document.querySelector("#credentials");
+    const username = document.querySelector("#username");
+    const password = document.querySelector("#password");
+    const loginStatus = document.querySelector("#loginStatus");
+    let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
-    address.addEventListener("input", () => { status.textContent = ""; });
+    address.addEventListener("input", () => {
+      connectionStatus.textContent = "";
+      loginStatus.textContent = "";
+    });
 
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (button.disabled) return;
-      address.readOnly = true;
-      button.disabled = true;
-      status.textContent = "正在检查服务连接…";
+    function setBusy(busy) {
+      address.readOnly = busy || signedIn;
+      checkConnection.disabled = busy;
+      credentials.disabled = busy;
+    }
+
+    checkConnection.addEventListener("click", async () => {
+      setBusy(true);
+      connectionStatus.textContent = "正在检查服务连接…";
       try {
         const serverAddress = address.value.trim();
         await Call.ByName("github.com/opaoxx/cloud-nest/pkg/client.Readiness.Check", serverAddress);
         localStorage.setItem("cloudnest.serverAddress", serverAddress);
-        status.textContent = "已连接，CloudNest 服务已就绪。";
+        connectionStatus.textContent = "已连接，CloudNest 服务已就绪。";
       } catch (error) {
-        status.textContent = error.message || "连接检查失败，请重试";
+        connectionStatus.textContent = error.message || "连接检查失败，请重试";
       } finally {
-        address.readOnly = false;
-        button.disabled = false;
+        setBusy(false);
+      }
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (signedIn || credentials.disabled) return;
+      const loginName = username.value.trim();
+      if (!loginName || !password.value) {
+        loginStatus.textContent = "请输入用户名和密码。";
+        return;
+      }
+      setBusy(true);
+      loginStatus.textContent = "正在登录…";
+      try {
+        const login = Call.ByName("main.Account.Login", address.value.trim(), loginName, password.value);
+        password.value = "";
+        const signedInName = await login;
+        signedIn = true;
+        credentials.hidden = true;
+        loginStatus.textContent = "已登录：" + signedInName;
+      } catch (error) {
+        loginStatus.textContent = error.message || "登录失败，请重试";
+      } finally {
+        setBusy(false);
       }
     });
   </script>

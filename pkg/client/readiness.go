@@ -18,11 +18,9 @@ type Readiness struct{}
 // Check 访问服务根地址的就绪接口，返回可在桌面窗口显示的错误。
 func (*Readiness) Check(ctx context.Context, address string) error {
 	// 1. 只接受服务根地址，避免把凭证或输入的其他路径发送给服务器。
-	base, err := url.Parse(strings.TrimSpace(address))
-	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" ||
-		base.User != nil || (base.EscapedPath() != "" && base.EscapedPath() != "/") ||
-		base.RawQuery != "" || base.ForceQuery || base.Fragment != "" {
-		return errors.New("请输入 HTTP 或 HTTPS 服务根地址，例如 http://127.0.0.1:18081")
+	base, err := parseServiceAddress(address)
+	if err != nil {
+		return err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.JoinPath("health", "ready").String(), nil)
 	if err != nil {
@@ -30,13 +28,7 @@ func (*Readiness) Check(ctx context.Context, address string) error {
 	}
 
 	// 2. 给后端的五秒依赖检查留出网络时间，只检查配置的服务本身。
-	httpClient := http.Client{
-		Timeout: 8 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	response, err := httpClient.Do(request)
+	response, err := serviceHTTPClient.Do(request)
 	if err != nil {
 		return errors.New("无法连接服务，请检查服务地址、网络及后端是否已启动，然后重试")
 	}
@@ -60,4 +52,21 @@ func (*Readiness) Check(ctx context.Context, address string) error {
 		}
 	}
 	return errors.New("收到的响应与 CloudNest 就绪接口不符，请核对服务地址")
+}
+
+var serviceHTTPClient = http.Client{
+	Timeout: 8 * time.Second,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+func parseServiceAddress(address string) (*url.URL, error) {
+	base, err := url.Parse(strings.TrimSpace(address))
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" ||
+		base.User != nil || (base.EscapedPath() != "" && base.EscapedPath() != "/") ||
+		base.RawQuery != "" || base.ForceQuery || base.Fragment != "" {
+		return nil, errors.New("请输入 HTTP 或 HTTPS 服务根地址，例如 http://127.0.0.1:18081")
+	}
+	return base, nil
 }
