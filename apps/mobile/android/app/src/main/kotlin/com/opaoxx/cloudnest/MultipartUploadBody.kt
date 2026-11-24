@@ -1,5 +1,8 @@
 package com.opaoxx.cloudnest
 
+import android.util.Xml
+import org.xmlpull.v1.XmlPullParser
+import java.io.ByteArrayInputStream
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -11,6 +14,9 @@ internal val multipartDigestPattern = Regex("[0-9a-f]{64}")
 internal val multipartETagPattern = Regex("[A-Za-z0-9._:-]{1,64}")
 private const val CHECKSUM_HEADER = "x-amz-checksum-sha256"
 private const val BUFFER_SIZE = 64 * 1024
+private const val MAX_STORAGE_ERROR_BYTES = 8 * 1024
+
+internal class MultipartSignatureExpired : IOException()
 
 internal fun multipartDigests(
     input: FileInputStream,
@@ -74,7 +80,9 @@ internal fun putMultipartBody(
         }
 
         // 2. 只有存储明确返回成功和唯一 ETag 才交付回执。
-        if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+        val status = connection.responseCode
+        if (status != HttpURLConnection.HTTP_OK) {
+            if (isExpiredSignature(connection, status)) throw MultipartSignatureExpired()
             throw IOException("Storage did not accept part")
         }
         val tags = connection.headerFields.entries
@@ -86,6 +94,40 @@ internal fun putMultipartBody(
     } finally {
         connection.disconnect()
     }
+}
+
+private fun isExpiredSignature(connection: HttpURLConnection, status: Int): Boolean {
+    if (status != HttpURLConnection.HTTP_BAD_REQUEST && status != HttpURLConnection.HTTP_FORBIDDEN) return false
+    val error = connection.errorStream ?: return false
+    return runCatching {
+        error.use { input ->
+            // 1. 只读取有界的错误正文，避免把普通 403 当成过期。
+            val buffer = ByteArray(MAX_STORAGE_ERROR_BYTES + 1)
+            var size = 0
+            while (size < buffer.size) {
+                val count = input.read(buffer, size, buffer.size - size)
+                if (count <= 0) break
+                size += count
+            }
+            if (size > MAX_STORAGE_ERROR_BYTES) return@use false
+            val parser = Xml.newPullParser()
+            parser.setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false)
+            parser.setInput(ByteArrayInputStream(buffer, 0, size), "UTF-8")
+            parser.nextTag()
+            parser.require(XmlPullParser.START_TAG, null, "Error")
+            val fields = mutableMapOf<String, String>()
+            while (parser.nextTag() == XmlPullParser.START_TAG) {
+                val name = parser.name
+                if (fields.put(name, parser.nextText()) != null) return@use false
+            }
+            parser.require(XmlPullParser.END_TAG, null, "Error")
+
+            // 2. 与存储端的明确过期响应一致时才允许上层重签。
+            fields["Code"] == "RequestExpired" ||
+                (status == HttpURLConnection.HTTP_FORBIDDEN && fields["Code"] == "AccessDenied" &&
+                    fields["Message"] == "Request has expired")
+        }
+    }.getOrDefault(false)
 }
 
 private inline fun readRange(

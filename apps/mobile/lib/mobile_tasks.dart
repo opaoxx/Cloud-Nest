@@ -200,11 +200,26 @@ Future<void> saveMultipartPart(
 ) => _taskCall<void>('recordMultipartPart', owner, {
   'id': id,
   'remoteId': taskId,
+  ..._receiptArguments(receipt),
+});
+
+Future<void> saveReconciledMultipartParts(
+  AccountOwner owner,
+  String id,
+  String taskId,
+  Iterable<MultipartReceipt> receipts,
+) => _taskCall<void>('reconcileMultipartParts', owner, {
+  'id': id,
+  'remoteId': taskId,
+  'receipts': receipts.map(_receiptArguments).toList(),
+});
+
+Map<String, Object> _receiptArguments(MultipartReceipt receipt) => {
   'number': receipt.number,
-  'lengthBytes': receipt.sizeBytes,
+  'sizeBytes': receipt.sizeBytes,
   'sha256': receipt.sha256,
   'etag': receipt.etag,
-});
+};
 
 Future<void> saveMultipartOutcome(
   AccountOwner owner,

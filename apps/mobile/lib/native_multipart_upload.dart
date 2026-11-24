@@ -31,6 +31,10 @@ typedef MultipartPartGrant = ({
   DateTime expiresAt,
 });
 
+class MultipartSignatureExpired extends AccountFailure {
+  const MultipartSignatureExpired() : super('分片签名已到期，请重试。');
+}
+
 bool isMultipartSha256(String digest) =>
     _sha256Pattern.stringMatch(digest) == digest;
 bool isMultipartETag(String etag) => _etagPattern.stringMatch(etag) == etag;
@@ -196,7 +200,6 @@ Future<MultipartPartGrant> requestMultipartPart(
     if (url != null &&
         expiresAt != null &&
         taskExpiresAt != null &&
-        expiresAt.isAfter(DateTime.now()) &&
         !expiresAt.isAfter(taskExpiresAt)) {
       if ((
             url.queryParametersAll['partNumber'],
@@ -211,6 +214,27 @@ Future<MultipartPartGrant> requestMultipartPart(
   throw const AccountFailure('服务端未交付与该分片匹配的有效签名。');
 }
 
+Future<MultipartPartGrant> renewMultipartPart(
+  NativeSession session,
+  MultipartCreation plan,
+  MultipartPart part,
+  MultipartPartGrant expired,
+) async {
+  // 新签名只允许用于同一存储会话和路径，片号和摘要仍由签名解析核对。
+  final renewed = await requestMultipartPart(session, plan, part);
+  final before = Uri.parse(expired.signedUrl);
+  final after = Uri.parse(renewed.signedUrl);
+  if (before.scheme != after.scheme ||
+      before.authority != after.authority ||
+      before.path != after.path ||
+      before.queryParameters['uploadId'] != after.queryParameters['uploadId'] ||
+      renewed.signedUrl == expired.signedUrl ||
+      !renewed.expiresAt.isAfter(DateTime.now())) {
+    throw const AccountFailure('未取得同一存储会话的新签名，请重试。');
+  }
+  return renewed;
+}
+
 Future<MultipartReceipt> sendMultipartPart(
   String scope,
   PreparedUploadFile source,
@@ -218,7 +242,7 @@ Future<MultipartReceipt> sendMultipartPart(
   MultipartPartGrant grant,
 ) async {
   if (!grant.expiresAt.isAfter(DateTime.now())) {
-    throw const AccountFailure('分片签名已到期，请重试。');
+    throw const MultipartSignatureExpired();
   }
   final response = await _sourceOperation('putMultipartPart', scope, source, {
     'offsetBytes': part.offsetBytes,
@@ -252,6 +276,9 @@ Future<Object?> _sourceOperation(
       ...arguments,
     });
   } on PlatformException catch (error) {
+    if (error.code == 'multipart_signature_expired') {
+      throw const MultipartSignatureExpired();
+    }
     throw AccountFailure(switch (error.code) {
       'document_source_changed' => '源文件已变化，请返回首页重新选择。',
       'document_access_lost' => '无法访问原文件，请返回首页重新选择。',

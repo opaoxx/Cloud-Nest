@@ -91,7 +91,8 @@ class MainActivity : FlutterFragmentActivity() {
             setMethodCallHandler { call, result ->
                 if (call.method !in setOf(
                         "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart",
-                        "readMultipartParts", "recordMultipartPart", "saveMultipartOutcome", "recordDownload",
+                        "readMultipartParts", "recordMultipartPart", "reconcileMultipartParts",
+                        "saveMultipartOutcome", "recordDownload",
                     )
                 ) {
                     result.notImplemented()
@@ -149,12 +150,17 @@ class MainActivity : FlutterFragmentActivity() {
                                     owner,
                                     requireNotNull(call.argument<String>("id")),
                                     requireNotNull(call.argument<String>("remoteId")),
-                                    MultipartPartReceipt(
-                                        requireNotNull(call.argument<Int>("number")),
-                                        requireNotNull(call.argument<Number>("lengthBytes")).toLong(),
-                                        requireNotNull(call.argument<String>("sha256")),
-                                        requireNotNull(call.argument<String>("etag")),
-                                    ),
+                                    parseMultipartReceipt(call.arguments as Map<*, *>),
+                                )
+                                null
+                            }
+                            "reconcileMultipartParts" -> {
+                                val rows = requireNotNull(call.argument<List<Map<*, *>>>("receipts"))
+                                store.reconcileMultipartParts(
+                                    owner,
+                                    requireNotNull(call.argument<String>("id")),
+                                    requireNotNull(call.argument<String>("remoteId")),
+                                    rows.map(::parseMultipartReceipt),
                                 )
                                 null
                             }
@@ -228,6 +234,13 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
     }
+
+    private fun parseMultipartReceipt(arguments: Map<*, *>): MultipartPartReceipt = MultipartPartReceipt(
+        arguments["number"] as Int,
+        (arguments["sizeBytes"] as Number).toLong(),
+        arguments["sha256"] as String,
+        arguments["etag"] as String,
+    )
 
     private fun readUploadSource(call: MethodCall, scope: String, source: SourceSummary): Map<String, Any> =
         when (call.method) {
@@ -317,6 +330,8 @@ class MainActivity : FlutterFragmentActivity() {
                 "document_source_changed"
             } catch (paused: UploadSourcePaused) {
                 paused.reason
+            } catch (_: MultipartSignatureExpired) {
+                "multipart_signature_expired"
             } catch (_: Exception) {
                 defaultErrorCode
             }

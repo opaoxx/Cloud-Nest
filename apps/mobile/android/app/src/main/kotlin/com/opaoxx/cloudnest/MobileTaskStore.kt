@@ -345,6 +345,48 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    fun reconcileMultipartParts(owner: TaskOwner, id: String, remoteId: String, receipts: List<MultipartPartReceipt>) {
+        require(isStageId(id) && validTaskNumber(remoteId))
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            // 1. 在写事务内核对归属、阶段和计划，避免替换已经结束的任务。
+            database.query(
+                TASKS,
+                arrayOf("size_bytes", "part_size_bytes", "part_count"),
+                "$OWNER_FILTER AND local_task_id = ? AND remote_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND part_count IS NOT NULL",
+                owner.selectionArgs() + arrayOf(id, remoteId),
+                null, null, null,
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) throw SQLiteException("Multipart task not available for reconciliation")
+                val size = cursor.getLong(0)
+                val partSize = cursor.getLong(1)
+                val partCount = cursor.getInt(2)
+                require(receipts.size <= partCount && receipts.map { it.number }.toSet().size == receipts.size)
+                for (receipt in receipts) {
+                    require(receipt.number in 1..partCount)
+                    require(receipt.sizeBytes == minOf(partSize, size - (receipt.number - 1L) * partSize))
+                }
+            }
+
+            // 2. 一次提交删除旧回执并保存已核对的远端 ETag，失败时全部回滚。
+            database.delete("multipart_part_receipts", "local_task_id = ?", arrayOf(id))
+            for (receipt in receipts) {
+                val values = ContentValues().apply {
+                    put("local_task_id", id)
+                    put("part_number", receipt.number)
+                    put("size_bytes", receipt.sizeBytes)
+                    put("sha256", receipt.sha256)
+                    put("etag", receipt.etag)
+                }
+                database.insertOrThrow("multipart_part_receipts", null, values)
+            }
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
     fun list(owner: TaskOwner): List<Map<String, Any?>> = readTasks(readableDatabase, owner)
 
     fun recordDownload(owner: TaskOwner, actualName: String, sizeBytes: Long, sha256: String) {

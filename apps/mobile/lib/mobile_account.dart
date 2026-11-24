@@ -9,6 +9,7 @@ import 'native_directory.dart';
 import 'native_download.dart';
 import 'native_login.dart';
 import 'native_multipart_completion.dart';
+import 'native_multipart_reconcile.dart';
 import 'native_multipart_upload.dart';
 import 'native_single_upload.dart';
 import 'native_upload_creation.dart';
@@ -247,7 +248,7 @@ class MobileAccount {
     }
 
     try {
-      // 1. 找回任务和本地回执，复核源文件并计算各片摘要。
+      // 1. 校验源文件，读取原任务的服务端分片清单。
       final intent = await reserveMultipartIntent(
         currentOwner,
         parentId,
@@ -263,39 +264,53 @@ class MobileAccount {
       if (intent.creation == null) {
         await saveMultipartCheckpoint(currentOwner, intent.id, plan);
       }
-      final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
       _checkSession(epoch);
-      onProgress(plan, saved.length);
-      Future<String> finish() => _finishMultipart(
-        currentOwner,
-        intent.id,
-        parentId,
-        plan,
-        saved,
-        epoch,
+      Future<MultipartTask> queryTask() => _readForAccount(
+        (session) => readMultipartTask(session, plan, parentId),
       );
-      if (saved.length == plan.partCount) return await finish();
-
-      final scope = documentScopeFor(currentOwner);
-      final digests = await inspectMultipartSource(scope, source, plan);
-      _checkSession(epoch);
-      if (saved.values.any(
-        (receipt) => receipt.sha256 != digests[receipt.number - 1],
-      )) {
-        throw const AccountFailure('本机分片摘要与原文件不一致。');
-      }
       final waiting = Stopwatch()..start();
-      while (!await _readForAccount(
-        (session) => multipartReady(session, plan, parentId),
-      )) {
+      var task = await queryTask();
+      while (task.state == 'CREATING') {
         if (waiting.elapsed >= const Duration(seconds: 10)) {
           throw const AccountFailure('服务端仍在初始化任务，请稍后重试。');
         }
         await Future<void>.delayed(const Duration(milliseconds: 450));
         _checkSession(epoch);
+        task = await queryTask();
+      }
+      if (task.state != 'UPLOADING') {
+        return await _finishMultipart(
+          currentOwner,
+          intent.id,
+          parentId,
+          plan,
+          const {},
+          epoch,
+          initialTask: task,
+        );
+      }
+      if (!task.expiresAt.isAfter(DateTime.now())) {
+        throw const AccountFailure('原分片任务的有效期已结束。');
       }
 
+      final scope = documentScopeFor(currentOwner);
+      final digests = await inspectMultipartSource(scope, source, plan);
+      _checkSession(epoch);
+      final remote = await _readForAccount(
+        (session) => reconcileMultipartReceipts(session, plan, digests),
+      );
+
+      // 2. 按长度和摘要核对分片，在一个事务里更新本机回执。
+      await saveReconciledMultipartParts(
+        currentOwner,
+        intent.id,
+        plan.taskId,
+        remote.values,
+      );
+      final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
+      _checkSession(epoch);
       var confirmed = saved.length;
+      onProgress(plan, confirmed);
       for (var number = 1; number <= plan.partCount; number++) {
         if (saved.containsKey(number)) continue;
         _checkSession(epoch);
@@ -306,13 +321,14 @@ class MobileAccount {
           sha256: digests[number - 1],
         );
         try {
-          // 2. 逐片申请签名，按计划范围和签名头发送正文。
-          final grant = await _readForAccount(
-            (session) => requestMultipartPart(session, plan, part),
+          // 3. 补传缺片。签名明确过期时，核对原任务后重签一次。
+          final receipt = await _sendMultipartWithRenewal(
+            scope,
+            source,
+            part,
+            plan,
+            parentId,
           );
-          final receipt = await sendMultipartPart(scope, source, part, grant);
-
-          // 3. 每收到一片的有效回执，先写入 SQLite，再更新进度。
           await saveMultipartPart(
             currentOwner,
             intent.id,
@@ -326,13 +342,44 @@ class MobileAccount {
           rethrow;
         } on AccountFailure catch (error) {
           throw AccountFailure(
-            '第 $number 片未确认。已记录 $confirmed/${plan.partCount} 片。\n${error.message}',
+            '第 $number 片未确认。已记录 $confirmed/${plan.partCount} 片。\n'
+            '${error.message}\n恢复网络后可再次点击上传继续。',
           );
         }
       }
-      return await finish();
+      return await _finishMultipart(
+        currentOwner,
+        intent.id,
+        parentId,
+        plan,
+        saved,
+        epoch,
+      );
     } on TaskStoreFailure {
       throw const AccountFailure('无法读写本机上传记录，请重试。');
+    }
+  }
+
+  Future<MultipartReceipt> _sendMultipartWithRenewal(
+    String scope,
+    PreparedUploadFile source,
+    MultipartPart part,
+    MultipartCreation plan,
+    String parentId,
+  ) async {
+    final grant = await _readForAccount(
+      (session) => requestMultipartPart(session, plan, part),
+    );
+    try {
+      return await sendMultipartPart(scope, source, part, grant);
+    } on MultipartSignatureExpired {
+      final renewed = await _readForAccount((session) async {
+        if (!await multipartReady(session, plan, parentId)) {
+          throw const AccountFailure('原任务暂未准备好，请重试。');
+        }
+        return renewMultipartPart(session, plan, part, grant);
+      });
+      return sendMultipartPart(scope, source, part, renewed);
     }
   }
 
@@ -342,8 +389,9 @@ class MobileAccount {
     String parentId,
     MultipartCreation plan,
     Map<int, MultipartReceipt> receipts,
-    int epoch,
-  ) async {
+    int epoch, {
+    MultipartTask? initialTask,
+  }) async {
     Future<MultipartTask> readTask() {
       _checkSession(epoch);
       return _readForAccount(
@@ -352,7 +400,7 @@ class MobileAccount {
     }
 
     // 1. 查询原任务，按片号核对已保存的完整回执。
-    var task = await readTask();
+    var task = initialTask ?? await readTask();
     if (task.state == 'UPLOADING') {
       if (!task.expiresAt.isAfter(DateTime.now())) {
         throw const AccountFailure('原分片任务的有效期已结束。');
