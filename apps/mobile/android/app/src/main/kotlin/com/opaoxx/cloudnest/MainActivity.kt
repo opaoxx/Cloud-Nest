@@ -16,6 +16,7 @@ class MainActivity : FlutterFragmentActivity() {
     private val rememberedDocument by lazy { RememberedDocument(applicationContext) }
     private var installationChannel: MethodChannel? = null
     private var sessionChannel: MethodChannel? = null
+    private var taskChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
     private data class DocumentRequest(val scope: String, val result: MethodChannel.Result)
     private var pendingDocumentRequest: DocumentRequest? = null
@@ -71,6 +72,34 @@ class MainActivity : FlutterFragmentActivity() {
                     }
                 } catch (_: Exception) {
                     result.error("session_store_unavailable", null, null)
+                }
+            }
+        }
+        taskChannel = MethodChannel(
+            messenger,
+            "cloudnest/android_tasks",
+            StandardMethodCodec.INSTANCE,
+            messenger.makeBackgroundTaskQueue(),
+        ).apply {
+            setMethodCallHandler { call, result ->
+                if (call.method != "list" && call.method != "createTest") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                try {
+                    val owner = TaskOwner(
+                        requireNotNull(call.argument<String>("server")),
+                        requireNotNull(call.argument<String>("userId")),
+                    )
+                    val store = MobileTaskStore(applicationContext)
+                    val rows = try {
+                        if (call.method == "createTest") store.createTest(owner) else store.list(owner)
+                    } finally {
+                        store.close()
+                    }
+                    result.success(rows)
+                } catch (_: Exception) {
+                    result.error("task_store_unavailable", null, null)
                 }
             }
         }
@@ -182,6 +211,8 @@ class MainActivity : FlutterFragmentActivity() {
         installationChannel = null
         sessionChannel?.setMethodCallHandler(null)
         sessionChannel = null
+        taskChannel?.setMethodCallHandler(null)
+        taskChannel = null
         documentChannel?.setMethodCallHandler(null)
         documentChannel = null
         pendingDocumentRequest?.result?.error("document_picker_closed", null, null)

@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 import 'cloud_drive_page.dart';
 import 'login_page.dart';
 import 'mobile_account.dart';
+import 'mobile_tasks_page.dart';
 import 'native_login.dart';
 
 const _documentPicker = MethodChannel('cloudnest/android_document');
@@ -59,6 +60,14 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
       ),
     );
     if (mounted) _accountNotice = notice;
+  });
+
+  Future<void> _openTaskRecords() => _runAccount(() async {
+    final owner = _account.owner;
+    if (owner == null) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(builder: (context) => MobileTasksPage(owner: owner)),
+    );
   });
 
   Future<void> _runAccount(Future<void> Function() action) async {
@@ -204,12 +213,19 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
                 child: Semantics(liveRegion: true, child: Text(accountNotice)),
               ),
             if (username != null)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton(
-                  onPressed: _accountBusy ? null : _openCloudDrive,
-                  child: const Text('浏览云盘'),
-                ),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: _accountBusy ? null : _openCloudDrive,
+                    child: const Text('浏览云盘'),
+                  ),
+                  OutlinedButton(
+                    onPressed: _accountBusy ? null : _openTaskRecords,
+                    child: const Text('任务记录'),
+                  ),
+                ],
               ),
             if (!_accountBusy && _documentScope != null) ...[
               Align(
