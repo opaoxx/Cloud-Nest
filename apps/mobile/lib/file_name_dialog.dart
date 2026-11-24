@@ -5,6 +5,7 @@ Future<String?> showFileNameDialog(
   required String title,
   required String initialName,
   required String actionLabel,
+  bool autofocus = true,
   List<Widget> details = const [],
 }) {
   final form = GlobalKey<FormState>();
@@ -30,7 +31,7 @@ Future<String?> showFileNameDialog(
               ...details,
               TextFormField(
                 initialValue: initialName,
-                autofocus: true,
+                autofocus: autofocus,
                 textInputAction: TextInputAction.done,
                 decoration: const InputDecoration(labelText: '文件名'),
                 onChanged: (value) => name = value,

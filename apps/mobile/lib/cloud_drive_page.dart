@@ -3,17 +3,28 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 
 import 'file_name_dialog.dart';
+import 'file_presentation.dart';
 import 'mobile_account.dart';
+import 'mobile_tasks_page.dart';
 import 'native_directory.dart';
+import 'native_document_selection.dart';
 import 'native_login.dart';
 import 'native_upload_creation.dart';
 import 'transfer_pause.dart';
 
 class CloudDrivePage extends StatefulWidget {
-  const CloudDrivePage({super.key, required this.account, this.source});
+  const CloudDrivePage({
+    super.key,
+    required this.account,
+    this.accountBusy = false,
+    this.onLogout,
+    this.onSessionEnded,
+  });
 
   final MobileAccount account;
-  final PreparedUploadFile? source;
+  final bool accountBusy;
+  final VoidCallback? onLogout;
+  final ValueChanged<String>? onSessionEnded;
 
   @override
   State<CloudDrivePage> createState() => _CloudDrivePageState();
@@ -26,13 +37,17 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   String? _nextCursor;
   bool _loading = false;
   bool _transferBusy = false;
+  bool _choosingUpload = false;
   TransferPause? _pause;
   String? _transferNotice;
-  String? _pendingUploadName;
+  ({PreparedUploadFile source, String target, String name})? _pendingUpload;
   ({String message, String? parentId, String? cursor})? _failure;
 
   String? get _currentDirectory =>
       _breadcrumbs.isEmpty ? null : _breadcrumbs.last.id;
+
+  bool get _blocked =>
+      _loading || _transferBusy || _choosingUpload || widget.accountBusy;
 
   @override
   void initState() {
@@ -41,7 +56,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   }
 
   Future<void> _load(String? parentId, {String? cursor}) async {
-    if (_loading || _transferBusy) return;
+    if (_loading || _transferBusy || _choosingUpload) return;
     setState(() {
       _loading = true;
       _failure = null;
@@ -73,12 +88,13 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
         _entries = byId.values.toList();
         _breadcrumbs = listing.breadcrumbs;
         _nextCursor = listing.nextCursor;
+        if (_pendingUpload?.target != _currentDirectory) _pendingUpload = null;
       });
     } on AccountFailure catch (error) {
       // 3. 保留上次成功的列表。远端会话结束时回首页显示重新登录提示。
       if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
       if (widget.account.owner == null) {
-        Navigator.of(context).pop(error.message);
+        widget.onSessionEnded?.call(error.message);
       } else {
         setState(() {
           _failure = (
@@ -93,39 +109,75 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     }
   }
 
-  Future<void> _confirmUpload() async {
-    final source = widget.source;
-    final target = _currentDirectory;
-    if (source == null || target == null || _loading || _transferBusy) {
+  Future<void> _openTaskRecords() async {
+    final owner = widget.account.owner;
+    if (owner == null || _blocked) return;
+    final notice = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (context) =>
+            MobileTasksPage(owner: owner, account: widget.account),
+      ),
+    );
+    if (!mounted) return;
+    if (widget.account.owner != owner) {
+      widget.onSessionEnded?.call(notice ?? '会话已失效，请重新登录。');
       return;
     }
-    final multipart = source.sizeBytes > maxSingleUploadBytes;
+    // 任务记录中也可完成上传，返回时刷新当前目录。
+    await _load(_currentDirectory);
+  }
+
+  Future<void> _chooseUpload() async {
+    final target = _currentDirectory;
+    final owner = widget.account.owner;
+    if (target == null || owner == null || _blocked) return;
     final path = _breadcrumbs
         .map((crumb) => crumb.name.isEmpty ? '根目录' : crumb.name)
         .join(' / ');
-    // 1. 确认云盘名称和目标目录，保留所选文件的正文身份。
-    final name = await showFileNameDialog(
-      context,
-      title: '上传到当前目录',
-      initialName: _pendingUploadName ?? source.name,
-      actionLabel: '上传',
-      details: [Text(path), Text('${source.sizeBytes} B')],
-    );
-    if (!mounted ||
-        name == null ||
-        _currentDirectory != target ||
-        _loading ||
-        _transferBusy) {
+    setState(() {
+      _choosingUpload = true;
+      _pendingUpload = null;
+      _transferNotice = '正在读取所选文件…';
+    });
+    try {
+      // 1. 在原位置打开系统选择器，记住发起时的目标目录。
+      final source = await pickUploadFile(owner);
+      if (!mounted || widget.account.owner != owner) return;
+      setState(() => _transferNotice = null);
+      if (source == null) return;
+
+      // 2. 默认保留原文件名，可选改名，按一次上传即提交。
+      final name = await showFileNameDialog(
+        context,
+        title: '上传到当前目录',
+        initialName: source.name,
+        actionLabel: '上传',
+        autofocus: false,
+        details: [Text(path), Text(fileSizeLabel(source.sizeBytes))],
+      );
+      if (!mounted || widget.account.owner != owner || name == null) return;
+      _pendingUpload = (source: source, target: target, name: name);
+    } on AccountFailure catch (error) {
+      if (mounted) setState(() => _transferNotice = error.message);
+    } finally {
+      if (mounted) setState(() => _choosingUpload = false);
+    }
+    if (mounted && _pendingUpload != null) await _upload();
+  }
+
+  Future<void> _upload() async {
+    final pending = _pendingUpload;
+    if (pending == null || _blocked || pending.target != _currentDirectory) {
       return;
     }
-
-    // 2. 用同一发布名称创建或恢复任务，并按本机回执更新进度。
+    final (:source, :target, :name) = pending;
+    final multipart = source.sizeBytes > maxSingleUploadBytes;
     final pause = multipart ? TransferPause() : null;
+    // 3. 沿用已选名称和原目标开始上传，失败时可在本页重试。
     setState(() {
       _transferBusy = true;
       _pause = pause;
-      _pendingUploadName = name;
-      _transferNotice = multipart ? '正在核对分片任务…' : '正在上传并等待服务端校验…';
+      _transferNotice = multipart ? '正在准备上传…' : '正在上传文件…';
     });
     var published = false;
     try {
@@ -150,14 +202,14 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
       published = true;
       if (mounted) {
         setState(() {
-          _pendingUploadName = null;
+          _pendingUpload = null;
           _transferNotice = '上传成功。';
         });
       }
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {
-        Navigator.of(context).pop(error.message);
+        widget.onSessionEnded?.call(error.message);
       } else {
         setState(() => _transferNotice = error.message);
       }
@@ -174,7 +226,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   }
 
   Future<void> _download(DirectoryEntry entry) async {
-    if (_loading || _transferBusy) return;
+    if (_blocked) return;
     final pause = TransferPause();
     setState(() {
       _transferBusy = true;
@@ -188,7 +240,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {
-        Navigator.of(context).pop(error.message);
+        widget.onSessionEnded?.call(error.message);
       } else {
         setState(() => _transferNotice = error.message);
       }
@@ -204,7 +256,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
 
   Future<void> _editFile(DirectoryEntry entry, {required bool rename}) async {
     final directory = _currentDirectory;
-    if (directory == null || _loading || _transferBusy) return;
+    if (directory == null || _blocked) return;
 
     // 1. 等用户提交新名称或明确确认移入回收站。
     String? name;
@@ -236,10 +288,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
       );
       if (confirmed != true) return;
     }
-    if (!mounted ||
-        _currentDirectory != directory ||
-        _loading ||
-        _transferBusy) {
+    if (!mounted || _currentDirectory != directory || _blocked) {
       return;
     }
 
@@ -269,7 +318,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {
-        Navigator.of(context).pop(error.message);
+        widget.onSessionEnded?.call(error.message);
       } else {
         setState(() => _transferNotice = error.message);
       }
@@ -293,9 +342,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
             )
           else
             TextButton(
-              onPressed: _loading || _transferBusy
-                  ? null
-                  : () => _load(_breadcrumbs[index].id),
+              onPressed: _blocked ? null : () => _load(_breadcrumbs[index].id),
               child: Text(index == 0 ? '根目录' : _breadcrumbs[index].name),
             ),
         ],
@@ -338,7 +385,9 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
             entry.isFolder ? Icons.folder_outlined : Icons.description_outlined,
           ),
           title: Text(entry.name, maxLines: 2, overflow: TextOverflow.ellipsis),
-          subtitle: entry.isFolder ? null : Text('${entry.sizeBytes} B'),
+          subtitle: entry.isFolder
+              ? null
+              : Text(fileSizeLabel(entry.sizeBytes)),
           trailing: entry.isFolder
               ? const Icon(Icons.chevron_right)
               : Row(
@@ -346,30 +395,26 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                   children: [
                     IconButton(
                       tooltip: '下载 ${entry.name}',
-                      onPressed: _loading || _transferBusy
-                          ? null
-                          : () => _download(entry),
+                      onPressed: _blocked ? null : () => _download(entry),
                       icon: const Icon(Icons.download_outlined),
                     ),
                     IconButton(
                       tooltip: '重命名 ${entry.name}',
-                      onPressed: _loading || _transferBusy
+                      onPressed: _blocked
                           ? null
                           : () => _editFile(entry, rename: true),
                       icon: const Icon(Icons.edit_outlined),
                     ),
                     IconButton(
                       tooltip: '删除 ${entry.name}',
-                      onPressed: _loading || _transferBusy
+                      onPressed: _blocked
                           ? null
                           : () => _editFile(entry, rename: false),
                       icon: const Icon(Icons.delete_outline),
                     ),
                   ],
                 ),
-          onTap: entry.isFolder && !_loading && !_transferBusy
-              ? () => _load(entry.id)
-              : null,
+          onTap: entry.isFolder && !_blocked ? () => _load(entry.id) : null,
         );
       },
     );
@@ -382,11 +427,17 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (_breadcrumbs.isNotEmpty) _pathBar(),
-        if (_loading || _transferBusy) const LinearProgressIndicator(),
+        if (_loading || _transferBusy || (_choosingUpload && notice != null))
+          const LinearProgressIndicator(),
         if (notice != null)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Semantics(liveRegion: true, child: Text(notice)),
+          ),
+        if (_pendingUpload != null && !_blocked)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(onPressed: _upload, child: const Text('重试上传')),
           ),
         if (failure != null)
           Padding(
@@ -414,14 +465,28 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   @override
   Widget build(BuildContext context) {
     final cursor = _nextCursor;
-    final source = widget.source;
     final pause = _pause;
+    final canGoUp = _breadcrumbs.length > 1;
     return PopScope(
-      canPop: !_transferBusy,
+      canPop: !_blocked && !canGoUp,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && canGoUp && !_blocked) {
+          _load(_breadcrumbs[_breadcrumbs.length - 2].id);
+        }
+      },
       child: Scaffold(
         appBar: AppBar(
           title: const Text('云盘'),
-          automaticallyImplyLeading: !_transferBusy,
+          automaticallyImplyLeading: false,
+          leading: canGoUp
+              ? IconButton(
+                  tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+                  icon: const BackButtonIcon(),
+                  onPressed: _blocked
+                      ? null
+                      : () => _load(_breadcrumbs[_breadcrumbs.length - 2].id),
+                )
+              : null,
           actions: [
             if (pause != null)
               TextButton(
@@ -431,11 +496,22 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                 child: Text(pause.requested ? '正在暂停…' : '暂停'),
               ),
             IconButton(
-              tooltip: '刷新目录',
-              onPressed: _loading || _transferBusy
-                  ? null
-                  : () => _load(_currentDirectory),
-              icon: const Icon(Icons.refresh),
+              tooltip: '任务记录',
+              onPressed: _blocked ? null : _openTaskRecords,
+              icon: const Icon(Icons.history),
+            ),
+            PopupMenuButton<String>(
+              tooltip: '云盘选项',
+              enabled: !_blocked,
+              onSelected: (action) {
+                if (action == 'refresh') _load(_currentDirectory);
+                if (action == 'logout') widget.onLogout?.call();
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(value: 'refresh', child: Text('刷新目录')),
+                if (widget.onLogout != null)
+                  const PopupMenuItem(value: 'logout', child: Text('退出登录')),
+              ],
             ),
           ],
         ),
@@ -456,7 +532,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                         sliver: SliverToBoxAdapter(
                           child: OutlinedButton(
-                            onPressed: _loading || _transferBusy
+                            onPressed: _blocked
                                 ? null
                                 : () =>
                                       _load(_currentDirectory, cursor: cursor),
@@ -467,17 +543,21 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                   ],
                 ),
               ),
-              // 3. 上传入口继续提交已选文件到当前目录，完成后按同一 ID 刷新。
-              if (source != null && _currentDirectory != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                  child: FilledButton(
-                    onPressed: _loading || _transferBusy
+              // 3. 按钮固定在安全区内，切换目录时保留同一操作位置。
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: Align(
+                  alignment: Alignment.center,
+                  child: FilledButton.icon(
+                    key: const ValueKey('choose-upload'),
+                    onPressed: _blocked || _currentDirectory == null
                         ? null
-                        : _confirmUpload,
-                    child: const Text('上传到此目录'),
+                        : _chooseUpload,
+                    icon: const Icon(Icons.upload_file_outlined),
+                    label: const Text('选择文件'),
                   ),
                 ),
+              ),
             ],
           ),
         ),

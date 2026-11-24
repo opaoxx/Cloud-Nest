@@ -7,8 +7,31 @@ import 'package:cloudnest/native_login.dart';
 import 'package:cloudnest/native_multipart_upload.dart';
 import 'package:cloudnest/native_upload_creation.dart';
 import 'package:cloudnest/transfer_pause.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
+
+const _chooseUpload = ValueKey('choose-upload');
+
+void _selectFileOnTap(PreparedUploadFile source) {
+  const picker = MethodChannel('cloudnest/android_document');
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(picker, (call) async {
+    expect(call.method, 'pickAndSummarize');
+    expect(
+      call.arguments,
+      documentScopeFor((server: 'https://example.test', userId: '17')),
+    );
+    return {
+      'name': source.name,
+      'sizeBytes': source.sizeBytes,
+      'sha256': source.sha256,
+      'sourceMode': 'direct',
+    };
+  });
+  addTearDown(() => messenger.setMockMethodCallHandler(picker, null));
+}
 
 void main() {
   testWidgets('retries a page with the same cursor and merges by entry ID', (
@@ -44,15 +67,16 @@ void main() {
     tester,
   ) async {
     final account = _UploadAccount();
+    _selectFileOnTap(_source);
     await tester.pumpWidget(
-      MaterialApp(
-        home: CloudDrivePage(account: account, source: _source),
-      ),
+      MaterialApp(home: CloudDrivePage(account: account)),
     );
     await tester.pumpAndSettle();
+    final choicePosition = tester.getCenter(find.byKey(_chooseUpload));
     await tester.tap(find.text('目标目录'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('上传到此目录'));
+    expect(tester.getCenter(find.byKey(_chooseUpload)), choicePosition);
+    await tester.tap(find.byKey(_chooseUpload));
     await tester.pumpAndSettle();
     expect(find.text('根目录 / 目标目录'), findsOneWidget);
     expect(account.target, isNull);
@@ -65,9 +89,7 @@ void main() {
     expect(account.uploadName, '云盘新名称.txt');
     expect(find.text('上传成功。'), findsNothing);
     expect(
-      tester
-          .widget<FilledButton>(find.widgetWithText(FilledButton, '上传到此目录'))
-          .onPressed,
+      tester.widget<FilledButton>(find.byKey(_chooseUpload)).onPressed,
       isNull,
     );
 
@@ -137,15 +159,14 @@ void main() {
       sizeBytes: maxSingleUploadBytes + 1,
       sha256: _source.sha256,
     );
+    _selectFileOnTap(source);
     await tester.pumpWidget(
-      MaterialApp(
-        home: CloudDrivePage(account: account, source: source),
-      ),
+      MaterialApp(home: CloudDrivePage(account: account)),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.text('目标目录'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('上传到此目录'));
+    await tester.tap(find.byKey(_chooseUpload));
     await tester.pumpAndSettle();
     await tester.tap(find.text('上传'));
     await tester.pump();
@@ -172,19 +193,18 @@ void main() {
       sizeBytes: maxSingleUploadBytes + 1,
       sha256: _source.sha256,
     );
+    _selectFileOnTap(source);
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(840, 1120);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
     await tester.pumpWidget(
-      MaterialApp(
-        home: CloudDrivePage(account: account, source: source),
-      ),
+      MaterialApp(home: CloudDrivePage(account: account)),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.text('目标目录'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('上传到此目录'));
+    await tester.tap(find.byKey(_chooseUpload));
     await tester.pumpAndSettle();
     expect(find.text(source.name), findsOneWidget);
     expect(find.text('根目录 / 目标目录'), findsOneWidget);

@@ -1,133 +1,141 @@
 import 'dart:async';
 
 import 'package:cloudnest/main.dart';
+import 'package:cloudnest/mobile_account.dart';
+import 'package:cloudnest/native_directory.dart';
+import 'package:cloudnest/native_login.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
+const _pickButton = ValueKey('choose-upload');
+const _digest =
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const _sample = {
+  'name': '课程资料.txt',
+  'sizeBytes': 1536,
+  'sha256': _digest,
+  'sourceMode': 'direct',
+};
+const AccountOwner _driveOwner = (server: 'https://example.test', userId: '17');
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('cloudnest/android_document');
-  const credentials = MethodChannel('cloudnest/android_session');
+  const tasks = MethodChannel('cloudnest/android_tasks');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-  final pickButton = find.widgetWithText(FilledButton, '选择文件');
-  const emptyDigest =
-      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-  const emptyDocument = {
-    'name': '空文档.txt',
-    'sizeBytes': 0,
-    'sha256': emptyDigest,
-    'sourceMode': 'direct',
-  };
-
-  setUp(() {
-    messenger.setMockMethodCallHandler(credentials, (call) async {
-      expect(call.method, 'read');
-      return null;
-    });
-  });
+  final pickButton = find.byKey(_pickButton);
   tearDown(() {
     messenger.setMockMethodCallHandler(channel, null);
-    messenger.setMockMethodCallHandler(credentials, null);
+    messenger.setMockMethodCallHandler(tasks, null);
   });
 
-  testWidgets('shows the document summary and returns to idle on cancel', (
+  testWidgets(
+    'restored account opens the drive directly, with tasks in the app bar',
+    (tester) async {
+      final account = _RestoredAccount();
+      messenger.setMockMethodCallHandler(tasks, (call) async {
+        expect(call.method, 'list');
+        return [];
+      });
+      await tester.pumpWidget(CloudNestApp(account: account));
+      expect(find.text('正在恢复会话…'), findsOneWidget);
+      expect(find.text('选择文件'), findsNothing);
+      account.restored.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('根目录'), findsOneWidget);
+      expect(find.text('浏览云盘'), findsNothing);
+      expect(pickButton, findsOneWidget);
+      final history = find.byTooltip('任务记录');
+      expect(
+        tester.getCenter(history).dy,
+        lessThan(tester.getCenter(pickButton).dy),
+      );
+      await tester.tap(history);
+      await tester.pumpAndSettle();
+      expect(find.text('暂无任务记录'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'opens a readable confirmation after picking and stays in place on cancel',
+    (tester) async {
+      final account = _RestoredAccount()..restored.complete();
+      var picks = 0;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'pickAndSummarize');
+        expect(call.arguments, documentScopeFor(_driveOwner));
+        return ++picks == 1 ? _sample : null;
+      });
+      await tester.pumpWidget(CloudNestApp(account: account));
+      await tester.pumpAndSettle();
+      await tester.tap(pickButton);
+      await tester.pumpAndSettle();
+      expect(find.text('课程资料.txt'), findsOneWidget);
+      expect(find.text('1.5 KB'), findsOneWidget);
+      expect(find.textContaining(_digest), findsNothing);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(pickButton);
+      await tester.pumpAndSettle();
+      expect(picks, 2);
+      expect(find.text('根目录'), findsOneWidget);
+      expect(find.text('上传到当前目录'), findsNothing);
+      expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
+    },
+  );
+
+  testWidgets('space and read failures leave the fixed selector available', (
     tester,
   ) async {
-    var calls = 0;
-    final cancelled = Completer<Object?>();
+    final account = _RestoredAccount()..restored.complete();
+    var attempt = 0;
     messenger.setMockMethodCallHandler(channel, (call) async {
-      expect(call.arguments, 'guest');
-      if (call.method == 'restoreDocument') return null;
-      expect(call.method, 'pickAndSummarize');
-      calls++;
-      if (calls == 1) {
-        return emptyDocument;
-      }
-      return cancelled.future;
+      throw PlatformException(
+        code: ++attempt == 1
+            ? 'document_staging_space'
+            : 'document_read_failed',
+      );
     });
-
-    await tester.pumpWidget(const CloudNestApp());
+    await tester.pumpWidget(CloudNestApp(account: account));
     await tester.pumpAndSettle();
     await tester.tap(pickButton);
     await tester.pumpAndSettle();
-    expect(find.text('空文档.txt'), findsOneWidget);
-    expect(find.text('大小 0 B'), findsOneWidget);
-    expect(find.text('SHA-256 $emptyDigest'), findsOneWidget);
-
-    await tester.tap(pickButton);
-    await tester.pump();
-    expect(tester.widget<FilledButton>(pickButton).onPressed, isNull);
-    cancelled.complete(null);
-    await tester.pumpAndSettle();
-    expect(find.text('空文档.txt'), findsNothing);
-    expect(find.text('正在选择或读取文件…'), findsNothing);
-    expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
-    expect(calls, 2);
-  });
-
-  testWidgets('provider read errors allow another selection', (tester) async {
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'restoreDocument') return null;
-      throw PlatformException(code: 'document_read_failed');
-    });
-
-    await tester.pumpWidget(const CloudNestApp());
-    await tester.pumpAndSettle();
+    expect(find.textContaining('手机可用空间不足'), findsOneWidget);
     await tester.tap(pickButton);
     await tester.pumpAndSettle();
     expect(find.text('无法读取所选文件，请重新选择。'), findsOneWidget);
     expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
   });
+}
 
-  testWidgets('rereads a remembered document at startup', (tester) async {
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      expect(call.method, 'restoreDocument');
-      return emptyDocument;
-    });
+class _RestoredAccount extends MobileAccount {
+  final restored = Completer<void>();
+  AccountOwner? _owner;
 
-    await tester.pumpWidget(const CloudNestApp());
-    await tester.pumpAndSettle();
-    expect(find.text('已重新读取上次授权的文件。'), findsOneWidget);
-    expect(find.text('空文档.txt'), findsOneWidget);
-    expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
-  });
+  @override
+  AccountOwner? get owner => _owner;
 
-  testWidgets('allows reselection when the remembered read grant is gone', (
-    tester,
-  ) async {
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'restoreDocument') {
-        throw PlatformException(code: 'document_access_lost');
-      }
-      expect(call.method, 'pickAndSummarize');
-      return {...emptyDocument, 'sourceMode': 'staged'};
-    });
+  @override
+  Future<void> restore() async {
+    await restored.future;
+    _owner = _driveOwner;
+  }
 
-    await tester.pumpWidget(const CloudNestApp());
-    await tester.pumpAndSettle();
-    expect(find.text('上次文件的授权已失效，请重新选择。'), findsOneWidget);
-    expect(find.text('空文档.txt'), findsNothing);
-    await tester.tap(find.widgetWithText(FilledButton, '重新选择文件'));
-    await tester.pumpAndSettle();
-    expect(find.text('空文档.txt'), findsOneWidget);
-    expect(find.text('已暂存到本机，可在重开应用后继续使用。'), findsOneWidget);
-    expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
-  });
+  @override
+  Future<CurrentProfile> currentProfile() async =>
+      (userId: '17', username: 'test', rootEntryId: '1');
 
-  testWidgets('storage pause gives a reason and allows another file', (
-    tester,
-  ) async {
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'restoreDocument') return null;
-      throw PlatformException(code: 'document_staging_space');
-    });
-    await tester.pumpWidget(const CloudNestApp());
-    await tester.pumpAndSettle();
-    await tester.tap(pickButton);
-    await tester.pumpAndSettle();
-    expect(find.text('手机可用空间不足，已暂停准备。释放空间后请重新选择文件。'), findsOneWidget);
-    expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
-  });
+  @override
+  Future<DirectoryListing> listDirectory({
+    required String rootId,
+    required String parentId,
+    String? cursor,
+  }) async => (
+    breadcrumbs: [(id: '1', name: '')],
+    entries: <DirectoryEntry>[],
+    nextCursor: null,
+  );
 }
