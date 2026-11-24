@@ -248,116 +248,175 @@ class MobileAccount {
     }
 
     try {
-      // 1. 校验源文件，读取原任务的服务端分片清单。
       final intent = await reserveMultipartIntent(
         currentOwner,
         parentId,
         source,
       );
       _checkSession(epoch);
-      final plan =
-          intent.creation ??
-          await _readForAccount<MultipartCreation>(
-            (session) =>
-                createMultipartUpload(session, intent.id, parentId, source),
-          );
-      if (intent.creation == null) {
-        await saveMultipartCheckpoint(currentOwner, intent.id, plan);
-      }
-      _checkSession(epoch);
-      Future<MultipartTask> queryTask() => _readForAccount(
-        (session) => readMultipartTask(session, plan, parentId),
-      );
-      final waiting = Stopwatch()..start();
-      var task = await queryTask();
-      while (task.state == 'CREATING') {
-        if (waiting.elapsed >= const Duration(seconds: 10)) {
-          throw const AccountFailure('服务端仍在初始化任务，请稍后重试。');
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 450));
-        _checkSession(epoch);
-        task = await queryTask();
-      }
-      if (task.state != 'UPLOADING') {
-        return await _finishMultipart(
-          currentOwner,
-          intent.id,
-          parentId,
-          plan,
-          const {},
-          epoch,
-          initialTask: task,
-        );
-      }
-      if (!task.expiresAt.isAfter(DateTime.now())) {
-        throw const AccountFailure('原分片任务的有效期已结束。');
-      }
-
-      final scope = documentScopeFor(currentOwner);
-      final digests = await inspectMultipartSource(scope, source, plan);
-      _checkSession(epoch);
-      final remote = await _readForAccount(
-        (session) => reconcileMultipartReceipts(session, plan, digests),
-      );
-
-      // 2. 按长度和摘要核对分片，在一个事务里更新本机回执。
-      await saveReconciledMultipartParts(
+      return await _runMultipart(
         currentOwner,
-        intent.id,
-        plan.taskId,
-        remote.values,
+        (
+          id: intent.id,
+          parentId: parentId,
+          source: source,
+          creation: intent.creation,
+        ),
+        epoch,
+        onProgress,
       );
-      final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法读写本机上传记录，请重试。');
+    }
+  }
+
+  Future<String?> resumeMultipart(
+    AccountOwner taskOwner,
+    String localId, {
+    required bool reselect,
+    required void Function(MultipartCreation plan, int confirmed) onProgress,
+  }) async {
+    if (owner != taskOwner || _signingOut) {
+      throw const ReauthenticationRequired();
+    }
+    final epoch = _sessionEpoch;
+    try {
+      // 1. 按账号和本地任务 ID 找回原上传记录。
+      final pending = await readPendingMultipartUpload(taskOwner, localId);
       _checkSession(epoch);
-      var confirmed = saved.length;
-      onProgress(plan, confirmed);
-      for (var number = 1; number <= plan.partCount; number++) {
-        if (saved.containsKey(number)) continue;
-        _checkSession(epoch);
-        final part = (
-          number: number,
-          offsetBytes: plan.offsetOf(number),
-          sizeBytes: plan.sizeOf(number),
-          sha256: digests[number - 1],
-        );
-        try {
-          // 3. 补传缺片。签名明确过期时，核对原任务后重签一次。
-          final receipt = await _sendMultipartWithRenewal(
-            scope,
-            source,
-            part,
-            plan,
-            parentId,
-          );
-          await saveMultipartPart(
-            currentOwner,
-            intent.id,
-            plan.taskId,
-            receipt,
-          );
-          _checkSession(epoch);
-          saved[number] = receipt;
-          onProgress(plan, ++confirmed);
-        } on ReauthenticationRequired {
-          rethrow;
-        } on AccountFailure catch (error) {
-          throw AccountFailure(
-            '第 $number 片未确认。已记录 $confirmed/${plan.partCount} 片。\n'
-            '${error.message}\n恢复网络后可再次点击上传继续。',
-          );
-        }
+      if (pending == null) throw const AccountFailure('原任务已经结束或不可继续。');
+
+      // 2. 只有大小和 SHA-256 一致的副本才能替换该任务的来源。
+      if (reselect &&
+          !await pickReplacementMultipartSource(
+            taskDocumentScope(taskOwner, localId),
+            pending.source,
+          )) {
+        return null;
       }
+      _checkSession(epoch);
+      return await _runMultipart(taskOwner, pending, epoch, onProgress);
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法读写本机上传记录，请重试。');
+    }
+  }
+
+  Future<String> _runMultipart(
+    AccountOwner currentOwner,
+    PendingMultipartUpload intent,
+    int epoch,
+    void Function(MultipartCreation plan, int confirmed) onProgress,
+  ) async {
+    final source = intent.source;
+    final parentId = intent.parentId;
+    final scope = taskDocumentScope(currentOwner, intent.id);
+
+    Future<void> bindSource() =>
+        bindMultipartSource(scope, documentScopeFor(currentOwner), source);
+    if (intent.creation == null) {
+      await bindSource();
+      _checkSession(epoch);
+    }
+    final plan =
+        intent.creation ??
+        await _readForAccount<MultipartCreation>(
+          (session) =>
+              createMultipartUpload(session, intent.id, parentId, source),
+        );
+    if (intent.creation == null) {
+      await saveMultipartCheckpoint(currentOwner, intent.id, plan);
+    }
+    _checkSession(epoch);
+    Future<MultipartTask> queryTask() => _readForAccount(
+      (session) => readMultipartTask(session, plan, parentId),
+    );
+    final waiting = Stopwatch()..start();
+    var task = await queryTask();
+    while (task.state == 'CREATING') {
+      if (waiting.elapsed >= const Duration(seconds: 10)) {
+        throw const AccountFailure('服务端仍在初始化任务，请稍后重试。');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      _checkSession(epoch);
+      task = await queryTask();
+    }
+    if (task.state != 'UPLOADING') {
       return await _finishMultipart(
         currentOwner,
         intent.id,
         parentId,
         plan,
-        saved,
+        const {},
         epoch,
+        initialTask: task,
       );
-    } on TaskStoreFailure {
-      throw const AccountFailure('无法读写本机上传记录，请重试。');
     }
+    if (!task.expiresAt.isAfter(DateTime.now())) {
+      throw const AccountFailure('原分片任务的有效期已结束。');
+    }
+
+    if (intent.creation != null) {
+      await bindSource();
+      _checkSession(epoch);
+    }
+    final digests = await inspectMultipartSource(scope, source, plan);
+    _checkSession(epoch);
+    final remote = await _readForAccount(
+      (session) => reconcileMultipartReceipts(session, plan, digests),
+    );
+
+    // 3. 沿用原远端任务，对账后补传缺片。
+    await saveReconciledMultipartParts(
+      currentOwner,
+      intent.id,
+      plan.taskId,
+      remote.values,
+    );
+    final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
+    _checkSession(epoch);
+    var confirmed = saved.length;
+    onProgress(plan, confirmed);
+    for (var number = 1; number <= plan.partCount; number++) {
+      if (saved.containsKey(number)) continue;
+      _checkSession(epoch);
+      final part = (
+        number: number,
+        offsetBytes: plan.offsetOf(number),
+        sizeBytes: plan.sizeOf(number),
+        sha256: digests[number - 1],
+      );
+      try {
+        // 签名明确过期时，核对原任务后重签一次。
+        final receipt = await _sendMultipartWithRenewal(
+          scope,
+          source,
+          part,
+          plan,
+          parentId,
+        );
+        await saveMultipartPart(currentOwner, intent.id, plan.taskId, receipt);
+        _checkSession(epoch);
+        saved[number] = receipt;
+        onProgress(plan, ++confirmed);
+      } on ReauthenticationRequired {
+        rethrow;
+      } on MultipartSourceUnavailable {
+        rethrow;
+      } on AccountFailure catch (error) {
+        throw AccountFailure(
+          '第 $number 片未确认。已记录 $confirmed/${plan.partCount} 片。\n'
+          '${error.message}\n恢复网络后可再次点击上传继续。',
+        );
+      }
+    }
+    return await _finishMultipart(
+      currentOwner,
+      intent.id,
+      parentId,
+      plan,
+      saved,
+      epoch,
+    );
   }
 
   Future<MultipartReceipt> _sendMultipartWithRenewal(
@@ -425,11 +484,13 @@ class MobileAccount {
       _checkSession(epoch);
       if (task.entryId case final String entryId) {
         await saveMultipartOutcome(owner, localId, plan.taskId, task);
+        await releaseMultipartSource(taskDocumentScope(owner, localId));
         _checkSession(epoch);
         return entryId;
       }
       if (const {'FAILED', 'EXPIRED', 'CANCELLED'}.contains(task.state)) {
         await saveMultipartOutcome(owner, localId, plan.taskId, task);
+        await releaseMultipartSource(taskDocumentScope(owner, localId));
         _checkSession(epoch);
         final label = switch (task.state) {
           'EXPIRED' => '原分片任务已过期',

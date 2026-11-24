@@ -35,6 +35,10 @@ class MultipartSignatureExpired extends AccountFailure {
   const MultipartSignatureExpired() : super('分片签名已到期，请重试。');
 }
 
+class MultipartSourceUnavailable extends AccountFailure {
+  const MultipartSourceUnavailable(super.message);
+}
+
 bool isMultipartSha256(String digest) =>
     _sha256Pattern.stringMatch(digest) == digest;
 bool isMultipartETag(String etag) => _etagPattern.stringMatch(etag) == etag;
@@ -148,6 +152,35 @@ Future<List<String>> inspectMultipartSource(
     return values.cast<String>();
   }
   throw const AccountFailure('无法核对分片摘要，请重新选择文件。');
+}
+
+Future<void> bindMultipartSource(
+  String scope,
+  String selectedScope,
+  PreparedUploadFile source,
+) async {
+  await _sourceOperation('bindTaskSource', scope, source, {
+    'selectedScope': selectedScope,
+  });
+}
+
+Future<bool> pickReplacementMultipartSource(
+  String scope,
+  PreparedUploadFile source,
+) async {
+  // Android 校验字节数和摘要后才替换任务文件引用。
+  return await _sourceOperation('pickTaskSource', scope, source, const {}) !=
+      null;
+}
+
+Future<void> releaseMultipartSource(String scope) async {
+  try {
+    await _documents.invokeMethod<void>('clearTaskSource', scope);
+  } on PlatformException {
+    // 重新打开账号时也会释放终态任务的文件引用。
+  } on MissingPluginException {
+    // 本机记录的发布结果已经写入。
+  }
 }
 
 Future<MultipartPartGrant> requestMultipartPart(
@@ -279,10 +312,19 @@ Future<Object?> _sourceOperation(
     if (error.code == 'multipart_signature_expired') {
       throw const MultipartSignatureExpired();
     }
+    switch (error.code) {
+      case 'document_source_changed':
+        throw const MultipartSourceUnavailable('文件内容与原任务不一致，请重新选择原文件或相同副本。');
+      case 'document_access_lost':
+      case 'document_read_failed':
+        throw const MultipartSourceUnavailable('无法读取原文件或授权已失效，请重新选择文件。');
+    }
     throw AccountFailure(switch (error.code) {
-      'document_source_changed' => '源文件已变化，请返回首页重新选择。',
-      'document_access_lost' => '无法访问原文件，请返回首页重新选择。',
       'multipart_put_unconfirmed' => '存储端未确认分片，请重试。',
+      'selection_in_progress' => '正在读取另一个文件，请稍后重试。',
+      'picker_unavailable' => '无法打开系统文件选择器。',
+      'document_staging_budget' ||
+      'document_staging_space' => '手机暂存空间不足，请释放空间后重试。',
       _ => '无法读取源文件，请返回首页重新选择。',
     });
   } on MissingPluginException {

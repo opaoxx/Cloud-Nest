@@ -14,7 +14,13 @@ class TaskStoreFailure implements Exception {
 }
 
 class MobileTask {
-  const MobileTask(this.id, this.name, this.createdAt, this.statusLabel);
+  const MobileTask(
+    this.id,
+    this.name,
+    this.createdAt,
+    this.statusLabel,
+    this.canResume,
+  );
 
   factory MobileTask.fromAndroid(Object? row) {
     if (row is! Map<Object?, Object?>) throw const TaskStoreFailure();
@@ -50,6 +56,7 @@ class MobileTask {
         name,
         DateTime.fromMillisecondsSinceEpoch(createdAtMs),
         label,
+        kind == 'UPLOAD' && state == 'PENDING' && _isMultipartRow(row),
       );
     }
     throw const TaskStoreFailure();
@@ -59,6 +66,54 @@ class MobileTask {
   final String name;
   final DateTime createdAt;
   final String statusLabel;
+  final bool canResume;
+}
+
+bool _isMultipartRow(Map<Object?, Object?> row) => switch (row['sizeBytes']) {
+  final int size
+      when size > maxSingleUploadBytes && size <= maxUploadProtocolBytes =>
+    true,
+  _ => false,
+};
+
+typedef PendingMultipartUpload = ({
+  String id,
+  String parentId,
+  PreparedUploadFile source,
+  MultipartCreation? creation,
+});
+
+Future<PendingMultipartUpload?> readPendingMultipartUpload(
+  AccountOwner owner,
+  String id,
+) async {
+  final value = await _taskCall<Object?>('pendingMultipart', owner, {'id': id});
+  if (value == null) return null;
+  if (value
+      case {
+        'id': final String actualId,
+        'parentId': final String parentId,
+        'name': final String name,
+        'sizeBytes': final int size,
+        'sha256': final String sha256,
+        'remoteId': final String? remoteId,
+        'kind': 'UPLOAD',
+        'state': 'PENDING',
+      }
+      when actualId == id &&
+          isCloudNestId(parentId) &&
+          name.isNotEmpty &&
+          size > maxSingleUploadBytes &&
+          size <= maxUploadProtocolBytes &&
+          isMultipartSha256(sha256)) {
+    return (
+      id: id,
+      parentId: parentId,
+      source: (name: name, sizeBytes: size, sha256: sha256),
+      creation: remoteId == null ? null : _savedMultipart(value, size),
+    );
+  }
+  throw const TaskStoreFailure();
 }
 
 typedef LocalSingleIntent = ({String id, String? remoteId});

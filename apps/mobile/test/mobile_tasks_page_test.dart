@@ -1,4 +1,6 @@
+import 'package:cloudnest/mobile_account.dart';
 import 'package:cloudnest/mobile_tasks_page.dart';
+import 'package:cloudnest/native_multipart_upload.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -48,7 +50,9 @@ void main() {
     });
 
     await tester.pumpWidget(
-      const MaterialApp(home: MobileTasksPage(owner: _owner)),
+      MaterialApp(
+        home: MobileTasksPage(owner: _owner, account: MobileAccount()),
+      ),
     );
     await tester.pumpAndSettle();
     expect(find.text('暂无任务记录'), findsOneWidget);
@@ -65,10 +69,63 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpWidget(
-      const MaterialApp(home: MobileTasksPage(owner: _owner)),
+      MaterialApp(
+        home: MobileTasksPage(owner: _owner, account: MobileAccount()),
+      ),
     );
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey(_taskId)), findsOneWidget);
     expect(operations, ['list', 'createTest', 'createTest', 'list']);
   });
+
+  testWidgets('reselects the source for the same paused task', (tester) async {
+    final account = _ResumeAccount();
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    addTearDown(() => messenger.setMockMethodCallHandler(_channel, null));
+    messenger.setMockMethodCallHandler(
+      _channel,
+      (call) async => [
+        {
+          'id': _taskId,
+          'name': '大文件.bin',
+          'kind': 'UPLOAD',
+          'state': 'PENDING',
+          'createdAtMs': 1795478400000,
+          'sizeBytes': 16777217,
+        },
+      ],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MobileTasksPage(owner: _owner, account: account),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('继续上传'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('授权已失效'), findsOneWidget);
+    expect(find.text('重新选择文件'), findsOneWidget);
+    await tester.tap(find.text('重新选择文件'));
+    await tester.pumpAndSettle();
+    expect(find.text('已取消重新选择。任务保持暂停。'), findsOneWidget);
+    expect(account.attempts, [(_taskId, false), (_taskId, true)]);
+  });
+}
+
+class _ResumeAccount extends MobileAccount {
+  final attempts = <(String, bool)>[];
+
+  @override
+  Future<String?> resumeMultipart(
+    AccountOwner taskOwner,
+    String localId, {
+    required bool reselect,
+    required void Function(MultipartCreation plan, int confirmed) onProgress,
+  }) async {
+    expect(taskOwner, _owner);
+    attempts.add((localId, reselect));
+    if (!reselect) throw const MultipartSourceUnavailable('授权已失效。');
+    return null;
+  }
 }

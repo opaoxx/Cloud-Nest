@@ -22,6 +22,7 @@ private val singleBodyPattern = Regex("cloudnest-single-[0-9a-f-]{36}-[0-9]+\\.b
 
 internal class RememberedDocument(context: Context) {
     private val resolver = context.contentResolver
+    private val context = context.applicationContext
     private val savedDocument = AtomicFile(File(context.noBackupFilesDir, "remembered_document"))
     private val sources = PreparedUploadSources(resolver, File(context.noBackupFilesDir, "upload_sources"))
     private val cache = context.cacheDir
@@ -62,6 +63,23 @@ internal class RememberedDocument(context: Context) {
         return reference
     }
 
+    fun bindTaskSource(scope: String, selectedScope: String, expected: SourceSummary) =
+        synchronized(rememberedDocumentLock) {
+            // 1. 优先使用原任务来源。旧任务可接入同账号当前选中的相同正文。
+            val documents = storedDocuments()
+            val reference = documents[scope] ?: documents[selectedScope] ?: throw DocumentAccessLost()
+            if (reference.summary?.matches(expected) != true) throw UploadSourceChanged()
+            if (reference.uri != null && !hasReadGrant(reference.uri)) throw DocumentAccessLost()
+
+            // 2. 任务引用独立保存，新的首页选择不会撤销任务的授权或暂存。
+            save(scope, documents, reference.copy(summary = expected))
+        }
+
+    fun clearTaskSource(scope: String) = synchronized(rememberedDocumentLock) {
+        val documents = storedDocuments()
+        removeSources(documents, setOf(scope))
+    }
+
     private fun pruneSingleBodies() {
         cache.listFiles()?.forEach { file ->
             if (file.isFile && singleBodyPattern.matches(file.name) && !file.name.startsWith(singleBodyPrefix)) {
@@ -70,27 +88,33 @@ internal class RememberedDocument(context: Context) {
         }
     }
 
-    fun readSelection(scope: String, uri: Uri, intentFlags: Int): Map<String, Any> = synchronized(rememberedDocumentLock) {
-        val documents = storedDocuments()
-        pruneStages(documents)
-        var tookReadGrant = false
-        try {
-            val prepared = sources.prepare(uri) {
-                hasReadGrant(uri) || takeReadGrant(uri, intentFlags).also { tookReadGrant = it }
+    fun readSelection(scope: String, uri: Uri, intentFlags: Int, expected: SourceSummary? = null): Map<String, Any> =
+        synchronized(rememberedDocumentLock) {
+            val documents = storedDocuments()
+            pruneStages(documents)
+            var tookReadGrant = false
+            try {
+                val prepared = sources.prepare(uri) {
+                    hasReadGrant(uri) || takeReadGrant(uri, intentFlags).also { tookReadGrant = it }
+                }
+                if (expected != null && !expected.matches(checkNotNull(prepared.summary))) {
+                    throw UploadSourceChanged()
+                }
+                val accepted = if (expected == null) prepared else prepared.copy(summary = expected)
+                save(scope, documents, accepted)
+                accepted.view()
+            } finally {
+                // 文件与元数据分开落盘。按实际保存成功的引用回收孤立副本和新申请的授权。
+                val saved = cleanupUnreferenced()
+                if (tookReadGrant && saved != null && saved.values.none { it.uri == uri }) releaseReadGrant(uri)
             }
-            save(scope, documents, prepared)
-            prepared.view()
-        } finally {
-            // 文件与元数据分开落盘。按实际保存成功的引用回收孤立副本和新申请的授权。
-            val saved = cleanupUnreferenced()
-            if (tookReadGrant && saved != null && saved.values.none { it.uri == uri }) releaseReadGrant(uri)
         }
-    }
 
     fun restore(scope: String): Map<String, Any>? = synchronized(rememberedDocumentLock) {
         pruneSingleBodies()
         // 1. 先清理未提交的副本，再按账号恢复它自己的来源。
         val documents = storedDocuments()
+        if (scope != GUEST_SCOPE) pruneFinishedTaskSources(scope, documents)
         pruneStages(documents)
         val previous = documents[scope] ?: return@synchronized null
         if (previous.stageId != null) {
@@ -124,6 +148,37 @@ internal class RememberedDocument(context: Context) {
 
         // 3. 各账号分别保存来源。原子记录写入后才释放旧引用。
         documents[scope] = replacement
+        writeDocuments(documents)
+        val oldUri = previous?.uri
+        if (oldUri != null && documents.values.none { it.uri == oldUri }) releaseReadGrant(oldUri)
+    }
+
+    private fun pruneFinishedTaskSources(scope: String, documents: MutableMap<String, UploadSourceReference>) {
+        val prefix = scope.dropLast(1) + ","
+        val taskScopes = documents.keys.filter { it.startsWith(prefix) }
+        if (taskScopes.isEmpty()) return
+        // 进程可能在终态落库后结束。用 SQLite 的待继续任务保留有效引用。
+        val activeIds = runCatching {
+            val owner = org.json.JSONArray(scope)
+            MobileTaskStore(context).use { store ->
+                store.pendingMultipartIds(TaskOwner(owner.getString(0), owner.getString(1)))
+            }
+        }.getOrNull() ?: return
+        val activeScopes = activeIds.mapTo(mutableSetOf()) { "$prefix\"$it\"]" }
+        removeSources(documents, taskScopes.filterNot(activeScopes::contains).toSet())
+    }
+
+    private fun removeSources(documents: MutableMap<String, UploadSourceReference>, scopes: Set<String>) {
+        val removed = scopes.mapNotNull { documents.remove(it) }
+        if (removed.isEmpty()) return
+        writeDocuments(documents)
+        for (uri in removed.mapNotNull { it.uri }.distinct()) {
+            if (documents.values.none { it.uri == uri }) releaseReadGrant(uri)
+        }
+        pruneStages(documents)
+    }
+
+    private fun writeDocuments(documents: Map<String, UploadSourceReference>) {
         val serialized = JSONObject()
         documents.forEach { (owner, reference) -> serialized.put(owner, encodeReference(reference)) }
         val output = savedDocument.startWrite()
@@ -135,8 +190,6 @@ internal class RememberedDocument(context: Context) {
             throw failure
         }
         if (storedDocuments() != documents) throw IOException("Could not save the document reference")
-        val oldUri = previous?.uri
-        if (oldUri != null && documents.values.none { it.uri == oldUri }) releaseReadGrant(oldUri)
     }
 
     private fun cleanupUnreferenced(): Map<String, UploadSourceReference>? {

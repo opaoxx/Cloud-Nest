@@ -74,9 +74,12 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   Future<void> _openTaskRecords() => _runAccount(() async {
     final owner = _account.owner;
     if (owner == null) return;
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(builder: (context) => MobileTasksPage(owner: owner)),
+    final notice = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (context) => MobileTasksPage(owner: owner, account: _account),
+      ),
     );
+    if (mounted) _accountNotice = notice;
   });
 
   Future<void> _runAccount(Future<void> Function() action) async {
@@ -234,7 +237,9 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
                     child: const Text('浏览云盘'),
                   ),
                   OutlinedButton(
-                    onPressed: _accountBusy ? null : _openTaskRecords,
+                    onPressed: _accountBusy || activity != null
+                        ? null
+                        : _openTaskRecords,
                     child: const Text('任务记录'),
                   ),
                 ],

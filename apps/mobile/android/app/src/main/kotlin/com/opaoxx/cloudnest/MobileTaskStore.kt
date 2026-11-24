@@ -389,6 +389,21 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
 
     fun list(owner: TaskOwner): List<Map<String, Any?>> = readTasks(readableDatabase, owner)
 
+    fun pendingMultipart(owner: TaskOwner, id: String): Map<String, Any?>? {
+        require(isStageId(id))
+        return readTasks(readableDatabase, owner, id).singleOrNull()
+    }
+
+    fun pendingMultipartIds(owner: TaskOwner): Set<String> = readableDatabase.query(
+        TASKS,
+        arrayOf("local_task_id"),
+        "$OWNER_FILTER AND kind = 'UPLOAD' AND state = 'PENDING' AND size_bytes > ?",
+        owner.selectionArgs() + MAX_SINGLE_UPLOAD_BYTES.toString(),
+        null, null, null,
+    ).use { cursor ->
+        buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) }
+    }
+
     fun recordDownload(owner: TaskOwner, actualName: String, sizeBytes: Long, sha256: String) {
         require(actualName.isNotBlank() && sizeBytes >= 0 && Regex("[0-9a-f]{64}").matches(sha256))
         // 外部文件写入完成后，按所属账号记录提供方实际返回的名称。
@@ -444,16 +459,19 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun readTasks(database: SQLiteDatabase, owner: TaskOwner): List<Map<String, Any?>> =
+    private fun readTasks(database: SQLiteDatabase, owner: TaskOwner, pendingId: String? = null): List<Map<String, Any?>> =
         database.query(
             TASKS,
             arrayOf(
                 "local_task_id", "name", "kind", "state", "created_at_ms",
                 "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at", "error_code",
+                "parent_id", "sha256",
                 "(SELECT count(*) FROM multipart_part_receipts p WHERE p.local_task_id = transfer_tasks.local_task_id) AS confirmed_parts",
             ),
-            OWNER_FILTER,
-            owner.selectionArgs(),
+            if (pendingId == null) OWNER_FILTER else
+                "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND size_bytes > ?",
+            if (pendingId == null) owner.selectionArgs() else
+                owner.selectionArgs() + arrayOf(pendingId, MAX_SINGLE_UPLOAD_BYTES.toString()),
             null,
             null,
             "created_at_ms DESC, local_task_id",
@@ -470,6 +488,8 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             val expiresAt = cursor.getColumnIndexOrThrow("expires_at")
             val confirmedParts = cursor.getColumnIndexOrThrow("confirmed_parts")
             val errorCode = cursor.getColumnIndexOrThrow("error_code")
+            val parentId = cursor.getColumnIndexOrThrow("parent_id")
+            val sha256 = cursor.getColumnIndexOrThrow("sha256")
             buildList {
                 while (cursor.moveToNext()) {
                     add(
@@ -486,6 +506,8 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                             "expiresAt" to cursor.getString(expiresAt),
                             "confirmedParts" to cursor.getInt(confirmedParts),
                             "errorCode" to cursor.getString(errorCode),
+                            "parentId" to cursor.getString(parentId),
+                            "sha256" to cursor.getString(sha256),
                         ),
                     )
                 }

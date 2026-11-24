@@ -22,7 +22,11 @@ class MainActivity : FlutterFragmentActivity() {
     private var downloadChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
     private val downloadSave: DownloadSave by lazy { DownloadSave(this) { saveDestination.launch(it) } }
-    private data class DocumentRequest(val scope: String, val result: MethodChannel.Result)
+    private data class DocumentRequest(
+        val scope: String,
+        val result: MethodChannel.Result,
+        val expected: SourceSummary? = null,
+    )
     private var pendingDocumentRequest: DocumentRequest? = null
     private val openDocument = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -92,7 +96,7 @@ class MainActivity : FlutterFragmentActivity() {
                 if (call.method !in setOf(
                         "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart",
                         "readMultipartParts", "recordMultipartPart", "reconcileMultipartParts",
-                        "saveMultipartOutcome", "recordDownload",
+                        "saveMultipartOutcome", "pendingMultipart", "recordDownload",
                     )
                 ) {
                     result.notImplemented()
@@ -107,6 +111,7 @@ class MainActivity : FlutterFragmentActivity() {
                     val rows = try {
                         when (call.method) {
                             "createTest" -> store.createTest(owner)
+                            "pendingMultipart" -> store.pendingMultipart(owner, requireNotNull(call.argument<String>("id")))
                             "reserveUpload" -> store.reserveUpload(
                                 owner,
                                 UploadDeclaration(
@@ -212,7 +217,14 @@ class MainActivity : FlutterFragmentActivity() {
                 when (call.method) {
                     "pickAndSummarize" -> selectDocument(DocumentRequest(scope, result))
                     "restoreDocument" -> restoreDocument(DocumentRequest(scope, result))
-                    "snapshotForSingle", "inspectMultipart", "putMultipartPart" -> {
+                    "clearTaskSource" -> {
+                        val request = DocumentRequest(scope, result)
+                        if (beginRequest(request)) readOnWorker(request, "document_read_failed") {
+                            rememberedDocument.clearTaskSource(scope)
+                            null
+                        }
+                    }
+                    "pickTaskSource", "bindTaskSource", "snapshotForSingle", "inspectMultipart", "putMultipartPart" -> {
                         val name = call.argument<String>("name")
                         val size = call.argument<Number>("sizeBytes")?.toLong()
                         val sha = call.argument<String>("sha256")
@@ -222,11 +234,16 @@ class MainActivity : FlutterFragmentActivity() {
                             result.error("document_source_changed", null, null)
                             return@setMethodCallHandler
                         }
-                        val request = DocumentRequest(scope, result)
+                        val source = SourceSummary(name, size, sha)
+                        val request = DocumentRequest(scope, result, source)
+                        if (call.method == "pickTaskSource") {
+                            selectDocument(request)
+                            return@setMethodCallHandler
+                        }
                         val error = if (call.method == "putMultipartPart") "multipart_put_unconfirmed"
                             else "document_read_failed"
                         if (beginRequest(request)) readOnWorker(request, error) {
-                            readUploadSource(call, scope, SourceSummary(name, size, sha))
+                            readUploadSource(call, scope, source)
                         }
                     }
                     else -> result.notImplemented()
@@ -244,6 +261,10 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun readUploadSource(call: MethodCall, scope: String, source: SourceSummary): Map<String, Any> =
         when (call.method) {
+            "bindTaskSource" -> {
+                rememberedDocument.bindTaskSource(scope, requireNotNull(call.argument<String>("selectedScope")), source)
+                emptyMap()
+            }
             "snapshotForSingle" -> rememberedDocument.snapshotForSingle(scope, source)
             "inspectMultipart" -> rememberedDocument.openMultipartBody(scope, source).use { input ->
                 mapOf("partDigests" to multipartDigests(
@@ -295,7 +316,7 @@ class MainActivity : FlutterFragmentActivity() {
         val intentFlags = selectedIntent?.flags ?: 0
 
         readOnWorker(request, "document_read_failed") {
-            rememberedDocument.readSelection(request.scope, uri, intentFlags)
+            rememberedDocument.readSelection(request.scope, uri, intentFlags, request.expected)
         }
     }
 
