@@ -21,7 +21,7 @@ const localMinIODockerInspectFields = `{"id":{{json .Id}},"image":{{json .Image}
 	`"state":{{json .State.Status}},"started_at":{{json .State.StartedAt}},"executable":{{json .Path}},"args":{{json .Args}},` +
 	`"bindings":{{json (index .NetworkSettings.Ports "9000/tcp")}},"mounts":[{{$separator := ""}}` +
 	`{{range .Mounts}}{{$separator}}{{json .Destination}}{{$separator = ","}}{{end}}` +
-	`{{range $destination, $_ := .HostConfig.Tmpfs}}{{$separator}}{{json $destination}}{{$separator = ","}}{{end}}]}`
+	`{{range $destination, $_ := index .HostConfig "Tmpfs"}}{{$separator}}{{json $destination}}{{$separator = ","}}{{end}}]}`
 
 type localMinIODockerInstance struct {
 	ContainerID string    `json:"id"`

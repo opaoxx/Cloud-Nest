@@ -15,3 +15,26 @@ scripts/minio/minio-source.tar.gz
 .playwright-cli/
 output/
 /docs/
+
+# Local editor settings and Flutter/Android build state
+.vscode/
+.idea/
+.fvm/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.gradle/
+local.properties
+key.properties
+
+# Signing files and packaged clients
+*.jks
+*.keystore
+*.pfx
+*.apk
+*.aab
+*.msi
+
+# Development tests stay with the local archive
+*_test.go
+/apps/mobile/test/

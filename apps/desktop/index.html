@@ -1,0 +1,1246 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CloudNest</title>
+  <meta name="color-scheme" content="light dark">
+  <style>
+    :root {
+      color-scheme: light dark;
+      font: 15px/1.5 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      --page: light-dark(#f3f6f4, #131a18);
+      --surface: light-dark(#fff, #1b2521);
+      --surface-soft: light-dark(#f5f8f6, #23312b);
+      --surface-hover: light-dark(#e7f0eb, #2b3d34);
+      --ink: light-dark(#192c24, #edf5ef);
+      --muted: light-dark(#4f665b, #a8beb1);
+      --line: light-dark(#d7e2db, #34483e);
+      --accent: light-dark(#22654e, #9ee1bd);
+      --on-accent: light-dark(#fff, #10271a);
+      --danger: light-dark(#a12c3b, #ffb2ba);
+      color: var(--ink);
+      background: var(--page);
+    }
+    :root[data-theme="light"] { color-scheme: light; }
+    :root[data-theme="dark"] { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 1.55rem; letter-spacing: -.035em; }
+    h2 { font-size: 1.13rem; }
+    button, input { font: inherit; }
+    button {
+      padding: .48rem .8rem;
+      border: 1px solid transparent;
+      border-radius: .5rem;
+      background: var(--surface-soft);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: var(--surface-hover); }
+    button:disabled { opacity: .55; cursor: default; }
+    button:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .primary-action {
+      background: var(--accent);
+      color: var(--on-accent);
+      font-weight: 600;
+    }
+    .primary-action:hover:not(:disabled) { background: var(--accent); filter: brightness(.9); }
+    .remove-action { color: var(--danger); }
+    input {
+      width: 100%;
+      min-width: 0;
+      padding: .57rem .7rem;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: .5rem;
+    }
+    label { display: block; margin-bottom: .35rem; font-weight: 600; }
+    fieldset { min-width: 0; margin: 1rem 0 0; padding: 0; border: 0; }
+    fieldset input { margin-bottom: .8rem; }
+    output { display: block; margin-top: .7rem; overflow-wrap: anywhere; color: var(--muted); }
+    output:empty { display: none; }
+    #downloadStatus { white-space: pre-line; }
+    .shell-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: .65rem 1.25rem;
+      padding: .9rem clamp(.85rem, 2.5vw, 2.5rem);
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .theme-choice {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .22rem;
+      padding: .2rem;
+      background: var(--surface-soft);
+      border: 1px solid var(--line);
+      border-radius: .65rem;
+    }
+    .theme-choice button { padding: .32rem .65rem; font-size: .87rem; }
+    .theme-choice [aria-pressed="true"] {
+      background: var(--surface);
+      border-color: var(--line);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(20rem, 31%);
+      grid-template-areas: "directory account" "directory transfer";
+      grid-template-rows: auto 1fr;
+      align-items: start;
+      gap: 1rem;
+      padding: clamp(.85rem, 2.5vw, 2.5rem);
+    }
+    .workspace:not([data-signed-in]) {
+      display: block;
+      width: min(100%, 30rem);
+      margin: 0 auto;
+    }
+    .panel {
+      min-width: 0;
+      padding: clamp(.9rem, 1.9vw, 1.45rem);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: .85rem;
+    }
+    #accountPanel { grid-area: account; }
+    #directoryPanel { grid-area: directory; min-height: min(68vh, 39rem); }
+    #transferPanel { grid-area: transfer; }
+    #serviceSettings { margin-top: .65rem; }
+    #serviceSettings summary { color: var(--accent); cursor: pointer; }
+    #serviceSettings label { margin-top: .65rem; }
+    #checkConnection, #logoutAccount { margin-top: .65rem; }
+    #loginStatus { color: var(--ink); }
+    .directory-header, .upload-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: .65rem;
+    }
+    .upload-controls { justify-content: flex-start; }
+    #uploadPanel { margin-top: 1rem; padding-top: .95rem; border-top: 1px solid var(--line); }
+    ul { list-style: none; margin: .65rem 0 0; padding: 0; }
+    #directoryItems li, #uploadItems li {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: .55rem .8rem;
+      padding: .75rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    #uploadItems li {
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+    }
+    .file-summary { display: grid; min-width: 0; gap: .2rem; overflow-wrap: anywhere; }
+    .file-summary span { color: var(--muted); font-size: .88rem; }
+    .file-actions, .upload-actions, .dialog-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .35rem;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .upload-actions { justify-content: flex-start; }
+    .file-actions button, .upload-actions button { padding: .3rem .55rem; font-size: .87rem; }
+    #loadMore, #stageDownload, #saveDownload { margin-top: .7rem; }
+    #directoryPath ol {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .35rem .55rem;
+      list-style: none;
+      padding: 0;
+      margin: .8rem 0 0;
+    }
+    #directoryPath li { min-width: 0; overflow-wrap: anywhere; }
+    #directoryPath [aria-current="page"] { font-weight: 600; }
+    .directory-link {
+      padding: 0;
+      justify-self: start;
+      color: var(--accent);
+      background: transparent;
+      text-align: left;
+      overflow-wrap: anywhere;
+      font-weight: 600;
+    }
+    .directory-link:hover:not(:disabled) { text-decoration: underline; }
+    dialog {
+      width: min(30rem, calc(100vw - 2rem));
+      padding: 1.3rem;
+      border: 1px solid var(--line);
+      border-radius: .85rem;
+      color: var(--ink);
+      background: var(--surface);
+      box-shadow: 0 16px 60px #0004;
+    }
+    dialog::backdrop { background: #0d1915a6; }
+    dialog h2 + p { margin-top: .6rem; overflow-wrap: anywhere; color: var(--muted); }
+    dialog form { margin-top: 1rem; }
+    #fileEditDialog form { display: grid; gap: .85rem; }
+    #movePath { display: flex; flex-wrap: wrap; gap: .35rem; overflow-wrap: anywhere; }
+    #moveFolders { max-height: 36vh; overflow: auto; }
+    #moveFolders button { display: block; width: 100%; padding: .55rem .3rem; }
+    #moveMore, #moveRetry { margin-top: .45rem; }
+    #editStatus { margin: 0; }
+    @media (max-width: 52rem) {
+      .workspace { grid-template-columns: minmax(0, 1fr); grid-template-areas: "directory" "transfer" "account"; }
+      #directoryPanel { min-height: 0; }
+    }
+    @media (max-width: 36rem) {
+      #directoryItems li { grid-template-columns: minmax(0, 1fr); }
+      .file-actions { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell-header">
+    <h1>CloudNest</h1>
+    <div class="theme-choice" role="group" aria-label="界面主题">
+      <button type="button" data-theme-choice="system" aria-pressed="true">跟随系统</button>
+      <button type="button" data-theme-choice="light" aria-pressed="false">浅色</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">深色</button>
+    </div>
+  </header>
+  <main>
+    <form id="accountForm" class="workspace" autocomplete="off">
+      <section id="accountPanel" class="panel" aria-labelledby="accountTitle">
+        <h2 id="accountTitle">账号</h2>
+        <output id="loginStatus" role="status" aria-live="polite"></output>
+        <details id="serviceSettings" open>
+          <summary>服务连接</summary>
+          <label for="address">服务地址</label>
+          <input id="address" type="text" inputmode="url" spellcheck="false" value="http://127.0.0.1:18081">
+          <button id="checkConnection" type="button">检查连接</button>
+          <output id="connectionStatus" role="status" aria-live="polite"></output>
+        </details>
+        <fieldset id="credentials">
+          <label for="username">用户名</label>
+          <input id="username" type="text" spellcheck="false">
+          <label for="password">密码</label>
+          <input id="password" type="password">
+          <button type="submit" class="primary-action">登录</button>
+        </fieldset>
+        <button id="logoutAccount" type="button" hidden>退出账号</button>
+      </section>
+      <section id="directoryPanel" class="panel" aria-labelledby="directoryTitle" hidden>
+        <div class="directory-header">
+          <h2 id="directoryTitle">目录</h2>
+          <button id="refreshDirectory" type="button">刷新目录</button>
+        </div>
+        <nav id="directoryPath" aria-label="目录路径" hidden><ol></ol></nav>
+        <output id="directoryStatus" role="status" aria-live="polite"></output>
+        <output id="downloadStatus" role="status" aria-live="polite"></output>
+        <button id="stageDownload" type="button" hidden>开始下载</button>
+        <button id="saveDownload" type="button" hidden>另存为…</button>
+        <ul id="directoryItems" aria-label="目录内容"></ul>
+        <button id="loadMore" type="button" hidden>加载更多</button>
+      </section>
+      <section id="transferPanel" class="panel" aria-label="上传" hidden>
+        <div class="upload-controls">
+          <button id="chooseFile" type="button">选择文件</button>
+          <button id="saveUploadIntent" class="primary-action" type="button" hidden disabled>上传</button>
+        </div>
+        <output id="fileSelection" role="status" aria-live="polite"></output>
+        <section id="uploadPanel" aria-labelledby="uploadTitle">
+          <h2 id="uploadTitle">上传队列</h2>
+          <output id="uploadStatus" role="status" aria-live="polite"></output>
+          <ul id="uploadItems" aria-label="上传任务列表"></ul>
+        </section>
+      </section>
+    </form>
+  </main>
+  <dialog id="trashDialog" aria-labelledby="trashTitle">
+    <h2 id="trashTitle">移入回收站</h2>
+    <p id="trashPrompt"></p>
+    <form method="dialog" class="dialog-actions">
+      <button value="cancel" autofocus>取消</button>
+      <button value="trash" class="remove-action">移入回收站</button>
+    </form>
+  </dialog>
+  <dialog id="fileEditDialog" aria-labelledby="fileEditTitle">
+    <h2 id="fileEditTitle"></h2>
+    <p id="editFileName"></p>
+    <form id="fileEditForm">
+      <div id="renameField" hidden>
+        <label for="newFileName">文件名</label>
+        <input id="newFileName" type="text" spellcheck="false" autocomplete="off" required>
+      </div>
+      <div id="movePicker" hidden>
+        <nav id="movePath" aria-label="目标文件夹路径"></nav>
+        <ul id="moveFolders" aria-label="可选文件夹"></ul>
+        <button id="moveMore" type="button" hidden>加载更多文件夹</button>
+        <button id="moveRetry" type="button" hidden>重试读取</button>
+      </div>
+      <output id="editStatus" role="status" aria-live="polite"></output>
+      <div class="dialog-actions">
+        <button id="editCancel" type="button">取消</button>
+        <button id="editConfirm" class="primary-action" type="submit"></button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module">
+    import { Call } from "/wails/runtime.js";
+
+    const form = document.querySelector("#accountForm");
+    const serviceSettings = document.querySelector("#serviceSettings");
+    const themeButtons = document.querySelectorAll("[data-theme-choice]");
+
+    function applyTheme(preference) {
+      // 1. 未选择时由系统决定明暗，手动选择时覆盖当前窗口配色。
+      document.documentElement.dataset.theme = preference;
+      // 2. 同步按钮的选中状态，键盘和辅助功能也能识别当前主题。
+      for (const button of themeButtons) {
+        button.setAttribute("aria-pressed", String(button.dataset.themeChoice === preference));
+      }
+    }
+
+    const savedTheme = localStorage.getItem("cloudnest.desktopTheme");
+    applyTheme(["light", "dark"].includes(savedTheme) ? savedTheme : "system");
+    for (const button of themeButtons) {
+      button.addEventListener("click", () => {
+        // 3. 将偏好存入当前 WebView，重开应用时直接恢复。
+        const preference = button.dataset.themeChoice;
+        applyTheme(preference);
+        localStorage.setItem("cloudnest.desktopTheme", preference);
+      });
+    }
+
+    const address = document.querySelector("#address");
+    const checkConnection = document.querySelector("#checkConnection");
+    const connectionStatus = document.querySelector("#connectionStatus");
+    const credentials = document.querySelector("#credentials");
+    const username = document.querySelector("#username");
+    const password = document.querySelector("#password");
+    const loginStatus = document.querySelector("#loginStatus");
+    const logoutAccount = document.querySelector("#logoutAccount");
+    const chooseFile = document.querySelector("#chooseFile");
+    const saveUploadIntent = document.querySelector("#saveUploadIntent");
+    const fileSelection = document.querySelector("#fileSelection");
+    const transferPanel = document.querySelector("#transferPanel");
+    const uploadStatus = document.querySelector("#uploadStatus");
+    const uploadItems = document.querySelector("#uploadItems");
+    const directoryPanel = document.querySelector("#directoryPanel");
+    const directoryPath = document.querySelector("#directoryPath");
+    const breadcrumbs = directoryPath.querySelector("ol");
+    const refreshDirectory = document.querySelector("#refreshDirectory");
+    const directoryStatus = document.querySelector("#directoryStatus");
+    const downloadStatus = document.querySelector("#downloadStatus");
+    const stageDownload = document.querySelector("#stageDownload");
+    const saveDownload = document.querySelector("#saveDownload");
+    const directoryItems = document.querySelector("#directoryItems");
+    const loadMore = document.querySelector("#loadMore");
+    const entryRows = new Map();
+    let currentDirectoryID = "";
+    let nextCursor = null;
+    let pendingPage = null;
+    let selectionKey = "";
+    let selectedDownload = null;
+    const pendingPublications = new Map();
+    let publicationTimer = null;
+    let activeMultipartSend = null;
+    let activeUploadID = "";
+    let signedIn = false;
+    const savedAddress = localStorage.getItem("cloudnest.serverAddress");
+    if (savedAddress) address.value = savedAddress;
+    address.addEventListener("input", () => {
+      connectionStatus.textContent = "";
+      loginStatus.textContent = "";
+    });
+
+    function setBusy(busy) {
+      address.readOnly = busy || signedIn;
+      checkConnection.disabled = busy;
+      chooseFile.disabled = busy;
+      credentials.disabled = busy;
+      for (const button of directoryPanel.querySelectorAll("button")) {
+        button.disabled = busy;
+      }
+      updateUploadButtons();
+      logoutAccount.disabled = busy;
+      updateLoadMore();
+      updateSaveUploadIntent();
+    }
+
+    function updateUploadButtons() {
+      for (const button of uploadItems.querySelectorAll("button")) {
+        if (button.dataset.pauseIntent) {
+          const canPause = activeMultipartSend?.intentID === button.dataset.pauseIntent;
+          button.hidden = !canPause;
+          button.disabled = !canPause || Boolean(activeMultipartSend.pauseRequest);
+        } else {
+          button.disabled = checkConnection.disabled;
+        }
+      }
+    }
+
+    function updateSaveUploadIntent() {
+      saveUploadIntent.hidden = !signedIn;
+      saveUploadIntent.disabled = checkConnection.disabled || chooseFile.disabled ||
+        !signedIn || !currentDirectoryID || !selectionKey;
+    }
+
+    function updateLoadMore() {
+      loadMore.hidden = nextCursor === null;
+      loadMore.disabled = refreshDirectory.disabled || pendingPage !== null;
+    }
+
+    function clearDirectoryItems() {
+      directoryItems.replaceChildren();
+      entryRows.clear();
+      nextCursor = null;
+    }
+
+    function showSignedIn(name, restored) {
+      signedIn = true;
+      credentials.hidden = true;
+      directoryPanel.hidden = false;
+      transferPanel.hidden = false;
+      form.dataset.signedIn = "";
+      serviceSettings.open = false;
+      logoutAccount.hidden = false;
+      loginStatus.textContent = (restored ? "已恢复会话：" : "已登录：") + name;
+    }
+
+    function showSignedOut(notice) {
+      signedIn = false;
+      credentials.hidden = false;
+      directoryPanel.hidden = true;
+      transferPanel.hidden = true;
+      delete form.dataset.signedIn;
+      serviceSettings.open = true;
+      logoutAccount.hidden = true;
+      password.value = "";
+      fileSelection.textContent = "";
+      selectionKey = "";
+      uploadStatus.textContent = "";
+      clearTimeout(publicationTimer);
+      publicationTimer = null;
+      pendingPublications.clear();
+      uploadItems.replaceChildren();
+      currentDirectoryID = "";
+      pendingPage = null;
+      directoryStatus.textContent = "";
+      clearDownloadSelection();
+      clearDirectoryItems();
+      breadcrumbs.replaceChildren();
+      directoryPath.hidden = true;
+      loginStatus.textContent = notice;
+      updateSaveUploadIntent();
+    }
+
+    logoutAccount.addEventListener("click", async () => {
+      setBusy(true);
+      loginStatus.textContent = "正在退出账号…";
+      try {
+        const notice = await Call.ByName("main.Account.Logout");
+        username.value = "";
+        showSignedOut(notice);
+      } catch (error) {
+        loginStatus.textContent = error.message || "退出失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    chooseFile.addEventListener("click", async () => {
+      if (checkConnection.disabled || !signedIn) return;
+      setBusy(true);
+      selectionKey = "";
+      updateSaveUploadIntent();
+      fileSelection.textContent = "正在准备文件…";
+      try {
+        const source = await Call.ByName("main.LocalFilePicker.SelectFile");
+        selectionKey = source?.creation_key || "";
+        fileSelection.textContent = source
+          ? "已选择 " + source.name + " · " + formatSize(source.size_bytes)
+          : "已取消选择。";
+      } catch (error) {
+        fileSelection.textContent = error.message || "选择文件失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    function formatSize(bytes) {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let size = Number(bytes);
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit++;
+      }
+      return size.toLocaleString("zh-CN", { maximumFractionDigits: unit ? 2 : 0 }) + " " + units[unit];
+    }
+
+    const uploadStates = {
+      PENDING_CREATE: "等待上传", PENDING_REUSE: "等待上传", REUSE_PENDING: "等待上传",
+      CREATED: "等待上传", MULTIPART_CREATED: "等待上传",
+      MULTIPART_COMPLETION_PENDING: "正在确认上传结果", COMPLETING: "正在处理文件", VERIFYING: "正在校验文件",
+      UPLOAD_CANCEL_PENDING: "取消待确认", CANCELLING: "正在取消",
+      REUSED: "上传完成", COMPLETED: "上传完成", FAILED: "上传失败",
+      CANCELLED: "已取消", EXPIRED: "上传已过期"
+    };
+
+    function publicationMethod(intent) {
+      if (intent.status === "CANCELLING") return "CheckUploadCancellation";
+      if (["MULTIPART_COMPLETION_PENDING", "COMPLETING", "VERIFYING"].includes(intent.status)) {
+        return intent.multipart_plan ? "CheckMultipartStatus" : "CheckStatus";
+      }
+      return null;
+    }
+
+    function renderUploadIntents(result) {
+      if (result.loginRequired) {
+        showSignedOut(result.loginRequired);
+        return false;
+      }
+      pendingPublications.clear();
+      uploadItems.replaceChildren();
+      for (const intent of result.items) {
+        const row = document.createElement("li");
+        const summary = document.createElement("div");
+        const name = document.createElement("strong");
+        const details = document.createElement("span");
+        const actions = document.createElement("div");
+        summary.className = "file-summary";
+        actions.className = "upload-actions";
+        name.textContent = intent.result_name || intent.name;
+        const paused = Boolean(intent.multipart_plan?.pause_id);
+        const hasProgress = Number(intent.confirmed_bytes) > 0;
+        const percent = Math.floor(100 * Number(intent.confirmed_bytes) / Number(intent.size_bytes));
+        const canUpload = ["PENDING_CREATE", "PENDING_REUSE", "REUSE_PENDING", "CREATED", "MULTIPART_CREATED"].includes(intent.status);
+        let status = uploadStates[intent.status] || "状态待确认";
+        if (canUpload) {
+          if (paused) status = "已暂停";
+          else if (intent.id === activeUploadID) status = "正在上传";
+          else if (hasProgress) status = "可继续上传";
+          if (hasProgress || paused) status += " · " + (hasProgress ? percent : 0) + "%";
+          actions.append(uploadActionButton(paused || hasProgress ? "继续上传" : "上传", () => startUpload(intent)));
+        }
+        if (intent.status === "MULTIPART_CREATED") {
+          const pauseButton = uploadActionButton("暂停", () => requestMultipartPause(intent.id));
+          pauseButton.dataset.pauseIntent = intent.id;
+          pauseButton.hidden = true;
+          actions.append(pauseButton);
+        }
+        if (["CREATED", "MULTIPART_CREATED", "VERIFYING", "COMPLETING", "MULTIPART_COMPLETION_PENDING", "UPLOAD_CANCEL_PENDING"].includes(intent.status)) {
+          actions.append(uploadActionButton(intent.status === "UPLOAD_CANCEL_PENDING" ? "重试取消" : "取消上传", () => cancelUpload(intent.id)));
+        }
+        if (["COMPLETED", "REUSED"].includes(intent.status)) {
+          actions.append(uploadActionButton("打开所在目录", async () => {
+            await navigateTo(intent.parent_id);
+            entryRows.get(intent.result_entry_id)?.querySelector("button")?.focus();
+          }));
+        }
+        if (publicationMethod(intent)) pendingPublications.set(intent.id, intent);
+        details.textContent = formatSize(intent.size_bytes) + " · " + status;
+        summary.append(name, details);
+        if (intent.status === "FAILED" && intent.error_message) {
+          const error = document.createElement("span");
+          error.textContent = intent.error_message;
+          summary.append(error);
+        }
+        row.append(summary, actions);
+        uploadItems.append(row);
+      }
+      if (!result.items.length) uploadStatus.textContent = "暂无上传记录。";
+      updateUploadButtons();
+      schedulePublicationCheck();
+      return true;
+    }
+
+    function uploadActionButton(label, action) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.disabled = checkConnection.disabled;
+      button.addEventListener("click", action);
+      return button;
+    }
+
+    async function loadUploadIntents() {
+      if (!signedIn) return;
+      try {
+        renderUploadIntents(await Call.ByName("main.UploadIntents.List"));
+      } catch (error) {
+        uploadStatus.textContent = error.message || "读取本机上传记录失败";
+      }
+    }
+
+    function requestMultipartPause(intentID) {
+      const transfer = activeMultipartSend;
+      if (transfer?.intentID !== intentID || transfer.pauseRequest) return;
+      // 让当前批次保存回执，再停止派发后续分片。
+      uploadStatus.textContent = "正在暂停…";
+      transfer.pauseRequest = Call.ByName("main.UploadIntents.PauseMultipart", intentID).then(result => {
+        if (result.loginRequired) showSignedOut(result.loginRequired);
+      }).catch(error => {
+        transfer.pauseRequest = null;
+        uploadStatus.textContent = error.message || "暂停未确认，请重试";
+        updateUploadButtons();
+      });
+      updateUploadButtons();
+    }
+
+    async function uploadStep(method, intent, ...args) {
+      const result = await Call.ByName("main.UploadIntents." + method, intent.id, ...args);
+      if (!signedIn || !renderUploadIntents(result)) return null;
+      return result.items.find(item => item.id === intent.id);
+    }
+
+    async function sendMultipart(intent) {
+      const pauseID = intent.multipart_plan.pause_id;
+      const transfer = { intentID: intent.id, pauseRequest: null };
+      activeMultipartSend = transfer;
+      updateUploadButtons();
+      try {
+        const result = await uploadStep(pauseID ? "ContinueMultipart" : "SendRemainingParts", intent, ...(pauseID ? [pauseID] : []));
+        if (!transfer.pauseRequest || !signedIn) return result;
+        await transfer.pauseRequest;
+        if (!signedIn) return null;
+        const latest = await Call.ByName("main.UploadIntents.List");
+        if (!renderUploadIntents(latest)) return null;
+        return latest.items.find(item => item.id === intent.id);
+      } finally {
+        activeMultipartSend = null;
+        updateUploadButtons();
+      }
+    }
+
+    async function runUpload(intent) {
+      // 1. 接上原记录。新任务先创建，已有记录可从正文或分片阶段继续。
+      if (["PENDING_CREATE", "PENDING_REUSE", "REUSE_PENDING"].includes(intent.status)) {
+        intent = await uploadStep("Submit", intent);
+      }
+      if (intent?.status === "CREATED") {
+        intent = await uploadStep("SendContent", intent);
+      } else if (intent?.status === "MULTIPART_CREATED") {
+        // 2. 核对并补传缺失部分。已暂停时等用户再次点击，全部确认后提交完成。
+        intent = await sendMultipart(intent);
+        if (intent?.status === "MULTIPART_CREATED" && !intent.multipart_plan.pause_id &&
+            intent.multipart_plan.confirmed_parts === intent.multipart_plan.part_count) {
+          intent = await uploadStep("CompleteMultipart", intent);
+        }
+      }
+      // 3. 完成时刷新相应目录，待校验的任务交给查询调度器。
+      if (intent) await showUploadOutcome(intent);
+    }
+
+    async function startUpload(intent) {
+      if (checkConnection.disabled || !signedIn) return;
+      activeUploadID = intent?.id || "";
+      setBusy(true);
+      uploadStatus.textContent = "正在上传…";
+      try {
+        if (!intent) {
+          // 先用本地创建键保存。同一次选择重试时仍取得原记录。
+          const result = await Call.ByName("main.UploadIntents.Save", currentDirectoryID, selectionKey);
+          if (!signedIn || result.loginRequired) {
+            if (result.loginRequired) showSignedOut(result.loginRequired);
+            return;
+          }
+          intent = result.items.find(item => item.id === result.savedIntentID);
+          if (!intent) throw new Error("无法读取已保存的上传记录，请重试");
+          activeUploadID = intent.id;
+          renderUploadIntents(result);
+          selectionKey = "";
+          fileSelection.textContent = "";
+        }
+        await runUpload(intent);
+      } catch (error) {
+        activeUploadID = "";
+        await loadUploadIntents();
+        if (signedIn) uploadStatus.textContent = error.message || "上传尚未完成，可从队列继续";
+      } finally {
+        activeUploadID = "";
+        setBusy(false);
+      }
+    }
+
+    async function showUploadOutcome(intent) {
+      if (["COMPLETED", "REUSED"].includes(intent.status)) {
+        uploadStatus.textContent = "已上传「" + (intent.result_name || intent.name) + "」。";
+        if (currentDirectoryID === intent.parent_id) {
+          await loadDirectory(currentDirectoryID, { preserveRows: true, preserveDownload: true });
+        }
+      } else if (intent.multipart_plan?.pause_id) {
+        uploadStatus.textContent = "已暂停，可稍后继续。";
+      } else {
+        uploadStatus.textContent = uploadStates[intent.status] || "";
+      }
+    }
+
+    function schedulePublicationCheck(delay = 1200) {
+      if (publicationTimer !== null || !signedIn || pendingPublications.size === 0) return;
+      publicationTimer = setTimeout(checkPendingPublications, delay);
+    }
+
+    async function checkPendingPublications() {
+      publicationTimer = null;
+      if (!signedIn || !pendingPublications.size) return;
+      if (checkConnection.disabled || document.querySelector("dialog[open]")) {
+        schedulePublicationCheck();
+        return;
+      }
+      // 只查询现有任务。重启后仍会检查已提交的结果，不会自动发送文件。
+      setBusy(true);
+      let delay = 1200;
+      try {
+        for (const [intentID, previous] of [...pendingPublications]) {
+          const intent = pendingPublications.get(intentID);
+          if (!intent || !signedIn) continue;
+          try {
+            const latest = await uploadStep(publicationMethod(intent), intent);
+            if (latest && latest.status !== previous.status) await showUploadOutcome(latest);
+          } catch {
+            delay = 5000;
+          }
+        }
+        if (signedIn && delay === 5000) uploadStatus.textContent = "暂未取得上传结果，将自动重试。";
+      } finally {
+        // 渲染新记录时可能已经排了下一次查询，统一在这里按本次结果重排。
+        clearTimeout(publicationTimer);
+        publicationTimer = null;
+        setBusy(false);
+        schedulePublicationCheck(delay);
+      }
+    }
+
+    async function cancelUpload(intentID) {
+      if (checkConnection.disabled || !signedIn) return;
+      setBusy(true);
+      uploadStatus.textContent = "正在取消…";
+      try {
+        const intent = await uploadStep("CancelUpload", { id: intentID });
+        if (intent) await showUploadOutcome(intent);
+      } catch (error) {
+        await loadUploadIntents();
+        if (signedIn) uploadStatus.textContent = error.message || "取消尚未确认，可重试";
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    saveUploadIntent.addEventListener("click", () => startUpload(null));
+
+    function directoryButton(label, id) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "directory-link";
+      button.textContent = label;
+      button.disabled = refreshDirectory.disabled;
+      button.addEventListener("click", () => navigateTo(id));
+      return button;
+    }
+
+    function downloadButton(item) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "download-action";
+      button.textContent = "下载";
+      button.setAttribute("aria-label", "下载 · " + item.name);
+      button.addEventListener("click", () => authorizeDownload(item));
+      return button;
+    }
+
+    const trashDialog = document.querySelector("#trashDialog");
+    const trashPrompt = document.querySelector("#trashPrompt");
+    let pendingTrash = null;
+
+    function trashButton(item) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "remove-action";
+      button.textContent = "删除";
+      button.setAttribute("aria-label", "删除 · " + item.name);
+      button.addEventListener("click", () => {
+        if (checkConnection.disabled || !signedIn || trashDialog.open) return;
+        pendingTrash = { item, directoryID: currentDirectoryID };
+        trashPrompt.textContent = "将「" + item.name + "」移入回收站？";
+        trashDialog.returnValue = "";
+        trashDialog.showModal();
+      });
+      return button;
+    }
+
+    trashDialog.addEventListener("close", async () => {
+      const target = pendingTrash;
+      pendingTrash = null;
+      // 1. 对话框确认时仍使用原目录、条目和所见修订。
+      if (trashDialog.returnValue !== "trash" || !target || !signedIn ||
+          checkConnection.disabled || currentDirectoryID !== target.directoryID) return;
+      setBusy(true);
+      directoryStatus.textContent = "正在移入回收站…";
+      try {
+        // 2. Wails 以当前会话提交回收，过期或冲突保留原列表。
+        const result = await Call.ByName("main.Account.TrashFile", target.item.id, target.item.revision);
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        // 3. 成功后重新读取原目录的可见条目与分页。
+        entryRows.get(target.item.id)?.remove();
+        entryRows.delete(target.item.id);
+        await loadDirectory(target.directoryID, { preserveRows: true });
+        if (signedIn) directoryStatus.textContent = "已移入回收站。" + directoryStatus.textContent;
+      } catch (error) {
+        directoryStatus.textContent = error.message || "无法确认回收结果，请刷新目录核对";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    const editDialog = document.querySelector("#fileEditDialog");
+    const editForm = document.querySelector("#fileEditForm");
+    const editTitle = document.querySelector("#fileEditTitle");
+    const editFileName = document.querySelector("#editFileName");
+    const renameField = document.querySelector("#renameField");
+    const newFileName = document.querySelector("#newFileName");
+    const editStatus = document.querySelector("#editStatus");
+    const editCancel = document.querySelector("#editCancel");
+    const editConfirm = document.querySelector("#editConfirm");
+    const movePicker = document.querySelector("#movePicker");
+    const movePath = document.querySelector("#movePath");
+    const moveFolders = document.querySelector("#moveFolders");
+    const moveMore = document.querySelector("#moveMore");
+    const moveRetry = document.querySelector("#moveRetry");
+    let fileEdit = null;
+
+    function fileEditButton(item, mode) {
+      const rename = mode === "rename";
+      const label = rename ? "重命名" : "移动";
+      const button = uploadActionButton(label, () => {
+        if (checkConnection.disabled || !signedIn || editDialog.open) return;
+        // 1. 保存打开对话框时的文件快照。后续只编辑这一个文件。
+        fileEdit = { item, mode, page: null, reading: false, submitting: false, attempt: null, retry: null };
+        editTitle.textContent = label + "文件";
+        editFileName.textContent = item.name;
+        renameField.hidden = !rename;
+        newFileName.disabled = !rename;
+        newFileName.value = item.name;
+        movePicker.hidden = rename;
+        movePath.replaceChildren();
+        moveFolders.replaceChildren();
+        moveMore.hidden = true;
+        moveRetry.hidden = true;
+        editStatus.textContent = "";
+        editConfirm.textContent = rename ? "保存名称" : "移动到此处";
+        editDialog.showModal();
+        updateEditControls();
+        if (rename) {
+          newFileName.focus();
+          newFileName.select();
+        } else {
+          readMoveFolders("");
+        }
+      });
+      button.setAttribute("aria-label", label + " · " + item.name);
+      return button;
+    }
+
+    function updateEditControls() {
+      const edit = fileEdit;
+      if (!edit) return;
+      const busy = edit.reading || edit.submitting;
+      for (const button of movePicker.querySelectorAll("button")) button.disabled = busy;
+      editCancel.disabled = edit.submitting;
+      newFileName.readOnly = edit.submitting;
+      const name = newFileName.value.trim();
+      const ready = edit.mode === "rename"
+        ? name !== "" && name !== edit.item.name
+        : edit.page && edit.page.breadcrumbs.at(-1).id !== edit.item.parent_id;
+      editConfirm.disabled = busy || !ready;
+    }
+
+    function moveFolderButton(label, directoryID) {
+      const button = uploadActionButton(label, () => readMoveFolders(directoryID));
+      button.className = "directory-link";
+      return button;
+    }
+
+    async function readMoveFolders(directoryID, cursor = null) {
+      const edit = fileEdit;
+      if (!edit || edit.reading || edit.submitting) return;
+      // 2. 复用账号的目录分页。对话框关闭后丢弃迟到的页。
+      edit.reading = true;
+      edit.retry = null;
+      moveRetry.hidden = true;
+      editStatus.textContent = "正在读取文件夹…";
+      updateEditControls();
+      try {
+        const result = cursor === null
+          ? await Call.ByName("main.Account.ReadDirectory", directoryID)
+          : await Call.ByName("main.Account.ReadNextDirectoryPage", directoryID, cursor);
+        if (edit !== fileEdit || !editDialog.open) return;
+        if (result.loginRequired) {
+          editDialog.close();
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        const page = result.page;
+        edit.page = page;
+        if (cursor === null) {
+          movePath.replaceChildren();
+          moveFolders.replaceChildren();
+          for (const [index, crumb] of page.breadcrumbs.entries()) {
+            const label = crumb.name || "根目录";
+            if (index) movePath.append(" / ");
+            if (index === page.breadcrumbs.length - 1) movePath.append(label);
+            else movePath.append(moveFolderButton(label, crumb.id));
+          }
+        }
+        for (const folder of page.items.filter(item => item.entry_type === "DIR")) {
+          const row = document.createElement("li");
+          row.append(moveFolderButton(folder.name, folder.id));
+          moveFolders.append(row);
+        }
+        moveMore.hidden = page.next_cursor === null;
+        editStatus.textContent = moveFolders.childElementCount || !moveMore.hidden ? "" : "此处没有子文件夹。";
+      } catch (error) {
+        if (edit !== fileEdit || !editDialog.open) return;
+        edit.retry = { directoryID, cursor };
+        moveRetry.hidden = false;
+        editStatus.textContent = error.message || "读取文件夹失败，请重试";
+      } finally {
+        if (edit === fileEdit) {
+          edit.reading = false;
+          updateEditControls();
+        }
+      }
+    }
+
+    moveMore.addEventListener("click", () => {
+      const page = fileEdit?.page;
+      if (page?.next_cursor) readMoveFolders(page.breadcrumbs.at(-1).id, page.next_cursor);
+    });
+    moveRetry.addEventListener("click", () => {
+      const retry = fileEdit?.retry;
+      if (retry) readMoveFolders(retry.directoryID, retry.cursor);
+    });
+    newFileName.addEventListener("input", updateEditControls);
+    editCancel.addEventListener("click", () => editDialog.close());
+    editDialog.addEventListener("cancel", event => {
+      if (fileEdit?.submitting) event.preventDefault();
+    });
+    editDialog.addEventListener("close", () => { if (!editDialog.open) fileEdit = null; });
+
+    editForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const edit = fileEdit;
+      if (!edit || editConfirm.disabled || !signedIn || checkConnection.disabled ||
+          currentDirectoryID !== edit.item.parent_id) return;
+      const rename = edit.mode === "rename";
+      const value = rename ? newFileName.value.trim() : edit.page.breadcrumbs.at(-1).id;
+      const { item } = edit;
+      edit.submitting = true;
+      updateEditControls();
+      setBusy(true);
+      editStatus.textContent = rename ? "正在保存名称…" : "正在移动文件…";
+      try {
+        // 3. 相同参数重试时沿用同一键。先核对回执，再更新列表。
+        if (edit.attempt?.value !== value) edit.attempt = { value, key: crypto.randomUUID() };
+        const result = await Call.ByName("main.Account." + (rename ? "RenameFile" : "MoveFile"),
+          item.id, item.revision, item.parent_id, value, edit.attempt.key);
+        if (result.loginRequired) {
+          editDialog.close();
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        editDialog.close();
+        if (selectedDownload?.item.id === item.id) clearDownloadSelection();
+        if (rename) {
+          renderDirectoryEntry(result.entry);
+        } else {
+          entryRows.get(item.id)?.remove();
+          entryRows.delete(item.id);
+        }
+        await loadDirectory(item.parent_id, { preserveRows: true, preserveDownload: true });
+        if (signedIn) directoryStatus.textContent = (rename ? "已重命名。" : "已移动。") + directoryStatus.textContent;
+      } catch (error) {
+        editStatus.textContent = error.message || "文件操作未完成，请重试";
+      } finally {
+        edit.submitting = false;
+        updateEditControls();
+        setBusy(false);
+      }
+    });
+
+    function clearDownloadSelection() {
+      selectedDownload = null;
+      stageDownload.hidden = true;
+      saveDownload.hidden = true;
+      downloadStatus.textContent = "";
+    }
+
+    async function authorizeDownload(item) {
+      if (checkConnection.disabled || !signedIn) return;
+      setBusy(true);
+      clearDownloadSelection();
+      downloadStatus.textContent = "正在取得下载授权…";
+      try {
+        // 1. 发送点击时读到的修订，冲突时由用户刷新后重新选择。
+        const grant = await Call.ByName("main.Account.AuthorizeDownload", item.id, item.revision);
+        if (!signedIn) return;
+        if (grant.loginRequired) {
+          showSignedOut(grant.loginRequired);
+          return;
+        }
+        // 2. 显示文件和已存在的下载进度，授权及内容校验信息保留在内部。
+        downloadStatus.textContent = item.name + " · " + formatSize(grant.size_bytes);
+        if (grant.confirmed_bytes > 0) {
+          downloadStatus.textContent += "\n已下载 " + formatSize(grant.confirmed_bytes) + " / " + formatSize(grant.size_bytes);
+        }
+        if (grant.failure_message) {
+          downloadStatus.textContent += "\n上次暂停 · " + grant.failure_message;
+        }
+        selectedDownload = {item, objectID: grant.object_id};
+        stageDownload.textContent = grant.confirmed_bytes > 0 ? "继续下载" : "开始下载";
+        stageDownload.hidden = false;
+      } catch (error) {
+        if (signedIn) downloadStatus.textContent = error.message || "获取下载授权失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    stageDownload.addEventListener("click", async () => {
+      if (checkConnection.disabled || !signedIn || !selectedDownload) return;
+      setBusy(true);
+      const {item, objectID} = selectedDownload;
+      downloadStatus.textContent = "正在下载并校验 " + item.name + "…";
+      try {
+        // 1. 由 Go 重新取得同一条目、修订和对象的授权，检查本机断点。
+        const result = await Call.ByName("main.Account.StageDownload", item.id, item.revision, objectID);
+        if (!signedIn) return;
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        // 2. Go 确认大小和摘要后才显示可保存。
+        stageDownload.hidden = true;
+        saveDownload.hidden = false;
+        downloadStatus.textContent = "下载完成，可以保存 · " + item.name + " · " + formatSize(result.size_bytes);
+      } catch (error) {
+        if (signedIn) {
+          downloadStatus.textContent = error.message || "下载未完成，请重试";
+          stageDownload.textContent = "继续下载";
+        }
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    saveDownload.addEventListener("click", async () => {
+      if (checkConnection.disabled || !signedIn || !selectedDownload || saveDownload.hidden) return;
+      setBusy(true);
+      const {item, objectID} = selectedDownload;
+      downloadStatus.textContent = "正在另存 " + item.name + "…";
+      try {
+        // 1. 使用同一条目、修订和对象交付暂存，取消选择时可再次另存。
+        const path = await Call.ByName("main.DownloadSaver.Save", item.id, item.revision, objectID, item.name);
+        if (!signedIn) return;
+        if (path) {
+          clearDownloadSelection();
+          downloadStatus.textContent = "已保存 · " + path;
+        } else {
+          downloadStatus.textContent = "已取消另存为，仍可保存已校验的文件。";
+        }
+      } catch (error) {
+        if (signedIn) downloadStatus.textContent = error.message || "保存未完成，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    function renderDirectoryEntry(item) {
+      const row = document.createElement("li");
+      const isDirectory = item.entry_type === "DIR";
+      const name = isDirectory ? directoryButton(item.name, item.id) : document.createElement("strong");
+      const details = document.createElement("span");
+      name.textContent = item.name;
+      details.textContent = isDirectory ? "文件夹" : formatSize(item.size_bytes);
+      const summary = document.createElement("div");
+      summary.className = "file-summary";
+      summary.append(name, details);
+      row.append(summary);
+      if (!isDirectory) {
+        const actions = document.createElement("div");
+        actions.className = "file-actions";
+        actions.append(downloadButton(item), fileEditButton(item, "rename"), fileEditButton(item, "move"), trashButton(item));
+        row.append(actions);
+      }
+      const previousRow = entryRows.get(item.id);
+      if (previousRow) {
+        previousRow.replaceWith(row);
+      } else {
+        directoryItems.append(row);
+      }
+      entryRows.set(item.id, row);
+    }
+
+    function renderDirectory(page, append) {
+      breadcrumbs.replaceChildren();
+      for (const [index, crumb] of page.breadcrumbs.entries()) {
+        const part = document.createElement("li");
+        if (index > 0) {
+          const separator = document.createElement("span");
+          separator.textContent = " / ";
+          separator.setAttribute("aria-hidden", "true");
+          part.append(separator);
+        }
+        const label = index === 0 ? "根目录" : crumb.name;
+        if (index === page.breadcrumbs.length - 1) {
+          part.setAttribute("aria-current", "page");
+          part.append(document.createTextNode(label));
+        } else {
+          part.append(directoryButton(label, crumb.id));
+        }
+        breadcrumbs.append(part);
+      }
+      directoryPath.hidden = false;
+
+      if (!append) clearDirectoryItems();
+      for (const item of page.items) renderDirectoryEntry(item);
+      currentDirectoryID = page.breadcrumbs.at(-1).id;
+      nextCursor = page.next_cursor;
+      if (entryRows.size === 0) {
+        directoryStatus.textContent = "此目录为空。";
+      } else if (nextCursor !== null) {
+        directoryStatus.textContent = "已显示前 " + entryRows.size + " 项。";
+      } else {
+        directoryStatus.textContent = append ? "已显示全部 " + entryRows.size + " 项。" : "";
+      }
+    }
+
+    async function loadDirectory(targetID, { preserveRows = false, preserveDownload = false } = {}) {
+      // 导航和刷新都让上一次续页失效，即使之后回到同一个目录。
+      pendingPage = null;
+      if (!preserveDownload) clearDownloadSelection();
+      directoryStatus.textContent = "正在读取目录…";
+      if (targetID === currentDirectoryID && !preserveRows) clearDirectoryItems();
+      try {
+        const result = await Call.ByName("main.Account.ReadDirectory", targetID);
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        renderDirectory(result.page, false);
+      } catch (error) {
+        directoryStatus.textContent = error.message || "读取目录失败，请重试";
+      }
+    }
+
+    async function navigateTo(targetID) {
+      if (refreshDirectory.disabled) return;
+      setBusy(true);
+      try {
+        await loadDirectory(targetID);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    refreshDirectory.addEventListener("click", () => navigateTo(currentDirectoryID));
+
+    loadMore.addEventListener("click", async () => {
+      if (loadMore.disabled || nextCursor === null) return;
+      // 1. 记录本次续页的目录 ID 和原始游标，只禁用加载更多按钮。
+      const request = { directoryID: currentDirectoryID, cursor: nextCursor };
+      pendingPage = request;
+      updateLoadMore();
+      directoryStatus.textContent = "正在加载更多…";
+      try {
+        const result = await Call.ByName("main.Account.ReadNextDirectoryPage", request.directoryID, request.cursor);
+        // 2. 对象身份对应这一次加载，导航后不再交付旧结果。
+        if (pendingPage !== request) return;
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+        } else {
+          renderDirectory(result.page, true);
+        }
+      } catch (error) {
+        if (pendingPage === request) directoryStatus.textContent = error.message || "加载更多失败，请重试";
+      } finally {
+        // 3. 失败时保留原游标，恢复按钮以便重试。
+        if (pendingPage === request) {
+          pendingPage = null;
+          updateLoadMore();
+        }
+      }
+    });
+
+    checkConnection.addEventListener("click", async () => {
+      setBusy(true);
+      connectionStatus.textContent = "正在检查服务连接…";
+      try {
+        const serverAddress = address.value.trim();
+        await Call.ByName("github.com/opaoxx/cloud-nest/pkg/client.Readiness.Check", serverAddress);
+        localStorage.setItem("cloudnest.serverAddress", serverAddress);
+        connectionStatus.textContent = "已连接，CloudNest 服务已就绪。";
+      } catch (error) {
+        connectionStatus.textContent = error.message || "连接检查失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (signedIn || credentials.disabled) return;
+      const loginName = username.value.trim();
+      if (!loginName || !password.value) {
+        loginStatus.textContent = "请输入用户名和密码。";
+        return;
+      }
+      setBusy(true);
+      loginStatus.textContent = "正在登录…";
+      try {
+        const login = Call.ByName("main.Account.Login", address.value.trim(), loginName, password.value);
+        password.value = "";
+        const signedInName = await login;
+        showSignedIn(signedInName, false);
+        await loadDirectory("");
+        await loadUploadIntents();
+      } catch (error) {
+        loginStatus.textContent = error.message || "登录失败，请重试";
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    async function restoreSession() {
+      setBusy(true);
+      loginStatus.textContent = "正在恢复会话…";
+      try {
+        const restored = await Call.ByName("main.Account.Restore");
+        if (restored.address) address.value = restored.address;
+        if (restored.username) {
+          showSignedIn(restored.username, true);
+          await loadDirectory("");
+          await loadUploadIntents();
+        } else {
+          loginStatus.textContent = restored.notice || "";
+        }
+      } catch (error) {
+        loginStatus.textContent = error.message || "无法恢复会话，请重新登录";
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    restoreSession();
+  </script>
+</body>
+</html>

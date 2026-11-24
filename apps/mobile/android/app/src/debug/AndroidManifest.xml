@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 调试包可以连接本机和局域网的 HTTP 开发服务。 -->
+    <application android:networkSecurityConfig="@xml/network_security_config"/>
+</manifest>
