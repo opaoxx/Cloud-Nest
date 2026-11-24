@@ -220,6 +220,7 @@ Future<({int status, Object? body})> requestAuthorizedJson(
   String path, {
   Map<String, String>? query,
   Map<String, Object>? payload,
+  String? method,
   String? creationKey,
   NativeFileBody? fileBody,
   bool emptyPost = false,
@@ -233,6 +234,7 @@ Future<({int status, Object? body})> requestAuthorizedJson(
     token: accessToken,
     query: query,
     payload: payload,
+    method: method,
     creationKey: creationKey,
     fileBody: fileBody,
     emptyPost: emptyPost,
@@ -272,6 +274,7 @@ Future<({int status, Object? body})> _request(
   Uri base,
   String path, {
   Map<String, Object>? payload,
+  String? method,
   String? token,
   Map<String, String>? query,
   String? creationKey,
@@ -287,6 +290,7 @@ Future<({int status, Object? body})> _request(
       client,
       base.replace(path: path, queryParameters: query),
       payload: payload,
+      method: method,
       token: token,
       creationKey: creationKey,
       fileBody: fileBody,
@@ -310,6 +314,7 @@ Future<({int status, Object? body})> _send(
   HttpClient client,
   Uri uri, {
   Map<String, Object>? payload,
+  String? method,
   String? token,
   String? creationKey,
   NativeFileBody? fileBody,
@@ -318,10 +323,10 @@ Future<({int status, Object? body})> _send(
   required Set<int> additionalJsonStatuses,
   required int maxResponseBytes,
 }) async {
-  final method = fileBody != null
+  final defaultMethod = fileBody != null
       ? 'PUT'
       : (payload != null || emptyPost ? 'POST' : 'GET');
-  final request = await client.openUrl(method, uri);
+  final request = await client.openUrl(method ?? defaultMethod, uri);
   request.followRedirects = false;
   if (emptyPost) request.contentLength = 0;
   if (token != null) {

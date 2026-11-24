@@ -95,6 +95,18 @@ class MobileAccount {
     ),
   );
 
+  Future<DirectoryEntry> editFile(
+    DirectoryEntry entry,
+    String parentId, {
+    String? name,
+  }) {
+    final key = newFileActionKey();
+    return _readForAccount(
+      (session) =>
+          changeDirectoryFile(session, entry, parentId, key, name: name),
+    );
+  }
+
   Future<Result> _readForAccount<Result>(
     Future<Result> Function(NativeSession) read,
   ) async {

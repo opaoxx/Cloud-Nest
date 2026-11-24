@@ -98,6 +98,36 @@ void main() {
     expect(tester.widget<IconButton>(action).onPressed, isNotNull);
   });
 
+  testWidgets('renames and trashes the latest revision after confirmation', (
+    tester,
+  ) async {
+    final account = _FileActionAccount();
+    await tester.pumpWidget(
+      MaterialApp(home: CloudDrivePage(account: account)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('重命名 notes.txt'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField), '结果.txt');
+    await tester.tap(find.text('保存名称'));
+    await tester.pumpAndSettle();
+    expect(find.text('结果.txt'), findsOneWidget);
+    expect(account.actions, [('1', '结果.txt')]);
+
+    await tester.tap(find.byTooltip('删除 结果.txt'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(account.actions, hasLength(1));
+    await tester.tap(find.byTooltip('删除 结果.txt'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移入回收站'));
+    await tester.pumpAndSettle();
+    expect(account.actions, [('1', '结果.txt'), ('2', null)]);
+    expect(find.text('结果.txt'), findsNothing);
+    expect(find.text('此目录为空'), findsOneWidget);
+  });
+
   testWidgets('saved parts and a checksum failure never publish the file', (
     tester,
   ) async {
@@ -180,6 +210,48 @@ void main() {
     expect(find.text('上传成功。'), findsOneWidget);
     expect(find.text(source.name), findsOneWidget);
   });
+}
+
+class _FileActionAccount extends _DirectoryAccount {
+  final actions = <(String, String?)>[];
+  DirectoryEntry? file = (
+    id: '81',
+    name: 'notes.txt',
+    isFolder: false,
+    sizeBytes: 14,
+    revision: '1',
+  );
+
+  @override
+  Future<DirectoryListing> listDirectory({
+    required String rootId,
+    required String parentId,
+    String? cursor,
+  }) async => (
+    breadcrumbs: [(id: _rootId, name: '')],
+    entries: [?file],
+    nextCursor: null,
+  );
+
+  @override
+  Future<DirectoryEntry> editFile(
+    DirectoryEntry entry,
+    String parentId, {
+    String? name,
+  }) async {
+    expect(parentId, _rootId);
+    expect(entry, file);
+    actions.add((entry.revision, name));
+    final updated = (
+      id: entry.id,
+      name: name ?? entry.name,
+      isFolder: false,
+      sizeBytes: entry.sizeBytes,
+      revision: '${int.parse(entry.revision) + 1}',
+    );
+    file = name == null ? null : updated;
+    return updated;
+  }
 }
 
 class _DownloadAccount extends _DirectoryAccount {

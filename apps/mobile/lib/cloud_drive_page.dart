@@ -202,6 +202,85 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     }
   }
 
+  Future<void> _editFile(DirectoryEntry entry, {required bool rename}) async {
+    final directory = _currentDirectory;
+    if (directory == null || _loading || _transferBusy) return;
+
+    // 1. 等用户提交新名称或明确确认移入回收站。
+    String? name;
+    if (rename) {
+      name = await showFileNameDialog(
+        context,
+        title: '重命名文件',
+        initialName: entry.name,
+        actionLabel: '保存名称',
+      );
+      if (name == null || name == entry.name) return;
+    } else {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('移入回收站'),
+          content: Text('将「${entry.name}」移入回收站？'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('移入回收站'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    if (!mounted ||
+        _currentDirectory != directory ||
+        _loading ||
+        _transferBusy) {
+      return;
+    }
+
+    // 2. 发出原文件修订上的操作，等待服务端确认。
+    setState(() {
+      _transferBusy = true;
+      _transferNotice = rename ? '正在重命名…' : '正在移入回收站…';
+    });
+    try {
+      final updated = await widget.account.editFile(
+        entry,
+        directory,
+        name: name,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (rename) {
+          _entries = [
+            for (final listed in _entries)
+              if (listed.id == updated.id) updated else listed,
+          ];
+        } else {
+          _entries.removeWhere((listed) => listed.id == updated.id);
+        }
+        _transferNotice = rename ? '已重命名为「${updated.name}」。' : '已移入回收站。';
+      });
+    } on AccountFailure catch (error) {
+      if (!mounted) return;
+      if (widget.account.owner == null) {
+        Navigator.of(context).pop(error.message);
+      } else {
+        setState(() => _transferNotice = error.message);
+      }
+      return;
+    } finally {
+      if (mounted) setState(() => _transferBusy = false);
+    }
+    // 3. 当前页先反映已确认快照，再读取服务端的新排序和分页。
+    if (mounted) await _load(directory);
+  }
+
   Widget _pathBar() {
     final path = Row(
       children: [
@@ -262,12 +341,31 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           subtitle: entry.isFolder ? null : Text('${entry.sizeBytes} B'),
           trailing: entry.isFolder
               ? const Icon(Icons.chevron_right)
-              : IconButton(
-                  tooltip: '下载 ${entry.name}',
-                  onPressed: _loading || _transferBusy
-                      ? null
-                      : () => _download(entry),
-                  icon: const Icon(Icons.download_outlined),
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: '下载 ${entry.name}',
+                      onPressed: _loading || _transferBusy
+                          ? null
+                          : () => _download(entry),
+                      icon: const Icon(Icons.download_outlined),
+                    ),
+                    IconButton(
+                      tooltip: '重命名 ${entry.name}',
+                      onPressed: _loading || _transferBusy
+                          ? null
+                          : () => _editFile(entry, rename: true),
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      tooltip: '删除 ${entry.name}',
+                      onPressed: _loading || _transferBusy
+                          ? null
+                          : () => _editFile(entry, rename: false),
+                      icon: const Icon(Icons.delete_outline),
+                    ),
+                  ],
                 ),
           onTap: entry.isFolder && !_loading && !_transferBusy
               ? () => _load(entry.id)

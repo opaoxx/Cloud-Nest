@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'native_login.dart';
 
@@ -19,6 +20,85 @@ typedef DirectoryListing = ({
 
 const _maxCursorBytes = 1024;
 const _maxJsonSafeInteger = 9007199254740991;
+
+String newFileActionKey() {
+  final random = Random.secure();
+  return List.generate(
+    16,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+}
+
+Future<DirectoryEntry> changeDirectoryFile(
+  NativeSession session,
+  DirectoryEntry entry,
+  String parentId,
+  String key, {
+  String? name,
+}) async {
+  // 1. 用选中项的 ID、当前父目录和所见修订提交一次文件操作。
+  if (entry.isFolder ||
+      !isCloudNestId(entry.id) ||
+      !isCloudNestId(entry.revision) ||
+      !isCloudNestId(parentId)) {
+    throw const AccountFailure('文件信息有误，请刷新目录后重试。');
+  }
+  final path = '/api/v1/entries/${entry.id}';
+  final reply = await requestAuthorizedJson(
+    session.address,
+    session.accessToken,
+    name == null ? '$path/trash' : path,
+    method: name == null ? 'POST' : 'PATCH',
+    payload: {'expected_revision': entry.revision, 'name': ?name},
+    creationKey: key,
+    additionalJsonStatuses: const {HttpStatus.badRequest},
+  );
+  // 2. 只接受同一文件与目录的成功快照。
+  if (reply
+      case (
+        status: HttpStatus.ok,
+        body: {
+          'data': {
+            'entry': {
+              'id': final String id,
+              'entry_type': 'FILE',
+              'parent_id': final String actualParent,
+              'name': final String actualName,
+              'revision': final String revision,
+              'status': final String status,
+            },
+          },
+        },
+      )
+      when id == entry.id &&
+          actualParent == parentId &&
+          actualName.isNotEmpty &&
+          isCloudNestId(revision) &&
+          status == (name == null ? 'TRASHED' : 'ACTIVE')) {
+    return (
+      id: id,
+      name: actualName,
+      isFolder: false,
+      sizeBytes: entry.sizeBytes,
+      revision: revision,
+    );
+  }
+
+  // 3. 显示明确的冲突原因，保留目录项供用户刷新或修正。
+  if (reply.status == HttpStatus.notFound) {
+    throw const AccountFailure('文件不存在或已不可访问，请刷新目录。');
+  }
+  final code = switch (reply.body) {
+    {'error': {'code': final String value}} => value,
+    _ => '',
+  };
+  throw AccountFailure(switch (code) {
+    'NAME_CONFLICT' => '当前目录已有同名文件，请换一个名称。',
+    'INVALID_NAME' => '文件名不符合服务端规则，请换一个名称。',
+    'REVISION_CONFLICT' => '文件已发生变化，请刷新目录后重试。',
+    _ => '服务端未确认文件操作，请刷新目录核对结果。',
+  });
+}
 
 Future<DirectoryListing> readDirectoryListing(
   NativeSession session, {
