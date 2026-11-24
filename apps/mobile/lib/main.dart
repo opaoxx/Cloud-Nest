@@ -1,5 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
+import 'document_selection_page.dart';
+
 void main() {
   // 1. 交给 Flutter 驱动应用的根组件。
   runApp(const CloudNestApp());
@@ -10,13 +12,11 @@ class CloudNestApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 2. Android 完成启动后，在安全区域显示可核对的应用名称。
+    // 2. 将系统文件选择入口放在首页。
     return const MaterialApp(
       title: 'CloudNest',
       debugShowCheckedModeBanner: false,
-      home: Scaffold(
-        body: SafeArea(child: Center(child: Text('CloudNest'))),
-      ),
+      home: DocumentSelectionPage(),
     );
   }
 }
