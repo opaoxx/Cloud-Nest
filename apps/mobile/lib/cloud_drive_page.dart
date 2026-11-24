@@ -246,13 +246,19 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     );
   }
 
-  Widget _entryList() {
+  Widget _entrySliver() {
     if (_entries.isEmpty) {
-      if (_breadcrumbs.isEmpty && !_loading) return const SizedBox.shrink();
-      return Center(child: Text(_breadcrumbs.isEmpty ? '正在读取云盘目录…' : '此目录为空'));
+      final message = _breadcrumbs.isEmpty
+          ? (_loading ? '正在读取云盘目录…' : null)
+          : '此目录为空';
+      final empty = message == null
+          ? const SizedBox.shrink()
+          : Center(child: Text(message));
+      return _nextCursor == null
+          ? SliverFillRemaining(hasScrollBody: false, child: empty)
+          : SliverToBoxAdapter(child: empty);
     }
-    return ListView.builder(
-      key: ValueKey(_currentDirectory),
+    return SliverList.builder(
       itemCount: _entries.length,
       itemBuilder: (context, index) {
         final entry = _entries[index];
@@ -279,12 +285,46 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     );
   }
 
+  Widget _directoryHeader() {
+    final notice = _transferNotice;
+    final failure = _failure;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_breadcrumbs.isNotEmpty) _pathBar(),
+        if (_loading || _transferBusy) const LinearProgressIndicator(),
+        if (notice != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Semantics(liveRegion: true, child: Text(notice)),
+          ),
+        if (failure != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Text(failure.message),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () =>
+                      _load(failure.parentId, cursor: failure.cursor),
+                  child: const Text('重试'),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final failure = _failure;
     final cursor = _nextCursor;
     final source = widget.source;
-    final notice = _transferNotice;
     final pause = _pause;
     return PopScope(
       canPop: !_transferBusy,
@@ -313,46 +353,31 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (_breadcrumbs.isNotEmpty) _pathBar(),
-              if (_loading || _transferBusy) const LinearProgressIndicator(),
-              if (notice != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
-                  ),
-                  child: Semantics(liveRegion: true, child: Text(notice)),
-                ),
-              if (failure != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Semantics(
-                          liveRegion: true,
-                          child: Text(failure.message),
+              // 1. 使用当前目录 ID，窗口变化时沿用页面和目录对应的滚动区域。
+              Expanded(
+                child: CustomScrollView(
+                  key: ValueKey(_currentDirectory),
+                  slivers: [
+                    // 2. 路径、状态和文件列表共享纵向滚动区域，短窗口也能查看。
+                    SliverToBoxAdapter(child: _directoryHeader()),
+                    _entrySliver(),
+                    if (cursor != null)
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                        sliver: SliverToBoxAdapter(
+                          child: OutlinedButton(
+                            onPressed: _loading || _transferBusy
+                                ? null
+                                : () =>
+                                      _load(_currentDirectory, cursor: cursor),
+                            child: const Text('加载更多'),
+                          ),
                         ),
                       ),
-                      TextButton(
-                        onPressed: () =>
-                            _load(failure.parentId, cursor: failure.cursor),
-                        child: const Text('重试'),
-                      ),
-                    ],
-                  ),
+                  ],
                 ),
-              Expanded(child: _entryList()),
-              if (cursor != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                  child: OutlinedButton(
-                    onPressed: _loading || _transferBusy
-                        ? null
-                        : () => _load(_currentDirectory, cursor: cursor),
-                    child: const Text('加载更多'),
-                  ),
-                ),
+              ),
+              // 3. 上传入口继续提交已选文件到当前目录，完成后按同一 ID 刷新。
               if (source != null && _currentDirectory != null)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),

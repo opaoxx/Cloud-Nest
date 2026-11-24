@@ -130,6 +130,54 @@ void main() {
     expect(find.text('上传成功。'), findsNothing);
     expect(find.text(source.name), findsNothing);
   });
+
+  testWidgets('keeps the folder and in-flight upload when the window shrinks', (
+    tester,
+  ) async {
+    final account = _MultipartAccount();
+    final source = (
+      name: _source.name,
+      sizeBytes: maxSingleUploadBytes + 1,
+      sha256: _source.sha256,
+    );
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(840, 1120);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CloudDrivePage(account: account, source: source),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('目标目录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('上传到此目录'));
+    await tester.pumpAndSettle();
+    expect(find.text(source.name), findsOneWidget);
+    expect(find.text('根目录 / 目标目录'), findsOneWidget);
+    await tester.tap(find.text('上传'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    tester.view.physicalSize = const Size(400, 180);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    final progress = find.textContaining('已确认 2/2 片');
+    await tester.ensureVisible(progress);
+    await tester.pump();
+    expect(progress.hitTestable(), findsOneWidget);
+    expect(find.text('暂停').hitTestable(), findsOneWidget);
+
+    tester.view.physicalSize = const Size(1120, 840);
+    await tester.pump();
+    expect(find.text('目标目录'), findsOneWidget);
+    expect(progress, findsOneWidget);
+    account.published.complete('82');
+    await tester.pumpAndSettle();
+    expect(find.text('上传成功。'), findsOneWidget);
+    expect(find.text(source.name), findsOneWidget);
+  });
 }
 
 class _DownloadAccount extends _DirectoryAccount {
