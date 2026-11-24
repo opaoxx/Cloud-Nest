@@ -13,6 +13,7 @@ import 'native_multipart_reconcile.dart';
 import 'native_multipart_upload.dart';
 import 'native_single_upload.dart';
 import 'native_upload_creation.dart';
+import 'native_upload_status.dart';
 import 'transfer_pause.dart';
 
 export 'account_owner.dart' show AccountOwner, documentScopeFor;
@@ -248,6 +249,131 @@ class MobileAccount {
     }
   }
 
+  Future<String> cancelTransfer(
+    AccountOwner taskOwner,
+    String localId, {
+    required bool submit,
+  }) async {
+    if (owner != taskOwner || _signingOut) {
+      throw const ReauthenticationRequired();
+    }
+    final epoch = _sessionEpoch;
+    try {
+      // 1. 等待用户确认，保存原任务的取消意图。
+      final task = await readCancellationTask(taskOwner, localId, submit);
+      _checkSession(epoch);
+      switch (task) {
+        case DownloadCancellation(:final source):
+          // 2. 下载只清理其私有断点。失败时保留待确认记录以便重试。
+          await discardDownloadCheckpoint(
+            taskOwner,
+            source.entry,
+            source.objectId,
+            source.sha256,
+          );
+          await finishDownloadCancellation(taskOwner, localId);
+          _checkSession(epoch);
+          return '下载已取消。';
+        case final UploadCancellation upload:
+          return await _cancelUpload(taskOwner, localId, upload, submit, epoch);
+        case null:
+          throw const AccountFailure('原任务已结束或不可取消。');
+      }
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法更新原任务的取消记录，请重试。');
+    }
+  }
+
+  Future<String> _cancelUpload(
+    AccountOwner owner,
+    String localId,
+    UploadCancellation upload,
+    bool submit,
+    int epoch,
+  ) async {
+    final source = upload.source;
+    final parentId = upload.parentId;
+    final multipart = source.sizeBytes > maxSingleUploadBytes;
+    var remoteId = upload.remoteId;
+    if (remoteId == null) {
+      if (!submit) return '原上传创建结果待确认，请重试取消。';
+      // 创建回执丢失时，用原键找回任务。取消流程无需读取或发送正文。
+      if (multipart) {
+        final plan = await _readForAccount(
+          (session) =>
+              createMultipartUpload(session, localId, parentId, source),
+        );
+        await saveMultipartCheckpoint(owner, localId, plan);
+        remoteId = plan.taskId;
+      } else {
+        remoteId = await _readForAccount<String>(
+          (session) => createSingleUpload(session, localId, parentId, source),
+        );
+        await saveSingleCheckpoint(owner, localId, remoteId, 'PENDING');
+      }
+    }
+    final target = (
+      id: remoteId,
+      mode: multipart ? 'MULTIPART' : 'SINGLE',
+      sizeBytes: source.sizeBytes,
+    );
+    Future<UploadTaskSnapshot> readTask() {
+      _checkSession(epoch);
+      return _readForAccount(
+        (session) => readUploadTaskStatus(session, target, parentId),
+      );
+    }
+
+    // 2. 先查询实际状态。回执丢失时只对账，当前操作不重复发送取消。
+    var snapshot = await readTask();
+    if (submit &&
+        upload.state != 'CANCELLING' &&
+        snapshot.state != 'CANCELLING' &&
+        snapshot.state != 'EXPIRING' &&
+        !uploadIsTerminal(snapshot.state)) {
+      try {
+        snapshot = await _readForAccount(
+          (session) => requestUploadCancellation(session, target, parentId),
+        );
+      } on ReauthenticationRequired {
+        rethrow;
+      } on AccountFailure {
+        snapshot = await readTask();
+        if (snapshot.state != 'CANCELLING' &&
+            !uploadIsTerminal(snapshot.state)) {
+          rethrow;
+        }
+      }
+    }
+
+    if (snapshot.state == 'CANCELLING') {
+      await recordUploadCancelling(owner, localId, target.id);
+    }
+    final waiting = Stopwatch()..start();
+    while (snapshot.state == 'CANCELLING' || snapshot.state == 'EXPIRING') {
+      if (waiting.elapsed >= const Duration(seconds: 30)) {
+        return '服务端仍在处理，可在任务记录查看结果。';
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      snapshot = await readTask();
+    }
+    if (!uploadIsTerminal(snapshot.state)) return '取消尚未确认，可在任务记录重试。';
+
+    // 3. 按实际终态更新记录。发布先完成时保留有效的发布条目。
+    _checkSession(epoch);
+    await saveUploadOutcome(owner, localId, target.id, snapshot);
+    if (multipart) {
+      await releaseMultipartSource(taskDocumentScope(owner, localId));
+    }
+    _checkSession(epoch);
+    return switch (snapshot.state) {
+      'CANCELLED' => '上传已取消。',
+      'COMPLETED' => '上传已发布，可在原目录查看。',
+      'EXPIRED' => '原上传任务已过期。',
+      _ => '原上传任务已失败。',
+    };
+  }
+
   Future<String> logout() async {
     final current = _session;
     if (current == null) return '当前已退出账号。';
@@ -444,7 +570,7 @@ class MobileAccount {
       await saveMultipartCheckpoint(currentOwner, intent.id, plan);
     }
     _checkSession(epoch);
-    Future<MultipartTask> queryTask() => _readForAccount(
+    Future<UploadTaskSnapshot> queryTask() => _readForAccount(
       (session) => readMultipartTask(session, plan, parentId),
     );
     final waiting = Stopwatch()..start();
@@ -597,10 +723,10 @@ class MobileAccount {
     MultipartCreation plan,
     Map<int, MultipartReceipt> receipts,
     int epoch, {
-    MultipartTask? initialTask,
+    UploadTaskSnapshot? initialTask,
     TransferPause? pause,
   }) async {
-    Future<MultipartTask> readTask() {
+    Future<UploadTaskSnapshot> readTask() {
       _checkSession(epoch);
       return _readForAccount(
         (session) => readMultipartTask(session, plan, parentId),
@@ -633,13 +759,13 @@ class MobileAccount {
     while (true) {
       _checkSession(epoch);
       if (task.entryId case final String entryId) {
-        await saveMultipartOutcome(owner, localId, plan.taskId, task);
+        await saveUploadOutcome(owner, localId, plan.taskId, task);
         await releaseMultipartSource(taskDocumentScope(owner, localId));
         _checkSession(epoch);
         return entryId;
       }
       if (const {'FAILED', 'EXPIRED', 'CANCELLED'}.contains(task.state)) {
-        await saveMultipartOutcome(owner, localId, plan.taskId, task);
+        await saveUploadOutcome(owner, localId, plan.taskId, task);
         await releaseMultipartSource(taskDocumentScope(owner, localId));
         _checkSession(epoch);
         final label = switch (task.state) {

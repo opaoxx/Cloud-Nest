@@ -2,27 +2,7 @@ import 'dart:io';
 
 import 'native_login.dart';
 import 'native_multipart_upload.dart';
-
-typedef MultipartTask = ({
-  String state,
-  String? entryId,
-  String? errorCode,
-  DateTime expiresAt,
-});
-
-final _errorCodePattern = RegExp(r'^[A-Z][A-Z_0-9]{0,63}$');
-const _multipartStates = {
-  'CREATING',
-  'UPLOADING',
-  'COMPLETING',
-  'VERIFYING',
-  'COMPLETED',
-  'CANCELLING',
-  'CANCELLED',
-  'EXPIRING',
-  'EXPIRED',
-  'FAILED',
-};
+import 'native_upload_status.dart';
 
 String multipartFailureLabel(Object? code) => switch (code) {
   'CHECKSUM_MISMATCH' => '整文件 SHA-256 校验失败',
@@ -32,22 +12,14 @@ String multipartFailureLabel(Object? code) => switch (code) {
   _ => '分片上传失败',
 };
 
-Future<MultipartTask> readMultipartTask(
+Future<UploadTaskSnapshot> readMultipartTask(
   NativeSession session,
   MultipartCreation plan,
   String parentId,
-) async {
-  final response = await requestAuthorizedJson(
-    session.address,
-    session.accessToken,
-    '/api/v1/uploads/${plan.taskId}',
-  );
-  if (response.status == HttpStatus.ok) {
-    final task = _parseTask(response.body, plan, parentId);
-    if (task != null) return task;
-  }
-  throw const AccountFailure('无法核对原分片任务，请重试。');
-}
+) => readUploadTaskStatus(session, multipartTarget(plan), parentId);
+
+UploadTaskTarget multipartTarget(MultipartCreation plan) =>
+    (id: plan.taskId, mode: 'MULTIPART', sizeBytes: plan.sizeBytes);
 
 Future<bool> multipartReady(
   NativeSession session,
@@ -65,7 +37,7 @@ Future<bool> multipartReady(
   throw const AccountFailure('原任务当前无法接收分片。');
 }
 
-Future<MultipartTask> requestMultipartCompletion(
+Future<UploadTaskSnapshot> requestMultipartCompletion(
   NativeSession session,
   MultipartCreation plan,
   String parentId,
@@ -96,7 +68,11 @@ Future<MultipartTask> requestMultipartCompletion(
     successStatus: HttpStatus.accepted,
     additionalJsonStatuses: const {HttpStatus.ok, HttpStatus.conflict},
   );
-  final task = _parseTask(reply.body, plan, parentId);
+  final task = parseUploadTaskSnapshot(
+    reply.body,
+    multipartTarget(plan),
+    parentId,
+  );
   if (task != null &&
       ((reply.status == HttpStatus.accepted &&
               (task.state == 'COMPLETING' || task.state == 'VERIFYING')) ||
@@ -110,57 +86,4 @@ Future<MultipartTask> requestMultipartCompletion(
     throw const AccountFailure('服务端核对分片回执不一致，文件未发布。');
   }
   throw const AccountFailure('完成请求结果未确认。重试时会查询原任务。');
-}
-
-MultipartTask? _parseTask(
-  Object? body,
-  MultipartCreation plan,
-  String parentId,
-) {
-  if (body
-      case {
-        'data': {
-          'id': final String id,
-          'parent_id': final String actualParent,
-          'size_bytes': final int size,
-          'upload_mode': 'MULTIPART',
-          'status': final String state,
-          'expires_at': final String expiry,
-          'completed_at': final String? completedAt,
-          'result_entry_id': final String? entryId,
-          'last_error': final Object? error,
-        },
-      }
-      when id == plan.taskId &&
-          actualParent == parentId &&
-          size == plan.sizeBytes &&
-          _multipartStates.contains(state)) {
-    final expiresAt = DateTime.tryParse(expiry);
-    if (expiresAt == null) return null;
-    if (state == 'COMPLETED') {
-      if (entryId == null ||
-          !isCloudNestId(entryId) ||
-          completedAt == null ||
-          DateTime.tryParse(completedAt) == null) {
-        return null;
-      }
-    } else if (entryId != null ||
-        ((state == 'COMPLETING' || state == 'VERIFYING') &&
-            completedAt != null)) {
-      return null;
-    }
-    final code = switch (error) {
-      {'code': final String code}
-          when _errorCodePattern.stringMatch(code) == code =>
-        code,
-      _ => null,
-    };
-    return (
-      state: state,
-      entryId: entryId,
-      errorCode: code,
-      expiresAt: expiresAt,
-    );
-  }
-  return null;
 }

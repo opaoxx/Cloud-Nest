@@ -96,8 +96,9 @@ class MainActivity : FlutterFragmentActivity() {
                 if (call.method !in setOf(
                         "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart",
                         "readMultipartParts", "recordMultipartPart", "reconcileMultipartParts",
-                        "saveMultipartOutcome", "pendingMultipart", "reserveDownload", "pendingDownload",
-                        "finishDownload", "setPauseReason",
+                        "saveUploadOutcome", "pendingMultipart", "reserveDownload", "pendingDownload",
+                        "finishDownload", "setPauseReason", "cancellationTask", "recordUploadCancelling",
+                        "finishDownloadCancellation",
                     )
                 ) {
                     result.notImplemented()
@@ -114,6 +115,20 @@ class MainActivity : FlutterFragmentActivity() {
                             "createTest" -> store.createTest(owner)
                             "pendingMultipart" -> store.pendingMultipart(owner, requireNotNull(call.argument<String>("id")))
                             "pendingDownload" -> store.pendingDownload(owner, requireNotNull(call.argument<String>("id")))
+                            "cancellationTask" -> store.cancellationTask(
+                                owner, requireNotNull(call.argument<String>("id")), call.argument<Boolean>("submit") == true,
+                            )
+                            "recordUploadCancelling" -> {
+                                store.recordUploadCancelling(
+                                    owner, requireNotNull(call.argument<String>("id")),
+                                    requireNotNull(call.argument<String>("remoteId")),
+                                )
+                                null
+                            }
+                            "finishDownloadCancellation" -> {
+                                store.finishDownloadCancellation(owner, requireNotNull(call.argument<String>("id")))
+                                null
+                            }
                             "reserveDownload" -> store.reserveDownload(call.downloadIdentity(owner))
                             "setPauseReason" -> {
                                 store.setPauseReason(
@@ -178,8 +193,8 @@ class MainActivity : FlutterFragmentActivity() {
                                 )
                                 null
                             }
-                            "saveMultipartOutcome" -> {
-                                store.saveMultipartOutcome(
+                            "saveUploadOutcome" -> {
+                                store.saveUploadOutcome(
                                     owner,
                                     requireNotNull(call.argument<String>("id")),
                                     requireNotNull(call.argument<String>("remoteId")),

@@ -22,8 +22,9 @@ internal class DownloadSave(
     )
 
     private val worker = Executors.newSingleThreadExecutor()
+    private val directory by lazy { File(activity.noBackupFilesDir, "downloads") }
     private val files by lazy {
-        VerifiedDownload(File(activity.noBackupFilesDir, "downloads"), activity.cacheDir, activity.contentResolver)
+        VerifiedDownload(directory, activity.cacheDir, activity.contentResolver)
     }
     private var active: Request? = null
 
@@ -33,7 +34,7 @@ internal class DownloadSave(
             result.success(null)
             return
         }
-        if (call.method != "downloadAndSave") {
+        if (call.method != "downloadAndSave" && call.method != "discardDownload") {
             result.notImplemented()
             return
         }
@@ -47,7 +48,30 @@ internal class DownloadSave(
                 TaskOwner(requireNotNull(call.argument<String>("server")), requireNotNull(call.argument<String>("userId"))),
             )
         }.getOrNull()
-        if (url.isNullOrEmpty() || identity == null) {
+        if (identity == null) {
+            result.error("download_network", null, null)
+            return
+        }
+        if (call.method == "discardDownload") {
+            worker.execute {
+                val discarded = runCatching {
+                    if (directory.isDirectory) {
+                        val checkpoint = DownloadCheckpoint.open(directory, identity)
+                        try {
+                            checkpoint.discardIfCurrent()
+                        } finally {
+                            checkpoint.release()
+                        }
+                    }
+                }
+                activity.runOnUiThread {
+                    if (discarded.isSuccess) result.success(null)
+                    else result.error("download_discard_failed", null, null)
+                }
+            }
+            return
+        }
+        if (url.isNullOrEmpty()) {
             result.error("download_network", null, null)
             return
         }

@@ -46,11 +46,7 @@ internal class DownloadCheckpoint private constructor(
 
     fun restore(output: RandomAccessFile) {
         // 1. 只承认属于同一对象、且文件实际还保有的已同步字节。
-        val lines = try {
-            marker.readFully().decodeToString().lineSequence().toList()
-        } catch (_: FileNotFoundException) {
-            emptyList()
-        }
+        val lines = readMarker()
         val offset = lines.getOrNull(1)?.toLongOrNull()
         if (lines.firstOrNull() != versionKey || offset == null ||
             offset !in 0..sizeBytes || output.length() < offset
@@ -61,6 +57,20 @@ internal class DownloadCheckpoint private constructor(
         confirmed = offset
         if (output.length() > offset) output.setLength(offset)
         output.seek(offset)
+    }
+
+    private fun readMarker(): List<String> = try {
+        marker.readFully().decodeToString().lineSequence().toList()
+    } catch (_: FileNotFoundException) {
+        emptyList()
+    }
+
+    fun discardIfCurrent() {
+        // 锁内只清理匹配的版本。先删正文，未删完时仍有标记可重试。
+        if (readMarker().firstOrNull() != versionKey) return
+        if (file.exists() && !file.delete()) throw IOException("Could not remove download data")
+        marker.delete()
+        if (marker.baseFile.exists()) throw IOException("Could not remove download checkpoint")
     }
 
     fun restart(output: RandomAccessFile) {

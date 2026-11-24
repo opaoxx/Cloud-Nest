@@ -122,6 +122,58 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
     }
   }
 
+  Future<void> _cancel(MobileTask task) async {
+    if (_activeId != null || _busy) return;
+    final submit = task.state != 'CANCELLING';
+    if (submit) {
+      // 只有确认按钮会写取消意图。关闭对话框保留任务及进度。
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(task.isDownload ? '取消下载' : '取消上传'),
+          content: Text(
+            task.isDownload
+                ? '取消「${task.name}」会清理本机下载断点。'
+                : '取消「${task.name}」后，将查询服务端的实际结果。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('保留任务'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('确认取消'),
+            ),
+          ],
+        ),
+      );
+      if (accepted != true || !mounted || _activeId != null) return;
+    }
+    setState(() {
+      _activeId = task.id;
+      _notice = submit ? '正在确认取消…' : '正在查询取消结果…';
+    });
+    try {
+      final result = await widget.account.cancelTransfer(
+        widget.owner,
+        task.id,
+        submit: submit,
+      );
+      if (mounted) setState(() => _notice = result);
+    } on AccountFailure catch (error) {
+      if (!mounted) return;
+      if (widget.account.owner != widget.owner) {
+        Navigator.of(context).pop(error.message);
+        return;
+      }
+      setState(() => _notice = error.message);
+    } finally {
+      if (mounted) setState(() => _activeId = null);
+    }
+    if (mounted) await _load();
+  }
+
   @override
   Widget build(BuildContext context) {
     final notice = _notice;
@@ -188,20 +240,42 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
           leading: const Icon(Icons.assignment_outlined),
           title: Text(task.name),
           subtitle: Text(
-            '${sourceRequired && task.canResume && task.pauseReason == null ? '已暂停 · ' : ''}${task.statusLabel} · $date $time',
+            _activeId == task.id
+                ? '正在处理…'
+                : '${sourceRequired && task.canResume && task.pauseReason == null ? '已暂停 · ' : ''}${task.statusLabel} · $date $time',
           ),
-          trailing: task.canResume
-              ? TextButton(
-                  onPressed: _activeId == null ? () => _resume(task) : null,
-                  child: Text(
-                    task.isDownload
-                        ? '继续下载'
-                        : (sourceRequired ? '重新选择文件' : '继续上传'),
-                  ),
-                )
-              : null,
+          trailing: _taskActions(task, sourceRequired),
         );
       },
+    );
+  }
+
+  Widget? _taskActions(MobileTask task, bool sourceRequired) {
+    final idle = _activeId == null;
+    if (task.state == 'CANCEL_PENDING' || task.state == 'CANCELLING') {
+      return TextButton(
+        onPressed: idle ? () => _cancel(task) : null,
+        child: Text(task.state == 'CANCELLING' ? '查看取消结果' : '重试取消'),
+      );
+    }
+    if (!task.canResume && !task.canCancel) return null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (task.canResume)
+          TextButton(
+            onPressed: idle ? () => _resume(task) : null,
+            child: Text(
+              task.isDownload ? '继续下载' : (sourceRequired ? '重新选择文件' : '继续上传'),
+            ),
+          ),
+        if (task.canCancel)
+          IconButton(
+            tooltip: '取消${task.isDownload ? '下载' : '上传'} ${task.name}',
+            onPressed: idle ? () => _cancel(task) : null,
+            icon: const Icon(Icons.cancel_outlined),
+          ),
+      ],
     );
   }
 

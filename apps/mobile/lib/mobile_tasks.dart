@@ -7,6 +7,7 @@ import 'native_login.dart';
 import 'native_multipart_completion.dart';
 import 'native_multipart_upload.dart';
 import 'native_upload_creation.dart';
+import 'native_upload_status.dart';
 
 const _tasks = MethodChannel('cloudnest/android_tasks');
 
@@ -23,6 +24,8 @@ class MobileTask {
     this.canResume,
     this.isDownload,
     this.pauseReason,
+    this.state,
+    this.canCancel,
   );
 
   factory MobileTask.fromAndroid(Object? row) {
@@ -53,6 +56,9 @@ class MobileTask {
         ('UPLOAD', 'CANCELLED') => '已取消',
         ('DOWNLOAD', 'COMPLETED') => '已下载',
         ('DOWNLOAD', 'PENDING') => '待下载',
+        ('DOWNLOAD', 'CANCELLED') => '已取消',
+        ('UPLOAD' || 'DOWNLOAD', 'CANCEL_PENDING') => '取消待确认',
+        ('UPLOAD', 'CANCELLING') => '取消中',
         _ => throw const TaskStoreFailure(),
       };
       final reason = row['pauseReason'] as String?;
@@ -65,6 +71,8 @@ class MobileTask {
             (kind == 'DOWNLOAD' || (kind == 'UPLOAD' && _isMultipartRow(row))),
         kind == 'DOWNLOAD',
         reason,
+        state,
+        state == 'PENDING' && (kind == 'UPLOAD' || kind == 'DOWNLOAD'),
       );
     }
     throw const TaskStoreFailure();
@@ -77,6 +85,15 @@ class MobileTask {
   final bool canResume;
   final bool isDownload;
   final String? pauseReason;
+  final String state;
+  final bool canCancel;
+}
+
+void _requirePending(Object? state) {
+  if (state == 'CANCEL_PENDING' || state == 'CANCELLING') {
+    throw const AccountFailure('原任务正在确认取消，请到任务记录查看。');
+  }
+  if (state != 'PENDING') throw const TaskStoreFailure();
 }
 
 String _pauseLabel(String reason) => switch (reason) {
@@ -143,6 +160,7 @@ Future<LocalSingleIntent> reserveSingleIntent(
   PreparedUploadFile source,
 ) async {
   final value = await _reserveUpload(owner, parentId, source);
+  if (value case {'state': final Object? state}) _requirePending(state);
   if (value case {'id': final String id, 'remoteId': final String? remoteId}
       when id.isNotEmpty && (remoteId == null || isCloudNestId(remoteId))) {
     return (id: id, remoteId: remoteId);
@@ -156,6 +174,7 @@ Future<({String id, MultipartCreation? creation})> reserveMultipartIntent(
   PreparedUploadFile source,
 ) async {
   final value = await _reserveUpload(owner, parentId, source);
+  if (value case {'state': final Object? state}) _requirePending(state);
   if (value case {'id': final String id, 'remoteId': final String? remoteId}
       when id.isNotEmpty) {
     return (
@@ -295,12 +314,12 @@ Map<String, Object> _receiptArguments(MultipartReceipt receipt) => {
   'etag': receipt.etag,
 };
 
-Future<void> saveMultipartOutcome(
+Future<void> saveUploadOutcome(
   AccountOwner owner,
   String id,
   String taskId,
-  MultipartTask task,
-) => _taskCall<void>('saveMultipartOutcome', owner, {
+  UploadTaskSnapshot task,
+) => _taskCall<void>('saveUploadOutcome', owner, {
   'id': id,
   'remoteId': taskId,
   'state': task.state,
@@ -326,7 +345,7 @@ Future<String> reserveDownload(
   DirectoryEntry entry,
   DownloadGrant grant,
 ) async {
-  final id = await _taskCall<String>('reserveDownload', owner, {
+  final row = await _taskCall<Object?>('reserveDownload', owner, {
     'name': entry.name,
     'entryId': entry.id,
     'revision': grant.revision,
@@ -334,14 +353,30 @@ Future<String> reserveDownload(
     'sizeBytes': grant.sizeBytes,
     'sha256': grant.sha256,
   });
-  if (id == null || id.isEmpty) throw const TaskStoreFailure();
-  return id;
+  if (row case {'id': final String id, 'state': final String state}
+      when id.isNotEmpty) {
+    _requirePending(state);
+    return id;
+  }
+  throw const TaskStoreFailure();
 }
 
-Future<({DirectoryEntry entry, String objectId, String sha256})?>
-readPendingDownload(AccountOwner owner, String id) async {
+typedef DownloadTaskSource = ({
+  DirectoryEntry entry,
+  String objectId,
+  String sha256,
+});
+
+Future<DownloadTaskSource?> readPendingDownload(
+  AccountOwner owner,
+  String id,
+) async {
   final row = await _taskCall<Object?>('pendingDownload', owner, {'id': id});
   if (row == null) return null;
+  return _downloadTaskSource(row, id);
+}
+
+DownloadTaskSource _downloadTaskSource(Object? row, String id) {
   if (row
       case {
         'id': final String actualId,
@@ -374,6 +409,81 @@ readPendingDownload(AccountOwner owner, String id) async {
   }
   throw const TaskStoreFailure();
 }
+
+sealed class CancellationTask {
+  const CancellationTask(this.state);
+  final String state;
+}
+
+class UploadCancellation extends CancellationTask {
+  const UploadCancellation(
+    super.state,
+    this.parentId,
+    this.source,
+    this.remoteId,
+  );
+  final String parentId;
+  final PreparedUploadFile source;
+  final String? remoteId;
+}
+
+class DownloadCancellation extends CancellationTask {
+  const DownloadCancellation(super.state, this.source);
+  final DownloadTaskSource source;
+}
+
+Future<CancellationTask?> readCancellationTask(
+  AccountOwner owner,
+  String id,
+  bool submit,
+) async {
+  final row = await _taskCall<Object?>('cancellationTask', owner, {
+    'id': id,
+    'submit': submit,
+  });
+  if (row == null) return null;
+  if (row case {'kind': 'DOWNLOAD', 'state': 'CANCEL_PENDING'}) {
+    return DownloadCancellation('CANCEL_PENDING', _downloadTaskSource(row, id));
+  }
+  if (row
+      case {
+        'id': final String actualId,
+        'kind': 'UPLOAD',
+        'state': final String state,
+        'parentId': final String parentId,
+        'name': final String name,
+        'sizeBytes': final int size,
+        'sha256': final String digest,
+        'remoteId': final String? remoteId,
+      }
+      when actualId == id &&
+          (state == 'CANCEL_PENDING' || state == 'CANCELLING') &&
+          isCloudNestId(parentId) &&
+          name.isNotEmpty &&
+          size >= 0 &&
+          size <= maxUploadProtocolBytes &&
+          isMultipartSha256(digest) &&
+          (remoteId == null || isCloudNestId(remoteId))) {
+    return UploadCancellation(state, parentId, (
+      name: name,
+      sizeBytes: size,
+      sha256: digest,
+    ), remoteId);
+  }
+  throw const TaskStoreFailure();
+}
+
+Future<void> recordUploadCancelling(
+  AccountOwner owner,
+  String id,
+  String remoteId,
+) => _taskCall<void>('recordUploadCancelling', owner, {
+  'id': id,
+  'remoteId': remoteId,
+});
+
+Future<void> finishDownloadCancellation(AccountOwner owner, String id) =>
+    _taskCall<void>('finishDownloadCancellation', owner, {'id': id});
 
 Future<void> finishDownload(AccountOwner owner, String id, String? name) =>
     _taskCall<void>('finishDownload', owner, {'id': id, 'name': ?name});

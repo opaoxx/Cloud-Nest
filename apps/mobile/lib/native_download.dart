@@ -142,3 +142,27 @@ Future<void> _notifyDownloadPause() async {
     // 下载调用会报告当前平台不可用。
   }
 }
+
+Future<void> discardDownloadCheckpoint(
+  AccountOwner owner,
+  DirectoryEntry entry,
+  String objectId,
+  String sha256,
+) async {
+  try {
+    await _downloads.invokeMethod<void>('discardDownload', {
+      'server': owner.server,
+      'userId': owner.userId,
+      'entryId': entry.id,
+      'name': entry.name,
+      'revision': entry.revision,
+      'objectId': objectId,
+      'sizeBytes': entry.sizeBytes,
+      'sha256': sha256,
+    });
+  } on PlatformException {
+    throw const AccountFailure('暂时无法清理该下载的本机断点，请重试取消。');
+  } on MissingPluginException {
+    throw const AccountFailure('当前设备无法清理该下载的本机断点。');
+  }
+}

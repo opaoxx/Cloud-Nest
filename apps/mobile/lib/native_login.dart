@@ -222,6 +222,7 @@ Future<({int status, Object? body})> requestAuthorizedJson(
   Map<String, Object>? payload,
   String? creationKey,
   NativeFileBody? fileBody,
+  bool emptyPost = false,
   int successStatus = HttpStatus.ok,
   Set<int> additionalJsonStatuses = const {},
   int maxResponseBytes = 64 * 1024,
@@ -234,6 +235,7 @@ Future<({int status, Object? body})> requestAuthorizedJson(
     payload: payload,
     creationKey: creationKey,
     fileBody: fileBody,
+    emptyPost: emptyPost,
     successStatus: successStatus,
     additionalJsonStatuses: additionalJsonStatuses,
     maxResponseBytes: maxResponseBytes,
@@ -274,6 +276,7 @@ Future<({int status, Object? body})> _request(
   Map<String, String>? query,
   String? creationKey,
   NativeFileBody? fileBody,
+  bool emptyPost = false,
   int successStatus = HttpStatus.ok,
   Set<int> additionalJsonStatuses = const {},
   int maxResponseBytes = 64 * 1024,
@@ -287,6 +290,7 @@ Future<({int status, Object? body})> _request(
       token: token,
       creationKey: creationKey,
       fileBody: fileBody,
+      emptyPost: emptyPost,
       successStatus: successStatus,
       additionalJsonStatuses: additionalJsonStatuses,
       maxResponseBytes: maxResponseBytes,
@@ -309,13 +313,17 @@ Future<({int status, Object? body})> _send(
   String? token,
   String? creationKey,
   NativeFileBody? fileBody,
+  required bool emptyPost,
   required int successStatus,
   required Set<int> additionalJsonStatuses,
   required int maxResponseBytes,
 }) async {
-  final method = fileBody != null ? 'PUT' : (payload == null ? 'GET' : 'POST');
+  final method = fileBody != null
+      ? 'PUT'
+      : (payload != null || emptyPost ? 'POST' : 'GET');
   final request = await client.openUrl(method, uri);
   request.followRedirects = false;
+  if (emptyPost) request.contentLength = 0;
   if (token != null) {
     request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
   }
