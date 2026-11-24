@@ -6,6 +6,7 @@ import 'package:cloudnest/native_directory.dart';
 import 'package:cloudnest/native_login.dart';
 import 'package:cloudnest/native_multipart_upload.dart';
 import 'package:cloudnest/native_upload_creation.dart';
+import 'package:cloudnest/transfer_pause.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -136,7 +137,7 @@ class _DownloadAccount extends _DirectoryAccount {
   DirectoryEntry? selected;
 
   @override
-  Future<String?> downloadFile(DirectoryEntry entry) {
+  Future<String?> downloadFile(DirectoryEntry entry, {TransferPause? pause}) {
     selected = entry;
     return saved.future;
   }
@@ -191,6 +192,7 @@ class _MultipartAccount extends _UploadAccount {
     PreparedUploadFile source,
     String parentId, {
     required void Function(MultipartCreation plan, int confirmed) onProgress,
+    TransferPause? pause,
   }) {
     final plan = MultipartCreation.checked(
       taskId: '9',

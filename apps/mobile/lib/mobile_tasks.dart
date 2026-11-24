@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 
 import 'account_owner.dart';
+import 'native_directory.dart';
 import 'native_download.dart';
 import 'native_login.dart';
 import 'native_multipart_completion.dart';
@@ -20,6 +21,8 @@ class MobileTask {
     this.createdAt,
     this.statusLabel,
     this.canResume,
+    this.isDownload,
+    this.pauseReason,
   );
 
   factory MobileTask.fromAndroid(Object? row) {
@@ -49,14 +52,19 @@ class MobileTask {
         ('UPLOAD', 'EXPIRED') => '已过期',
         ('UPLOAD', 'CANCELLED') => '已取消',
         ('DOWNLOAD', 'COMPLETED') => '已下载',
+        ('DOWNLOAD', 'PENDING') => '待下载',
         _ => throw const TaskStoreFailure(),
       };
+      final reason = row['pauseReason'] as String?;
       return MobileTask(
         id,
         name,
         DateTime.fromMillisecondsSinceEpoch(createdAtMs),
-        label,
-        kind == 'UPLOAD' && state == 'PENDING' && _isMultipartRow(row),
+        reason == null ? label : '已暂停 · ${_pauseLabel(reason)} · $label',
+        state == 'PENDING' &&
+            (kind == 'DOWNLOAD' || (kind == 'UPLOAD' && _isMultipartRow(row))),
+        kind == 'DOWNLOAD',
+        reason,
       );
     }
     throw const TaskStoreFailure();
@@ -67,7 +75,18 @@ class MobileTask {
   final DateTime createdAt;
   final String statusLabel;
   final bool canResume;
+  final bool isDownload;
+  final String? pauseReason;
 }
+
+String _pauseLabel(String reason) => switch (reason) {
+  'manual' => '用户暂停',
+  'source' => '需重新选择源文件',
+  'target' => '需核对原目标或修订',
+  'authorization' => '需重新登录',
+  'space' => '存储空间不足',
+  _ => '传输中断',
+};
 
 bool _isMultipartRow(Map<Object?, Object?> row) => switch (row['sizeBytes']) {
   final int size
@@ -302,15 +321,68 @@ Future<void> saveSingleCheckpoint(
   'entryId': ?entryId,
 });
 
-Future<void> recordSavedDownload(
+Future<String> reserveDownload(
   AccountOwner owner,
-  String actualName,
+  DirectoryEntry entry,
   DownloadGrant grant,
-) => _taskCall<void>('recordDownload', owner, {
-  'name': actualName,
-  'sizeBytes': grant.sizeBytes,
-  'sha256': grant.sha256,
-});
+) async {
+  final id = await _taskCall<String>('reserveDownload', owner, {
+    'name': entry.name,
+    'entryId': entry.id,
+    'revision': grant.revision,
+    'objectId': grant.objectId,
+    'sizeBytes': grant.sizeBytes,
+    'sha256': grant.sha256,
+  });
+  if (id == null || id.isEmpty) throw const TaskStoreFailure();
+  return id;
+}
+
+Future<({DirectoryEntry entry, String objectId, String sha256})?>
+readPendingDownload(AccountOwner owner, String id) async {
+  final row = await _taskCall<Object?>('pendingDownload', owner, {'id': id});
+  if (row == null) return null;
+  if (row
+      case {
+        'id': final String actualId,
+        'name': final String name,
+        'entryId': final String entry,
+        'revision': final String revision,
+        'objectId': final String objectId,
+        'sizeBytes': final int size,
+        'sha256': final String sha,
+      }
+      when actualId == id &&
+          name.isNotEmpty &&
+          isCloudNestId(entry) &&
+          isCloudNestId(revision) &&
+          isCloudNestId(objectId) &&
+          size >= 0 &&
+          size <= maxUploadProtocolBytes &&
+          isMultipartSha256(sha)) {
+    return (
+      entry: (
+        id: entry,
+        name: name,
+        isFolder: false,
+        sizeBytes: size,
+        revision: revision,
+      ),
+      objectId: objectId,
+      sha256: sha,
+    );
+  }
+  throw const TaskStoreFailure();
+}
+
+Future<void> finishDownload(AccountOwner owner, String id, String? name) =>
+    _taskCall<void>('finishDownload', owner, {'id': id, 'name': ?name});
+
+Future<void> setTransferPauseReason(
+  AccountOwner owner,
+  String id,
+  String? reason,
+) => _taskCall<void>('setPauseReason', owner, {'id': id, 'reason': ?reason});
 
 Future<T?> _taskCall<T>(
   String operation,

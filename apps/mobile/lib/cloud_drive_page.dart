@@ -6,6 +6,7 @@ import 'mobile_account.dart';
 import 'native_directory.dart';
 import 'native_login.dart';
 import 'native_upload_creation.dart';
+import 'transfer_pause.dart';
 
 class CloudDrivePage extends StatefulWidget {
   const CloudDrivePage({super.key, required this.account, this.source});
@@ -24,6 +25,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   String? _nextCursor;
   bool _loading = false;
   bool _transferBusy = false;
+  TransferPause? _pause;
   String? _transferNotice;
   ({String message, String? parentId, String? cursor})? _failure;
 
@@ -134,8 +136,10 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     }
 
     // 以本机分片回执更新进度，以服务端的发布结果刷新目录。
+    final pause = multipart ? TransferPause() : null;
     setState(() {
       _transferBusy = true;
+      _pause = pause;
       _transferNotice = multipart ? '正在核对分片任务…' : '正在上传并等待服务端校验…';
     });
     var published = false;
@@ -144,6 +148,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
         await widget.account.uploadMultipart(
           source,
           target,
+          pause: pause,
           onProgress: (plan, confirmed) {
             if (!mounted) return;
             final progress = '已确认 $confirmed/${plan.partCount} 片';
@@ -166,19 +171,26 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
         setState(() => _transferNotice = error.message);
       }
     } finally {
-      if (mounted) setState(() => _transferBusy = false);
+      if (mounted) {
+        setState(() {
+          _transferBusy = false;
+          _pause = null;
+        });
+      }
     }
     if (published && mounted) await _load(target);
   }
 
   Future<void> _download(DirectoryEntry entry) async {
     if (_loading || _transferBusy) return;
+    final pause = TransferPause();
     setState(() {
       _transferBusy = true;
+      _pause = pause;
       _transferNotice = '正在下载并校验文件…';
     });
     try {
-      final name = await widget.account.downloadFile(entry);
+      final name = await widget.account.downloadFile(entry, pause: pause);
       if (!mounted) return;
       setState(() => _transferNotice = name == null ? '已取消保存。' : '已保存「$name」。');
     } on AccountFailure catch (error) {
@@ -189,7 +201,12 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
         setState(() => _transferNotice = error.message);
       }
     } finally {
-      if (mounted) setState(() => _transferBusy = false);
+      if (mounted) {
+        setState(() {
+          _transferBusy = false;
+          _pause = null;
+        });
+      }
     }
   }
 
@@ -268,6 +285,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     final cursor = _nextCursor;
     final source = widget.source;
     final notice = _transferNotice;
+    final pause = _pause;
     return PopScope(
       canPop: !_transferBusy,
       child: Scaffold(
@@ -275,6 +293,13 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           title: const Text('云盘'),
           automaticallyImplyLeading: !_transferBusy,
           actions: [
+            if (pause != null)
+              TextButton(
+                onPressed: pause.requested
+                    ? null
+                    : () => setState(pause.request),
+                child: Text(pause.requested ? '正在暂停…' : '暂停'),
+              ),
             IconButton(
               tooltip: '刷新目录',
               onPressed: _loading || _transferBusy

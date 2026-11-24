@@ -96,7 +96,8 @@ class MainActivity : FlutterFragmentActivity() {
                 if (call.method !in setOf(
                         "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart",
                         "readMultipartParts", "recordMultipartPart", "reconcileMultipartParts",
-                        "saveMultipartOutcome", "pendingMultipart", "recordDownload",
+                        "saveMultipartOutcome", "pendingMultipart", "reserveDownload", "pendingDownload",
+                        "finishDownload", "setPauseReason",
                     )
                 ) {
                     result.notImplemented()
@@ -112,6 +113,14 @@ class MainActivity : FlutterFragmentActivity() {
                         when (call.method) {
                             "createTest" -> store.createTest(owner)
                             "pendingMultipart" -> store.pendingMultipart(owner, requireNotNull(call.argument<String>("id")))
+                            "pendingDownload" -> store.pendingDownload(owner, requireNotNull(call.argument<String>("id")))
+                            "reserveDownload" -> store.reserveDownload(call.downloadIdentity(owner))
+                            "setPauseReason" -> {
+                                store.setPauseReason(
+                                    owner, requireNotNull(call.argument<String>("id")), call.argument<String>("reason"),
+                                )
+                                null
+                            }
                             "reserveUpload" -> store.reserveUpload(
                                 owner,
                                 UploadDeclaration(
@@ -180,12 +189,11 @@ class MainActivity : FlutterFragmentActivity() {
                                 )
                                 null
                             }
-                            "recordDownload" -> {
-                                store.recordDownload(
+                            "finishDownload" -> {
+                                store.finishDownload(
                                     owner,
-                                    requireNotNull(call.argument<String>("name")),
-                                    requireNotNull(call.argument<Number>("sizeBytes")).toLong(),
-                                    requireNotNull(call.argument<String>("sha256")),
+                                    requireNotNull(call.argument<String>("id")),
+                                    call.argument<String>("name"),
                                 )
                                 null
                             }

@@ -20,6 +20,8 @@ internal data class DownloadIdentity(
         require(listOf(entryId, revision, objectId).all { id ->
             id != "0" && id.toULongOrNull()?.toString() == id
         })
+        require(source.name.isNotBlank() && source.sizeBytes in 0..9_007_199_254_740_991L)
+        require(multipartDigestPattern.matches(source.sha256))
     }
 
     fun fileKey(): String = downloadKey(owner.server, owner.userId, entryId)

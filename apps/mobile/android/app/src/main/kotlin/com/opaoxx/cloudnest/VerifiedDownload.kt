@@ -25,7 +25,7 @@ internal class VerifiedDownload(
     private val legacyCache: File,
     private val resolver: ContentResolver,
 ) {
-    fun stage(signedUrl: String, identity: DownloadIdentity): StagedDownload {
+    fun stage(signedUrl: String, identity: DownloadIdentity, shouldPause: () -> Boolean): StagedDownload {
         val url = URI(signedUrl).toURL()
         if (url.protocol !in setOf("http", "https") || url.host.isEmpty() ||
             url.userInfo != null || url.ref != null
@@ -42,12 +42,15 @@ internal class VerifiedDownload(
             RandomAccessFile(checkpoint.file, "rw").use { output ->
                 // 1. 恢复同一对象已落盘的偏移，丢弃尚未确认的尾部。
                 checkpoint.restore(output)
+                checkPause(shouldPause)
                 if (checkpoint.confirmed == 0L || checkpoint.confirmed < expected.sizeBytes) {
-                    receive(url, checkpoint, output, expected.sizeBytes)
+                    receive(url, checkpoint, output, expected.sizeBytes, shouldPause)
                 }
             }
             // 3. 核对整文件大小和 SHA-256，交给系统另存为。
-            val actual = checkpoint.file.inputStream().use { summarizeSource(it, expected.name) }
+            val actual = checkpoint.file.inputStream().use { input ->
+                summarizeSource(input, expected.name) { _, _, _ -> checkPause(shouldPause) }
+            }
             if (!expected.matches(actual)) {
                 discard = true
                 throw DownloadFailure("download_integrity")
@@ -64,7 +67,9 @@ internal class VerifiedDownload(
         }
     }
 
-    private fun receive(url: URL, checkpoint: DownloadCheckpoint, output: RandomAccessFile, size: Long) {
+    private fun receive(
+        url: URL, checkpoint: DownloadCheckpoint, output: RandomAccessFile, size: Long, shouldPause: () -> Boolean,
+    ) {
         // 2. 检查存储返回的范围，边下载边保存断点。存储 GET 不携带业务令牌。
         val requested = checkpoint.confirmed
         val connection = url.openConnection() as HttpURLConnection
@@ -78,7 +83,7 @@ internal class VerifiedDownload(
             val start = responseOffset(connection, requested, size)
             if (start != requested) checkpoint.restart(output)
             checkSpace(size - start)
-            connection.inputStream.use { input -> writeBody(input, checkpoint, output, start, size) }
+            connection.inputStream.use { input -> writeBody(input, checkpoint, output, start, size, shouldPause) }
         } finally {
             connection.disconnect()
         }
@@ -107,11 +112,13 @@ internal class VerifiedDownload(
 
     private fun writeBody(
         input: InputStream, checkpoint: DownloadCheckpoint, output: RandomAccessFile, start: Long, size: Long,
+        shouldPause: () -> Boolean,
     ) {
         val buffer = ByteArray(64 * 1024)
         var offset = start
         try {
             while (offset < size) {
+                checkPause(shouldPause)
                 if (Thread.currentThread().isInterrupted) throw InterruptedIOException()
                 val length = minOf(buffer.size.toLong(), size - offset).toInt()
                 val count = readBodyChunk { input.read(buffer, 0, length) }
@@ -123,14 +130,21 @@ internal class VerifiedDownload(
                     checkpoint.confirm(output, offset)
                 }
             }
+            checkPause(shouldPause)
             if (readBodyChunk { input.read() } != -1) throw DownloadFailure("download_integrity")
             checkpoint.confirm(output, offset)
         } catch (failure: DownloadFailure) {
-            if (failure.code == "download_interrupted" && offset > checkpoint.confirmed && offset < size) {
+            if ((failure.code == "download_interrupted" || failure.code == "download_paused") &&
+                offset > checkpoint.confirmed && offset < size
+            ) {
                 checkpoint.confirm(output, offset)
             }
             throw failure
         }
+    }
+
+    private fun checkPause(shouldPause: () -> Boolean) {
+        if (shouldPause()) throw DownloadFailure("download_paused")
     }
 
     private inline fun readBodyChunk(read: () -> Int): Int = try {

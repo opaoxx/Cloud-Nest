@@ -1,6 +1,7 @@
 import 'package:cloudnest/mobile_account.dart';
 import 'package:cloudnest/mobile_tasks_page.dart';
 import 'package:cloudnest/native_multipart_upload.dart';
+import 'package:cloudnest/transfer_pause.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -122,6 +123,7 @@ class _ResumeAccount extends MobileAccount {
     String localId, {
     required bool reselect,
     required void Function(MultipartCreation plan, int confirmed) onProgress,
+    TransferPause? pause,
   }) async {
     expect(taskOwner, _owner);
     attempts.add((localId, reselect));

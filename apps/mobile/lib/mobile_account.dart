@@ -13,6 +13,7 @@ import 'native_multipart_reconcile.dart';
 import 'native_multipart_upload.dart';
 import 'native_single_upload.dart';
 import 'native_upload_creation.dart';
+import 'transfer_pause.dart';
 
 export 'account_owner.dart' show AccountOwner, documentScopeFor;
 
@@ -128,34 +129,123 @@ class MobileAccount {
     }
   }
 
-  Future<String?> downloadFile(DirectoryEntry entry) async {
+  Future<String?> downloadFile(
+    DirectoryEntry entry, {
+    TransferPause? pause,
+  }) async {
     final currentOwner = owner;
     if (currentOwner == null || _signingOut) {
       throw const ReauthenticationRequired();
     }
     final epoch = _sessionEpoch;
 
-    // 1. API 访问按当前账号授权。签名交给 Android，正文请求独立发出。
-    final grant = await _readForAccount(
-      (session) => createDownloadGrant(session, entry),
-    );
-    _checkSession(epoch);
-    final actualName = await saveGrantedDownload(
-      currentOwner,
-      entry.id,
-      grant,
-      entry.name,
-    );
-    if (actualName == null) return null;
+    try {
+      final grant = await _readForAccount(
+        (session) => createDownloadGrant(session, entry),
+      );
+      _checkSession(epoch);
+      final id = await reserveDownload(currentOwner, entry, grant);
+      return await _transferDownload(
+        currentOwner,
+        id,
+        entry,
+        epoch,
+        pause,
+        () async => grant,
+      );
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法读写本机下载记录，请重试。');
+    }
+  }
 
-    // 2. 只有系统保存成功才记任务。记录失败时仍告知用户实际保存名称。
+  Future<String?> resumeDownload(
+    AccountOwner taskOwner,
+    String id, {
+    TransferPause? pause,
+  }) async {
+    if (owner != taskOwner || _signingOut) {
+      throw const ReauthenticationRequired();
+    }
+    final epoch = _sessionEpoch;
+    try {
+      final task = await readPendingDownload(taskOwner, id);
+      _checkSession(epoch);
+      if (task == null) throw const AccountFailure('原下载已经结束或不可继续。');
+      return await _transferDownload(
+        taskOwner,
+        id,
+        task.entry,
+        epoch,
+        pause,
+        () async {
+          // 继续只允许为原对象授权。新修订需用户回云盘另行选择。
+          final grant = await _readForAccount(
+            (session) => createDownloadGrant(session, task.entry),
+          );
+          if (grant.objectId != task.objectId || grant.sha256 != task.sha256) {
+            throw const TransferTargetUnavailable('文件对象已变化，请回到云盘重新选择。');
+          }
+          return grant;
+        },
+      );
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法读写本机下载记录，请重试。');
+    }
+  }
+
+  Future<String?> _transferDownload(
+    AccountOwner owner,
+    String id,
+    DirectoryEntry entry,
+    int epoch,
+    TransferPause? pause,
+    Future<DownloadGrant> Function() authorize,
+  ) async {
+    final actualName = await _withPauseRecord(owner, id, () async {
+      _checkSession(epoch);
+      pause?.check();
+      final grant = await authorize();
+      _checkSession(epoch);
+      pause?.check();
+      await setTransferPauseReason(owner, id, null);
+      _checkSession(epoch);
+      return saveGrantedDownload(
+        owner,
+        entry.id,
+        grant,
+        entry.name,
+        pause: pause,
+      );
+    });
     _checkSession(epoch);
     try {
-      await recordSavedDownload(currentOwner, actualName, grant);
+      await finishDownload(owner, id, actualName);
     } on TaskStoreFailure {
+      if (actualName == null) rethrow;
       throw AccountFailure('已保存「$actualName」，本机任务记录写入失败。');
     }
     return actualName;
+  }
+
+  Future<T> _withPauseRecord<T>(
+    AccountOwner owner,
+    String id,
+    Future<T> Function() action,
+  ) async {
+    try {
+      return await action();
+    } on AccountFailure catch (error) {
+      final reason = switch (error) {
+        TransferPaused() => 'manual',
+        MultipartSourceUnavailable() => 'source',
+        TransferTargetUnavailable() => 'target',
+        TransferSpaceUnavailable() => 'space',
+        ReauthenticationRequired() => 'authorization',
+        _ => 'interrupted',
+      };
+      await setTransferPauseReason(owner, id, reason);
+      rethrow;
+    }
   }
 
   Future<String> logout() async {
@@ -241,6 +331,7 @@ class MobileAccount {
     PreparedUploadFile source,
     String parentId, {
     required void Function(MultipartCreation plan, int confirmed) onProgress,
+    TransferPause? pause,
   }) async {
     final currentOwner = owner;
     if (currentOwner == null || _signingOut) {
@@ -259,16 +350,22 @@ class MobileAccount {
         source,
       );
       _checkSession(epoch);
-      return await _runMultipart(
+      return await _withPauseRecord(
         currentOwner,
-        (
-          id: intent.id,
-          parentId: parentId,
-          source: source,
-          creation: intent.creation,
+        intent.id,
+        () => _runMultipart(
+          currentOwner,
+          (
+            id: intent.id,
+            parentId: parentId,
+            source: source,
+            creation: intent.creation,
+          ),
+          epoch,
+          onProgress,
+          pause,
+          verifyTarget: intent.creation != null,
         ),
-        epoch,
-        onProgress,
       );
     } on TaskStoreFailure {
       throw const AccountFailure('无法读写本机上传记录，请重试。');
@@ -280,6 +377,7 @@ class MobileAccount {
     String localId, {
     required bool reselect,
     required void Function(MultipartCreation plan, int confirmed) onProgress,
+    TransferPause? pause,
   }) async {
     if (owner != taskOwner || _signingOut) {
       throw const ReauthenticationRequired();
@@ -291,16 +389,26 @@ class MobileAccount {
       _checkSession(epoch);
       if (pending == null) throw const AccountFailure('原任务已经结束或不可继续。');
 
-      // 2. 只有大小和 SHA-256 一致的副本才能替换该任务的来源。
-      if (reselect &&
-          !await pickReplacementMultipartSource(
-            taskDocumentScope(taskOwner, localId),
-            pending.source,
-          )) {
-        return null;
-      }
-      _checkSession(epoch);
-      return await _runMultipart(taskOwner, pending, epoch, onProgress);
+      return await _withPauseRecord(taskOwner, localId, () async {
+        pause?.check();
+        // 2. 只有大小和 SHA-256 一致的副本才能替换该任务的来源。
+        if (reselect &&
+            !await pickReplacementMultipartSource(
+              taskDocumentScope(taskOwner, localId),
+              pending.source,
+            )) {
+          return null;
+        }
+        _checkSession(epoch);
+        return _runMultipart(
+          taskOwner,
+          pending,
+          epoch,
+          onProgress,
+          pause,
+          verifyTarget: true,
+        );
+      });
     } on TaskStoreFailure {
       throw const AccountFailure('无法读写本机上传记录，请重试。');
     }
@@ -311,16 +419,20 @@ class MobileAccount {
     PendingMultipartUpload intent,
     int epoch,
     void Function(MultipartCreation plan, int confirmed) onProgress,
-  ) async {
+    TransferPause? pause, {
+    required bool verifyTarget,
+  }) async {
     final source = intent.source;
     final parentId = intent.parentId;
     final scope = taskDocumentScope(currentOwner, intent.id);
+    pause?.check();
 
     Future<void> bindSource() =>
         bindMultipartSource(scope, documentScopeFor(currentOwner), source);
     if (intent.creation == null) {
       await bindSource();
       _checkSession(epoch);
+      pause?.check();
     }
     final plan =
         intent.creation ??
@@ -338,6 +450,7 @@ class MobileAccount {
     final waiting = Stopwatch()..start();
     var task = await queryTask();
     while (task.state == 'CREATING') {
+      pause?.check();
       if (waiting.elapsed >= const Duration(seconds: 10)) {
         throw const AccountFailure('服务端仍在初始化任务，请稍后重试。');
       }
@@ -354,18 +467,24 @@ class MobileAccount {
         const {},
         epoch,
         initialTask: task,
+        pause: pause,
       );
     }
     if (!task.expiresAt.isAfter(DateTime.now())) {
       throw const AccountFailure('原分片任务的有效期已结束。');
     }
 
+    pause?.check();
+    if (verifyTarget) await _verifyUploadTarget(parentId, epoch);
+    pause?.check();
     if (intent.creation != null) {
       await bindSource();
       _checkSession(epoch);
     }
+    pause?.check();
     final digests = await inspectMultipartSource(scope, source, plan);
     _checkSession(epoch);
+    pause?.check();
     final remote = await _readForAccount(
       (session) => reconcileMultipartReceipts(session, plan, digests),
     );
@@ -379,11 +498,15 @@ class MobileAccount {
     );
     final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
     _checkSession(epoch);
+    pause?.check();
+    await setTransferPauseReason(currentOwner, intent.id, null);
+    _checkSession(epoch);
     var confirmed = saved.length;
     onProgress(plan, confirmed);
     for (var number = 1; number <= plan.partCount; number++) {
       if (saved.containsKey(number)) continue;
       _checkSession(epoch);
+      pause?.check();
       final part = (
         number: number,
         offsetBytes: plan.offsetOf(number),
@@ -398,11 +521,14 @@ class MobileAccount {
           part,
           plan,
           parentId,
+          pause,
         );
         await saveMultipartPart(currentOwner, intent.id, plan.taskId, receipt);
         _checkSession(epoch);
         saved[number] = receipt;
         onProgress(plan, ++confirmed);
+      } on TransferPaused {
+        rethrow;
       } on ReauthenticationRequired {
         rethrow;
       } on MultipartSourceUnavailable {
@@ -421,7 +547,20 @@ class MobileAccount {
       plan,
       saved,
       epoch,
+      pause: pause,
     );
+  }
+
+  Future<void> _verifyUploadTarget(String parentId, int epoch) async {
+    try {
+      final profile = await currentProfile();
+      _checkSession(epoch);
+      await listDirectory(rootId: profile.rootEntryId, parentId: parentId);
+    } on ReauthenticationRequired {
+      rethrow;
+    } on AccountFailure {
+      throw const TransferTargetUnavailable('无法核对原目标目录，请检查后继续。');
+    }
   }
 
   Future<MultipartReceipt> _sendMultipartWithRenewal(
@@ -430,19 +569,23 @@ class MobileAccount {
     MultipartPart part,
     MultipartCreation plan,
     String parentId,
+    TransferPause? pause,
   ) async {
     final grant = await _readForAccount(
       (session) => requestMultipartPart(session, plan, part),
     );
+    pause?.check();
     try {
       return await sendMultipartPart(scope, source, part, grant);
     } on MultipartSignatureExpired {
+      pause?.check();
       final renewed = await _readForAccount((session) async {
         if (!await multipartReady(session, plan, parentId)) {
           throw const AccountFailure('原任务暂未准备好，请重试。');
         }
         return renewMultipartPart(session, plan, part, grant);
       });
+      pause?.check();
       return sendMultipartPart(scope, source, part, renewed);
     }
   }
@@ -455,6 +598,7 @@ class MobileAccount {
     Map<int, MultipartReceipt> receipts,
     int epoch, {
     MultipartTask? initialTask,
+    TransferPause? pause,
   }) async {
     Future<MultipartTask> readTask() {
       _checkSession(epoch);
@@ -466,6 +610,7 @@ class MobileAccount {
     // 1. 查询原任务，按片号核对已保存的完整回执。
     var task = initialTask ?? await readTask();
     if (task.state == 'UPLOADING') {
+      pause?.check();
       if (!task.expiresAt.isAfter(DateTime.now())) {
         throw const AccountFailure('原分片任务的有效期已结束。');
       }
@@ -504,6 +649,7 @@ class MobileAccount {
         };
         throw AccountFailure('$label。文件未发布。');
       }
+      pause?.check();
       if (!const {
             'COMPLETING',
             'VERIFYING',

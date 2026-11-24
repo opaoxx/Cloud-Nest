@@ -14,6 +14,7 @@ private const val TEST_KIND = "TEST"
 private const val UPLOAD_KIND = "UPLOAD"
 private const val MAX_UPLOAD_PROTOCOL_BYTES = 9007199254740991L
 private val taskErrorCodePattern = Regex("[A-Z][A-Z_0-9]{0,63}")
+private val pauseReasons = setOf("manual", "source", "target", "authorization", "interrupted", "space")
 
 internal data class TaskOwner(val server: String, val userId: String) {
     init {
@@ -72,7 +73,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
     context,
     File(context.noBackupFilesDir, "mobile_tasks.sqlite3").absolutePath,
     null,
-    5,
+    6,
     // 损坏时报告错误并保留原始文件，避免自动删除任务记录。
     { _ -> },
 ) {
@@ -100,16 +101,18 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         addMultipartUploadFields(database)
         createPartReceipts(database)
         addUploadOutcomeFields(database)
+        addPauseFields(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion !in 1..4 || newVersion != 5) {
+        if (oldVersion !in 1..5 || newVersion != 6) {
             throw SQLiteException("Unsupported task database migration: $oldVersion to $newVersion")
         }
         if (oldVersion == 1) addSingleUploadFields(database)
         if (oldVersion <= 2) addMultipartUploadFields(database)
         if (oldVersion <= 3) createPartReceipts(database)
-        addUploadOutcomeFields(database)
+        if (oldVersion <= 4) addUploadOutcomeFields(database)
+        addPauseFields(database)
     }
 
     private fun addSingleUploadFields(database: SQLiteDatabase) {
@@ -150,6 +153,20 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
 
     private fun addUploadOutcomeFields(database: SQLiteDatabase) {
         database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN error_code TEXT")
+    }
+
+    private fun addPauseFields(database: SQLiteDatabase) {
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN pause_reason TEXT")
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN download_entry_id TEXT")
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN download_revision TEXT")
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN download_object_id TEXT")
+        database.execSQL(
+            """
+            CREATE UNIQUE INDEX transfer_tasks_pending_download
+            ON transfer_tasks(server_origin, user_id, download_entry_id)
+            WHERE kind = 'DOWNLOAD' AND state = 'PENDING'
+            """.trimIndent(),
+        )
     }
 
     override fun onConfigure(database: SQLiteDatabase) {
@@ -270,6 +287,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             put("state", state)
             put("result_entry_id", entryId)
             put("error_code", errorCode)
+            putNull("pause_reason")
         }
         val updated = writableDatabase.update(
             TASKS,
@@ -391,7 +409,23 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
 
     fun pendingMultipart(owner: TaskOwner, id: String): Map<String, Any?>? {
         require(isStageId(id))
-        return readTasks(readableDatabase, owner, id).singleOrNull()
+        return readTasks(readableDatabase, owner, "local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND size_bytes > ?",
+            arrayOf(id, MAX_SINGLE_UPLOAD_BYTES.toString())).singleOrNull()
+    }
+
+    fun pendingDownload(owner: TaskOwner, id: String): Map<String, Any?>? {
+        require(isStageId(id))
+        return readTasks(readableDatabase, owner, "local_task_id = ? AND kind = 'DOWNLOAD' AND state = 'PENDING'",
+            arrayOf(id)).singleOrNull()
+    }
+
+    fun setPauseReason(owner: TaskOwner, id: String, reason: String?) {
+        require(isStageId(id) && (reason == null || reason in pauseReasons))
+        val values = ContentValues().apply { put("pause_reason", reason) }
+        writableDatabase.update(
+            TASKS, values, "$OWNER_FILTER AND local_task_id = ? AND state = 'PENDING'",
+            owner.selectionArgs() + id,
+        )
     }
 
     fun pendingMultipartIds(owner: TaskOwner): Set<String> = readableDatabase.query(
@@ -404,21 +438,66 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) }
     }
 
-    fun recordDownload(owner: TaskOwner, actualName: String, sizeBytes: Long, sha256: String) {
-        require(actualName.isNotBlank() && sizeBytes >= 0 && Regex("[0-9a-f]{64}").matches(sha256))
-        // 外部文件写入完成后，按所属账号记录提供方实际返回的名称。
-        val values = ContentValues().apply {
-            put("local_task_id", UUID.randomUUID().toString())
-            put("server_origin", owner.server)
-            put("user_id", owner.userId)
-            put("kind", "DOWNLOAD")
-            put("name", actualName)
-            put("state", "COMPLETED")
-            put("created_at_ms", System.currentTimeMillis())
-            put("size_bytes", sizeBytes)
-            put("sha256", sha256)
+    fun reserveDownload(identity: DownloadIdentity): String {
+        val database = writableDatabase
+        val filter = "$OWNER_FILTER AND kind = 'DOWNLOAD' AND state = 'PENDING' AND download_entry_id = ?"
+        val scope = identity.owner.selectionArgs() + identity.entryId
+        database.beginTransaction()
+        try {
+            // 1. 相同对象沿用原下载。本次明确选了新版本时替换该条目的旧待下载记录。
+            val existing = database.query(
+                TASKS, arrayOf("local_task_id", "download_revision", "download_object_id", "size_bytes", "sha256"),
+                filter, scope, null, null, null,
+            ).use { cursor ->
+                if (cursor.moveToFirst() && cursor.getString(1) == identity.revision &&
+                    cursor.getString(2) == identity.objectId && cursor.getLong(3) == identity.source.sizeBytes &&
+                    cursor.getString(4) == identity.source.sha256
+                ) cursor.getString(0) else null
+            }
+            if (existing != null) {
+                database.setTransactionSuccessful()
+                return existing
+            }
+            database.delete(TASKS, filter, scope)
+            val id = UUID.randomUUID().toString()
+            val values = ContentValues().apply {
+                put("local_task_id", id)
+                put("server_origin", identity.owner.server)
+                put("user_id", identity.owner.userId)
+                put("kind", "DOWNLOAD")
+                put("name", identity.source.name)
+                put("state", "PENDING")
+                put("created_at_ms", System.currentTimeMillis())
+                put("size_bytes", identity.source.sizeBytes)
+                put("sha256", identity.source.sha256)
+                put("download_entry_id", identity.entryId)
+                put("download_revision", identity.revision)
+                put("download_object_id", identity.objectId)
+            }
+            database.insertOrThrow(TASKS, null, values)
+            database.setTransactionSuccessful()
+            return id
+        } finally {
+            database.endTransaction()
         }
-        writableDatabase.insertOrThrow(TASKS, null, values)
+    }
+
+    fun finishDownload(owner: TaskOwner, id: String, actualName: String?) {
+        require(isStageId(id) && (actualName == null || actualName.isNotBlank()))
+        val filter = "$OWNER_FILTER AND local_task_id = ? AND kind = 'DOWNLOAD' AND state = 'PENDING'"
+        val scope = owner.selectionArgs() + id
+        if (actualName == null) {
+            writableDatabase.delete(TASKS, filter, scope)
+        } else {
+            val values = ContentValues().apply {
+                put("name", actualName)
+                put("state", "COMPLETED")
+                putNull("pause_reason")
+            }
+            if (writableDatabase.update(TASKS, values, filter, scope) != 1) {
+                throw SQLiteException("Download task changed before saving")
+            }
+        }
     }
 
     fun createTest(owner: TaskOwner): List<Map<String, Any?>> {
@@ -459,19 +538,21 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun readTasks(database: SQLiteDatabase, owner: TaskOwner, pendingId: String? = null): List<Map<String, Any?>> =
+    private fun readTasks(
+        database: SQLiteDatabase, owner: TaskOwner,
+        filter: String? = null, arguments: Array<String> = emptyArray(),
+    ): List<Map<String, Any?>> =
         database.query(
             TASKS,
             arrayOf(
                 "local_task_id", "name", "kind", "state", "created_at_ms",
                 "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at", "error_code",
                 "parent_id", "sha256",
+                "pause_reason", "download_entry_id", "download_revision", "download_object_id",
                 "(SELECT count(*) FROM multipart_part_receipts p WHERE p.local_task_id = transfer_tasks.local_task_id) AS confirmed_parts",
             ),
-            if (pendingId == null) OWNER_FILTER else
-                "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND size_bytes > ?",
-            if (pendingId == null) owner.selectionArgs() else
-                owner.selectionArgs() + arrayOf(pendingId, MAX_SINGLE_UPLOAD_BYTES.toString()),
+            if (filter == null) OWNER_FILTER else "$OWNER_FILTER AND $filter",
+            owner.selectionArgs() + arguments,
             null,
             null,
             "created_at_ms DESC, local_task_id",
@@ -490,6 +571,10 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             val errorCode = cursor.getColumnIndexOrThrow("error_code")
             val parentId = cursor.getColumnIndexOrThrow("parent_id")
             val sha256 = cursor.getColumnIndexOrThrow("sha256")
+            val pause = cursor.getColumnIndexOrThrow("pause_reason")
+            val entry = cursor.getColumnIndexOrThrow("download_entry_id")
+            val revision = cursor.getColumnIndexOrThrow("download_revision")
+            val objectId = cursor.getColumnIndexOrThrow("download_object_id")
             buildList {
                 while (cursor.moveToNext()) {
                     add(
@@ -508,6 +593,10 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                             "errorCode" to cursor.getString(errorCode),
                             "parentId" to cursor.getString(parentId),
                             "sha256" to cursor.getString(sha256),
+                            "pauseReason" to cursor.getString(pause),
+                            "entryId" to cursor.getString(entry),
+                            "revision" to cursor.getString(revision),
+                            "objectId" to cursor.getString(objectId),
                         ),
                     )
                 }

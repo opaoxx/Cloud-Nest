@@ -18,6 +18,7 @@ internal class DownloadSave(
         val result: MethodChannel.Result,
         var staged: StagedDownload? = null,
         var saving: Boolean = false,
+        @Volatile var pauseRequested: Boolean = false,
     )
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -27,6 +28,11 @@ internal class DownloadSave(
     private var active: Request? = null
 
     fun handle(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "pauseDownload") {
+            active?.takeIf { it.staged == null }?.pauseRequested = true
+            result.success(null)
+            return
+        }
         if (call.method != "downloadAndSave") {
             result.notImplemented()
             return
@@ -36,32 +42,23 @@ internal class DownloadSave(
             return
         }
         val url = call.argument<String>("url")
-        val name = call.argument<String>("name")
-        val size = call.argument<Number>("sizeBytes")?.toLong()
-        val digest = call.argument<String>("sha256")
         val identity = runCatching {
-            DownloadIdentity(
+            call.downloadIdentity(
                 TaskOwner(requireNotNull(call.argument<String>("server")), requireNotNull(call.argument<String>("userId"))),
-                requireNotNull(call.argument<String>("entryId")),
-                requireNotNull(call.argument<String>("revision")),
-                requireNotNull(call.argument<String>("objectId")),
-                SourceSummary(requireNotNull(name), requireNotNull(size), requireNotNull(digest)),
             )
         }.getOrNull()
-        if (url.isNullOrEmpty() || name.isNullOrBlank() || size == null ||
-            size !in 0..9_007_199_254_740_991L || digest == null ||
-            !digest.matches(Regex("[0-9a-f]{64}")) || identity == null
-        ) {
+        if (url.isNullOrEmpty() || identity == null) {
             result.error("download_network", null, null)
             return
         }
+        val name = identity.source.name
 
         val request = Request(result)
         active = request
         // 下载和校验在工作线程中完成，系统选择器只接收已验证的文件。
         worker.execute {
             val staged = try {
-                files.stage(url, identity)
+                files.stage(url, identity) { request.pauseRequested }
             } catch (failure: Exception) {
                 replyFailure(request, failure, "download_network")
                 return@execute
@@ -72,6 +69,10 @@ internal class DownloadSave(
                     return@runOnUiThread
                 }
                 request.staged = staged
+                if (request.pauseRequested) {
+                    finish(request) { error("download_paused", null, null) }
+                    return@runOnUiThread
+                }
                 try {
                     launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                         addCategory(Intent.CATEGORY_OPENABLE)
@@ -146,3 +147,15 @@ internal class DownloadSave(
         worker.shutdown()
     }
 }
+
+internal fun MethodCall.downloadIdentity(owner: TaskOwner): DownloadIdentity = DownloadIdentity(
+    owner,
+    requireNotNull(argument<String>("entryId")),
+    requireNotNull(argument<String>("revision")),
+    requireNotNull(argument<String>("objectId")),
+    SourceSummary(
+        requireNotNull(argument<String>("name")),
+        requireNotNull(argument<Number>("sizeBytes")).toLong(),
+        requireNotNull(argument<String>("sha256")),
+    ),
+)

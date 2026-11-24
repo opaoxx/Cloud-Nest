@@ -6,6 +6,7 @@ import 'mobile_account.dart';
 import 'mobile_tasks.dart';
 import 'native_login.dart';
 import 'native_multipart_upload.dart';
+import 'transfer_pause.dart';
 
 class MobileTasksPage extends StatefulWidget {
   const MobileTasksPage({
@@ -26,6 +27,7 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
   bool _busy = false;
   bool? _failedCreation;
   String? _activeId;
+  TransferPause? _pause;
   String? _notice;
   final _sourceRequired = <String>{};
 
@@ -37,30 +39,43 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
 
   Future<void> _resume(MobileTask task) async {
     if (_activeId != null || _busy) return;
+    final pause = TransferPause();
     setState(() {
       _activeId = task.id;
+      _pause = pause;
       _notice = '正在核对原任务和文件…';
     });
     try {
-      final published = await widget.account.resumeMultipart(
-        widget.owner,
-        task.id,
-        reselect: _sourceRequired.contains(task.id),
-        onProgress: (plan, confirmed) {
-          if (mounted) {
-            setState(() {
-              _sourceRequired.remove(task.id);
-              _notice = confirmed == plan.partCount
-                  ? '分片已确认，等待校验和发布…'
-                  : '已确认 $confirmed/${plan.partCount} 片';
-            });
-          }
-        },
-      );
+      final completed = task.isDownload
+          ? await widget.account.resumeDownload(
+              widget.owner,
+              task.id,
+              pause: pause,
+            )
+          : await widget.account.resumeMultipart(
+              widget.owner,
+              task.id,
+              reselect:
+                  _sourceRequired.contains(task.id) ||
+                  task.pauseReason == 'source',
+              pause: pause,
+              onProgress: (plan, confirmed) {
+                if (mounted) {
+                  setState(() {
+                    _sourceRequired.remove(task.id);
+                    _notice = confirmed == plan.partCount
+                        ? '分片已确认，等待校验和发布…'
+                        : '已确认 $confirmed/${plan.partCount} 片';
+                  });
+                }
+              },
+            );
       if (!mounted) return;
       setState(() {
-        if (published != null) _sourceRequired.remove(task.id);
-        _notice = published == null ? '已取消重新选择。任务保持暂停。' : '上传成功。';
+        if (completed != null) _sourceRequired.remove(task.id);
+        _notice = task.isDownload
+            ? (completed == null ? '已取消保存。' : '已保存「$completed」。')
+            : (completed == null ? '已取消重新选择。任务保持暂停。' : '上传成功。');
       });
     } on MultipartSourceUnavailable catch (error) {
       if (mounted) {
@@ -77,7 +92,12 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
       }
       setState(() => _notice = error.message);
     } finally {
-      if (mounted) setState(() => _activeId = null);
+      if (mounted) {
+        setState(() {
+          _activeId = null;
+          _pause = null;
+        });
+      }
     }
     if (mounted) await _load();
   }
@@ -105,10 +125,22 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
   @override
   Widget build(BuildContext context) {
     final notice = _notice;
+    final pause = _pause;
     return PopScope(
       canPop: _activeId == null,
       child: Scaffold(
-        appBar: AppBar(title: const Text('任务记录')),
+        appBar: AppBar(
+          title: const Text('任务记录'),
+          actions: [
+            if (pause != null)
+              TextButton(
+                onPressed: pause.requested
+                    ? null
+                    : () => setState(pause.request),
+                child: Text(pause.requested ? '正在暂停…' : '暂停'),
+              ),
+          ],
+        ),
         body: SafeArea(
           child: Column(
             children: [
@@ -149,18 +181,23 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
         final time = dates.formatTimeOfDay(
           TimeOfDay.fromDateTime(task.createdAt),
         );
-        final sourceRequired = _sourceRequired.contains(task.id);
+        final sourceRequired =
+            _sourceRequired.contains(task.id) || task.pauseReason == 'source';
         return ListTile(
           key: ValueKey(task.id),
           leading: const Icon(Icons.assignment_outlined),
           title: Text(task.name),
           subtitle: Text(
-            '${sourceRequired && task.canResume ? '已暂停 · ' : ''}${task.statusLabel} · $date $time',
+            '${sourceRequired && task.canResume && task.pauseReason == null ? '已暂停 · ' : ''}${task.statusLabel} · $date $time',
           ),
           trailing: task.canResume
               ? TextButton(
                   onPressed: _activeId == null ? () => _resume(task) : null,
-                  child: Text(sourceRequired ? '重新选择文件' : '继续上传'),
+                  child: Text(
+                    task.isDownload
+                        ? '继续下载'
+                        : (sourceRequired ? '重新选择文件' : '继续上传'),
+                  ),
                 )
               : null,
         );
