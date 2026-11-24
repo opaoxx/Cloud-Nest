@@ -12,8 +12,9 @@ import java.util.concurrent.Executors
 
 class MainActivity : FlutterFragmentActivity() {
     private val documentReader = Executors.newSingleThreadExecutor()
+    private val rememberedDocument by lazy { RememberedDocument(applicationContext) }
     private var documentChannel: MethodChannel? = null
-    private var pendingSelection: MethodChannel.Result? = null
+    private var pendingDocumentRequest: MethodChannel.Result? = null
     private val openDocument = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
         ::onDocumentSelected,
@@ -26,10 +27,10 @@ class MainActivity : FlutterFragmentActivity() {
             "cloudnest/android_document",
         ).apply {
             setMethodCallHandler { call, result ->
-                if (call.method == "pickAndSummarize") {
-                    selectDocument(result)
-                } else {
-                    result.notImplemented()
+                when (call.method) {
+                    "pickAndSummarize" -> selectDocument(result)
+                    "restoreDocument" -> restoreDocument(result)
+                    else -> result.notImplemented()
                 }
             }
         }
@@ -37,11 +38,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun selectDocument(result: MethodChannel.Result) {
         // 1. 让系统只展示可作为文件流打开的文档。
-        if (pendingSelection != null) {
-            result.error("selection_in_progress", null, null)
-            return
-        }
-        pendingSelection = result
+        if (!beginRequest(result)) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -50,55 +47,84 @@ class MainActivity : FlutterFragmentActivity() {
         try {
             openDocument.launch(intent)
         } catch (_: RuntimeException) {
-            finishSelection(result) { error("picker_unavailable", null, null) }
+            finishRequest(result) { error("picker_unavailable", null, null) }
         }
     }
 
     private fun onDocumentSelected(selection: ActivityResult) {
-        val result = pendingSelection ?: return
+        val result = pendingDocumentRequest ?: return
 
         // 2. 取消直接返回。选中后通过 Android 授权的内容 URI 读取。
         if (selection.resultCode != Activity.RESULT_OK) {
-            finishSelection(result) { success(null) }
+            finishRequest(result) { success(null) }
             return
         }
-        val uri = selection.data?.data
+        val selectedIntent = selection.data
+        val uri = selectedIntent?.data
         if (uri == null || uri.scheme != ContentResolver.SCHEME_CONTENT) {
-            finishSelection(result) { error("invalid_document", null, null) }
+            finishRequest(result) { error("invalid_document", null, null) }
             return
         }
+        val intentFlags = selectedIntent?.flags ?: 0
 
-        // 3. 让后台线程读取，回到主线程交付单次摘要。
-        val resolver = contentResolver
+        readOnWorker(result, "document_read_failed") {
+            rememberedDocument.readSelection(uri, intentFlags)
+        }
+    }
+
+    private fun restoreDocument(result: MethodChannel.Result) {
+        if (!beginRequest(result)) return
+        readOnWorker(result, "document_restore_failed") { rememberedDocument.restore() }
+    }
+
+    private fun beginRequest(result: MethodChannel.Result): Boolean {
+        if (pendingDocumentRequest != null) {
+            result.error("selection_in_progress", null, null)
+            return false
+        }
+        pendingDocumentRequest = result
+        return true
+    }
+
+    private fun readOnWorker(
+        result: MethodChannel.Result,
+        defaultErrorCode: String,
+        read: () -> Map<String, Any>?,
+    ) {
+        // 后台线程处理正文和授权记录，在主线程交付单次结果。
         documentReader.execute {
-            val summary = try {
-                readSelectedDocument(resolver, uri)
-            } catch (_: Exception) {
+            var summary: Map<String, Any>? = null
+            val errorCode = try {
+                summary = read()
                 null
+            } catch (_: DocumentAccessLost) {
+                "document_access_lost"
+            } catch (_: Exception) {
+                defaultErrorCode
             }
             runOnUiThread {
-                finishSelection(result) {
-                    if (summary == null) error("document_read_failed", null, null)
-                    else success(summary)
+                finishRequest(result) {
+                    if (errorCode == null) success(summary)
+                    else error(errorCode, null, null)
                 }
             }
         }
     }
 
-    private fun finishSelection(
+    private fun finishRequest(
         result: MethodChannel.Result,
         reply: MethodChannel.Result.() -> Unit,
     ) {
-        if (pendingSelection !== result) return
-        pendingSelection = null
+        if (pendingDocumentRequest !== result) return
+        pendingDocumentRequest = null
         result.reply()
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         documentChannel?.setMethodCallHandler(null)
         documentChannel = null
-        pendingSelection?.error("document_picker_closed", null, null)
-        pendingSelection = null
+        pendingDocumentRequest?.error("document_picker_closed", null, null)
+        pendingDocumentRequest = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 

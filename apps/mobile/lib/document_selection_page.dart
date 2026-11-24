@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -11,45 +13,65 @@ class DocumentSelectionPage extends StatefulWidget {
 }
 
 class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
-  bool _selecting = false;
+  String? _activity;
+  bool _needsReselection = false;
   _DocumentSummary? _document;
   String? _notice;
 
-  Future<void> _selectDocument() async {
-    if (_selecting) return;
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_readDocument(restore: true));
+  }
 
-    // 1. 清除前一次结果，从 Flutter 发起单次选择。
+  Future<void> _readDocument({required bool restore}) async {
+    if (_activity != null) return;
+
+    // 1. 启动时查找上次授权，主动点击时打开系统选择器。
     setState(() {
-      _selecting = true;
+      _activity = restore ? '正在检查上次文件授权…' : '正在选择或读取文件…';
       _document = null;
       _notice = null;
     });
 
     _DocumentSummary? document;
     String? notice;
+    var needsReselection = false;
     try {
       final result = await _documentPicker.invokeMapMethod<String, Object?>(
-        'pickAndSummarize',
+        restore ? 'restoreDocument' : 'pickAndSummarize',
       );
 
-      // 2. null 表示系统选择器取消。正文读取和摘要计算由 Android 完成。
+      // 2. 只展示 Android 刚读取到的内容，并提示授权能否跨重启。
       if (result != null) {
         document = _DocumentSummary.fromResult(result);
+        if (restore) {
+          notice = '已重新读取上次授权的文件。';
+        } else if (!document.persisted) {
+          notice = '已读取文件。本次授权无法在重启后恢复。';
+        }
       }
     } on PlatformException catch (error) {
-      notice = error.code == 'picker_unavailable'
-          ? '无法打开系统文件选择器。'
-          : '无法读取所选文件，请重新选择。';
+      needsReselection =
+          error.code == 'document_access_lost' ||
+          error.code == 'document_restore_failed';
+      notice = switch (error.code) {
+        'picker_unavailable' => '无法打开系统文件选择器。',
+        'document_access_lost' => '上次文件的授权已失效，请重新选择。',
+        'document_restore_failed' => '上次文件无法读取，请重新选择。',
+        _ => '无法读取所选文件，请重新选择。',
+      };
     } on MissingPluginException {
-      notice = '当前设备无法打开系统文件选择器。';
+      if (!restore) notice = '当前设备无法打开系统文件选择器。';
     } on FormatException {
       notice = '文件读取结果无效，请重新选择。';
     }
 
-    // 3. 结果、失败或取消都结束本次选择，让用户可以再次打开。
+    // 3. 授权失效时恢复选择入口。取消继续回到空闲。
     if (!mounted) return;
     setState(() {
-      _selecting = false;
+      _activity = null;
+      _needsReselection = needsReselection;
       _document = document;
       _notice = notice;
     });
@@ -59,6 +81,7 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   Widget build(BuildContext context) {
     final document = _document;
     final notice = _notice;
+    final activity = _activity;
     return Scaffold(
       appBar: AppBar(title: const Text('CloudNest')),
       body: SafeArea(
@@ -68,11 +91,13 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
             Align(
               alignment: Alignment.centerLeft,
               child: FilledButton(
-                onPressed: _selecting ? null : _selectDocument,
-                child: const Text('选择文件'),
+                onPressed: activity == null
+                    ? () => _readDocument(restore: false)
+                    : null,
+                child: Text(_needsReselection ? '重新选择文件' : '选择文件'),
               ),
             ),
-            if (_selecting) const Text('正在选择或读取文件…'),
+            if (activity != null) Text(activity),
             if (notice != null) Text(notice),
             if (document != null) ...[
               const SizedBox(height: 20),
@@ -88,7 +113,12 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
 }
 
 class _DocumentSummary {
-  const _DocumentSummary(this.name, this.sizeBytes, this.sha256);
+  const _DocumentSummary(
+    this.name,
+    this.sizeBytes,
+    this.sha256,
+    this.persisted,
+  );
 
   factory _DocumentSummary.fromResult(Map<String, Object?> result) {
     if (result
@@ -96,9 +126,10 @@ class _DocumentSummary {
           'name': final String name,
           'sizeBytes': final int sizeBytes,
           'sha256': final String sha256,
+          'persisted': final bool persisted,
         }
         when sizeBytes >= 0) {
-      return _DocumentSummary(name, sizeBytes, sha256);
+      return _DocumentSummary(name, sizeBytes, sha256, persisted);
     }
     throw const FormatException('Invalid Android document summary');
   }
@@ -106,4 +137,5 @@ class _DocumentSummary {
   final String name;
   final int sizeBytes;
   final String sha256;
+  final bool persisted;
 }
