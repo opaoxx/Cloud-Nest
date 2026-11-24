@@ -128,6 +128,34 @@ pnpm --dir apps/web dev
 
 ## 局域网访问
 
+### 第二版 Windows、手机与平板试用
+
+Windows 客户端和 Android 调试 APK 可通过以下脚本连接本机后端。首次准备按上文完成 Docker 镜像、私有桶、数据库迁移及业务账号初始化。日常使用时先打开 Docker Desktop，再在**管理员 PowerShell** 执行。
+
+```powershell
+Set-Location F:\CloudNest
+./scripts/Start-LanTrial.ps1
+```
+
+启动脚本选择具有 IPv4 网关的已连接物理网卡，读取实际地址和子网。存在多个候选地址时，按提示指定网卡名称，例如 `./scripts/Start-LanTrial.ps1 -InterfaceAlias 'WLAN'`。此入口面向当前 Compose 中的本机 MySQL 和 MinIO，读取其端口与凭据，启动并等待基础容器健康，再编译后台 API。
+
+脚本显示手机和平板应填写的服务根地址。Windows 本机使用 `http://127.0.0.1:18081`。同一网卡的当前子网可访问 API 与文件端点，手机和平板需能在该网络中与电脑互通。API 和 MinIO 的局域网健康检查在电脑上通过后才报告启动成功，设备侧仍需实际连接确认。
+
+运行状态、后端程序和日志位于 `output/lan-trial`。API 临时上传目录也位于此处。关闭启动终端后，后台 API 和网络规则继续存在。用管理员 PowerShell 执行停止命令。
+
+```powershell
+Set-Location F:\CloudNest
+./scripts/Stop-LanTrial.ps1
+```
+
+停止脚本关闭本入口创建的 API，删除本仓库记录的端口转发和防火墙规则。基础容器继续运行。Windows 规则具有持久性，因此退出试用应执行停止命令。异常退出或重启后，运行停止脚本也能清理遗留规则。运行期间请保留 `output/lan-trial/state.json`。
+
+换 Wi-Fi 或 IP 变化后，重新执行启动命令。它先清理上次的服务及规则，再按新地址启动，手机和平板需填写新的服务地址。重新启动会中断当前连接，切换前先暂停传输。客户端本地任务按服务地址和账号隔离，换地址后的旧任务恢复仍受该约束。
+
+重复启动会替换本脚本管理的 API。其他入口占用 `18081` 时，脚本提示先停止原服务。启动中途失败会清理本次 API 和网络规则。清理失败时保留状态文件并提示重试，已有转发被外部修改时提示人工核对。回归检查可在普通终端执行 `./scripts/Test-LanTrial.ps1`。
+
+### 浏览器入口
+
 默认配置供部署电脑本机使用。手机、平板或另一台电脑访问时，部署电脑须保持开机，Web、API 和存储服务须在运行。
 
 - 让 Web 入口在局域网可访问，其他设备使用部署电脑的局域网 IP 或域名打开页面。通过同源 `/api` 代理访问 Go API，并在 `CLOUDNEST_ALLOWED_ORIGINS` 中配置浏览器实际访问的 Web 来源。
