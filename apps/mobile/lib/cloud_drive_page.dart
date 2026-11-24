@@ -19,12 +19,14 @@ class CloudDrivePage extends StatefulWidget {
     required this.account,
     this.accountBusy = false,
     this.onLogout,
+    this.onChooseTheme,
     this.onSessionEnded,
   });
 
   final MobileAccount account;
   final bool accountBusy;
   final VoidCallback? onLogout;
+  final VoidCallback? onChooseTheme;
   final ValueChanged<String>? onSessionEnded;
 
   @override
@@ -542,9 +544,12 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
               onSelected: (action) {
                 if (action == 'refresh') _load(_currentDirectory);
                 if (action == 'logout') widget.onLogout?.call();
+                if (action == 'theme') widget.onChooseTheme?.call();
               },
               itemBuilder: (context) => [
                 const PopupMenuItem(value: 'refresh', child: Text('刷新目录')),
+                if (widget.onChooseTheme != null)
+                  const PopupMenuItem(value: 'theme', child: Text('界面主题')),
                 if (widget.onLogout != null)
                   const PopupMenuItem(value: 'logout', child: Text('退出登录')),
               ],

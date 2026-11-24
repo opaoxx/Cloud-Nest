@@ -18,6 +18,7 @@ class MainActivity : FlutterFragmentActivity() {
     private val rememberedDocument by lazy { RememberedDocument(applicationContext) }
     private var installationChannel: MethodChannel? = null
     private var sessionChannel: MethodChannel? = null
+    private var appearanceChannel: MethodChannel? = null
     private var taskChannel: MethodChannel? = null
     private var downloadChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
@@ -83,6 +84,30 @@ class MainActivity : FlutterFragmentActivity() {
                     }
                 } catch (_: Exception) {
                     result.error("session_store_unavailable", null, null)
+                }
+            }
+        }
+        appearanceChannel = MethodChannel(
+            messenger,
+            "cloudnest/android_appearance",
+            StandardMethodCodec.INSTANCE,
+            messenger.makeBackgroundTaskQueue(),
+        ).apply {
+            val preferences by lazy { getSharedPreferences("cloudnest_appearance", MODE_PRIVATE) }
+            setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "readTheme" -> result.success(preferences.getString("theme", null))
+                    "writeTheme" -> {
+                        val theme = call.arguments as? String
+                        if (theme == null || theme !in setOf("system", "light", "dark")) {
+                            result.error("theme_invalid", null, null)
+                        } else if (preferences.edit().putString("theme", theme).commit()) {
+                            result.success(null)
+                        } else {
+                            result.error("theme_store_unavailable", null, null)
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
         }
@@ -420,6 +445,8 @@ class MainActivity : FlutterFragmentActivity() {
         installationChannel = null
         sessionChannel?.setMethodCallHandler(null)
         sessionChannel = null
+        appearanceChannel?.setMethodCallHandler(null)
+        appearanceChannel = null
         taskChannel?.setMethodCallHandler(null)
         taskChannel = null
         downloadChannel?.setMethodCallHandler(null)

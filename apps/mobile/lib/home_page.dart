@@ -2,15 +2,23 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 
+import 'app_theme.dart';
 import 'cloud_drive_page.dart';
 import 'login_page.dart';
 import 'mobile_account.dart';
 import 'native_login.dart';
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.account});
+  const HomePage({
+    super.key,
+    this.account,
+    required this.themeMode,
+    required this.onThemeChanged,
+  });
 
   final MobileAccount? account;
+  final ThemeMode themeMode;
+  final Future<bool> Function(ThemeMode) onThemeChanged;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -46,6 +54,16 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _chooseTheme() async {
+    final chosen = await showAppThemeDialog(context, widget.themeMode);
+    if (!mounted || chosen == null || chosen == widget.themeMode) return;
+    final saved = await widget.onThemeChanged(chosen);
+    if (!saved && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('当前主题已切换，但无法保存选择。')));
+    }
+  }
+
   Future<void> _runAccount(Future<void> Function() action) async {
     if (_accountBusy) return;
     setState(() {
@@ -71,6 +89,7 @@ class _HomePageState extends State<HomePage> {
         account: _account,
         accountBusy: _accountBusy,
         onLogout: _logout,
+        onChooseTheme: _chooseTheme,
         onSessionEnded: (message) => setState(() => _notice = message),
       );
     }
@@ -78,6 +97,11 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('CloudNest'),
         actions: [
+          IconButton(
+            tooltip: '界面主题',
+            onPressed: _chooseTheme,
+            icon: const Icon(Icons.contrast),
+          ),
           TextButton(
             onPressed: _accountBusy ? null : _openLogin,
             child: const Text('登录'),

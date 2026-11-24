@@ -10,6 +10,53 @@ void main() {
     expect(find.text('CloudNest'), findsOneWidget);
   });
 
+  testWidgets('applies and restores the selected app appearance', (
+    tester,
+  ) async {
+    const appearance = MethodChannel('cloudnest/android_appearance');
+    const credentials = MethodChannel('cloudnest/android_session');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(credentials, (_) async => null);
+    addTearDown(() => messenger.setMockMethodCallHandler(credentials, null));
+    addTearDown(() => messenger.setMockMethodCallHandler(appearance, null));
+    String? stored;
+    messenger.setMockMethodCallHandler(appearance, (call) async {
+      if (call.method == 'readTheme') return stored;
+      expect(call.method, 'writeTheme');
+      stored = call.arguments as String;
+      return null;
+    });
+    ThemeMode mode() =>
+        tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode!;
+    Future<void> choose(String name) async {
+      await tester.tap(find.byTooltip('界面主题'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name));
+      await tester.pumpAndSettle();
+    }
+
+    await tester.pumpWidget(const CloudNestApp());
+    await tester.pumpAndSettle();
+    expect(mode(), ThemeMode.system);
+    await choose('浅色');
+    expect(mode(), ThemeMode.light);
+    await choose('深色');
+    expect(mode(), ThemeMode.dark);
+    expect(
+      Theme.of(tester.element(find.byType(Scaffold))).brightness,
+      Brightness.dark,
+    );
+    expect(stored, 'dark');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(const CloudNestApp());
+    await tester.pumpAndSettle();
+    expect(mode(), ThemeMode.dark);
+    await choose('跟随系统');
+    expect(mode(), ThemeMode.system);
+    expect(stored, 'system');
+  });
+
   testWidgets('login advances IPv4 segments and rejects invalid addresses', (
     tester,
   ) async {
