@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 
+import 'file_name_dialog.dart';
 import 'mobile_account.dart';
 import 'native_directory.dart';
 import 'native_login.dart';
@@ -27,6 +28,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   bool _transferBusy = false;
   TransferPause? _pause;
   String? _transferNotice;
+  String? _pendingUploadName;
   ({String message, String? parentId, String? cursor})? _failure;
 
   String? get _currentDirectory =>
@@ -101,45 +103,28 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     final path = _breadcrumbs
         .map((crumb) => crumb.name.isEmpty ? '根目录' : crumb.name)
         .join(' / ');
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('上传到当前目录'),
-        scrollable: true,
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(source.name),
-            Text('${source.sizeBytes} B'),
-            Text(path),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('上传'),
-          ),
-        ],
-      ),
+    // 1. 确认云盘名称和目标目录，保留所选文件的正文身份。
+    final name = await showFileNameDialog(
+      context,
+      title: '上传到当前目录',
+      initialName: _pendingUploadName ?? source.name,
+      actionLabel: '上传',
+      details: [Text(path), Text('${source.sizeBytes} B')],
     );
     if (!mounted ||
-        accepted != true ||
+        name == null ||
         _currentDirectory != target ||
         _loading ||
         _transferBusy) {
       return;
     }
 
-    // 以本机分片回执更新进度，以服务端的发布结果刷新目录。
+    // 2. 用同一发布名称创建或恢复任务，并按本机回执更新进度。
     final pause = multipart ? TransferPause() : null;
     setState(() {
       _transferBusy = true;
       _pause = pause;
+      _pendingUploadName = name;
       _transferNotice = multipart ? '正在核对分片任务…' : '正在上传并等待服务端校验…';
     });
     var published = false;
@@ -148,6 +133,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
         await widget.account.uploadMultipart(
           source,
           target,
+          uploadName: name,
           pause: pause,
           onProgress: (plan, confirmed) {
             if (!mounted) return;
@@ -159,10 +145,15 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           },
         );
       } else {
-        await widget.account.uploadSingle(source, target);
+        await widget.account.uploadSingle(source, target, uploadName: name);
       }
       published = true;
-      if (mounted) setState(() => _transferNotice = '上传成功。');
+      if (mounted) {
+        setState(() {
+          _pendingUploadName = null;
+          _transferNotice = '上传成功。';
+        });
+      }
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {
@@ -178,6 +169,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
         });
       }
     }
+    // 3. 发布后按原目录 ID 读取服务端实际文件名。
     if (published && mounted) await _load(target);
   }
 

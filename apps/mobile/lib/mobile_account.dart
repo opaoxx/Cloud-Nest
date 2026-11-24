@@ -480,6 +480,7 @@ class MobileAccount {
     String parentId, {
     required void Function(MultipartCreation plan, int confirmed) onProgress,
     TransferPause? pause,
+    String? uploadName,
   }) async {
     final currentOwner = owner;
     if (currentOwner == null || _signingOut) {
@@ -492,11 +493,11 @@ class MobileAccount {
     }
 
     try {
-      final intent = await reserveMultipartIntent(
-        currentOwner,
-        parentId,
-        source,
-      );
+      final intent = await reserveMultipartIntent(currentOwner, parentId, (
+        name: uploadName ?? source.name,
+        sizeBytes: source.sizeBytes,
+        sha256: source.sha256,
+      ));
       _checkSession(epoch);
       return await _withPauseRecord(
         currentOwner,
@@ -874,8 +875,9 @@ class MobileAccount {
 
   Future<String> uploadSingle(
     PreparedUploadFile source,
-    String parentId,
-  ) async {
+    String parentId, {
+    String? uploadName,
+  }) async {
     final currentOwner = owner;
     if (currentOwner == null || _signingOut) {
       throw const ReauthenticationRequired();
@@ -898,14 +900,23 @@ class MobileAccount {
 
     try {
       // 1. 保存或恢复同一声明。首次创建前先复核正文。
-      final intent = await reserveSingleIntent(currentOwner, parentId, source);
+      final declaration = (
+        name: uploadName ?? source.name,
+        sizeBytes: source.sizeBytes,
+        sha256: source.sha256,
+      );
+      final intent = await reserveSingleIntent(
+        currentOwner,
+        parentId,
+        declaration,
+      );
       _checkSession(epoch);
       final reused = await _tryUploadReuse(
         currentOwner,
         intent.id,
         intent.stage,
         parentId,
-        source,
+        declaration,
         epoch,
         verifySource: () =>
             verifyUploadReuseSource(documentScopeFor(currentOwner), source),
@@ -917,7 +928,8 @@ class MobileAccount {
       } else {
         await openBody();
         taskId = await remote(
-          (session) => createSingleUpload(session, intent.id, parentId, source),
+          (session) =>
+              createSingleUpload(session, intent.id, parentId, declaration),
         );
         await saveSingleCheckpoint(currentOwner, intent.id, taskId, 'PENDING');
       }

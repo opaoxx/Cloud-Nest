@@ -56,11 +56,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('根目录 / 目标目录'), findsOneWidget);
     expect(account.target, isNull);
+    await tester.enterText(find.byType(TextFormField), '云盘新名称.txt');
 
     await tester.tap(find.text('上传'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 230));
     expect(account.target, '81');
+    expect(account.uploadName, '云盘新名称.txt');
     expect(find.text('上传成功。'), findsNothing);
     expect(
       tester
@@ -72,7 +74,7 @@ void main() {
     account.published.complete('82');
     await tester.pumpAndSettle();
     expect(find.text('上传成功。'), findsOneWidget);
-    expect(find.text('样本.txt'), findsOneWidget);
+    expect(find.text('云盘新名称.txt'), findsOneWidget);
   });
 
   testWidgets('downloads the selected revision and shows the provider name', (
@@ -200,11 +202,17 @@ const _source = (
 class _UploadAccount extends _DirectoryAccount {
   final published = Completer<String>();
   String? target;
+  String? uploadName;
 
   @override
-  Future<String> uploadSingle(PreparedUploadFile source, String parentId) {
+  Future<String> uploadSingle(
+    PreparedUploadFile source,
+    String parentId, {
+    String? uploadName,
+  }) {
     expect(source, _source);
     target = parentId;
+    this.uploadName = uploadName;
     return published.future;
   }
 
@@ -224,7 +232,7 @@ class _UploadAccount extends _DirectoryAccount {
       if (parentId == '81' && published.isCompleted)
         (
           id: '82',
-          name: _source.name,
+          name: uploadName ?? _source.name,
           isFolder: false,
           sizeBytes: 0,
           revision: '1',
@@ -241,6 +249,7 @@ class _MultipartAccount extends _UploadAccount {
     String parentId, {
     required void Function(MultipartCreation plan, int confirmed) onProgress,
     TransferPause? pause,
+    String? uploadName,
   }) {
     final plan = MultipartCreation.checked(
       taskId: '9',
