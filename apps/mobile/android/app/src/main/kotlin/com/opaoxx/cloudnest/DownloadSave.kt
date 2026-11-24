@@ -1,8 +1,10 @@
 package com.opaoxx.cloudnest
 
 import android.app.Activity
+import android.app.KeyguardManager
 import android.content.ContentResolver
 import android.content.Intent
+import android.os.PowerManager
 import android.webkit.MimeTypeMap
 import androidx.activity.result.ActivityResult
 import io.flutter.plugin.common.MethodCall
@@ -17,6 +19,7 @@ internal class DownloadSave(
     private data class Request(
         val result: MethodChannel.Result,
         var staged: StagedDownload? = null,
+        var pickerLaunched: Boolean = false,
         var saving: Boolean = false,
         @Volatile var pauseRequested: Boolean = false,
     )
@@ -27,6 +30,7 @@ internal class DownloadSave(
         VerifiedDownload(directory, activity.cacheDir, activity.contentResolver)
     }
     private var active: Request? = null
+    private var activityResumed = false
 
     fun handle(call: MethodCall, result: MethodChannel.Result) {
         if (call.method == "pauseDownload") {
@@ -75,11 +79,9 @@ internal class DownloadSave(
             result.error("download_network", null, null)
             return
         }
-        val name = identity.source.name
-
         val request = Request(result)
         active = request
-        // 下载和校验在工作线程中完成，系统选择器只接收已验证的文件。
+        // 1. 在工作线程校验文件，并保留可供重开的下载断点。
         worker.execute {
             val staged = try {
                 files.stage(url, identity) { request.pauseRequested }
@@ -97,24 +99,45 @@ internal class DownloadSave(
                     finish(request) { error("download_paused", null, null) }
                     return@runOnUiThread
                 }
-                try {
-                    launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
-                            ?: "application/octet-stream"
-                        putExtra(Intent.EXTRA_TITLE, name)
-                        addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                    })
-                } catch (_: RuntimeException) {
-                    finish(request) { error("download_picker_unavailable", null, null) }
-                }
+                offerDestination()
             }
+        }
+    }
+
+    fun setActivityResumed(resumed: Boolean) {
+        activityResumed = resumed
+        if (resumed) offerDestination()
+    }
+
+    fun offerDestination() {
+        val request = active ?: return
+        val staged = request.staged ?: return
+        // 2. 等到窗口能与用户交互后，再为当前请求打开一次保存选择器。
+        if (request.pickerLaunched || !activityResumed || !activity.hasWindowFocus()) return
+        if (!activity.getSystemService(PowerManager::class.java).isInteractive ||
+            activity.getSystemService(KeyguardManager::class.java).isKeyguardLocked
+        ) return
+
+        request.pickerLaunched = true
+        val name = staged.summary.name
+        try {
+            launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+                    ?: "application/octet-stream"
+                putExtra(Intent.EXTRA_TITLE, name)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            })
+        } catch (_: RuntimeException) {
+            finish(request) { error("download_picker_unavailable", null, null) }
         }
     }
 
     fun onDestination(selection: ActivityResult) {
         val request = active ?: return
         val staged = request.staged ?: return
+        if (!request.pickerLaunched || request.saving) return
+        // 3. 用系统返回的目标保存文件；进程重开时可沿用持久化断点。
         if (selection.resultCode != Activity.RESULT_OK) {
             finish(request, discard = true) { success(null) }
             return

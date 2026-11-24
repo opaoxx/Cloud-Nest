@@ -432,6 +432,21 @@ class MainActivity : FlutterFragmentActivity() {
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        downloadSave.setActivityResumed(true)
+    }
+
+    override fun onPause() {
+        downloadSave.setActivityResumed(false)
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) downloadSave.offerDestination()
+    }
+
     override fun onDestroy() {
         documentReader.shutdownNow()
         downloadSave.close()
