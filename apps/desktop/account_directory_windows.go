@@ -19,6 +19,35 @@ type FileTrashResult struct {
 	LoginRequired string `json:"loginRequired"`
 }
 
+// FileEditResult 将确认后的文件详情或重新登录提示交给桌面窗口。
+type FileEditResult struct {
+	Entry         client.DirectoryEntry `json:"entry"`
+	LoginRequired string                `json:"loginRequired"`
+}
+
+// RenameFile 使用窗口保存的原修订和请求键提交新名称。
+func (account *Account) RenameFile(ctx context.Context, entryID, revision, parentID, name, key string) (FileEditResult, error) {
+	return account.editFile(ctx, func(address string, session client.NativeSession) (client.DirectoryEntry, error) {
+		return client.RenameFile(ctx, address, session.AccessToken, entryID, revision, parentID, name, key)
+	})
+}
+
+// MoveFile 使用窗口保存的原修订和请求键提交目标父目录。
+func (account *Account) MoveFile(ctx context.Context, entryID, revision, parentID, targetParentID, key string) (FileEditResult, error) {
+	return account.editFile(ctx, func(address string, session client.NativeSession) (client.DirectoryEntry, error) {
+		return client.MoveFile(ctx, address, session.AccessToken, entryID, revision, parentID, targetParentID, key)
+	})
+}
+
+func (account *Account) editFile(ctx context.Context, mutate func(string, client.NativeSession) (client.DirectoryEntry, error)) (FileEditResult, error) {
+	// 续期重试沿用原请求键。会话已失效时由窗口恢复登录页。
+	entry, err := readForAccount(ctx, account, mutate)
+	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) || errors.Is(err, client.ErrFileSessionRevoked) {
+		return FileEditResult{LoginRequired: err.Error()}, nil
+	}
+	return FileEditResult{Entry: entry}, err
+}
+
 // TrashFile 将选中的文件修订移入回收站。
 func (account *Account) TrashFile(ctx context.Context, entryID, revision string) (FileTrashResult, error) {
 	// 同一次操作的会话刷新重用相同的幂等键。

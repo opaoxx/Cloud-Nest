@@ -41,6 +41,13 @@
     dialog::backdrop { background: #192a3b66; }
     dialog form { display: flex; justify-content: flex-end; gap: .5rem; border: 0; padding: 0; }
     dialog p { overflow-wrap: anywhere; }
+    #fileEditDialog { width: min(29rem, calc(100vw - 3.5rem)); }
+    #fileEditDialog form { display: grid; gap: 1rem; }
+    .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
+    #movePath { display: flex; flex-wrap: wrap; gap: .35rem; overflow-wrap: anywhere; }
+    #moveFolders { max-height: 36vh; overflow: auto; }
+    #moveFolders button { display: block; width: 100%; padding: .6rem .25rem; }
+    #editStatus { margin: 0; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -89,6 +96,27 @@
     <form method="dialog">
       <button value="cancel" autofocus>取消</button>
       <button value="trash" class="remove-action">移入回收站</button>
+    </form>
+  </dialog>
+  <dialog id="fileEditDialog" aria-labelledby="fileEditTitle">
+    <h2 id="fileEditTitle"></h2>
+    <p id="editFileName"></p>
+    <form id="fileEditForm">
+      <div id="renameField" hidden>
+        <label for="newFileName">文件名</label>
+        <input id="newFileName" type="text" spellcheck="false" autocomplete="off" required>
+      </div>
+      <div id="movePicker" hidden>
+        <nav id="movePath" aria-label="目标文件夹路径"></nav>
+        <ul id="moveFolders" aria-label="可选文件夹"></ul>
+        <button id="moveMore" type="button" hidden>加载更多文件夹</button>
+        <button id="moveRetry" type="button" hidden>重试读取</button>
+      </div>
+      <output id="editStatus" role="status" aria-live="polite"></output>
+      <div class="dialog-actions">
+        <button id="editCancel" type="button">取消</button>
+        <button id="editConfirm" type="submit"></button>
+      </div>
     </form>
   </dialog>
   <script type="module">
@@ -576,6 +604,181 @@
       }
     });
 
+    const editDialog = document.querySelector("#fileEditDialog");
+    const editForm = document.querySelector("#fileEditForm");
+    const editTitle = document.querySelector("#fileEditTitle");
+    const editFileName = document.querySelector("#editFileName");
+    const renameField = document.querySelector("#renameField");
+    const newFileName = document.querySelector("#newFileName");
+    const editStatus = document.querySelector("#editStatus");
+    const editCancel = document.querySelector("#editCancel");
+    const editConfirm = document.querySelector("#editConfirm");
+    const movePicker = document.querySelector("#movePicker");
+    const movePath = document.querySelector("#movePath");
+    const moveFolders = document.querySelector("#moveFolders");
+    const moveMore = document.querySelector("#moveMore");
+    const moveRetry = document.querySelector("#moveRetry");
+    let fileEdit = null;
+
+    function fileEditButton(item, mode) {
+      const rename = mode === "rename";
+      const label = rename ? "重命名" : "移动";
+      const button = uploadActionButton(label, () => {
+        if (checkConnection.disabled || !signedIn || editDialog.open) return;
+        // 1. 保存打开对话框时的文件快照。后续只编辑这一个文件。
+        fileEdit = { item, mode, page: null, reading: false, submitting: false, attempt: null, retry: null };
+        editTitle.textContent = label + "文件";
+        editFileName.textContent = item.name;
+        renameField.hidden = !rename;
+        newFileName.disabled = !rename;
+        newFileName.value = item.name;
+        movePicker.hidden = rename;
+        movePath.replaceChildren();
+        moveFolders.replaceChildren();
+        moveMore.hidden = true;
+        moveRetry.hidden = true;
+        editStatus.textContent = "";
+        editConfirm.textContent = rename ? "保存名称" : "移动到此处";
+        editDialog.showModal();
+        updateEditControls();
+        if (rename) {
+          newFileName.focus();
+          newFileName.select();
+        } else {
+          readMoveFolders("");
+        }
+      });
+      button.setAttribute("aria-label", label + " · " + item.name);
+      return button;
+    }
+
+    function updateEditControls() {
+      const edit = fileEdit;
+      if (!edit) return;
+      const busy = edit.reading || edit.submitting;
+      for (const button of movePicker.querySelectorAll("button")) button.disabled = busy;
+      editCancel.disabled = edit.submitting;
+      newFileName.readOnly = edit.submitting;
+      const name = newFileName.value.trim();
+      const ready = edit.mode === "rename"
+        ? name !== "" && name !== edit.item.name
+        : edit.page && edit.page.breadcrumbs.at(-1).id !== edit.item.parent_id;
+      editConfirm.disabled = busy || !ready;
+    }
+
+    function moveFolderButton(label, directoryID) {
+      const button = uploadActionButton(label, () => readMoveFolders(directoryID));
+      button.className = "directory-link";
+      return button;
+    }
+
+    async function readMoveFolders(directoryID, cursor = null) {
+      const edit = fileEdit;
+      if (!edit || edit.reading || edit.submitting) return;
+      // 2. 复用账号的目录分页。对话框关闭后丢弃迟到的页。
+      edit.reading = true;
+      edit.retry = null;
+      moveRetry.hidden = true;
+      editStatus.textContent = "正在读取文件夹…";
+      updateEditControls();
+      try {
+        const result = cursor === null
+          ? await Call.ByName("main.Account.ReadDirectory", directoryID)
+          : await Call.ByName("main.Account.ReadNextDirectoryPage", directoryID, cursor);
+        if (edit !== fileEdit || !editDialog.open) return;
+        if (result.loginRequired) {
+          editDialog.close();
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        const page = result.page;
+        edit.page = page;
+        if (cursor === null) {
+          movePath.replaceChildren();
+          moveFolders.replaceChildren();
+          for (const [index, crumb] of page.breadcrumbs.entries()) {
+            const label = crumb.name || "根目录";
+            if (index) movePath.append(" / ");
+            if (index === page.breadcrumbs.length - 1) movePath.append(label);
+            else movePath.append(moveFolderButton(label, crumb.id));
+          }
+        }
+        for (const folder of page.items.filter(item => item.entry_type === "DIR")) {
+          const row = document.createElement("li");
+          row.append(moveFolderButton(folder.name, folder.id));
+          moveFolders.append(row);
+        }
+        moveMore.hidden = page.next_cursor === null;
+        editStatus.textContent = moveFolders.childElementCount || !moveMore.hidden ? "" : "此处没有子文件夹。";
+      } catch (error) {
+        if (edit !== fileEdit || !editDialog.open) return;
+        edit.retry = { directoryID, cursor };
+        moveRetry.hidden = false;
+        editStatus.textContent = error.message || "读取文件夹失败，请重试";
+      } finally {
+        if (edit === fileEdit) {
+          edit.reading = false;
+          updateEditControls();
+        }
+      }
+    }
+
+    moveMore.addEventListener("click", () => {
+      const page = fileEdit?.page;
+      if (page?.next_cursor) readMoveFolders(page.breadcrumbs.at(-1).id, page.next_cursor);
+    });
+    moveRetry.addEventListener("click", () => {
+      const retry = fileEdit?.retry;
+      if (retry) readMoveFolders(retry.directoryID, retry.cursor);
+    });
+    newFileName.addEventListener("input", updateEditControls);
+    editCancel.addEventListener("click", () => editDialog.close());
+    editDialog.addEventListener("cancel", event => {
+      if (fileEdit?.submitting) event.preventDefault();
+    });
+    editDialog.addEventListener("close", () => { if (!editDialog.open) fileEdit = null; });
+
+    editForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const edit = fileEdit;
+      if (!edit || editConfirm.disabled || !signedIn || checkConnection.disabled ||
+          currentDirectoryID !== edit.item.parent_id) return;
+      const rename = edit.mode === "rename";
+      const value = rename ? newFileName.value.trim() : edit.page.breadcrumbs.at(-1).id;
+      const { item } = edit;
+      edit.submitting = true;
+      updateEditControls();
+      setBusy(true);
+      editStatus.textContent = rename ? "正在保存名称…" : "正在移动文件…";
+      try {
+        // 3. 相同参数重试时沿用同一键。先核对回执，再更新列表。
+        if (edit.attempt?.value !== value) edit.attempt = { value, key: crypto.randomUUID() };
+        const result = await Call.ByName("main.Account." + (rename ? "RenameFile" : "MoveFile"),
+          item.id, item.revision, item.parent_id, value, edit.attempt.key);
+        if (result.loginRequired) {
+          editDialog.close();
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        editDialog.close();
+        if (selectedDownload?.item.id === item.id) clearDownloadSelection();
+        if (rename) {
+          renderDirectoryEntry(result.entry);
+        } else {
+          entryRows.get(item.id)?.remove();
+          entryRows.delete(item.id);
+        }
+        await loadDirectory(item.parent_id, { preserveRows: true, preserveDownload: true });
+        if (signedIn) directoryStatus.textContent = (rename ? "已重命名。" : "已移动。") + directoryStatus.textContent;
+      } catch (error) {
+        editStatus.textContent = error.message || "文件操作未完成，请重试";
+      } finally {
+        edit.submitting = false;
+        updateEditControls();
+        setBusy(false);
+      }
+    });
+
     function clearDownloadSelection() {
       selectedDownload = null;
       stageDownload.hidden = true;
@@ -663,6 +866,29 @@
       }
     });
 
+    function renderDirectoryEntry(item) {
+      const row = document.createElement("li");
+      const isDirectory = item.entry_type === "DIR";
+      const name = isDirectory ? directoryButton(item.name, item.id) : document.createElement("span");
+      const details = document.createElement("span");
+      name.textContent = item.name;
+      details.textContent = isDirectory ? "文件夹" : formatSize(item.size_bytes);
+      row.append(name, details);
+      if (!isDirectory) {
+        const actions = document.createElement("div");
+        actions.className = "file-actions";
+        actions.append(downloadButton(item), fileEditButton(item, "rename"), fileEditButton(item, "move"), trashButton(item));
+        row.append(actions);
+      }
+      const previousRow = entryRows.get(item.id);
+      if (previousRow) {
+        previousRow.replaceWith(row);
+      } else {
+        directoryItems.append(row);
+      }
+      entryRows.set(item.id, row);
+    }
+
     function renderDirectory(page, append) {
       breadcrumbs.replaceChildren();
       for (const [index, crumb] of page.breadcrumbs.entries()) {
@@ -685,28 +911,7 @@
       directoryPath.hidden = false;
 
       if (!append) clearDirectoryItems();
-      for (const item of page.items) {
-        const row = document.createElement("li");
-        const isDirectory = item.entry_type === "DIR";
-        const name = isDirectory ? directoryButton(item.name, item.id) : document.createElement("span");
-        const details = document.createElement("span");
-        name.textContent = item.name;
-        details.textContent = isDirectory ? "文件夹" : formatSize(item.size_bytes);
-        row.append(name, details);
-        if (!isDirectory) {
-          const actions = document.createElement("div");
-          actions.className = "file-actions";
-          actions.append(downloadButton(item), trashButton(item));
-          row.append(actions);
-        }
-        const previousRow = entryRows.get(item.id);
-        if (previousRow) {
-          previousRow.replaceWith(row);
-        } else {
-          directoryItems.append(row);
-        }
-        entryRows.set(item.id, row);
-      }
+      for (const item of page.items) renderDirectoryEntry(item);
       currentDirectoryID = page.breadcrumbs.at(-1).id;
       nextCursor = page.next_cursor;
       if (entryRows.size === 0) {
