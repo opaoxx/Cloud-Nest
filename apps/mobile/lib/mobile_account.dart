@@ -230,10 +230,11 @@ class MobileAccount {
     ));
   }
 
-  Future<MultipartCreation> prepareMultipartUpload(
+  Future<void> uploadMultipart(
     PreparedUploadFile source,
-    String parentId,
-  ) async {
+    String parentId, {
+    required void Function(MultipartCreation plan, int confirmed) onProgress,
+  }) async {
     final currentOwner = owner;
     if (currentOwner == null || _signingOut) {
       throw const ReauthenticationRequired();
@@ -245,27 +246,82 @@ class MobileAccount {
     }
 
     try {
-      // 1. 将文件声明、目标目录和创建键写入 SQLite。
+      // 1. 找回任务和本地回执，复核源文件并计算各片摘要。
       final intent = await reserveMultipartIntent(
         currentOwner,
         parentId,
         source,
       );
       _checkSession(epoch);
-      if (intent.creation case final MultipartCreation saved) return saved;
-
-      // 2. 用原创建键请求服务端，核对回执的任务和分片计划。
-      final creation = await _readForAccount(
-        (session) =>
-            createMultipartUpload(session, intent.id, parentId, source),
-      );
-
-      // 3. 保存回执，重试时沿用同一条记录。
-      await saveMultipartCheckpoint(currentOwner, intent.id, creation);
+      final plan =
+          intent.creation ??
+          await _readForAccount<MultipartCreation>(
+            (session) =>
+                createMultipartUpload(session, intent.id, parentId, source),
+          );
+      if (intent.creation == null) {
+        await saveMultipartCheckpoint(currentOwner, intent.id, plan);
+      }
+      final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
       _checkSession(epoch);
-      return creation;
+      onProgress(plan, saved.length);
+      if (saved.length == plan.partCount) return;
+
+      final scope = documentScopeFor(currentOwner);
+      final digests = await inspectMultipartSource(scope, source, plan);
+      _checkSession(epoch);
+      if (saved.values.any(
+        (receipt) => receipt.sha256 != digests[receipt.number - 1],
+      )) {
+        throw const AccountFailure('本机分片摘要与原文件不一致。');
+      }
+      final waiting = Stopwatch()..start();
+      while (!await _readForAccount(
+        (session) => multipartReady(session, plan, parentId),
+      )) {
+        if (waiting.elapsed >= const Duration(seconds: 10)) {
+          throw const AccountFailure('服务端仍在初始化任务，请稍后重试。');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 450));
+        _checkSession(epoch);
+      }
+
+      var confirmed = saved.length;
+      for (var number = 1; number <= plan.partCount; number++) {
+        if (saved.containsKey(number)) continue;
+        _checkSession(epoch);
+        final part = (
+          number: number,
+          offsetBytes: plan.offsetOf(number),
+          sizeBytes: plan.sizeOf(number),
+          sha256: digests[number - 1],
+        );
+        try {
+          // 2. 逐片申请签名，按计划范围和签名头发送正文。
+          final grant = await _readForAccount(
+            (session) => requestMultipartPart(session, plan, part),
+          );
+          final receipt = await sendMultipartPart(scope, source, part, grant);
+
+          // 3. 每收到一片的有效回执，先写入 SQLite，再更新进度。
+          await saveMultipartPart(
+            currentOwner,
+            intent.id,
+            plan.taskId,
+            receipt,
+          );
+          _checkSession(epoch);
+          onProgress(plan, ++confirmed);
+        } on ReauthenticationRequired {
+          rethrow;
+        } on AccountFailure catch (error) {
+          throw AccountFailure(
+            '第 $number 片未确认。已记录 $confirmed/${plan.partCount} 片。\n${error.message}',
+          );
+        }
+      }
     } on TaskStoreFailure {
-      throw const AccountFailure('无法保存本机上传记录，请重试。');
+      throw const AccountFailure('无法读写本机上传记录，请重试。');
     }
   }
 

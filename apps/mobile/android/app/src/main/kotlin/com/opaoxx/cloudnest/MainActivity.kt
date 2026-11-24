@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.StandardMethodCodec
 import java.util.concurrent.Executors
 
@@ -89,7 +90,8 @@ class MainActivity : FlutterFragmentActivity() {
         ).apply {
             setMethodCallHandler { call, result ->
                 if (call.method !in setOf(
-                        "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart", "recordDownload",
+                        "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart",
+                        "readMultipartParts", "recordMultipartPart", "recordDownload",
                     )
                 ) {
                     result.notImplemented()
@@ -137,6 +139,25 @@ class MainActivity : FlutterFragmentActivity() {
                                 )
                                 null
                             }
+                            "readMultipartParts" -> store.readMultipartParts(
+                                owner,
+                                requireNotNull(call.argument<String>("id")),
+                                requireNotNull(call.argument<String>("remoteId")),
+                            )
+                            "recordMultipartPart" -> {
+                                store.recordMultipartPart(
+                                    owner,
+                                    requireNotNull(call.argument<String>("id")),
+                                    requireNotNull(call.argument<String>("remoteId")),
+                                    MultipartPartReceipt(
+                                        requireNotNull(call.argument<Int>("number")),
+                                        requireNotNull(call.argument<Number>("lengthBytes")).toLong(),
+                                        requireNotNull(call.argument<String>("sha256")),
+                                        requireNotNull(call.argument<String>("etag")),
+                                    ),
+                                )
+                                null
+                            }
                             "recordDownload" -> {
                                 store.recordDownload(
                                     owner,
@@ -165,7 +186,7 @@ class MainActivity : FlutterFragmentActivity() {
             "cloudnest/android_document",
         ).apply {
             setMethodCallHandler { call, result ->
-                val scope = if (call.method == "snapshotForSingle") call.argument<String>("scope")
+                val scope = if (call.arguments is Map<*, *>) call.argument<String>("scope")
                     else call.arguments as? String
                 if (scope.isNullOrEmpty()) {
                     result.error("document_scope_required", null, null)
@@ -174,17 +195,21 @@ class MainActivity : FlutterFragmentActivity() {
                 when (call.method) {
                     "pickAndSummarize" -> selectDocument(DocumentRequest(scope, result))
                     "restoreDocument" -> restoreDocument(DocumentRequest(scope, result))
-                    "snapshotForSingle" -> {
+                    "snapshotForSingle", "inspectMultipart", "putMultipartPart" -> {
                         val name = call.argument<String>("name")
                         val size = call.argument<Number>("sizeBytes")?.toLong()
                         val sha = call.argument<String>("sha256")
-                        if (name == null || size == null || size !in 0L..MAX_SINGLE_UPLOAD_BYTES || sha == null) {
+                        if (name == null || size == null || size < 0 || sha == null ||
+                            (call.method == "snapshotForSingle" && size > MAX_SINGLE_UPLOAD_BYTES)
+                        ) {
                             result.error("document_source_changed", null, null)
                             return@setMethodCallHandler
                         }
                         val request = DocumentRequest(scope, result)
-                        if (beginRequest(request)) readOnWorker(request, "document_read_failed") {
-                            rememberedDocument.snapshotForSingle(scope, SourceSummary(name, size, sha))
+                        val error = if (call.method == "putMultipartPart") "multipart_put_unconfirmed"
+                            else "document_read_failed"
+                        if (beginRequest(request)) readOnWorker(request, error) {
+                            readUploadSource(call, scope, SourceSummary(name, size, sha))
                         }
                     }
                     else -> result.notImplemented()
@@ -192,6 +217,27 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
     }
+
+    private fun readUploadSource(call: MethodCall, scope: String, source: SourceSummary): Map<String, Any> =
+        when (call.method) {
+            "snapshotForSingle" -> rememberedDocument.snapshotForSingle(scope, source)
+            "inspectMultipart" -> rememberedDocument.openMultipartBody(scope, source).use { input ->
+                mapOf("partDigests" to multipartDigests(
+                    input, source,
+                    requireNotNull(call.argument<Number>("partSizeBytes")).toLong(),
+                    requireNotNull(call.argument<Int>("partCount")),
+                ))
+            }
+            else -> rememberedDocument.openMultipartBody(scope, source).use { input ->
+                mapOf("etag" to putMultipartBody(
+                    input, source.sizeBytes,
+                    requireNotNull(call.argument<Number>("offsetBytes")).toLong(),
+                    requireNotNull(call.argument<Number>("lengthBytes")).toLong(),
+                    requireNotNull(call.argument<String>("url")),
+                    requireNotNull(call.argument<String>("checksum")),
+                ))
+            }
+        }
 
     private fun selectDocument(request: DocumentRequest) {
         // 1. 让系统只展示可作为文件流打开的文档。

@@ -52,6 +52,18 @@ internal data class MultipartUploadCheckpoint(
     }
 }
 
+internal data class MultipartPartReceipt(
+    val number: Int,
+    val sizeBytes: Long,
+    val sha256: String,
+    val etag: String,
+) {
+    init {
+        require(number in 1..10000 && sizeBytes in 1L..MAX_UPLOAD_PROTOCOL_BYTES)
+        require(multipartDigestPattern.matches(sha256) && multipartETagPattern.matches(etag))
+    }
+}
+
 private fun validTaskNumber(value: String): Boolean =
     value != "0" && value.toULongOrNull()?.toString() == value
 
@@ -59,7 +71,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
     context,
     File(context.noBackupFilesDir, "mobile_tasks.sqlite3").absolutePath,
     null,
-    3,
+    4,
     // 损坏时报告错误并保留原始文件，避免自动删除任务记录。
     { _ -> },
 ) {
@@ -85,14 +97,16 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         )
         addSingleUploadFields(database)
         addMultipartUploadFields(database)
+        createPartReceipts(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion !in 1..2 || newVersion != 3) {
+        if (oldVersion !in 1..3 || newVersion != 4) {
             throw SQLiteException("Unsupported task database migration: $oldVersion to $newVersion")
         }
         if (oldVersion == 1) addSingleUploadFields(database)
-        addMultipartUploadFields(database)
+        if (oldVersion <= 2) addMultipartUploadFields(database)
+        createPartReceipts(database)
     }
 
     private fun addSingleUploadFields(database: SQLiteDatabase) {
@@ -114,6 +128,25 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN part_size_bytes INTEGER")
         database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN part_count INTEGER")
         database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN expires_at TEXT")
+    }
+
+    private fun createPartReceipts(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE multipart_part_receipts (
+                local_task_id TEXT NOT NULL REFERENCES transfer_tasks(local_task_id) ON DELETE CASCADE,
+                part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
+                size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+                sha256 TEXT NOT NULL,
+                etag TEXT NOT NULL,
+                PRIMARY KEY (local_task_id, part_number)
+            )
+            """.trimIndent(),
+        )
+    }
+
+    override fun onConfigure(database: SQLiteDatabase) {
+        database.setForeignKeyConstraintsEnabled(true)
     }
 
     fun reserveUpload(owner: TaskOwner, declaration: UploadDeclaration): Map<String, Any?> {
@@ -215,6 +248,67 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         if (updated != 1) throw SQLiteException("Multipart checkpoint did not match its upload intent")
     }
 
+    fun readMultipartParts(owner: TaskOwner, id: String, remoteId: String): List<Map<String, Any>> {
+        require(isStageId(id) && validTaskNumber(remoteId))
+        return readableDatabase.rawQuery(
+            """
+            SELECT p.part_number, p.size_bytes, p.sha256, p.etag
+            FROM multipart_part_receipts p JOIN transfer_tasks t USING (local_task_id)
+            WHERE t.server_origin = ? AND t.user_id = ? AND t.local_task_id = ? AND t.remote_task_id = ?
+            ORDER BY p.part_number
+            """.trimIndent(),
+            owner.selectionArgs() + arrayOf(id, remoteId),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(mapOf(
+                        "number" to cursor.getInt(0), "sizeBytes" to cursor.getLong(1),
+                        "sha256" to cursor.getString(2), "etag" to cursor.getString(3),
+                    ))
+                }
+            }
+        }
+    }
+
+    fun recordMultipartPart(owner: TaskOwner, id: String, remoteId: String, receipt: MultipartPartReceipt) {
+        require(isStageId(id) && validTaskNumber(remoteId))
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            // 1. 片号必须属于当前账号的原任务，长度由已保存的计划决定。
+            database.execSQL(
+                """
+                INSERT OR IGNORE INTO multipart_part_receipts (local_task_id, part_number, size_bytes, sha256, etag)
+                SELECT local_task_id, ?, ?, ?, ? FROM transfer_tasks
+                WHERE $OWNER_FILTER AND local_task_id = ? AND remote_task_id = ?
+                AND kind = 'UPLOAD' AND state = 'PENDING' AND ? BETWEEN 1 AND part_count
+                AND ? = min(part_size_bytes, size_bytes - (? - 1) * part_size_bytes)
+                """.trimIndent(),
+                arrayOf<Any>(
+                    receipt.number, receipt.sizeBytes, receipt.sha256, receipt.etag,
+                    owner.server, owner.userId, id, remoteId,
+                    receipt.number, receipt.sizeBytes, receipt.number,
+                ),
+            )
+
+            // 2. 同一片重复确认时保留原回执。回读含归属校验，可以区分冲突与有效重试。
+            val matched = database.rawQuery(
+                """
+                SELECT 1 FROM multipart_part_receipts p JOIN transfer_tasks t USING (local_task_id)
+                WHERE t.server_origin = ? AND t.user_id = ? AND t.local_task_id = ? AND t.remote_task_id = ?
+                AND p.part_number = ? AND p.size_bytes = ? AND p.sha256 = ? AND p.etag = ?
+                """.trimIndent(),
+                owner.selectionArgs() + arrayOf(
+                    id, remoteId, receipt.number.toString(), receipt.sizeBytes.toString(), receipt.sha256, receipt.etag,
+                ),
+            ).use { cursor -> cursor.moveToFirst() }
+            if (!matched) throw SQLiteException("Part receipt did not match its upload intent")
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
     fun list(owner: TaskOwner): List<Map<String, Any?>> = readTasks(readableDatabase, owner)
 
     fun recordDownload(owner: TaskOwner, actualName: String, sizeBytes: Long, sha256: String) {
@@ -278,6 +372,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             arrayOf(
                 "local_task_id", "name", "kind", "state", "created_at_ms",
                 "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at",
+                "(SELECT count(*) FROM multipart_part_receipts p WHERE p.local_task_id = transfer_tasks.local_task_id) AS confirmed_parts",
             ),
             OWNER_FILTER,
             owner.selectionArgs(),
@@ -295,6 +390,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             val partSize = cursor.getColumnIndexOrThrow("part_size_bytes")
             val partCount = cursor.getColumnIndexOrThrow("part_count")
             val expiresAt = cursor.getColumnIndexOrThrow("expires_at")
+            val confirmedParts = cursor.getColumnIndexOrThrow("confirmed_parts")
             buildList {
                 while (cursor.moveToNext()) {
                     add(
@@ -309,6 +405,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                             "partSizeBytes" to if (cursor.isNull(partSize)) null else cursor.getLong(partSize),
                             "partCount" to if (cursor.isNull(partCount)) null else cursor.getInt(partCount),
                             "expiresAt" to cursor.getString(expiresAt),
+                            "confirmedParts" to cursor.getInt(confirmedParts),
                         ),
                     )
                 }

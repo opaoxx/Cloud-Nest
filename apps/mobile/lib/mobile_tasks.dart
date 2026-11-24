@@ -31,8 +31,9 @@ class MobileTask {
             createdAtMs <= 8640000000000000) {
       final label = switch ((kind, state)) {
         ('TEST', 'TEST_RECORD') => '未执行',
-        ('UPLOAD', 'PENDING') when row['partCount'] != null =>
-          '已创建分片任务 · ${_savedMultipart(row, row['sizeBytes']).description}',
+        ('UPLOAD', 'PENDING') when row['partCount'] != null => _multipartStatus(
+          row,
+        ),
         ('UPLOAD', 'PENDING') => '待确认',
         ('UPLOAD', 'COMPLETED') => '已上传',
         ('UPLOAD', 'FAILED') => '失败',
@@ -110,6 +111,18 @@ MultipartCreation _savedMultipart(Object? row, Object? sizeBytes) {
   throw const TaskStoreFailure();
 }
 
+String _multipartStatus(Map<Object?, Object?> row) {
+  final plan = _savedMultipart(row, row['sizeBytes']);
+  final confirmed = row['confirmedParts'];
+  if (confirmed is! int || confirmed < 0 || confirmed > plan.partCount) {
+    throw const TaskStoreFailure();
+  }
+  final progress = confirmed == plan.partCount
+      ? '已确认 $confirmed/${plan.partCount} 片，等待合并'
+      : '已确认 $confirmed/${plan.partCount} 片';
+  return '$progress · 任务 ${plan.taskId}';
+}
+
 Future<Object?> _reserveUpload(
   AccountOwner owner,
   String parentId,
@@ -132,6 +145,60 @@ Future<void> saveMultipartCheckpoint(
   'partSizeBytes': creation.partSizeBytes,
   'partCount': creation.partCount,
   'expiresAt': creation.expiresAt,
+});
+
+Future<Map<int, MultipartReceipt>> readMultipartReceipts(
+  AccountOwner owner,
+  String id,
+  MultipartCreation plan,
+) async {
+  final rows = await _taskCall<List<Object?>>('readMultipartParts', owner, {
+    'id': id,
+    'remoteId': plan.taskId,
+  });
+  if (rows == null || rows.length > plan.partCount) {
+    throw const TaskStoreFailure();
+  }
+  final receipts = <int, MultipartReceipt>{};
+  for (final row in rows) {
+    if (row
+        case {
+          'number': final int number,
+          'sizeBytes': final int size,
+          'sha256': final String sha256,
+          'etag': final String etag,
+        }
+        when number >= 1 &&
+            number <= plan.partCount &&
+            size == plan.sizeOf(number) &&
+            isMultipartSha256(sha256) &&
+            isMultipartETag(etag) &&
+            !receipts.containsKey(number)) {
+      receipts[number] = (
+        number: number,
+        sizeBytes: size,
+        sha256: sha256,
+        etag: etag,
+      );
+    } else {
+      throw const TaskStoreFailure();
+    }
+  }
+  return receipts;
+}
+
+Future<void> saveMultipartPart(
+  AccountOwner owner,
+  String id,
+  String taskId,
+  MultipartReceipt receipt,
+) => _taskCall<void>('recordMultipartPart', owner, {
+  'id': id,
+  'remoteId': taskId,
+  'number': receipt.number,
+  'lengthBytes': receipt.sizeBytes,
+  'sha256': receipt.sha256,
+  'etag': receipt.etag,
 });
 
 Future<void> saveSingleCheckpoint(

@@ -102,7 +102,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     final accepted = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text(multipart ? '在当前目录创建分片任务' : '上传到当前目录'),
+        title: const Text('上传到当前目录'),
         scrollable: true,
         content: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -120,7 +120,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(multipart ? '创建任务' : '上传'),
+            child: const Text('上传'),
           ),
         ],
       ),
@@ -133,21 +133,26 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
       return;
     }
 
-    // 分片创建确认后显示任务计划，小文件发布成功后刷新目录。
+    // 以已保存的分片回执更新进度，小文件发布成功后刷新目录。
     setState(() {
       _transferBusy = true;
-      _transferNotice = multipart ? '正在创建分片任务…' : '正在上传并等待服务端校验…';
+      _transferNotice = multipart ? '正在核对分片任务…' : '正在上传并等待服务端校验…';
     });
     var published = false;
     try {
       if (multipart) {
-        final creation = await widget.account.prepareMultipartUpload(
+        await widget.account.uploadMultipart(
           source,
           target,
+          onProgress: (plan, confirmed) {
+            if (!mounted) return;
+            final progress = '已确认 $confirmed/${plan.partCount} 片';
+            final status = confirmed == plan.partCount
+                ? '$progress，等待合并。'
+                : progress;
+            setState(() => _transferNotice = '$status\n${plan.description}');
+          },
         );
-        if (mounted) {
-          setState(() => _transferNotice = '已创建分片任务。\n${creation.description}');
-        }
       } else {
         await widget.account.uploadSingle(source, target);
         published = true;
@@ -330,11 +335,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                     onPressed: _loading || _transferBusy
                         ? null
                         : _confirmUpload,
-                    child: Text(
-                      source.sizeBytes > maxSingleUploadBytes
-                          ? '在此目录创建分片任务'
-                          : '上传到此目录',
-                    ),
+                    child: const Text('上传到此目录'),
                   ),
                 ),
             ],

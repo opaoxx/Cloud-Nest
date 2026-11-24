@@ -7,6 +7,7 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -85,6 +86,26 @@ internal class PreparedUploadSources(
         if (!file.isFile || file.length() != expected.sizeBytes) throw UploadSourceChanged()
         val actual = file.inputStream().use { summarizeSource(it, expected.name) }
         if (!expected.matches(actual)) throw UploadSourceChanged()
+    }
+
+    fun openMultipartBody(reference: UploadSourceReference): FileInputStream {
+        val expected = checkNotNull(reference.summary)
+        if (reference.stageId != null) {
+            val ready = readyFile(reference.stageId)
+            if (!ready.isFile || ready.length() != expected.sizeBytes) throw UploadSourceChanged()
+            return ready.inputStream()
+        }
+
+        val descriptor = resolver.openAssetFileDescriptor(checkNotNull(reference.uri), "r")
+            ?: throw DocumentAccessLost()
+        try {
+            if (wholeFileSize(descriptor) != expected.sizeBytes) throw UploadSourceChanged()
+            // 流接管描述符，调用方用完后统一关闭。
+            return descriptor.createInputStream()
+        } catch (failure: Exception) {
+            descriptor.close()
+            throw failure
+        }
     }
 
     fun copySingleBody(reference: UploadSourceReference, target: File) {

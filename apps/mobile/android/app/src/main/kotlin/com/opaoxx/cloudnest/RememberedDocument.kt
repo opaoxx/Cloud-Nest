@@ -7,6 +7,7 @@ import android.net.Uri
 import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.util.UUID
@@ -28,9 +29,7 @@ internal class RememberedDocument(context: Context) {
     fun snapshotForSingle(scope: String, expected: SourceSummary): Map<String, Any> =
         synchronized(rememberedDocumentLock) {
             // 1. 仅使用当前账号选择且仍与界面声明一致的来源。
-            val reference = storedDocuments()[scope] ?: throw DocumentAccessLost()
-            if (reference.summary != expected) throw UploadSourceChanged()
-            if (reference.uri != null && !hasReadGrant(reference.uri)) throw DocumentAccessLost()
+            val reference = requireSource(scope, expected)
 
             // 2. 返回应用私有的临时正文路径。验证失败时回收这次副本。
             pruneSingleBodies()
@@ -44,6 +43,24 @@ internal class RememberedDocument(context: Context) {
                 throw failure
             }
         }
+
+    fun openMultipartBody(scope: String, expected: SourceSummary): FileInputStream =
+        synchronized(rememberedDocumentLock) {
+            try {
+                sources.openMultipartBody(requireSource(scope, expected))
+            } catch (_: SecurityException) {
+                throw DocumentAccessLost()
+            } catch (_: FileNotFoundException) {
+                throw DocumentAccessLost()
+            }
+        }
+
+    private fun requireSource(scope: String, expected: SourceSummary): UploadSourceReference {
+        val reference = storedDocuments()[scope] ?: throw DocumentAccessLost()
+        if (reference.summary != expected) throw UploadSourceChanged()
+        if (reference.uri != null && !hasReadGrant(reference.uri)) throw DocumentAccessLost()
+        return reference
+    }
 
     private fun pruneSingleBodies() {
         cache.listFiles()?.forEach { file ->

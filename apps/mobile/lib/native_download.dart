@@ -1,10 +1,10 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'native_directory.dart';
 import 'native_login.dart';
+import 'native_storage_url.dart';
 
 const _downloads = MethodChannel('cloudnest/android_download');
 final _digestPattern = RegExp(r'^[0-9a-f]{64}$');
@@ -55,19 +55,9 @@ Future<DownloadGrant> createDownloadGrant(
           _digestPattern.stringMatch(sha) == sha &&
           disposition.startsWith('attachment;')) {
     final expiresAt = DateTime.tryParse(expiresText);
-    final url = Uri.tryParse(raw);
     if (expiresAt != null &&
         expiresAt.isAfter(DateTime.now()) &&
-        url != null &&
-        url.host.isNotEmpty &&
-        !url.authority.contains('@') &&
-        !raw.codeUnits.any(
-          (char) => char <= 32 || char >= 127 || char == 35 || char == 92,
-        ) &&
-        (url.scheme == 'https' ||
-            (kDebugMode &&
-                session.address.scheme == 'http' &&
-                url.scheme == 'http'))) {
+        parseStorageUrl(raw, session.address) != null) {
       return (signedUrl: raw, sizeBytes: size, sha256: sha);
     }
   }
