@@ -26,6 +26,9 @@ var uploadPartETagPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 // ErrUploadPartURLExpired identifies a signed URL that expired before storage accepted the part.
 var ErrUploadPartURLExpired = errors.New("分片签名已过期")
 
+// ErrMultipartUploadInitializing indicates that the saved task is waiting for storage initialization.
+var ErrMultipartUploadInitializing = errors.New("服务端仍在准备上传，请稍后继续")
+
 // UploadPartGrant holds a storage PUT authorization. Credentials stay inside this package.
 type UploadPartGrant struct {
 	url       string
@@ -69,7 +72,7 @@ func CheckMultipartUploadReady(ctx context.Context, address, accessToken, taskID
 	case "UPLOADING":
 		return nil
 	case "CREATING":
-		return errors.New("服务端正在初始化分片任务，请稍后重试")
+		return ErrMultipartUploadInitializing
 	default:
 		return errors.New("远端任务当前不接收分片")
 	}

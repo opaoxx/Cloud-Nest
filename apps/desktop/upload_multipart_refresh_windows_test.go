@@ -19,6 +19,31 @@ import (
 	"github.com/opaoxx/cloud-nest/pkg/client"
 )
 
+func TestWaitForMultipartReadyPollsOriginalTaskAfterCreation(t *testing.T) {
+	var taskReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/uploads/7" ||
+			request.Header.Get("Authorization") != "Bearer access" {
+			t.Errorf("unexpected readiness request: %s %s", request.Method, request.URL.Path)
+		}
+		status := "UPLOADING"
+		if taskReads.Add(1) == 1 {
+			status = "CREATING"
+		}
+		fmt.Fprintf(writer, `{"data":{"id":"7","parent_id":"3","upload_mode":"MULTIPART","size_bytes":20000000,"status":%q,"expires_at":%q}}`,
+			status, time.Now().Add(time.Minute).UTC().Format(time.RFC3339))
+	}))
+	defer server.Close()
+	intent := scopedUploadIntent{owner: uploadOwner{Address: server.URL}, accessToken: "access"}
+	upload := multipartUploadSource{taskID: "7", parentID: "3", plan: client.MultipartPlan{SizeBytes: 20000000}}
+	if err := waitForMultipartReady(t.Context(), intent, upload); err != nil {
+		t.Fatal(err)
+	}
+	if calls := taskReads.Load(); calls != 2 {
+		t.Fatalf("task reads = %d, want 2", calls)
+	}
+}
+
 func TestUploadMultipartRefreshRetriesOnlyThisPartOnce(t *testing.T) {
 	const expiredReply = "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>"
 	const partBody = "this part"

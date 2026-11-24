@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/opaoxx/cloud-nest/pkg/client"
 )
@@ -72,8 +73,7 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 				numbers[index] = index + 1
 			}
 		}
-		if err := client.CheckMultipartUploadReady(ctx, intent.owner.Address, intent.accessToken,
-			upload.taskID, upload.parentID, upload.plan.SizeBytes); err != nil {
+		if err := waitForMultipartReady(ctx, intent, upload); err != nil {
 			return err
 		}
 		source, err := openSourceFile(upload.path)
@@ -116,6 +116,30 @@ func (uploads *UploadIntents) sendMultipartParts(ctx context.Context, intentID s
 		}
 		return nil
 	})
+}
+
+func waitForMultipartReady(ctx context.Context, intent scopedUploadIntent, upload multipartUploadSource) error {
+	// 1. 创建回执可能先于远端存储初始化，仅这一状态允许短暂等待。
+	wait, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	ticks := time.NewTicker(time.Second)
+	defer ticks.Stop()
+	for {
+		err := client.CheckMultipartUploadReady(wait, intent.owner.Address, intent.accessToken,
+			upload.taskID, upload.parentID, upload.plan.SizeBytes)
+		if !errors.Is(err, client.ErrMultipartUploadInitializing) {
+			return err
+		}
+		// 2. 用原任务继续查询。窗口退出或等待超时时保留已有记录。
+		select {
+		case <-wait.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return client.ErrMultipartUploadInitializing
+		case <-ticks.C:
+		}
+	}
 }
 
 func readMultipartUploadSource(ctx context.Context, intent scopedUploadIntent) (multipartUploadSource, error) {
