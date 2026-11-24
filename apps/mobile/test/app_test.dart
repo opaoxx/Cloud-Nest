@@ -10,7 +10,7 @@ void main() {
     expect(find.text('CloudNest'), findsOneWidget);
   });
 
-  testWidgets('login rejects a non-root address and allows another attempt', (
+  testWidgets('login advances IPv4 segments and rejects invalid addresses', (
     tester,
   ) async {
     const credentials = MethodChannel('cloudnest/android_session');
@@ -33,14 +33,20 @@ void main() {
     await tester.tap(find.text('登录'));
     await tester.pumpAndSettle();
 
-    await tester.enterText(
-      find.byType(TextField).first,
-      'https://cloud.example.com/unexpected',
-    );
+    final first = find.byKey(const ValueKey('server-ip-0'));
+    final second = find.byKey(const ValueKey('server-ip-1'));
+    expect(find.text('http://'), findsOneWidget);
+    expect(find.text('.'), findsNWidgets(3));
+    expect(find.text('18081'), findsOneWidget);
+    await tester.enterText(first, '192.');
+    await tester.pump();
+    expect(tester.widget<TextField>(first).controller!.text, '192');
+    expect(tester.widget<TextField>(second).focusNode!.hasFocus, isTrue);
+    await tester.enterText(second, '256');
     await tester.tap(find.widgetWithText(FilledButton, '登录'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('请输入服务根地址'), findsOneWidget);
+    expect(find.textContaining('请输入有效的四段 IPv4 地址'), findsOneWidget);
     final login = tester.widget<FilledButton>(
       find.widgetWithText(FilledButton, '登录'),
     );
