@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'login_page.dart';
+import 'native_login.dart';
+
 const _documentPicker = MethodChannel('cloudnest/android_document');
 
 class DocumentSelectionPage extends StatefulWidget {
@@ -13,6 +16,7 @@ class DocumentSelectionPage extends StatefulWidget {
 }
 
 class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
+  NativeSession? _session;
   String? _activity;
   bool _needsReselection = false;
   _DocumentSummary? _document;
@@ -22,6 +26,14 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   void initState() {
     super.initState();
     unawaited(_readDocument(restore: true));
+  }
+
+  Future<void> _openLogin() async {
+    final session = await Navigator.of(context).push<NativeSession>(
+      MaterialPageRoute(builder: (context) => const LoginPage()),
+    );
+    if (!mounted || session == null) return;
+    setState(() => _session = session);
   }
 
   Future<void> _readDocument({required bool restore}) async {
@@ -83,11 +95,22 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
     final notice = _notice;
     final activity = _activity;
     return Scaffold(
-      appBar: AppBar(title: const Text('CloudNest')),
+      appBar: AppBar(
+        title: const Text('CloudNest'),
+        actions: [
+          if (_session == null)
+            TextButton(onPressed: _openLogin, child: const Text('登录')),
+        ],
+      ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
+            if (_session case final session?)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Text('已登录为 ${session.username}'),
+              ),
             Align(
               alignment: Alignment.centerLeft,
               child: FilledButton(

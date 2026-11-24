@@ -8,11 +8,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.StandardMethodCodec
 import java.util.concurrent.Executors
 
 class MainActivity : FlutterFragmentActivity() {
     private val documentReader = Executors.newSingleThreadExecutor()
     private val rememberedDocument by lazy { RememberedDocument(applicationContext) }
+    private var installationChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
     private var pendingDocumentRequest: MethodChannel.Result? = null
     private val openDocument = registerForActivityResult(
@@ -22,8 +24,28 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        val messenger = flutterEngine.dartExecutor.binaryMessenger
+        // 安装标识需要访盘，由 Flutter 的后台消息队列处理。
+        installationChannel = MethodChannel(
+            messenger,
+            "cloudnest/android_installation",
+            StandardMethodCodec.INSTANCE,
+            messenger.makeBackgroundTaskQueue(),
+        ).apply {
+            val identity = InstallationIdentity(applicationContext)
+            setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getInstallationId" -> try {
+                        result.success(identity.getOrCreate())
+                    } catch (_: Exception) {
+                        result.error("installation_id_unavailable", null, null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
         documentChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
+            messenger,
             "cloudnest/android_document",
         ).apply {
             setMethodCallHandler { call, result ->
@@ -121,6 +143,8 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        installationChannel?.setMethodCallHandler(null)
+        installationChannel = null
         documentChannel?.setMethodCallHandler(null)
         documentChannel = null
         pendingDocumentRequest?.error("document_picker_closed", null, null)
