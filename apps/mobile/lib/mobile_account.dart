@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'account_owner.dart';
 import 'mobile_tasks.dart';
 import 'native_directory.dart';
+import 'native_download.dart';
 import 'native_login.dart';
 import 'native_single_upload.dart';
 
@@ -121,6 +122,31 @@ class MobileAccount {
       if (_session == null) throw const ReauthenticationRequired();
       throw const AccountFailure('会话已更新，请重试。');
     }
+  }
+
+  Future<String?> downloadFile(DirectoryEntry entry) async {
+    final currentOwner = owner;
+    if (currentOwner == null || _signingOut) {
+      throw const ReauthenticationRequired();
+    }
+    final epoch = _sessionEpoch;
+
+    // 1. API 访问按当前账号授权。签名交给 Android，正文请求独立发出。
+    final grant = await _readForAccount(
+      (session) => createDownloadGrant(session, entry),
+    );
+    _checkSession(epoch);
+    final actualName = await saveGrantedDownload(grant, entry.name);
+    if (actualName == null) return null;
+
+    // 2. 只有系统保存成功才记任务。记录失败时仍告知用户实际保存名称。
+    _checkSession(epoch);
+    try {
+      await recordSavedDownload(currentOwner, actualName, grant);
+    } on TaskStoreFailure {
+      throw AccountFailure('已保存「$actualName」，本机任务记录写入失败。');
+    }
+    return actualName;
   }
 
   Future<String> logout() async {

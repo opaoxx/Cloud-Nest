@@ -8,6 +8,7 @@ typedef DirectoryEntry = ({
   String name,
   bool isFolder,
   int sizeBytes,
+  String revision,
 });
 typedef DirectoryBreadcrumb = ({String id, String name});
 typedef DirectoryListing = ({
@@ -115,7 +116,13 @@ DirectoryEntry _readEntry(Object? item, String parentId) {
           (type == 'DIR' || type == 'FILE') &&
           sizeBytes >= 0 &&
           sizeBytes <= _maxJsonSafeInteger) {
-    return (id: id, name: name, isFolder: type == 'DIR', sizeBytes: sizeBytes);
+    return (
+      id: id,
+      name: name,
+      isFolder: type == 'DIR',
+      sizeBytes: sizeBytes,
+      revision: revision,
+    );
   }
   throw const AccountFailure('服务返回的目录项与请求不一致。');
 }

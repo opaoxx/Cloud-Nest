@@ -72,6 +72,38 @@ void main() {
     expect(find.text('上传成功。'), findsOneWidget);
     expect(find.text('样本.txt'), findsOneWidget);
   });
+
+  testWidgets('downloads the selected revision and shows the provider name', (
+    tester,
+  ) async {
+    final account = _DownloadAccount();
+    await tester.pumpWidget(
+      MaterialApp(home: CloudDrivePage(account: account)),
+    );
+    await tester.pumpAndSettle();
+    final action = find.byWidgetPredicate(
+      (widget) => widget is IconButton && widget.tooltip == '下载 notes.txt',
+    );
+    await tester.tap(action);
+    await tester.pump();
+    expect(account.selected?.revision, '1');
+    expect(tester.widget<IconButton>(action).onPressed, isNull);
+    account.saved.complete('notes (1).txt');
+    await tester.pumpAndSettle();
+    expect(find.text('已保存「notes (1).txt」。'), findsOneWidget);
+    expect(tester.widget<IconButton>(action).onPressed, isNotNull);
+  });
+}
+
+class _DownloadAccount extends _DirectoryAccount {
+  final saved = Completer<String?>();
+  DirectoryEntry? selected;
+
+  @override
+  Future<String?> downloadFile(DirectoryEntry entry) {
+    selected = entry;
+    return saved.future;
+  }
 }
 
 const _source = (
@@ -103,9 +135,15 @@ class _UploadAccount extends _DirectoryAccount {
     ],
     entries: [
       if (parentId == _rootId)
-        (id: '81', name: '目标目录', isFolder: true, sizeBytes: 0),
+        (id: '81', name: '目标目录', isFolder: true, sizeBytes: 0, revision: '1'),
       if (parentId == '81' && published.isCompleted)
-        (id: '82', name: _source.name, isFolder: false, sizeBytes: 0),
+        (
+          id: '82',
+          name: _source.name,
+          isFolder: false,
+          sizeBytes: 0,
+          revision: '1',
+        ),
     ],
     nextCursor: null,
   );
@@ -133,9 +171,21 @@ class _DirectoryAccount extends MobileAccount {
     return (
       breadcrumbs: [(id: _rootId, name: '')],
       entries: [
-        (id: '81', name: 'notes.txt', isFolder: false, sizeBytes: 14),
+        (
+          id: '81',
+          name: 'notes.txt',
+          isFolder: false,
+          sizeBytes: 14,
+          revision: '1',
+        ),
         if (cursor != null)
-          (id: '82', name: 'report.txt', isFolder: false, sizeBytes: 3),
+          (
+            id: '82',
+            name: 'report.txt',
+            isFolder: false,
+            sizeBytes: 3,
+            revision: '1',
+          ),
       ],
       nextCursor: cursor == null ? _cursor : null,
     );

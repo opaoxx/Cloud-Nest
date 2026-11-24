@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 
 import 'account_owner.dart';
 import 'native_login.dart';
+import 'native_download.dart';
 import 'native_single_upload.dart';
 
 const _tasks = MethodChannel('cloudnest/android_tasks');
@@ -31,6 +32,7 @@ class MobileTask {
         ('UPLOAD', 'PENDING') => '待确认',
         ('UPLOAD', 'COMPLETED') => '已上传',
         ('UPLOAD', 'FAILED') => '失败',
+        ('DOWNLOAD', 'COMPLETED') => '已下载',
         _ => throw const TaskStoreFailure(),
       };
       return MobileTask(
@@ -80,6 +82,16 @@ Future<void> saveSingleCheckpoint(
   'remoteId': remoteId,
   'state': state,
   'entryId': ?entryId,
+});
+
+Future<void> recordSavedDownload(
+  AccountOwner owner,
+  String actualName,
+  DownloadGrant grant,
+) => _taskCall<void>('recordDownload', owner, {
+  'name': actualName,
+  'sizeBytes': grant.sizeBytes,
+  'sha256': grant.sha256,
 });
 
 Future<T?> _taskCall<T>(

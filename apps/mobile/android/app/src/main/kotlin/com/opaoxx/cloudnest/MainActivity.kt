@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ContentResolver
 import android.content.Intent
 import androidx.activity.result.ActivityResult
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -17,13 +18,18 @@ class MainActivity : FlutterFragmentActivity() {
     private var installationChannel: MethodChannel? = null
     private var sessionChannel: MethodChannel? = null
     private var taskChannel: MethodChannel? = null
+    private var downloadChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
+    private val downloadSave: DownloadSave by lazy { DownloadSave(this) { saveDestination.launch(it) } }
     private data class DocumentRequest(val scope: String, val result: MethodChannel.Result)
     private var pendingDocumentRequest: DocumentRequest? = null
     private val openDocument = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
         ::onDocumentSelected,
     )
+    private val saveDestination: ActivityResultLauncher<Intent> = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { downloadSave.onDestination(it) }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -82,7 +88,7 @@ class MainActivity : FlutterFragmentActivity() {
             messenger.makeBackgroundTaskQueue(),
         ).apply {
             setMethodCallHandler { call, result ->
-                if (call.method !in setOf("list", "createTest", "reserveSingle", "checkpointSingle")) {
+                if (call.method !in setOf("list", "createTest", "reserveSingle", "checkpointSingle", "recordDownload")) {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
@@ -114,6 +120,15 @@ class MainActivity : FlutterFragmentActivity() {
                                 )
                                 null
                             }
+                            "recordDownload" -> {
+                                store.recordDownload(
+                                    owner,
+                                    requireNotNull(call.argument<String>("name")),
+                                    requireNotNull(call.argument<Number>("sizeBytes")).toLong(),
+                                    requireNotNull(call.argument<String>("sha256")),
+                                )
+                                null
+                            }
                             else -> store.list(owner)
                         }
                     } finally {
@@ -124,6 +139,9 @@ class MainActivity : FlutterFragmentActivity() {
                     result.error("task_store_unavailable", null, null)
                 }
             }
+        }
+        downloadChannel = MethodChannel(messenger, "cloudnest/android_download").apply {
+            setMethodCallHandler(downloadSave::handle)
         }
         documentChannel = MethodChannel(
             messenger,
@@ -253,6 +271,9 @@ class MainActivity : FlutterFragmentActivity() {
         sessionChannel = null
         taskChannel?.setMethodCallHandler(null)
         taskChannel = null
+        downloadChannel?.setMethodCallHandler(null)
+        downloadChannel = null
+        downloadSave.detach()
         documentChannel?.setMethodCallHandler(null)
         documentChannel = null
         pendingDocumentRequest?.result?.error("document_picker_closed", null, null)
@@ -262,6 +283,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun onDestroy() {
         documentReader.shutdownNow()
+        downloadSave.close()
         super.onDestroy()
     }
 }

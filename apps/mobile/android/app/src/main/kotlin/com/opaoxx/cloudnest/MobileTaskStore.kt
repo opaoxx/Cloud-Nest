@@ -162,6 +162,23 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
 
     fun list(owner: TaskOwner): List<Map<String, Any>> = readTasks(readableDatabase, owner)
 
+    fun recordDownload(owner: TaskOwner, actualName: String, sizeBytes: Long, sha256: String) {
+        require(actualName.isNotBlank() && sizeBytes >= 0 && Regex("[0-9a-f]{64}").matches(sha256))
+        // 外部文件写入完成后，按所属账号记录提供方实际返回的名称。
+        val values = ContentValues().apply {
+            put("local_task_id", UUID.randomUUID().toString())
+            put("server_origin", owner.server)
+            put("user_id", owner.userId)
+            put("kind", "DOWNLOAD")
+            put("name", actualName)
+            put("state", "COMPLETED")
+            put("created_at_ms", System.currentTimeMillis())
+            put("size_bytes", sizeBytes)
+            put("sha256", sha256)
+        }
+        writableDatabase.insertOrThrow(TASKS, null, values)
+    }
+
     fun createTest(owner: TaskOwner): List<Map<String, Any>> {
         val database = writableDatabase
         database.beginTransaction()

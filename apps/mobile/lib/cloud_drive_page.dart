@@ -23,8 +23,8 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   List<DirectoryEntry> _entries = [];
   String? _nextCursor;
   bool _loading = false;
-  bool _uploading = false;
-  String? _uploadNotice;
+  bool _transferBusy = false;
+  String? _transferNotice;
   ({String message, String? parentId, String? cursor})? _failure;
 
   String? get _currentDirectory =>
@@ -37,11 +37,13 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   }
 
   Future<void> _load(String? parentId, {String? cursor}) async {
-    if (_loading || _uploading) return;
+    if (_loading || _transferBusy) return;
     setState(() {
       _loading = true;
       _failure = null;
-      if (cursor == null && parentId != _currentDirectory) _uploadNotice = null;
+      if (cursor == null && parentId != _currentDirectory) {
+        _transferNotice = null;
+      }
     });
 
     try {
@@ -93,7 +95,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     if (source == null ||
         target == null ||
         _loading ||
-        _uploading ||
+        _transferBusy ||
         source.sizeBytes > maxSingleUploadBytes) {
       return;
     }
@@ -135,25 +137,47 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
 
     // 只在服务端确认目录项已发布后展示上传成功。
     setState(() {
-      _uploading = true;
-      _uploadNotice = '正在上传并等待服务端校验…';
+      _transferBusy = true;
+      _transferNotice = '正在上传并等待服务端校验…';
     });
     var published = false;
     try {
       await widget.account.uploadSingle(source, target);
       published = true;
-      if (mounted) setState(() => _uploadNotice = '上传成功。');
+      if (mounted) setState(() => _transferNotice = '上传成功。');
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {
         Navigator.of(context).pop(error.message);
       } else {
-        setState(() => _uploadNotice = error.message);
+        setState(() => _transferNotice = error.message);
       }
     } finally {
-      if (mounted) setState(() => _uploading = false);
+      if (mounted) setState(() => _transferBusy = false);
     }
     if (published && mounted) await _load(target);
+  }
+
+  Future<void> _download(DirectoryEntry entry) async {
+    if (_loading || _transferBusy) return;
+    setState(() {
+      _transferBusy = true;
+      _transferNotice = '正在下载并校验文件…';
+    });
+    try {
+      final name = await widget.account.downloadFile(entry);
+      if (!mounted) return;
+      setState(() => _transferNotice = name == null ? '已取消保存。' : '已保存「$name」。');
+    } on AccountFailure catch (error) {
+      if (!mounted) return;
+      if (widget.account.owner == null) {
+        Navigator.of(context).pop(error.message);
+      } else {
+        setState(() => _transferNotice = error.message);
+      }
+    } finally {
+      if (mounted) setState(() => _transferBusy = false);
+    }
   }
 
   Widget _pathBar() {
@@ -168,7 +192,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
             )
           else
             TextButton(
-              onPressed: _loading || _uploading
+              onPressed: _loading || _transferBusy
                   ? null
                   : () => _load(_breadcrumbs[index].id),
               child: Text(index == 0 ? '根目录' : _breadcrumbs[index].name),
@@ -208,8 +232,16 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           ),
           title: Text(entry.name, maxLines: 2, overflow: TextOverflow.ellipsis),
           subtitle: entry.isFolder ? null : Text('${entry.sizeBytes} B'),
-          trailing: entry.isFolder ? const Icon(Icons.chevron_right) : null,
-          onTap: entry.isFolder && !_loading && !_uploading
+          trailing: entry.isFolder
+              ? const Icon(Icons.chevron_right)
+              : IconButton(
+                  tooltip: '下载 ${entry.name}',
+                  onPressed: _loading || _transferBusy
+                      ? null
+                      : () => _download(entry),
+                  icon: const Icon(Icons.download_outlined),
+                ),
+          onTap: entry.isFolder && !_loading && !_transferBusy
               ? () => _load(entry.id)
               : null,
         );
@@ -222,17 +254,17 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     final failure = _failure;
     final cursor = _nextCursor;
     final source = widget.source;
-    final notice = _uploadNotice;
+    final notice = _transferNotice;
     return PopScope(
-      canPop: !_uploading,
+      canPop: !_transferBusy,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('云盘'),
-          automaticallyImplyLeading: !_uploading,
+          automaticallyImplyLeading: !_transferBusy,
           actions: [
             IconButton(
               tooltip: '刷新目录',
-              onPressed: _loading || _uploading
+              onPressed: _loading || _transferBusy
                   ? null
                   : () => _load(_currentDirectory),
               icon: const Icon(Icons.refresh),
@@ -244,7 +276,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (_breadcrumbs.isNotEmpty) _pathBar(),
-              if (_loading || _uploading) const LinearProgressIndicator(),
+              if (_loading || _transferBusy) const LinearProgressIndicator(),
               if (notice != null)
                 Padding(
                   padding: const EdgeInsets.symmetric(
@@ -277,7 +309,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                   child: OutlinedButton(
-                    onPressed: _loading || _uploading
+                    onPressed: _loading || _transferBusy
                         ? null
                         : () => _load(_currentDirectory, cursor: cursor),
                     child: const Text('加载更多'),
@@ -289,7 +321,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                   child: source.sizeBytes > maxSingleUploadBytes
                       ? const Text('小文件上传上限为 16 MiB。')
                       : FilledButton(
-                          onPressed: _loading || _uploading
+                          onPressed: _loading || _transferBusy
                               ? null
                               : _confirmUpload,
                           child: const Text('上传到此目录'),
