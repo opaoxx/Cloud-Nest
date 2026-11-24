@@ -33,6 +33,13 @@
     #directoryPath [aria-current="page"] { font-weight: 600; }
     .directory-link { margin: 0; padding: 0; color: #216080; background: none; text-align: left; text-decoration: underline; }
     .download-action { margin: 0; padding: .35rem .55rem; }
+    .file-actions { display: flex; flex-wrap: wrap; gap: .35rem; justify-content: flex-end; }
+    .file-actions button { margin: 0; padding: .35rem .55rem; }
+    .remove-action { background: #a22c35; }
+    dialog { max-width: min(26rem, calc(100vw - 2rem)); border: 0; border-radius: .75rem; padding: 1.25rem; color: inherit; }
+    dialog::backdrop { background: #192a3b66; }
+    dialog form { display: flex; justify-content: flex-end; gap: .5rem; border: 0; padding: 0; }
+    dialog p { overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -75,6 +82,14 @@
       </section>
     </form>
   </main>
+  <dialog id="trashDialog" aria-labelledby="trashTitle">
+    <h2 id="trashTitle">移入回收站</h2>
+    <p id="trashPrompt"></p>
+    <form method="dialog">
+      <button value="cancel" autofocus>取消</button>
+      <button value="trash" class="remove-action">移入回收站</button>
+    </form>
+  </dialog>
   <script type="module">
     import { Call } from "/wails/runtime.js";
 
@@ -503,6 +518,53 @@
       return button;
     }
 
+    const trashDialog = document.querySelector("#trashDialog");
+    const trashPrompt = document.querySelector("#trashPrompt");
+    let pendingTrash = null;
+
+    function trashButton(item) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "remove-action";
+      button.textContent = "删除";
+      button.setAttribute("aria-label", "删除 · " + item.name);
+      button.addEventListener("click", () => {
+        if (checkConnection.disabled || !signedIn || trashDialog.open) return;
+        pendingTrash = { item, directoryID: currentDirectoryID };
+        trashPrompt.textContent = "将「" + item.name + "」移入回收站？";
+        trashDialog.returnValue = "";
+        trashDialog.showModal();
+      });
+      return button;
+    }
+
+    trashDialog.addEventListener("close", async () => {
+      const target = pendingTrash;
+      pendingTrash = null;
+      // 1. 对话框确认时仍使用原目录、条目和所见修订。
+      if (trashDialog.returnValue !== "trash" || !target || !signedIn ||
+          checkConnection.disabled || currentDirectoryID !== target.directoryID) return;
+      setBusy(true);
+      directoryStatus.textContent = "正在移入回收站…";
+      try {
+        // 2. Wails 以当前会话提交回收，过期或冲突保留原列表。
+        const result = await Call.ByName("main.Account.TrashFile", target.item.id, target.item.revision);
+        if (result.loginRequired) {
+          showSignedOut(result.loginRequired);
+          return;
+        }
+        // 3. 成功后重新读取原目录的可见条目与分页。
+        entryRows.get(target.item.id)?.remove();
+        entryRows.delete(target.item.id);
+        await loadDirectory(target.directoryID, { preserveRows: true });
+        if (signedIn) directoryStatus.textContent = "已移入回收站。" + directoryStatus.textContent;
+      } catch (error) {
+        directoryStatus.textContent = error.message || "无法确认回收结果，请刷新目录核对";
+      } finally {
+        setBusy(false);
+      }
+    });
+
     function clearDownloadSelection() {
       selectedDownload = null;
       stageDownload.hidden = true;
@@ -628,7 +690,12 @@
         name.textContent = item.name;
         details.textContent = isDirectory ? "文件夹" : "文件 · " + item.size_bytes + " B";
         row.append(name, details);
-        if (!isDirectory) row.append(downloadButton(item));
+        if (!isDirectory) {
+          const actions = document.createElement("div");
+          actions.className = "file-actions";
+          actions.append(downloadButton(item), trashButton(item));
+          row.append(actions);
+        }
         const previousRow = entryRows.get(item.id);
         if (previousRow) {
           previousRow.replaceWith(row);
@@ -648,12 +715,12 @@
       }
     }
 
-    async function loadDirectory(targetID) {
+    async function loadDirectory(targetID, { preserveRows = false } = {}) {
       // 导航和刷新都让上一次续页失效，即使之后回到同一个目录。
       pendingPage = null;
       clearDownloadSelection();
       directoryStatus.textContent = "正在读取目录…";
-      if (targetID === currentDirectoryID) clearDirectoryItems();
+      if (targetID === currentDirectoryID && !preserveRows) clearDirectoryItems();
       try {
         const result = await Call.ByName("main.Account.ReadDirectory", targetID);
         if (result.loginRequired) {

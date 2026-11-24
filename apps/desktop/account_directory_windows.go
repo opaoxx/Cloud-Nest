@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
 	"github.com/opaoxx/cloud-nest/pkg/client"
 )
 
@@ -11,6 +12,27 @@ import (
 type DirectoryReadResult struct {
 	Page          client.DirectoryPage `json:"page"`
 	LoginRequired string               `json:"loginRequired"`
+}
+
+// FileTrashResult 将已确认的回收或重新登录提示交给桌面窗口。
+type FileTrashResult struct {
+	LoginRequired string `json:"loginRequired"`
+}
+
+// TrashFile 将选中的文件修订移入回收站。
+func (account *Account) TrashFile(ctx context.Context, entryID, revision string) (FileTrashResult, error) {
+	// 同一次操作的会话刷新重用相同的幂等键。
+	key, err := uuid.NewRandom()
+	if err != nil {
+		return FileTrashResult{}, errors.New("无法准备文件回收请求")
+	}
+	_, err = readForAccount(ctx, account, func(address string, session client.NativeSession) (struct{}, error) {
+		return struct{}{}, client.TrashFile(ctx, address, session.AccessToken, entryID, revision, key.String())
+	})
+	if errors.Is(err, errLoginRequired) || errors.Is(err, errRefreshOutcomeUnknown) || errors.Is(err, client.ErrFileSessionRevoked) {
+		return FileTrashResult{LoginRequired: err.Error()}, nil
+	}
+	return FileTrashResult{}, err
 }
 
 // ReadRootDirectory 按当前账号的真实根目录 ID 读取首页。
