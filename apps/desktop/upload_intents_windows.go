@@ -20,6 +20,7 @@ type UploadIntents struct {
 type UploadIntentResult struct {
 	Items         []UploadIntentView `json:"items"`
 	LoginRequired string             `json:"loginRequired"`
+	SavedIntentID string             `json:"savedIntentID,omitempty"`
 }
 
 // Save 以用户选中的本机文件及当前目录创建或找回一条本机记录。
@@ -67,12 +68,20 @@ func (uploads *UploadIntents) load(ctx context.Context, draft *uploadIntentDraft
 		return UploadIntentResult{}, errors.New("无法打开本机上传记录，请检查应用数据目录")
 	}
 	defer db.Close()
+	var savedIntentID string
 	if draft != nil {
 		if err := insertUploadIntent(ctx, db, owner, *draft); err != nil {
 			if errors.Is(err, errUploadKeyConflict) {
 				return UploadIntentResult{}, err
 			}
 			return UploadIntentResult{}, errors.New("无法保存上传意图，请重试")
+		}
+		// 同一个创建键重试时返回原记录，供窗口直接开始这一项。
+		err := db.QueryRowContext(ctx, `SELECT CAST(id AS TEXT) FROM upload_intents
+			WHERE server_address = ? AND user_id = ? AND creation_key = ?`,
+			owner.Address, owner.UserID, draft.Source.File.CreationKey).Scan(&savedIntentID)
+		if err != nil {
+			return UploadIntentResult{}, errors.New("无法读取已保存的上传记录，请重试")
 		}
 	}
 
@@ -81,7 +90,7 @@ func (uploads *UploadIntents) load(ctx context.Context, draft *uploadIntentDraft
 	if err != nil {
 		return UploadIntentResult{}, errors.New("无法读取本机上传记录")
 	}
-	return UploadIntentResult{Items: items}, nil
+	return UploadIntentResult{Items: items, SavedIntentID: savedIntentID}, nil
 }
 
 func resolveUploadOwner(ctx context.Context, address string, session client.NativeSession) (uploadOwner, error) {

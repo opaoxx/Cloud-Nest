@@ -23,9 +23,10 @@
     h2 { font-size: 1.15rem; margin: 1rem 0 0; }
     ul { list-style: none; margin: .75rem 0 0; padding: 0; }
     #directoryItems li, #uploadItems li { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e0e8ed; padding: .65rem 0; }
-    #uploadItems span { overflow-wrap: anywhere; }
+    .file-summary { display: grid; min-width: 0; gap: .35rem; overflow-wrap: anywhere; }
+    .file-summary span { color: #526977; font-size: .875rem; }
     #uploadItems button { flex: none; margin: 0; }
-    .upload-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
+    .upload-actions { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
     #directoryItems li > :first-child { min-width: 0; overflow-wrap: anywhere; }
     #directoryItems li > :last-child { flex: none; color: #526977; }
     #directoryPath ol { display: flex; flex-wrap: wrap; gap: .35rem .6rem; list-style: none; padding: 0; margin: .8rem 0 0; }
@@ -61,7 +62,7 @@
       <button id="logoutAccount" type="button" hidden>退出账号</button>
       <section aria-label="本机文件">
         <button id="chooseFile" type="button">选择文件</button>
-        <button id="saveUploadIntent" type="button" hidden disabled>保存上传意图</button>
+        <button id="saveUploadIntent" type="button" hidden disabled>上传</button>
         <output id="fileSelection" role="status" aria-live="polite"></output>
       </section>
       <section id="uploadPanel" aria-labelledby="uploadTitle" hidden>
@@ -75,7 +76,7 @@
         <button id="refreshDirectory" type="button">刷新目录</button>
         <output id="directoryStatus" role="status" aria-live="polite"></output>
         <output id="downloadStatus" role="status" aria-live="polite"></output>
-        <button id="stageDownload" type="button" hidden>下载到临时文件</button>
+        <button id="stageDownload" type="button" hidden>开始下载</button>
         <button id="saveDownload" type="button" hidden>另存为…</button>
         <ul id="directoryItems" aria-label="目录内容"></ul>
         <button id="loadMore" type="button" hidden>加载更多</button>
@@ -124,7 +125,10 @@
     let pendingPage = null;
     let selectionKey = "";
     let selectedDownload = null;
+    const pendingPublications = new Map();
+    let publicationTimer = null;
     let activeMultipartSend = null;
+    let activeUploadID = "";
     let signedIn = false;
     const savedAddress = localStorage.getItem("cloudnest.serverAddress");
     if (savedAddress) address.value = savedAddress;
@@ -136,6 +140,7 @@
     function setBusy(busy) {
       address.readOnly = busy || signedIn;
       checkConnection.disabled = busy;
+      chooseFile.disabled = busy;
       credentials.disabled = busy;
       for (const button of directoryPanel.querySelectorAll("button")) {
         button.disabled = busy;
@@ -194,6 +199,9 @@
       fileSelection.textContent = "";
       selectionKey = "";
       uploadStatus.textContent = "";
+      clearTimeout(publicationTimer);
+      publicationTimer = null;
+      pendingPublications.clear();
       uploadItems.replaceChildren();
       currentDirectoryID = "";
       pendingPage = null;
@@ -221,7 +229,8 @@
     });
 
     chooseFile.addEventListener("click", async () => {
-      chooseFile.disabled = true;
+      if (checkConnection.disabled || !signedIn) return;
+      setBusy(true);
       selectionKey = "";
       updateSaveUploadIntent();
       fileSelection.textContent = "正在准备文件…";
@@ -229,125 +238,100 @@
         const source = await Call.ByName("main.LocalFilePicker.SelectFile");
         selectionKey = source?.creation_key || "";
         fileSelection.textContent = source
-          ? ["已选择 " + source.name, "大小 " + source.size_bytes + " B", "SHA-256 " + source.sha256].join("\n")
+          ? "已选择 " + source.name + " · " + formatSize(source.size_bytes)
           : "已取消选择。";
       } catch (error) {
         fileSelection.textContent = error.message || "选择文件失败，请重试";
       } finally {
-        chooseFile.disabled = false;
-        updateSaveUploadIntent();
+        setBusy(false);
       }
     });
+
+    function formatSize(bytes) {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let size = Number(bytes);
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit++;
+      }
+      return size.toLocaleString("zh-CN", { maximumFractionDigits: unit ? 2 : 0 }) + " " + units[unit];
+    }
+
+    const uploadStates = {
+      PENDING_CREATE: "等待上传", PENDING_REUSE: "等待上传", REUSE_PENDING: "等待上传",
+      CREATED: "等待上传", MULTIPART_CREATED: "等待上传",
+      MULTIPART_COMPLETION_PENDING: "正在确认上传结果", COMPLETING: "正在处理文件", VERIFYING: "正在校验文件",
+      UPLOAD_CANCEL_PENDING: "取消待确认", CANCELLING: "正在取消",
+      REUSED: "上传完成", COMPLETED: "上传完成", FAILED: "上传失败",
+      CANCELLED: "已取消", EXPIRED: "上传已过期"
+    };
+
+    function publicationMethod(intent) {
+      if (intent.status === "CANCELLING") return "CheckUploadCancellation";
+      if (["MULTIPART_COMPLETION_PENDING", "COMPLETING", "VERIFYING"].includes(intent.status)) {
+        return intent.multipart_plan ? "CheckMultipartStatus" : "CheckStatus";
+      }
+      return null;
+    }
 
     function renderUploadIntents(result) {
       if (result.loginRequired) {
         showSignedOut(result.loginRequired);
         return false;
       }
+      pendingPublications.clear();
       uploadItems.replaceChildren();
       for (const intent of result.items) {
         const row = document.createElement("li");
-        const summary = document.createElement("span");
-        summary.textContent = intent.name + " · " + intent.size_bytes + " B · 目录 " + intent.parent_id;
-        row.append(summary);
-        if (["PENDING_CREATE", "PENDING_REUSE", "REUSE_PENDING"].includes(intent.status)) {
-          const phase = {
-            PENDING_CREATE: "待创建任务",
-            PENDING_REUSE: "待检查可复用内容",
-            REUSE_PENDING: "复用请求待确认"
-          }[intent.status];
-          summary.textContent += " · " + phase;
-          row.append(uploadActionButton("创建上传任务", () =>
-            runUploadAction("Submit", intent.id, "正在提交上传记录…", "已创建 SINGLE 上传任务。", async (created) => {
-              if (created.status === "REUSED") {
-                uploadStatus.textContent = "已复用并发布文件。";
-                if (currentDirectoryID) await loadDirectory(currentDirectoryID);
-              } else if (created.multipart_plan) {
-                uploadStatus.textContent = "已取得 Multipart 分片计划。";
-              }
-            })));
-        } else if (["UPLOAD_CANCEL_PENDING", "CANCELLING"].includes(intent.status)) {
-          const pending = intent.status === "UPLOAD_CANCEL_PENDING";
-          summary.textContent += (pending ? " · 取消请求待确认" : " · 取消中") + " · 任务 " + intent.task_id;
-          const actions = document.createElement("div");
-          actions.className = "upload-actions";
-          actions.append(uploadActionButton("查看取消结果", () =>
-            runUploadAction("CheckUploadCancellation", intent.id, "正在查询取消结果…", "", showUploadCancellation)));
-          if (pending) actions.append(cancelUploadButton(intent.id, "重试取消"));
-          row.append(actions);
-        } else if (intent.status === "CREATED") {
-          summary.textContent += " · 待发送正文 · 任务 " + intent.task_id;
-          const actions = document.createElement("div");
-          actions.className = "upload-actions";
-          actions.append(uploadActionButton("发送正文", () =>
-            runUploadAction("SendContent", intent.id, "正在发送正文…", "正文已接收，等待查看校验结果。")),
-            uploadActionButton("查看校验结果", () => checkUploadStatus(intent.id)),
-            cancelUploadButton(intent.id));
-          row.append(actions);
-        } else if (intent.multipart_plan && ["MULTIPART_COMPLETION_PENDING", "COMPLETING", "VERIFYING"].includes(intent.status)) {
-          const phase = {
-            MULTIPART_COMPLETION_PENDING: "完成请求待确认",
-            COMPLETING: "正在合并分片",
-            VERIFYING: "正在校验文件"
-          }[intent.status];
-          summary.textContent += " · " + phase + " · 任务 " + intent.task_id;
-          row.append(uploadActionButton("查看发布结果", () =>
-            runUploadAction("CheckMultipartStatus", intent.id, "正在查询发布结果…", "", showUploadPublication)),
-            cancelUploadButton(intent.id));
-        } else if (intent.status === "VERIFYING") {
-          summary.textContent += " · 正文已接收 · 待查看校验结果 · 任务 " + intent.task_id;
-          row.append(uploadActionButton("查看校验结果", () => checkUploadStatus(intent.id)),
-            cancelUploadButton(intent.id));
-        } else if (intent.status === "MULTIPART_CREATED") {
-          const plan = intent.multipart_plan;
-          summary.textContent += " · 已取得分片计划 · 任务 " + intent.task_id +
-            " · " + plan.part_count + " 片 · 标准片长 " + plan.part_size_bytes +
-            " B · 末片偏移 " + plan.last_part_offset_bytes + " B · 末片大小 " + plan.last_part_size_bytes +
-            " B · 已确认 " + plan.confirmed_parts + " / " + plan.part_count + " 片";
-          const actions = document.createElement("div");
-          actions.className = "upload-actions";
-          if (plan.pause_id) {
-            summary.textContent += " · 已暂停";
-            actions.append(uploadActionButton("继续上传", () =>
-              runMultipartSend("ContinueMultipart", intent, "正在复核源文件并继续上传…", "全部分片已确认。")));
-          } else {
-            if (plan.confirmed_parts === 0) {
-              actions.append(uploadActionButton("上传第一片", () =>
-                runMultipartSend("SendFirstPart", intent, "正在上传第一片…", "第一片已确认。")));
-            }
-            if (plan.confirmed_parts === plan.part_count && intent.confirmed_bytes === intent.size_bytes) {
-              actions.append(uploadActionButton("提交完成回执", () =>
-                runUploadAction("CompleteMultipart", intent.id, "正在提交完成回执…", "", showUploadPublication)));
-            }
-            actions.append(uploadActionButton("核对并续传", () =>
-              runMultipartSend("SendRemainingParts", intent, "正在核对并续传分片…", "全部分片已确认。")));
-          }
-          const pauseButton = uploadActionButton("暂停上传", () => requestMultipartPause(intent.id));
+        const summary = document.createElement("div");
+        const name = document.createElement("strong");
+        const details = document.createElement("span");
+        const actions = document.createElement("div");
+        summary.className = "file-summary";
+        actions.className = "upload-actions";
+        name.textContent = intent.result_name || intent.name;
+        const paused = Boolean(intent.multipart_plan?.pause_id);
+        const hasProgress = Number(intent.confirmed_bytes) > 0;
+        const percent = Math.floor(100 * Number(intent.confirmed_bytes) / Number(intent.size_bytes));
+        const canUpload = ["PENDING_CREATE", "PENDING_REUSE", "REUSE_PENDING", "CREATED", "MULTIPART_CREATED"].includes(intent.status);
+        let status = uploadStates[intent.status] || "状态待确认";
+        if (canUpload) {
+          if (paused) status = "已暂停";
+          else if (intent.id === activeUploadID) status = "正在上传";
+          else if (hasProgress) status = "可继续上传";
+          if (hasProgress || paused) status += " · " + (hasProgress ? percent : 0) + "%";
+          actions.append(uploadActionButton(paused || hasProgress ? "继续上传" : "上传", () => startUpload(intent)));
+        }
+        if (intent.status === "MULTIPART_CREATED") {
+          const pauseButton = uploadActionButton("暂停", () => requestMultipartPause(intent.id));
           pauseButton.dataset.pauseIntent = intent.id;
           pauseButton.hidden = true;
-          actions.append(pauseButton, cancelUploadButton(intent.id));
-          row.append(actions);
-        } else if (intent.status === "REUSED") {
-          summary.textContent += " · 已复用并发布 · 条目 " + intent.result_entry_id;
-          if (intent.result_name !== intent.name) summary.textContent += " · " + intent.result_name;
-        } else if (intent.status === "COMPLETED") {
-          summary.textContent += " · 已发布 · 任务 " + intent.task_id + " · 条目 " + intent.result_entry_id;
-          row.append(uploadActionButton("打开目标目录", async () => {
+          actions.append(pauseButton);
+        }
+        if (["CREATED", "MULTIPART_CREATED", "VERIFYING", "COMPLETING", "MULTIPART_COMPLETION_PENDING", "UPLOAD_CANCEL_PENDING"].includes(intent.status)) {
+          actions.append(uploadActionButton(intent.status === "UPLOAD_CANCEL_PENDING" ? "重试取消" : "取消上传", () => cancelUpload(intent.id)));
+        }
+        if (["COMPLETED", "REUSED"].includes(intent.status)) {
+          actions.append(uploadActionButton("打开所在目录", async () => {
             await navigateTo(intent.parent_id);
             entryRows.get(intent.result_entry_id)?.querySelector("button")?.focus();
           }));
-        } else {
-          const outcome = { FAILED: "上传失败", CANCELLED: "已取消", EXPIRED: "任务已过期" }[intent.status];
-          summary.textContent += " · " + outcome + " · 任务 " + intent.task_id;
-          if (intent.error_message) summary.textContent += " · " + intent.error_message;
-          if (intent.error_code) summary.textContent += "（" + intent.error_code + "）";
         }
-        if (intent.status !== "REUSED") {
-          summary.textContent += " · 已确认 " + intent.confirmed_bytes + " / " + intent.size_bytes + " B";
+        if (publicationMethod(intent)) pendingPublications.set(intent.id, intent);
+        details.textContent = formatSize(intent.size_bytes) + " · " + status;
+        summary.append(name, details);
+        if (intent.status === "FAILED" && intent.error_message) {
+          const error = document.createElement("span");
+          error.textContent = intent.error_message;
+          summary.append(error);
         }
+        row.append(summary, actions);
         uploadItems.append(row);
       }
-      uploadStatus.textContent = result.items.length ? "" : "暂无上传记录。";
+      if (!result.items.length) uploadStatus.textContent = "暂无上传记录。";
+      updateUploadButtons();
+      schedulePublicationCheck();
       return true;
     }
 
@@ -358,11 +342,6 @@
       button.disabled = checkConnection.disabled;
       button.addEventListener("click", action);
       return button;
-    }
-
-    function cancelUploadButton(intentID, label = "取消上传") {
-      return uploadActionButton(label, () =>
-        runUploadAction("CancelUpload", intentID, "正在提交取消请求…", "", showUploadCancellation));
     }
 
     async function loadUploadIntents() {
@@ -377,15 +356,10 @@
     function requestMultipartPause(intentID) {
       const transfer = activeMultipartSend;
       if (transfer?.intentID !== intentID || transfer.pauseRequest) return;
-
-      // 1. 通过独立调用保存暂停请求，正在上传的调用仍负责本批回执。
-      uploadStatus.textContent = "正在请求暂停…";
+      // 让当前批次保存回执，再停止派发后续分片。
+      uploadStatus.textContent = "正在暂停…";
       transfer.pauseRequest = Call.ByName("main.UploadIntents.PauseMultipart", intentID).then(result => {
-        if (result.loginRequired) {
-          showSignedOut(result.loginRequired);
-        } else {
-          uploadStatus.textContent = "正在暂停，等待本批分片收尾…";
-        }
+        if (result.loginRequired) showSignedOut(result.loginRequired);
       }).catch(error => {
         transfer.pauseRequest = null;
         uploadStatus.textContent = error.message || "暂停未确认，请重试";
@@ -394,109 +368,146 @@
       updateUploadButtons();
     }
 
-    async function runMultipartSend(method, intent, progress, success) {
-      if (checkConnection.disabled) return;
-      const transfer = { intentID: intent.id, pauseRequest: null };
-      const args = method === "ContinueMultipart" ? [intent.id, intent.multipart_plan.pause_id] : [intent.id];
-      activeMultipartSend = transfer;
-      setBusy(true);
-      uploadStatus.textContent = progress;
-      try {
-        const result = await Call.ByName("main.UploadIntents." + method, ...args).finally(async () => {
-          activeMultipartSend = null;
-          updateUploadButtons();
-          await transfer.pauseRequest;
-        });
-        if (!signedIn) return;
+    async function uploadStep(method, intent, ...args) {
+      const result = await Call.ByName("main.UploadIntents." + method, intent.id, ...args);
+      if (!signedIn || !renderUploadIntents(result)) return null;
+      return result.items.find(item => item.id === intent.id);
+    }
 
-        // 2. 两个调用都收尾后再刷新，确保显示本批最终回执和已保存的暂停状态。
-        const latest = transfer.pauseRequest && !result.loginRequired
-          ? await Call.ByName("main.UploadIntents.List") : result;
-        if (renderUploadIntents(latest)) {
-          const saved = latest.items.find(item => item.id === intent.id);
-          uploadStatus.textContent = saved?.multipart_plan?.pause_id ? "已暂停，可稍后继续上传。" : success;
-        }
-      } catch (error) {
-        await loadUploadIntents();
-        if (signedIn) uploadStatus.textContent = error.message || "分片未确认，请重试同一条记录";
+    async function sendMultipart(intent) {
+      const pauseID = intent.multipart_plan.pause_id;
+      const transfer = { intentID: intent.id, pauseRequest: null };
+      activeMultipartSend = transfer;
+      updateUploadButtons();
+      try {
+        const result = await uploadStep(pauseID ? "ContinueMultipart" : "SendRemainingParts", intent, ...(pauseID ? [pauseID] : []));
+        if (!transfer.pauseRequest || !signedIn) return result;
+        await transfer.pauseRequest;
+        if (!signedIn) return null;
+        const latest = await Call.ByName("main.UploadIntents.List");
+        if (!renderUploadIntents(latest)) return null;
+        return latest.items.find(item => item.id === intent.id);
       } finally {
         activeMultipartSend = null;
-        setBusy(false);
+        updateUploadButtons();
       }
     }
 
-    async function runUploadAction(method, intentID, progress, success, afterAction) {
-      if (checkConnection.disabled) return;
-      setBusy(true);
-      uploadStatus.textContent = progress;
-      try {
-        const result = await Call.ByName("main.UploadIntents." + method, intentID);
-        if (renderUploadIntents(result)) {
-          uploadStatus.textContent = success;
-          if (afterAction) await afterAction(result.items.find(item => item.id === intentID));
+    async function runUpload(intent) {
+      // 1. 接上原记录。新任务先创建，已有记录可从正文或分片阶段继续。
+      if (["PENDING_CREATE", "PENDING_REUSE", "REUSE_PENDING"].includes(intent.status)) {
+        intent = await uploadStep("Submit", intent);
+      }
+      if (intent?.status === "CREATED") {
+        intent = await uploadStep("SendContent", intent);
+      } else if (intent?.status === "MULTIPART_CREATED") {
+        // 2. 核对并补传缺失部分。已暂停时等用户再次点击，全部确认后提交完成。
+        intent = await sendMultipart(intent);
+        if (intent?.status === "MULTIPART_CREATED" && !intent.multipart_plan.pause_id &&
+            intent.multipart_plan.confirmed_parts === intent.multipart_plan.part_count) {
+          intent = await uploadStep("CompleteMultipart", intent);
         }
-      } catch (error) {
-        if (["Submit", "CompleteMultipart", "CancelUpload"].includes(method)) await loadUploadIntents();
-        if (signedIn) uploadStatus.textContent = error.message || "上传操作未确认，请重试同一条记录";
-      } finally {
-        setBusy(false);
       }
+      // 3. 完成时刷新相应目录，待校验的任务交给查询调度器。
+      if (intent) await showUploadOutcome(intent);
     }
 
-    function checkUploadStatus(intentID) {
-      return runUploadAction("CheckStatus", intentID, "正在查询校验结果…", "", showUploadPublication);
-    }
-
-    async function showUploadPublication(intent) {
-      // 只在确认发布后重新读取当前目录，沿用原位置及续页失效规则。
-      if (intent.status === "COMPLETED") {
-        uploadStatus.textContent = "文件已发布。";
-        if (currentDirectoryID) await loadDirectory(currentDirectoryID);
-      } else if (intent.status === "CANCELLING") {
-        await showUploadCancellation(intent);
-      } else if (intent.status === "MULTIPART_CREATED") {
-        uploadStatus.textContent = "任务尚可上传，可以核对分片或提交完成回执。";
-      } else if (["VERIFYING", "CREATED", "COMPLETING", "MULTIPART_COMPLETION_PENDING"].includes(intent.status)) {
-        uploadStatus.textContent = "发布结果尚未确认，可以再次查看。";
-      }
-    }
-
-    async function showUploadCancellation(intent) {
-      // 用服务端确认的阶段更新提示，发布先完成时仍显示目录入口。
-      switch (intent.status) {
-        case "COMPLETED":
-          await showUploadPublication(intent);
-          break;
-        case "CANCELLED":
-          uploadStatus.textContent = "上传已取消。";
-          break;
-        case "CANCELLING":
-          uploadStatus.textContent = "取消已受理，可再次查看结果。";
-          break;
-        case "UPLOAD_CANCEL_PENDING":
-          uploadStatus.textContent = "取消尚未确认，可再次查询或重试取消。";
-          break;
-      }
-    }
-
-    saveUploadIntent.addEventListener("click", async () => {
-      if (saveUploadIntent.disabled) return;
+    async function startUpload(intent) {
+      if (checkConnection.disabled || !signedIn) return;
+      activeUploadID = intent?.id || "";
       setBusy(true);
-      chooseFile.disabled = true;
-      uploadStatus.textContent = "正在保存…";
+      uploadStatus.textContent = "正在上传…";
       try {
-        const result = await Call.ByName("main.UploadIntents.Save", currentDirectoryID, selectionKey);
-        if (renderUploadIntents(result)) {
+        if (!intent) {
+          // 先用本地创建键保存。同一次选择重试时仍取得原记录。
+          const result = await Call.ByName("main.UploadIntents.Save", currentDirectoryID, selectionKey);
+          if (!signedIn || result.loginRequired) {
+            if (result.loginRequired) showSignedOut(result.loginRequired);
+            return;
+          }
+          intent = result.items.find(item => item.id === result.savedIntentID);
+          if (!intent) throw new Error("无法读取已保存的上传记录，请重试");
+          activeUploadID = intent.id;
+          renderUploadIntents(result);
           selectionKey = "";
-          uploadStatus.textContent = "已保存到本机。";
+          fileSelection.textContent = "";
         }
+        await runUpload(intent);
       } catch (error) {
-        uploadStatus.textContent = error.message || "保存失败，请重试";
+        activeUploadID = "";
+        await loadUploadIntents();
+        if (signedIn) uploadStatus.textContent = error.message || "上传尚未完成，可从队列继续";
       } finally {
-        chooseFile.disabled = false;
+        activeUploadID = "";
         setBusy(false);
       }
-    });
+    }
+
+    async function showUploadOutcome(intent) {
+      if (["COMPLETED", "REUSED"].includes(intent.status)) {
+        uploadStatus.textContent = "已上传「" + (intent.result_name || intent.name) + "」。";
+        if (currentDirectoryID === intent.parent_id) {
+          await loadDirectory(currentDirectoryID, { preserveRows: true, preserveDownload: true });
+        }
+      } else if (intent.multipart_plan?.pause_id) {
+        uploadStatus.textContent = "已暂停，可稍后继续。";
+      } else {
+        uploadStatus.textContent = uploadStates[intent.status] || "";
+      }
+    }
+
+    function schedulePublicationCheck(delay = 1200) {
+      if (publicationTimer !== null || !signedIn || pendingPublications.size === 0) return;
+      publicationTimer = setTimeout(checkPendingPublications, delay);
+    }
+
+    async function checkPendingPublications() {
+      publicationTimer = null;
+      if (!signedIn || !pendingPublications.size) return;
+      if (checkConnection.disabled || document.querySelector("dialog[open]")) {
+        schedulePublicationCheck();
+        return;
+      }
+      // 只查询现有任务。重启后仍会检查已提交的结果，不会自动发送文件。
+      setBusy(true);
+      let delay = 1200;
+      try {
+        for (const [intentID, previous] of [...pendingPublications]) {
+          const intent = pendingPublications.get(intentID);
+          if (!intent || !signedIn) continue;
+          try {
+            const latest = await uploadStep(publicationMethod(intent), intent);
+            if (latest && latest.status !== previous.status) await showUploadOutcome(latest);
+          } catch {
+            delay = 5000;
+          }
+        }
+        if (signedIn && delay === 5000) uploadStatus.textContent = "暂未取得上传结果，将自动重试。";
+      } finally {
+        // 渲染新记录时可能已经排了下一次查询，统一在这里按本次结果重排。
+        clearTimeout(publicationTimer);
+        publicationTimer = null;
+        setBusy(false);
+        schedulePublicationCheck(delay);
+      }
+    }
+
+    async function cancelUpload(intentID) {
+      if (checkConnection.disabled || !signedIn) return;
+      setBusy(true);
+      uploadStatus.textContent = "正在取消…";
+      try {
+        const intent = await uploadStep("CancelUpload", { id: intentID });
+        if (intent) await showUploadOutcome(intent);
+      } catch (error) {
+        await loadUploadIntents();
+        if (signedIn) uploadStatus.textContent = error.message || "取消尚未确认，可重试";
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    saveUploadIntent.addEventListener("click", () => startUpload(null));
 
     function directoryButton(label, id) {
       const button = document.createElement("button");
@@ -512,8 +523,8 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = "download-action";
-      button.textContent = "获取下载授权";
-      button.setAttribute("aria-label", "获取下载授权 · " + item.name);
+      button.textContent = "下载";
+      button.setAttribute("aria-label", "下载 · " + item.name);
       button.addEventListener("click", () => authorizeDownload(item));
       return button;
     }
@@ -585,20 +596,16 @@
           showSignedOut(grant.loginRequired);
           return;
         }
-        // 2. 显示这一份授权的对象与内容身份。
-        downloadStatus.textContent = [
-          "已取得下载授权 · " + item.name + " · 修订 " + grant.revision,
-          "对象 ID " + grant.object_id + " · 大小 " + grant.size_bytes + " B",
-          "SHA-256 " + grant.sha256
-        ].join("\n");
+        // 2. 显示文件和已存在的下载进度，授权及内容校验信息保留在内部。
+        downloadStatus.textContent = item.name + " · " + formatSize(grant.size_bytes);
         if (grant.confirmed_bytes > 0) {
-          downloadStatus.textContent += "\n本机已确认 " + grant.confirmed_bytes + " / " + grant.size_bytes + " B";
+          downloadStatus.textContent += "\n已下载 " + formatSize(grant.confirmed_bytes) + " / " + formatSize(grant.size_bytes);
         }
         if (grant.failure_message) {
           downloadStatus.textContent += "\n上次暂停 · " + grant.failure_message;
         }
         selectedDownload = {item, objectID: grant.object_id};
-        stageDownload.textContent = grant.confirmed_bytes > 0 ? "继续下载" : "下载到临时文件";
+        stageDownload.textContent = grant.confirmed_bytes > 0 ? "继续下载" : "开始下载";
         stageDownload.hidden = false;
       } catch (error) {
         if (signedIn) downloadStatus.textContent = error.message || "获取下载授权失败，请重试";
@@ -623,11 +630,7 @@
         // 2. Go 确认大小和摘要后才显示可保存。
         stageDownload.hidden = true;
         saveDownload.hidden = false;
-        downloadStatus.textContent = [
-          "已校验，可以保存 · " + item.name + " · 修订 " + result.revision,
-          "对象 ID " + result.object_id + " · 大小 " + result.size_bytes + " B",
-          "SHA-256 " + result.sha256
-        ].join("\n");
+        downloadStatus.textContent = "下载完成，可以保存 · " + item.name + " · " + formatSize(result.size_bytes);
       } catch (error) {
         if (signedIn) {
           downloadStatus.textContent = error.message || "下载未完成，请重试";
@@ -688,7 +691,7 @@
         const name = isDirectory ? directoryButton(item.name, item.id) : document.createElement("span");
         const details = document.createElement("span");
         name.textContent = item.name;
-        details.textContent = isDirectory ? "文件夹" : "文件 · " + item.size_bytes + " B";
+        details.textContent = isDirectory ? "文件夹" : formatSize(item.size_bytes);
         row.append(name, details);
         if (!isDirectory) {
           const actions = document.createElement("div");
@@ -715,10 +718,10 @@
       }
     }
 
-    async function loadDirectory(targetID, { preserveRows = false } = {}) {
+    async function loadDirectory(targetID, { preserveRows = false, preserveDownload = false } = {}) {
       // 导航和刷新都让上一次续页失效，即使之后回到同一个目录。
       pendingPage = null;
-      clearDownloadSelection();
+      if (!preserveDownload) clearDownloadSelection();
       directoryStatus.textContent = "正在读取目录…";
       if (targetID === currentDirectoryID && !preserveRows) clearDirectoryItems();
       try {
