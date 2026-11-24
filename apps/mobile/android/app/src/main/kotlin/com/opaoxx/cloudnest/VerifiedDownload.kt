@@ -6,85 +6,144 @@ import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
+import java.io.InterruptedIOException
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URI
-import java.util.UUID
+import java.net.URL
 
 internal class DownloadFailure(val code: String) : IOException()
 
-internal data class StagedDownload(val file: File, val summary: SourceSummary)
+internal data class StagedDownload(val checkpoint: DownloadCheckpoint, val summary: SourceSummary)
 
-private val downloadPrefix = "cloudnest-download-${UUID.randomUUID()}-"
-private val downloadFilePattern = Regex("cloudnest-download-[0-9a-f-]{36}-[0-9]+\\.part")
+private const val DOWNLOAD_CHECKPOINT_INTERVAL = 1024L * 1024
+private val legacyDownloadPattern = Regex("cloudnest-download-[0-9a-f-]{36}-[0-9]+\\.part")
 
-internal class VerifiedDownload(private val cache: File, private val resolver: ContentResolver) {
-    fun stage(signedUrl: String, expected: SourceSummary): StagedDownload {
-        // 1. 直接访问原签名地址，关闭跳转，不带 API 的访问令牌。
+internal class VerifiedDownload(
+    private val directory: File,
+    private val legacyCache: File,
+    private val resolver: ContentResolver,
+) {
+    fun stage(signedUrl: String, identity: DownloadIdentity): StagedDownload {
         val url = URI(signedUrl).toURL()
         if (url.protocol !in setOf("http", "https") || url.host.isEmpty() ||
             url.userInfo != null || url.ref != null
         ) throw DownloadFailure("download_network")
 
-        pruneOldDownloads()
-        checkSpace(expected.sizeBytes)
-        val target = try {
-            File.createTempFile(downloadPrefix, ".part", cache)
-        } catch (failure: IOException) {
-            checkSpace(1)
-            throw failure
-        }
+        val expected = identity.source
+        val checkpoint = DownloadCheckpoint.open(directory, identity)
         var complete = false
+        var discard = false
         try {
-            val connection = url.openConnection() as HttpURLConnection
-            try {
-                connection.instanceFollowRedirects = false
-                connection.connectTimeout = 10_000
-                connection.readTimeout = 20_000
-                connection.useCaches = false
-                connection.setRequestProperty("Accept-Encoding", "identity")
-                if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                    throw DownloadFailure("download_network")
+            legacyCache.listFiles()?.forEach { file ->
+                if (file.isFile && legacyDownloadPattern.matches(file.name)) file.delete()
+            }
+            RandomAccessFile(checkpoint.file, "rw").use { output ->
+                // 1. 恢复同一对象已落盘的偏移，丢弃尚未确认的尾部。
+                checkpoint.restore(output)
+                if (checkpoint.confirmed == 0L || checkpoint.confirmed < expected.sizeBytes) {
+                    receive(url, checkpoint, output, expected.sizeBytes)
                 }
-                val encoding = connection.contentEncoding
-                val length = connection.getHeaderField("Content-Length")
-                if (connection.getHeaderField("Content-Range") != null ||
-                    (encoding != null && !encoding.equals("identity", ignoreCase = true)) ||
-                    (length != null && length.toLongOrNull() != expected.sizeBytes)
-                ) throw DownloadFailure("download_integrity")
-
-                // 2. 流式写入私有临时文件，校验成功后才交给另存为。
-                val actual = connection.inputStream.use { input ->
-                    target.outputStream().use { output ->
-                        summarizeSource(input, expected.name) { buffer, count, before ->
-                            if (count.toLong() > expected.sizeBytes - before) {
-                                throw DownloadFailure("download_integrity")
-                            }
-                            checkSpace(count.toLong())
-                            output.write(buffer, 0, count)
-                        }
-                    }
-                }
-                if (!expected.matches(actual)) throw DownloadFailure("download_integrity")
-            } finally {
-                connection.disconnect()
+            }
+            // 3. 核对整文件大小和 SHA-256，交给系统另存为。
+            val actual = checkpoint.file.inputStream().use { summarizeSource(it, expected.name) }
+            if (!expected.matches(actual)) {
+                discard = true
+                throw DownloadFailure("download_integrity")
             }
             complete = true
-            return StagedDownload(target, expected)
+            return StagedDownload(checkpoint, expected)
         } catch (failure: IOException) {
-            if (failure !is DownloadFailure && cache.usableSpace == 0L) {
+            if (failure !is DownloadFailure && directory.usableSpace == 0L) {
                 throw DownloadFailure("download_space")
             }
             throw failure
         } finally {
-            if (!complete) target.delete()
+            if (!complete) checkpoint.release(discard)
         }
+    }
+
+    private fun receive(url: URL, checkpoint: DownloadCheckpoint, output: RandomAccessFile, size: Long) {
+        // 2. 检查存储返回的范围，边下载边保存断点。存储 GET 不携带业务令牌。
+        val requested = checkpoint.confirmed
+        val connection = url.openConnection() as HttpURLConnection
+        try {
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 20_000
+            connection.useCaches = false
+            connection.setRequestProperty("Accept-Encoding", "identity")
+            if (requested > 0) connection.setRequestProperty("Range", "bytes=$requested-")
+            val start = responseOffset(connection, requested, size)
+            if (start != requested) checkpoint.restart(output)
+            checkSpace(size - start)
+            connection.inputStream.use { input -> writeBody(input, checkpoint, output, start, size) }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun responseOffset(connection: HttpURLConnection, requested: Long, size: Long): Long {
+        val status = connection.responseCode
+        val ranges = connection.responseHeaders("Content-Range")
+        val start = when {
+            status == HttpURLConnection.HTTP_OK && ranges.isEmpty() -> 0L
+            status == HttpURLConnection.HTTP_PARTIAL && requested > 0 &&
+                ranges == listOf("bytes $requested-${size - 1}/$size") -> requested
+            status == HttpURLConnection.HTTP_OK || status == HttpURLConnection.HTTP_PARTIAL || status == 416 ->
+                throw DownloadFailure("download_range")
+            else -> throw DownloadFailure("download_network")
+        }
+        val lengths = connection.responseHeaders("Content-Length")
+        if (connection.responseHeaders("Content-Encoding").any { !it.equals("identity", ignoreCase = true) } ||
+            (lengths.isNotEmpty() && lengths.singleOrNull()?.toLongOrNull() != size - start)
+        ) throw DownloadFailure("download_range")
+        return start
+    }
+
+    private fun HttpURLConnection.responseHeaders(name: String): List<String> =
+        headerFields.entries.filter { it.key?.equals(name, ignoreCase = true) == true }.flatMap { it.value }
+
+    private fun writeBody(
+        input: InputStream, checkpoint: DownloadCheckpoint, output: RandomAccessFile, start: Long, size: Long,
+    ) {
+        val buffer = ByteArray(64 * 1024)
+        var offset = start
+        try {
+            while (offset < size) {
+                if (Thread.currentThread().isInterrupted) throw InterruptedIOException()
+                val length = minOf(buffer.size.toLong(), size - offset).toInt()
+                val count = readBodyChunk { input.read(buffer, 0, length) }
+                if (count <= 0) throw DownloadFailure("download_interrupted")
+                checkSpace(count.toLong())
+                output.write(buffer, 0, count)
+                offset += count
+                if (offset < size && offset - checkpoint.confirmed >= DOWNLOAD_CHECKPOINT_INTERVAL) {
+                    checkpoint.confirm(output, offset)
+                }
+            }
+            if (readBodyChunk { input.read() } != -1) throw DownloadFailure("download_integrity")
+            checkpoint.confirm(output, offset)
+        } catch (failure: DownloadFailure) {
+            if (failure.code == "download_interrupted" && offset > checkpoint.confirmed && offset < size) {
+                checkpoint.confirm(output, offset)
+            }
+            throw failure
+        }
+    }
+
+    private inline fun readBodyChunk(read: () -> Int): Int = try {
+        read()
+    } catch (_: IOException) {
+        throw DownloadFailure("download_interrupted")
     }
 
     fun save(download: StagedDownload, destination: Uri): String? {
         // 3. 只向系统新建的目标 URI 写入。出错时尝试回收空壳或残留。
         val expected = download.summary
         try {
-            download.file.inputStream().use { input ->
+            download.checkpoint.file.inputStream().use { input ->
                 val output = resolver.openOutputStream(destination, "wt")
                     ?: throw IOException("No output stream")
                 output.use {
@@ -110,14 +169,6 @@ internal class VerifiedDownload(private val cache: File, private val resolver: C
     }
 
     private fun checkSpace(bytes: Long) {
-        if (cache.usableSpace < bytes) throw DownloadFailure("download_space")
-    }
-
-    private fun pruneOldDownloads() {
-        cache.listFiles()?.forEach { file ->
-            if (file.isFile && downloadFilePattern.matches(file.name) && !file.name.startsWith(downloadPrefix)) {
-                file.delete()
-            }
-        }
+        if (directory.usableSpace < bytes) throw DownloadFailure("download_space")
     }
 }

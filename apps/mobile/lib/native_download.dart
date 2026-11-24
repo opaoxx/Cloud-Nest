@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import 'account_owner.dart';
 import 'native_directory.dart';
 import 'native_login.dart';
 import 'native_storage_url.dart';
@@ -9,7 +10,13 @@ import 'native_storage_url.dart';
 const _downloads = MethodChannel('cloudnest/android_download');
 final _digestPattern = RegExp(r'^[0-9a-f]{64}$');
 
-typedef DownloadGrant = ({String signedUrl, int sizeBytes, String sha256});
+typedef DownloadGrant = ({
+  String signedUrl,
+  String objectId,
+  String revision,
+  int sizeBytes,
+  String sha256,
+});
 
 Future<DownloadGrant> createDownloadGrant(
   NativeSession session,
@@ -58,13 +65,21 @@ Future<DownloadGrant> createDownloadGrant(
     if (expiresAt != null &&
         expiresAt.isAfter(DateTime.now()) &&
         parseStorageUrl(raw, session.address) != null) {
-      return (signedUrl: raw, sizeBytes: size, sha256: sha);
+      return (
+        signedUrl: raw,
+        objectId: objectId,
+        revision: revision,
+        sizeBytes: size,
+        sha256: sha,
+      );
     }
   }
   throw const AccountFailure('下载授权无效或已过期，请重新下载。');
 }
 
 Future<String?> saveGrantedDownload(
+  AccountOwner owner,
+  String entryId,
   DownloadGrant grant,
   String suggestedName,
 ) async {
@@ -74,6 +89,11 @@ Future<String?> saveGrantedDownload(
       'downloadAndSave',
       {
         'url': grant.signedUrl,
+        'server': owner.server,
+        'userId': owner.userId,
+        'entryId': entryId,
+        'objectId': grant.objectId,
+        'revision': grant.revision,
         'name': suggestedName,
         'sizeBytes': grant.sizeBytes,
         'sha256': grant.sha256,
@@ -87,9 +107,11 @@ Future<String?> saveGrantedDownload(
   } on PlatformException catch (error) {
     throw AccountFailure(switch (error.code) {
       'download_integrity' => '下载校验失败，文件未保存。请重试。',
+      'download_interrupted' => '下载中断。再次点击下载可继续。',
+      'download_range' => '存储返回的正文范围有误，已保留原断点。请重试。',
       'download_space' => '手机可用空间不足，释放空间后请重试。',
       'download_picker_unavailable' => '无法打开系统另存为，请重试。',
-      'download_save_failed' => '无法写入所选位置，请重新下载并另选位置。',
+      'download_save_failed' => '无法写入所选位置，请重试并另选位置。',
       'download_save_incomplete' => '写入未完成，所选位置可能留有未写完的文件。',
       'download_closed' => '下载窗口已关闭，请重试。',
       'download_busy' => '正在处理另一个下载。',

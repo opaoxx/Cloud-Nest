@@ -7,16 +7,23 @@ import android.webkit.MimeTypeMap
 import androidx.activity.result.ActivityResult
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.util.concurrent.Executors
 
 internal class DownloadSave(
     private val activity: Activity,
     private val launch: (Intent) -> Unit,
 ) {
-    private data class Request(val result: MethodChannel.Result, var staged: StagedDownload? = null)
+    private data class Request(
+        val result: MethodChannel.Result,
+        var staged: StagedDownload? = null,
+        var saving: Boolean = false,
+    )
 
     private val worker = Executors.newSingleThreadExecutor()
-    private val files by lazy { VerifiedDownload(activity.cacheDir, activity.contentResolver) }
+    private val files by lazy {
+        VerifiedDownload(File(activity.noBackupFilesDir, "downloads"), activity.cacheDir, activity.contentResolver)
+    }
     private var active: Request? = null
 
     fun handle(call: MethodCall, result: MethodChannel.Result) {
@@ -32,8 +39,18 @@ internal class DownloadSave(
         val name = call.argument<String>("name")
         val size = call.argument<Number>("sizeBytes")?.toLong()
         val digest = call.argument<String>("sha256")
+        val identity = runCatching {
+            DownloadIdentity(
+                TaskOwner(requireNotNull(call.argument<String>("server")), requireNotNull(call.argument<String>("userId"))),
+                requireNotNull(call.argument<String>("entryId")),
+                requireNotNull(call.argument<String>("revision")),
+                requireNotNull(call.argument<String>("objectId")),
+                SourceSummary(requireNotNull(name), requireNotNull(size), requireNotNull(digest)),
+            )
+        }.getOrNull()
         if (url.isNullOrEmpty() || name.isNullOrBlank() || size == null ||
-            size !in 0..9_007_199_254_740_991L || digest == null || !digest.matches(Regex("[0-9a-f]{64}"))
+            size !in 0..9_007_199_254_740_991L || digest == null ||
+            !digest.matches(Regex("[0-9a-f]{64}")) || identity == null
         ) {
             result.error("download_network", null, null)
             return
@@ -44,14 +61,14 @@ internal class DownloadSave(
         // 下载和校验在工作线程中完成，系统选择器只接收已验证的文件。
         worker.execute {
             val staged = try {
-                files.stage(url, SourceSummary(name, size, digest))
+                files.stage(url, identity)
             } catch (failure: Exception) {
                 replyFailure(request, failure, "download_network")
                 return@execute
             }
             activity.runOnUiThread {
                 if (active !== request) {
-                    staged.file.delete()
+                    release(staged)
                     return@runOnUiThread
                 }
                 request.staged = staged
@@ -74,7 +91,7 @@ internal class DownloadSave(
         val request = active ?: return
         val staged = request.staged ?: return
         if (selection.resultCode != Activity.RESULT_OK) {
-            finish(request) { success(null) }
+            finish(request, discard = true) { success(null) }
             return
         }
         val uri = selection.data?.data
@@ -82,14 +99,24 @@ internal class DownloadSave(
             finish(request) { error("download_save_failed", null, null) }
             return
         }
+        request.saving = true
         worker.execute {
-            val name = try {
-                files.save(staged, uri)
-            } catch (failure: Exception) {
-                replyFailure(request, failure, "download_save_incomplete")
-                return@execute
+            val saved = runCatching { files.save(staged, uri) }
+            activity.runOnUiThread {
+                request.saving = false
+                if (active !== request) {
+                    release(staged, discard = saved.isSuccess)
+                } else {
+                    finish(request, discard = saved.isSuccess) {
+                        saved.fold(
+                            onSuccess = { name -> success(mapOf("name" to name)) },
+                            onFailure = { failure ->
+                                error((failure as? DownloadFailure)?.code ?: "download_save_incomplete", null, null)
+                            },
+                        )
+                    }
+                }
             }
-            activity.runOnUiThread { finish(request) { success(mapOf("name" to name)) } }
         }
     }
 
@@ -98,11 +125,16 @@ internal class DownloadSave(
         activity.runOnUiThread { finish(request) { error(code, null, null) } }
     }
 
-    private fun finish(request: Request, respond: MethodChannel.Result.() -> Unit) {
+    private fun finish(request: Request, discard: Boolean = false, respond: MethodChannel.Result.() -> Unit) {
         if (active !== request) return
         active = null
-        request.staged?.file?.delete()
+        if (!request.saving) request.staged?.let { release(it, discard) }
         request.result.respond()
+    }
+
+    private fun release(staged: StagedDownload, discard: Boolean = false) {
+        // 选择器取消或导出成功后回收断点，导出失败可复用已验文件。
+        runCatching { staged.checkpoint.release(discard) }
     }
 
     fun detach() {
@@ -111,6 +143,6 @@ internal class DownloadSave(
 
     fun close() {
         detach()
-        worker.shutdownNow()
+        worker.shutdown()
     }
 }

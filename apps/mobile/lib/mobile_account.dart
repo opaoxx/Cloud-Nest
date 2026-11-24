@@ -140,7 +140,12 @@ class MobileAccount {
       (session) => createDownloadGrant(session, entry),
     );
     _checkSession(epoch);
-    final actualName = await saveGrantedDownload(grant, entry.name);
+    final actualName = await saveGrantedDownload(
+      currentOwner,
+      entry.id,
+      grant,
+      entry.name,
+    );
     if (actualName == null) return null;
 
     // 2. 只有系统保存成功才记任务。记录失败时仍告知用户实际保存名称。
