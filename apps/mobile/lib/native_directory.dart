@@ -35,21 +35,31 @@ Future<DirectoryEntry> changeDirectoryFile(
   String parentId,
   String key, {
   String? name,
+  String? targetParentId,
 }) async {
   // 1. 用选中项的 ID、当前父目录和所见修订提交一次文件操作。
   if (entry.isFolder ||
       !isCloudNestId(entry.id) ||
       !isCloudNestId(entry.revision) ||
-      !isCloudNestId(parentId)) {
+      !isCloudNestId(parentId) ||
+      (targetParentId != null &&
+          (!isCloudNestId(targetParentId) ||
+              targetParentId == parentId ||
+              name != null))) {
     throw const AccountFailure('文件信息有误，请刷新目录后重试。');
   }
+  final trash = name == null && targetParentId == null;
   final path = '/api/v1/entries/${entry.id}';
   final reply = await requestAuthorizedJson(
     session.address,
     session.accessToken,
-    name == null ? '$path/trash' : path,
+    targetParentId != null ? '$path/move' : (trash ? '$path/trash' : path),
     method: name == null ? 'POST' : 'PATCH',
-    payload: {'expected_revision': entry.revision, 'name': ?name},
+    payload: {
+      'expected_revision': entry.revision,
+      'name': ?name,
+      'target_parent_id': ?targetParentId,
+    },
     creationKey: key,
     additionalJsonStatuses: const {HttpStatus.badRequest},
   );
@@ -58,8 +68,8 @@ Future<DirectoryEntry> changeDirectoryFile(
     status: HttpStatus.ok,
     body: {'data': {'entry': final Map<String, Object?> snapshot}},
   )) {
-    // 重命名返回文件详情，回收返回带删除时间的简要快照。
-    final matchesAction = name == null
+    // 移动和重命名返回文件详情，回收返回带删除时间的快照。
+    final matchesAction = trash
         ? snapshot['entry_type'] == 'FILE' && snapshot['deleted_at'] is String
         : snapshot['kind'] is String &&
               snapshot['kind'] != 'folder' &&
@@ -74,10 +84,10 @@ Future<DirectoryEntry> changeDirectoryFile(
         }
         when matchesAction &&
             id == entry.id &&
-            actualParent == parentId &&
+            actualParent == (targetParentId ?? parentId) &&
             actualName.isNotEmpty &&
             isCloudNestId(revision) &&
-            status == (name == null ? 'TRASHED' : 'ACTIVE')) {
+            status == (trash ? 'TRASHED' : 'ACTIVE')) {
       return (
         id: id,
         name: actualName,
@@ -97,7 +107,8 @@ Future<DirectoryEntry> changeDirectoryFile(
     _ => '',
   };
   throw AccountFailure(switch (code) {
-    'NAME_CONFLICT' => '当前目录已有同名文件，请换一个名称。',
+    'NAME_CONFLICT' =>
+      targetParentId == null ? '当前目录已有同名文件，请换一个名称。' : '目标文件夹已有同名文件，请更换位置。',
     'INVALID_NAME' => '文件名不符合服务端规则，请换一个名称。',
     'REVISION_CONFLICT' => '文件已发生变化，请刷新目录后重试。',
     _ => '服务端未确认文件操作，请刷新目录核对结果。',

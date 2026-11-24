@@ -107,6 +107,21 @@ class MobileAccount {
     );
   }
 
+  Future<DirectoryEntry> moveFile(
+    DirectoryEntry entry,
+    String parentId,
+    String targetId,
+    String key,
+  ) => _readForAccount(
+    (session) => changeDirectoryFile(
+      session,
+      entry,
+      parentId,
+      key,
+      targetParentId: targetId,
+    ),
+  );
+
   Future<Result> _readForAccount<Result>(
     Future<Result> Function(NativeSession) read,
   ) async {

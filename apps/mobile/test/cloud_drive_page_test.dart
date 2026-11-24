@@ -128,26 +128,55 @@ void main() {
       MaterialApp(home: CloudDrivePage(account: account)),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('重命名 notes.txt'));
-    await tester.pumpAndSettle();
+    await _fileAction(tester, 'notes.txt', '重命名');
     await tester.enterText(find.byType(TextFormField), '结果.txt');
     await tester.tap(find.text('保存名称'));
     await tester.pumpAndSettle();
     expect(find.text('结果.txt'), findsOneWidget);
     expect(account.actions, [('1', '结果.txt')]);
 
-    await tester.tap(find.byTooltip('删除 结果.txt'));
-    await tester.pumpAndSettle();
+    await _fileAction(tester, '结果.txt', '移入回收站');
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(account.actions, hasLength(1));
-    await tester.tap(find.byTooltip('删除 结果.txt'));
-    await tester.pumpAndSettle();
+    await _fileAction(tester, '结果.txt', '移入回收站');
     await tester.tap(find.widgetWithText(FilledButton, '移入回收站'));
     await tester.pumpAndSettle();
     expect(account.actions, [('1', '结果.txt'), ('2', null)]);
     expect(find.text('结果.txt'), findsNothing);
     expect(find.text('此目录为空'), findsOneWidget);
+  });
+
+  testWidgets('moves into a nested folder, preserving selection on conflict', (
+    tester,
+  ) async {
+    final account = _MoveAccount();
+    await tester.pumpWidget(
+      MaterialApp(home: CloudDrivePage(account: account)),
+    );
+    await tester.pumpAndSettle();
+    await _fileAction(tester, 'notes.txt', '移动');
+    final move = find.widgetWithText(FilledButton, '移动到此处');
+    expect(tester.widget<FilledButton>(move).onPressed, isNull);
+    await tester.tap(find.text('课程'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('本周'));
+    await tester.pumpAndSettle();
+    await tester.tap(move);
+    await tester.pumpAndSettle();
+    expect(find.text('目标文件夹已有同名文件，请更换位置。'), findsOneWidget);
+    expect(find.text('根目录 / 课程 / 本周'), findsOneWidget);
+    await tester.tap(move);
+    await tester.pumpAndSettle();
+    expect(account.keys, hasLength(2));
+    expect(account.keys.toSet(), hasLength(1));
+    expect(find.text('notes.txt'), findsNothing);
+    expect(find.text('已移动「notes.txt」。'), findsOneWidget);
+    await tester.tap(find.text('课程'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('本周'));
+    await tester.pumpAndSettle();
+    expect(find.text('notes.txt'), findsOneWidget);
   });
 
   testWidgets('saved parts and a checksum failure never publish the file', (
@@ -228,6 +257,73 @@ void main() {
     expect(find.text('上传成功。'), findsOneWidget);
     expect(find.text(source.name), findsOneWidget);
   });
+}
+
+Future<void> _fileAction(
+  WidgetTester tester,
+  String name,
+  String action,
+) async {
+  await tester.tap(find.byTooltip('更多操作 $name'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(action));
+  await tester.pumpAndSettle();
+}
+
+class _MoveAccount extends _DirectoryAccount {
+  final keys = <String>[];
+  DirectoryEntry? _updated;
+  static const _file = (
+    id: '81',
+    name: 'notes.txt',
+    isFolder: false,
+    sizeBytes: 14,
+    revision: '1',
+  );
+
+  @override
+  Future<DirectoryListing> listDirectory({
+    required String rootId,
+    required String parentId,
+    String? cursor,
+  }) async => (
+    breadcrumbs: [
+      (id: _rootId, name: ''),
+      if (parentId != _rootId) (id: '90', name: '课程'),
+      if (parentId == '91') (id: '91', name: '本周'),
+    ],
+    entries: [
+      if (parentId == _rootId) ...[
+        (id: '90', name: '课程', isFolder: true, sizeBytes: 0, revision: '1'),
+        if (_updated == null) _file,
+      ],
+      if (parentId == '90')
+        (id: '91', name: '本周', isFolder: true, sizeBytes: 0, revision: '1'),
+      if (parentId == '91') ?_updated,
+    ],
+    nextCursor: null,
+  );
+
+  @override
+  Future<DirectoryEntry> moveFile(
+    DirectoryEntry entry,
+    String parentId,
+    String targetId,
+    String key,
+  ) async {
+    expect(entry, _file);
+    expect(parentId, _rootId);
+    expect(targetId, '91');
+    keys.add(key);
+    if (keys.length == 1) throw const AccountFailure('目标文件夹已有同名文件，请更换位置。');
+    return _updated = (
+      id: entry.id,
+      name: entry.name,
+      isFolder: false,
+      sizeBytes: entry.sizeBytes,
+      revision: '2',
+    );
+  }
 }
 
 class _FileActionAccount extends _DirectoryAccount {

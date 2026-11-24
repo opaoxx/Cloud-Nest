@@ -6,6 +6,7 @@ import 'file_name_dialog.dart';
 import 'file_presentation.dart';
 import 'mobile_account.dart';
 import 'mobile_tasks_page.dart';
+import 'move_file_page.dart';
 import 'native_directory.dart';
 import 'native_document_selection.dart';
 import 'native_login.dart';
@@ -328,6 +329,34 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     if (mounted) await _load(directory);
   }
 
+  Future<void> _moveFile(DirectoryEntry entry) async {
+    final directory = _currentDirectory;
+    final root = _rootId;
+    if (directory == null || root == null || _blocked) return;
+    final moved = await Navigator.of(context).push<DirectoryEntry>(
+      MaterialPageRoute(
+        builder: (context) => MoveFilePage(
+          account: widget.account,
+          rootId: root,
+          sourceParentId: directory,
+          file: entry,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (widget.account.owner == null) {
+      widget.onSessionEnded?.call('会话已失效，请重新登录。');
+      return;
+    }
+    // 3. 只有收到服务端确认才移除源目录中的文件，再重新读取目录。
+    if (moved == null || _currentDirectory != directory) return;
+    setState(() {
+      _entries.removeWhere((listed) => listed.id == moved.id);
+      _transferNotice = '已移动「${moved.name}」。';
+    });
+    await _load(directory);
+  }
+
   Widget _pathBar() {
     final path = Row(
       children: [
@@ -396,19 +425,28 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
                       onPressed: _blocked ? null : () => _download(entry),
                       icon: const Icon(Icons.download_outlined),
                     ),
-                    IconButton(
-                      tooltip: '重命名 ${entry.name}',
-                      onPressed: _blocked
-                          ? null
-                          : () => _editFile(entry, rename: true),
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                    IconButton(
-                      tooltip: '删除 ${entry.name}',
-                      onPressed: _blocked
-                          ? null
-                          : () => _editFile(entry, rename: false),
-                      icon: const Icon(Icons.delete_outline),
+                    PopupMenuButton<_FileAction>(
+                      tooltip: '更多操作 ${entry.name}',
+                      enabled: !_blocked,
+                      onSelected: (action) => switch (action) {
+                        _FileAction.rename => _editFile(entry, rename: true),
+                        _FileAction.move => _moveFile(entry),
+                        _FileAction.trash => _editFile(entry, rename: false),
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: _FileAction.rename,
+                          child: Text('重命名'),
+                        ),
+                        PopupMenuItem(
+                          value: _FileAction.move,
+                          child: Text('移动'),
+                        ),
+                        PopupMenuItem(
+                          value: _FileAction.trash,
+                          child: Text('移入回收站'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -563,3 +601,5 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     );
   }
 }
+
+enum _FileAction { rename, move, trash }
