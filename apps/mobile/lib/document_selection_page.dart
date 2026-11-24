@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'cloud_drive_page.dart';
 import 'login_page.dart';
 import 'mobile_account.dart';
 import 'native_login.dart';
@@ -49,6 +50,15 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
 
   Future<void> _logout() => _runAccount(() async {
     _accountNotice = await _account.logout();
+  });
+
+  Future<void> _openCloudDrive() => _runAccount(() async {
+    final notice = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (context) => CloudDrivePage(account: _account),
+      ),
+    );
+    if (mounted) _accountNotice = notice;
   });
 
   Future<void> _runAccount(Future<void> Function() action) async {
@@ -192,6 +202,14 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 16),
                 child: Semantics(liveRegion: true, child: Text(accountNotice)),
+              ),
+            if (username != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton(
+                  onPressed: _accountBusy ? null : _openCloudDrive,
+                  child: const Text('浏览云盘'),
+                ),
               ),
             if (!_accountBusy && _documentScope != null) ...[
               Align(

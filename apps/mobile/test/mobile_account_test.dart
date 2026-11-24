@@ -87,6 +87,7 @@ void main() {
           await _reply(request, 200, {
             'data': {
               'user': {'username': 'root', 'id': '1'},
+              'root_entry_id': '42',
             },
           });
           if (requestNumber == 2) firstRetries.complete();
@@ -212,6 +213,7 @@ void main() {
               await _reply(request, 200, {
                 'data': {
                   'user': {'username': 'root', 'id': '1'},
+                  'root_entry_id': '42',
                 },
               });
             case '/api/v1/auth/logout':
@@ -272,6 +274,7 @@ void main() {
               await _reply(request, 200, {
                 'data': {
                   'user': {'username': 'root', 'id': '17'},
+                  'root_entry_id': '42',
                 },
               });
             default:

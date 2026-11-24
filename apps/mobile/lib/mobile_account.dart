@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
+import 'native_directory.dart';
 import 'native_login.dart';
 
 const _credentials = MethodChannel('cloudnest/android_session');
@@ -53,37 +54,56 @@ class MobileAccount {
     if (saved != null) await _rotateOnce(saved);
   }
 
-  Future<String> readProfile() async {
+  Future<String> readProfile() async => (await currentProfile()).username;
+
+  Future<CurrentProfile> currentProfile() => _readForAccount((session) async {
+    final profile = await readCurrentProfile(
+      session.address,
+      session.accessToken,
+    );
+    if (profile.userId != session.userId ||
+        profile.username != session.username) {
+      throw const AccountFailure('服务返回的资料与当前账号不一致。');
+    }
+    return profile;
+  });
+
+  Future<DirectoryListing> listDirectory({
+    required String rootId,
+    required String parentId,
+    String? cursor,
+  }) => _readForAccount(
+    (session) => readDirectoryListing(
+      session,
+      rootId: rootId,
+      parentId: parentId,
+      cursor: cursor,
+    ),
+  );
+
+  Future<Result> _readForAccount<Result>(
+    Future<Result> Function(NativeSession) read,
+  ) async {
     var session = _session;
     if (session == null || _signingOut) throw const ReauthenticationRequired();
     final epoch = _sessionEpoch;
     try {
       // 1. 每个调用可以先独立读取。只有明确的 TOKEN_EXPIRED 才尝试轮换。
-      CurrentProfile profile;
+      Result result;
       try {
-        profile = await readCurrentProfile(
-          session.address,
-          session.accessToken,
-        );
+        result = await read(session);
       } on AccessTokenExpired {
         _checkSession(epoch);
         session = await _refreshFor(session);
         // 2. 各调用用新访问令牌重试一次。
         _checkSession(epoch);
-        profile = await readCurrentProfile(
-          session.address,
-          session.accessToken,
-        );
+        result = await read(session);
       }
 
       _checkSession(epoch);
-      if (profile.userId != session.userId ||
-          profile.username != session.username) {
-        throw const AccountFailure('服务返回的资料与当前账号不一致。');
-      }
-      return profile.username;
+      return result;
     } on AccessTokenExpired {
-      throw const AccountFailure('访问令牌再次过期，请重新核对会话。');
+      throw const AccountFailure('访问令牌再次过期，请重试。');
     } on SessionRejected {
       // 3. 远端明确撤销了当前会话时，清除本机记录并回到登录入口。
       _checkSession(epoch);
@@ -93,7 +113,7 @@ class MobileAccount {
         await _write(null);
       }
       if (_session == null) throw const ReauthenticationRequired();
-      throw const AccountFailure('会话已更新，请重新核对。');
+      throw const AccountFailure('会话已更新，请重试。');
     }
   }
 
@@ -242,7 +262,7 @@ class MobileAccount {
           }
           when username.isNotEmpty && refreshToken.isNotEmpty) {
         final userId = body['user_id'];
-        if (userId != null && (userId is! String || !isUserId(userId))) {
+        if (userId != null && (userId is! String || !isCloudNestId(userId))) {
           throw const AccountFailure('本机账号标识无效。');
         }
         return (

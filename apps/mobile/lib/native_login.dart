@@ -9,9 +9,10 @@ import 'package:flutter/services.dart';
 const _installation = MethodChannel('cloudnest/android_installation');
 const _deadline = Duration(seconds: 10);
 final _usernamePattern = RegExp(r'^[a-z0-9_]{1,64}$');
-final _userIdPattern = RegExp(r'^[1-9][0-9]{0,19}$');
+final _serverIdPattern = RegExp(r'^[1-9][0-9]{0,19}$');
+final _maxServerId = BigInt.parse('18446744073709551615');
 typedef NativeTokens = ({String accessToken, String refreshToken});
-typedef CurrentProfile = ({String username, String userId});
+typedef CurrentProfile = ({String username, String userId, String rootEntryId});
 
 class NativeSession {
   const NativeSession({
@@ -109,7 +110,7 @@ Future<NativeSession> loginAndroid({
           },
         },
       }
-      when returnedUsername == username && isUserId(userId)) {
+      when returnedUsername == username && isCloudNestId(userId)) {
     final tokens = _readTokens(response.body);
     return NativeSession(
       address: base,
@@ -140,7 +141,8 @@ Uri parseServiceAddress(String address) {
   return base;
 }
 
-bool isUserId(String value) => _userIdPattern.hasMatch(value);
+bool isCloudNestId(String value) =>
+    _serverIdPattern.hasMatch(value) && BigInt.parse(value) <= _maxServerId;
 
 Future<NativeTokens> refreshAndroid(Uri address, String refreshToken) async {
   // 1. 原生刷新请求通过 JSON 提交当前凭证，不发送访问令牌。
@@ -185,13 +187,13 @@ Future<CurrentProfile> readCurrentProfile(
   Uri address,
   String accessToken,
 ) async {
-  final result = await _request(address, '/api/v1/me', token: accessToken);
-  _checkAuthorization(result);
+  final result = await readAuthorizedJson(address, accessToken, '/api/v1/me');
   if (result
       case (
         status: HttpStatus.ok,
         body: {
           'data': {
+            'root_entry_id': final String rootEntryId,
             'user': {
               'username': final String username,
               'id': final String userId,
@@ -199,10 +201,30 @@ Future<CurrentProfile> readCurrentProfile(
           },
         },
       )
-      when username.isNotEmpty && isUserId(userId)) {
-    return (username: username, userId: userId);
+      when username.isNotEmpty &&
+          isCloudNestId(userId) &&
+          isCloudNestId(rootEntryId)) {
+    return (username: username, userId: userId, rootEntryId: rootEntryId);
   }
   throw const AccountFailure('无法核对账号资料，请检查服务后重试。');
+}
+
+Future<({int status, Object? body})> readAuthorizedJson(
+  Uri address,
+  String accessToken,
+  String path, {
+  Map<String, String>? query,
+  int maxResponseBytes = 64 * 1024,
+}) async {
+  final result = await _request(
+    address,
+    path,
+    token: accessToken,
+    query: query,
+    maxResponseBytes: maxResponseBytes,
+  );
+  _checkAuthorization(result);
+  return result;
 }
 
 void _checkAuthorization(({int status, Object? body}) result) {
@@ -234,14 +256,17 @@ Future<({int status, Object? body})> _request(
   String path, {
   Map<String, String>? payload,
   String? token,
+  Map<String, String>? query,
+  int maxResponseBytes = 64 * 1024,
 }) async {
   final client = HttpClient()..connectionTimeout = _deadline;
   try {
     return await _send(
       client,
-      base.resolve(path),
+      base.replace(path: path, queryParameters: query),
       payload,
       token,
+      maxResponseBytes,
     ).timeout(_deadline);
   } on TimeoutException {
     throw const AccountFailure('请求超时，请检查网络后重试。');
@@ -259,6 +284,7 @@ Future<({int status, Object? body})> _send(
   Uri uri,
   Map<String, String>? payload,
   String? token,
+  int maxResponseBytes,
 ) async {
   final request = await client.openUrl(payload == null ? 'GET' : 'POST', uri);
   request.followRedirects = false;
@@ -277,7 +303,6 @@ Future<({int status, Object? body})> _send(
     return (status: status, body: null);
   }
 
-  const maxResponseBytes = 64 * 1024;
   final body = BytesBuilder(copy: false);
   await for (final chunk in response) {
     if (body.length + chunk.length > maxResponseBytes) {
