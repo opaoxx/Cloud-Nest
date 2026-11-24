@@ -4,7 +4,7 @@ CloudNest 是一套以个人电脑为数据中心的私有云盘。文件集中�
 
 后端使用 Go、Gin 和 GORM，Web 使用 React、TypeScript、Vite 和 Ant Design。MySQL 保存目录、权限和任务状态，MinIO 保存文件正文。
 
-[首版功能](#首版功能) · [第二版客户端](#第二版客户端) · [数据存储位置](#数据存储位置) · [快速开始](#快速开始) · [局域网访问](#局域网访问) · [API 概览](#api-概览) · [仓库结构](#仓库结构)
+[客户端登录与后端启停](#客户端登录与后端启停) · [第二版客户端](#第二版客户端) · [首版功能](#首版功能) · [数据存储位置](#数据存储位置) · [快速开始](#快速开始) · [局域网访问](#局域网访问) · [API 概览](#api-概览) · [仓库结构](#仓库结构)
 
 ## 首版功能
 
@@ -20,16 +20,22 @@ CloudNest 是一套以个人电脑为数据中心的私有云盘。文件集中�
 
 ## 第二版客户端
 
-2026-11-25 归档，Git 标签为 `v2.0.0-preview.2`。Windows、Pura 70 Pro+ 和小米平板可在同一局域网按账号浏览目录、手动上传和下载文件。两端可重命名、移动和回收文件；大文件传输提供暂停和恢复入口。
+第二版试用版本为 `2.0.0-preview.2`，于 2026-11-25 归档。电脑运行后端并集中保存文件。Android 手机或平板上传文件后，在 Windows 客户端打开同一目录，点击「刷新目录」即可看到已发布的文件。
+
+| 操作 | Windows 桌面端 | Android 手机与平板 |
+| --- | --- | --- |
+| 浏览与整理 | 浏览目录、刷新列表，对文件改名、移动或移入回收站 | 登录后进入云盘，从文件菜单改名、选择目标目录移动或移入回收站 |
+| 手动传输 | 选择本机文件上传，查看分片上传进度，暂停后可继续。下载完成后可选择「另存为」 | 在当前目录选择本地文件并确认上传名称，通过任务记录查看状态、继续暂停的分片上传，下载时通过系统文件选择器保存 |
+| 界面与偏好 | 在工作区切换浅色、深色或跟随系统，重开应用时恢复偏好 | 从云盘菜单进入「界面主题」，选择浅色、深色或跟随系统 |
 
 | 交付文件 | 大小（B） | SHA-256 |
 | --- | ---: | --- |
 | `CloudNest-2.0.0-preview.2-windows-x64-setup.exe` | 13,687,652 | `ea40f1dc0572e188353baa1c5511dbaa0f229c9aae23c60b2ce9c5693fabd442` |
 | `CloudNest-android-debug.apk` | 182,544,227 | `c7f7d6e3e72e8d5a22015a8e934e8eef476ec207db3d92a534d17dd2b5bf22ea` |
 
-安装包和 `SHA256SUMS.txt` 位于本机 `output/second-edition`。Windows x64 试用安装包未签名，安装给当前用户，需有 WebView2 Evergreen Runtime。已有旧试用安装时，先从托盘退出并卸载，再安装本版。Android APK 使用调试签名，包名为 `com.opaoxx.cloudnest`，最低 Android API 24，可覆盖同签名的旧试用包。连接方法见[局域网试用](#第二版-windows手机与平板试用)，构建入口见 [Windows 打包脚本](scripts/Build-WindowsPreview.ps1)和 [Android 构建说明](apps/mobile/README.md)。
+安装包和 `SHA256SUMS.txt` 位于本机 `output/second-edition`。Windows x64 试用安装包未签名，安装给当前用户，需有 WebView2 Evergreen Runtime。已有旧试用安装时，先从托盘退出并卸载，再安装本版。Android APK 使用调试签名，包名为 `com.opaoxx.cloudnest`，最低 Android API 24，可覆盖同签名的旧试用包。登录字段和脚本示例见[客户端登录与后端启停](#客户端登录与后端启停)，构建入口见 [Windows 打包脚本](scripts/Build-WindowsPreview.ps1)和 [Android 构建说明](apps/mobile/README.md)。
 
-验收提交为 `b165380`。Windows 与两台实体 Android 设备在真实 WLAN 完成定版包往返，两个设备各自回传的文件大小和 SHA-256 均一致。Windows 定版包暂停、退出和重开后恢复了同一上传任务，只补传缺失分片；该场景在隔离环境验证。Windows 安装脚本对应 `fd33b63`，Android 包对应 `bf5395c`。
+归档验收使用上表中的试用包。Windows 与两台实体 Android 设备在真实 WLAN 完成定版包往返，两个设备各自回传的文件大小和 SHA-256 均一致。Windows 定版包暂停、退出和重开后恢复了同一上传任务，只补传缺失分片；该场景在隔离环境验证。
 
 本版交付范围为手动传输与中断恢复。Web 上传上限为 16 MiB。Android 后台执行和另存位置受设备系统及文件提供方影响。桌面单向备份和浏览器大文件上传列在后续规划。
 
@@ -100,16 +106,22 @@ python scripts/verify_infra.py --service minio
 
 打开 Docker Desktop 并确认数据磁盘位置后，在仓库根目录运行 [一键启动脚本](scripts/Start-Infra.ps1)。脚本首次从 [示例配置](scripts/.env.example) 生成本地 `scripts/.env`，检查 Compose 配置、端口和子网，下载并校验固定版本的 MinIO 源码，构建镜像，再启动 MySQL、MinIO 和 Redis 并等待健康检查通过。第二条命令准备 `cloudnest` 私有桶并检查存储读写，API 和 Web 按后续步骤启动。
 
-**2. 应用数据库迁移并启动 API**
+**2. 初始化数据库和业务账号**
+
+```powershell
+go run ./cmd/database -database cloudnest -seed
+```
+
+首次按默认设置执行 `-seed` 会创建业务账号 **`root`**，密码也是 **`root`**。需要自定义密码时，可在首次执行前设置 `CLOUDNEST_ADMIN_PASSWORD`。已有账号继续使用原密码。
+
+**使用 Windows 或 Android 客户端**，接下来直接运行局域网启动脚本，登录地址会显示在终端。[客户端登录与后端启停](#客户端登录与后端启停)
+
+**仅在本机使用 Web**，可在终端前台运行 API。将下面的暂存路径换成实际的非系统盘目录，另开终端执行健康检查。
 
 ```powershell
 $env:CLOUDNEST_TEMP_DIR = 'F:\CloudNestData\uploads-temp'
-$env:CLOUDNEST_ADMIN_PASSWORD = '<替换为你的本地登录密码>'
-go run ./cmd/database -database cloudnest -seed
 go run ./cmd/server
 ```
-
-将示例中的 F 盘路径换成电脑上的非系统盘目录。`-seed` 首次创建业务账号 `root` 和根目录。已有业务账号沿用原密码。API 默认监听 `127.0.0.1:18081`，可在另一个终端检查就绪状态。
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:18081/health/ready
@@ -143,25 +155,34 @@ pnpm --dir apps/web dev
 
 ## 局域网访问
 
-### 第二版 Windows、手机与平板试用
+### 客户端登录与后端启停
 
-Windows 客户端和 Android 调试 APK 可通过以下脚本连接本机后端。首次准备按上文完成 Docker 镜像、私有桶、数据库迁移及业务账号初始化。日常使用时先打开 Docker Desktop，再在**管理员 PowerShell** 执行。
+Windows 客户端和 Android 调试 APK 可通过以下脚本连接本机后端。首次准备按上文完成 Docker 镜像、私有桶、数据库迁移及业务账号初始化。日常使用时先打开 Docker Desktop，在部署电脑上用**管理员 PowerShell** 进入仓库根目录，执行启动命令。如果此前在前台运行过 `go run ./cmd/server`，先在那个终端按 Ctrl+C 释放端口。
 
 ```powershell
-Set-Location F:\CloudNest
 ./scripts/Start-LanTrial.ps1
 ```
 
 启动脚本选择具有 IPv4 网关的已连接物理网卡，读取实际地址和子网。存在多个候选地址时，按提示指定网卡名称，例如 `./scripts/Start-LanTrial.ps1 -InterfaceAlias 'WLAN'`。此入口面向当前 Compose 中的本机 MySQL 和 MinIO，读取其端口与凭据，启动并等待基础容器健康，再编译后台 API。
 
-脚本显示手机和平板应填写的服务根地址。Windows 本机使用 `http://127.0.0.1:18081`。同一网卡的当前子网可访问 API 与文件端点，手机和平板需能在该网络中与电脑互通。API 和 MinIO 的局域网健康检查在电脑上通过后才报告启动成功，设备侧仍需实际连接确认。
+**启动成功后，从 PowerShell 输出读取登录地址。** 下面以电脑的局域网 IP 为 `192.168.1.23` 举例，使用时以自己终端当次显示的 IP 和端口为准。
 
-移动端上传完成后，Windows 可以在同一服务端目录看到已发布文件。若桌面窗口已经打开该目录，点击「刷新目录」读取最新列表，再下载文件。
+```text
+Phone/tablet service address: http://192.168.1.23:18081
+Windows service address: http://127.0.0.1:18081
+File endpoint: http://192.168.1.23:19000
+```
 
-运行状态、后端程序和日志位于 `output/lan-trial`。API 临时上传目录也位于此处。关闭启动终端后，后台 API 和网络规则继续存在。用管理员 PowerShell 执行停止命令。
+| 在哪里登录 | 「服务地址」怎么填 | 用户名 | 默认密码 |
+| --- | --- | --- | --- |
+| **运行后端的 Windows 电脑** | 在「服务连接」中核对 `Windows service address` 整行里的 URL，默认是 `http://127.0.0.1:18081`。可先点击「检查连接」，再登录。 | `root` | `root` |
+| **Android 手机或平板** | 连接与电脑互通的 Wi-Fi，对照 `Phone/tablet service address`。以上例为例，在四个地址框依次填 `192`、`168`、`1`、`23`，「服务端口」填 `18081`。调试 APK 会自动补上 `http://`。 | `root` | `root` |
+
+两个客户端使用同一个 CloudNest 业务账号。首次初始化时自定义过密码的用户，在密码框填当时设置的值。`File endpoint` 是文件正文传输地址，客户端会从服务端取得签名链接，登录时只需填写对应的服务地址。
+
+运行状态、后端程序和日志位于 `output/lan-trial`。API 临时上传目录也位于此处。关闭启动终端后，后台 API 和网络规则继续存在。**使用结束后，在仓库根目录用管理员 PowerShell 执行停止命令。**
 
 ```powershell
-Set-Location F:\CloudNest
 ./scripts/Stop-LanTrial.ps1
 ```
 
@@ -199,6 +220,8 @@ Set-Location F:\CloudNest
 | 路径 | 职责 |
 | --- | --- |
 | [apps/web](apps/web) | Web 演示及 API 模式界面。 |
+| [apps/desktop](apps/desktop) · [pkg/client](pkg/client) | Windows 客户端界面、文件选择与传输，以及 Go 客户端的 API 调用。 |
+| [apps/mobile](apps/mobile) | Flutter 手机和平板界面，以及 Android 原生文件访问、会话和传输任务存储。 |
 | [cmd/server](cmd/server) | API 入口、依赖装配和后台任务。 |
 | [internal/server](internal/server) | HTTP、业务逻辑、数据库访问与对象存储适配。 |
 | [cmd/database](cmd/database) · [migrations](migrations) | 数据库初始化、业务账号初始化和版本化 SQL 迁移。 |
