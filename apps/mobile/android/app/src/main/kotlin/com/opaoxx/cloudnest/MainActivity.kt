@@ -15,6 +15,7 @@ class MainActivity : FlutterFragmentActivity() {
     private val documentReader = Executors.newSingleThreadExecutor()
     private val rememberedDocument by lazy { RememberedDocument(applicationContext) }
     private var installationChannel: MethodChannel? = null
+    private var sessionChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
     private var pendingDocumentRequest: MethodChannel.Result? = null
     private val openDocument = registerForActivityResult(
@@ -41,6 +42,34 @@ class MainActivity : FlutterFragmentActivity() {
                         result.error("installation_id_unavailable", null, null)
                     }
                     else -> result.notImplemented()
+                }
+            }
+        }
+        sessionChannel = MethodChannel(
+            messenger,
+            "cloudnest/android_session",
+            StandardMethodCodec.INSTANCE,
+            messenger.makeBackgroundTaskQueue(),
+        ).apply {
+            val credentials by lazy { SessionCredentialStore(applicationContext) }
+            setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "read" -> result.success(credentials.read())
+                        "write" -> {
+                            val credential = call.arguments as? String
+                                ?: throw IllegalArgumentException("Invalid session record")
+                            credentials.write(credential)
+                            result.success(null)
+                        }
+                        "clear" -> {
+                            credentials.clear()
+                            result.success(null)
+                        }
+                        else -> result.notImplemented()
+                    }
+                } catch (_: Exception) {
+                    result.error("session_store_unavailable", null, null)
                 }
             }
         }
@@ -145,6 +174,8 @@ class MainActivity : FlutterFragmentActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         installationChannel?.setMethodCallHandler(null)
         installationChannel = null
+        sessionChannel?.setMethodCallHandler(null)
+        sessionChannel = null
         documentChannel?.setMethodCallHandler(null)
         documentChannel = null
         pendingDocumentRequest?.error("document_picker_closed", null, null)

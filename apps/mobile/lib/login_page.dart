@@ -26,7 +26,7 @@ class _LoginPageState extends State<LoginPage> {
       _notice = null;
     });
     try {
-      // 2. 成功后把会话交回首页，仅在当前进程内使用。
+      // 2. 成功后把会话交回首页，由首页安全保存刷新凭证。
       final session = await loginAndroid(
         address: _address.text,
         username: _username.text,
@@ -35,7 +35,7 @@ class _LoginPageState extends State<LoginPage> {
       if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
       _password.clear();
       Navigator.of(context).pop(session);
-    } on LoginFailure catch (failure) {
+    } on AccountFailure catch (failure) {
       // 3. 显示固定的失败提示，并恢复重试入口。
       if (!mounted) return;
       setState(() {

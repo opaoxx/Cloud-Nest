@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'login_page.dart';
+import 'mobile_account.dart';
 import 'native_login.dart';
 
 const _documentPicker = MethodChannel('cloudnest/android_document');
@@ -16,7 +17,9 @@ class DocumentSelectionPage extends StatefulWidget {
 }
 
 class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
-  NativeSession? _session;
+  final _account = MobileAccount();
+  bool _accountBusy = false;
+  String? _accountNotice;
   String? _activity;
   bool _needsReselection = false;
   _DocumentSummary? _document;
@@ -25,15 +28,35 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(_runAccount(_account.restore));
     unawaited(_readDocument(restore: true));
   }
 
-  Future<void> _openLogin() async {
+  Future<void> _openLogin() => _runAccount(() async {
     final session = await Navigator.of(context).push<NativeSession>(
       MaterialPageRoute(builder: (context) => const LoginPage()),
     );
-    if (!mounted || session == null) return;
-    setState(() => _session = session);
+    if (mounted && session != null) await _account.remember(session);
+  });
+
+  Future<void> _checkSession() => _runAccount(() async {
+    final username = await _account.readProfile();
+    _accountNotice = '已核对账号 $username';
+  });
+
+  Future<void> _runAccount(Future<void> Function() action) async {
+    if (_accountBusy) return;
+    setState(() {
+      _accountBusy = true;
+      _accountNotice = null;
+    });
+    try {
+      await action();
+    } on AccountFailure catch (error) {
+      _accountNotice = error.message;
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
   }
 
   Future<void> _readDocument({required bool restore}) async {
@@ -94,22 +117,38 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
     final document = _document;
     final notice = _notice;
     final activity = _activity;
+    final username = _account.username;
+    final accountNotice = _accountNotice;
     return Scaffold(
       appBar: AppBar(
         title: const Text('CloudNest'),
         actions: [
-          if (_session == null)
-            TextButton(onPressed: _openLogin, child: const Text('登录')),
+          if (username == null)
+            TextButton(
+              onPressed: _accountBusy ? null : _openLogin,
+              child: const Text('登录'),
+            )
+          else
+            TextButton(
+              onPressed: _accountBusy ? null : _checkSession,
+              child: const Text('核对会话'),
+            ),
         ],
       ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(24),
           children: [
-            if (_session case final session?)
+            if (username != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 16),
-                child: Text('已登录为 ${session.username}'),
+                child: Text('已登录为 $username'),
+              ),
+            if (_accountBusy && username == null) const Text('正在处理会话…'),
+            if (accountNotice != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Semantics(liveRegion: true, child: Text(accountNotice)),
               ),
             Align(
               alignment: Alignment.centerLeft,
