@@ -91,7 +91,7 @@ class MainActivity : FlutterFragmentActivity() {
             setMethodCallHandler { call, result ->
                 if (call.method !in setOf(
                         "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart",
-                        "readMultipartParts", "recordMultipartPart", "recordDownload",
+                        "readMultipartParts", "recordMultipartPart", "saveMultipartOutcome", "recordDownload",
                     )
                 ) {
                     result.notImplemented()
@@ -155,6 +155,17 @@ class MainActivity : FlutterFragmentActivity() {
                                         requireNotNull(call.argument<String>("sha256")),
                                         requireNotNull(call.argument<String>("etag")),
                                     ),
+                                )
+                                null
+                            }
+                            "saveMultipartOutcome" -> {
+                                store.saveMultipartOutcome(
+                                    owner,
+                                    requireNotNull(call.argument<String>("id")),
+                                    requireNotNull(call.argument<String>("remoteId")),
+                                    requireNotNull(call.argument<String>("state")),
+                                    call.argument<String>("entryId"),
+                                    call.argument<String>("errorCode"),
                                 )
                                 null
                             }

@@ -133,7 +133,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
       return;
     }
 
-    // 以已保存的分片回执更新进度，小文件发布成功后刷新目录。
+    // 以本机分片回执更新进度，以服务端的发布结果刷新目录。
     setState(() {
       _transferBusy = true;
       _transferNotice = multipart ? '正在核对分片任务…' : '正在上传并等待服务端校验…';
@@ -148,16 +148,16 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
             if (!mounted) return;
             final progress = '已确认 $confirmed/${plan.partCount} 片';
             final status = confirmed == plan.partCount
-                ? '$progress，等待合并。'
+                ? '$progress，等待校验和发布…'
                 : progress;
             setState(() => _transferNotice = '$status\n${plan.description}');
           },
         );
       } else {
         await widget.account.uploadSingle(source, target);
-        published = true;
-        if (mounted) setState(() => _transferNotice = '上传成功。');
       }
+      published = true;
+      if (mounted) setState(() => _transferNotice = '上传成功。');
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {

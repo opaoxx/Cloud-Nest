@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'account_owner.dart';
 import 'native_download.dart';
 import 'native_login.dart';
+import 'native_multipart_completion.dart';
 import 'native_multipart_upload.dart';
 import 'native_upload_creation.dart';
 
@@ -36,7 +37,11 @@ class MobileTask {
         ),
         ('UPLOAD', 'PENDING') => '待确认',
         ('UPLOAD', 'COMPLETED') => '已上传',
+        ('UPLOAD', 'FAILED') when row['partCount'] != null =>
+          multipartFailureLabel(row['errorCode']),
         ('UPLOAD', 'FAILED') => '失败',
+        ('UPLOAD', 'EXPIRED') => '已过期',
+        ('UPLOAD', 'CANCELLED') => '已取消',
         ('DOWNLOAD', 'COMPLETED') => '已下载',
         _ => throw const TaskStoreFailure(),
       };
@@ -118,7 +123,7 @@ String _multipartStatus(Map<Object?, Object?> row) {
     throw const TaskStoreFailure();
   }
   final progress = confirmed == plan.partCount
-      ? '已确认 $confirmed/${plan.partCount} 片，等待合并'
+      ? '已确认 $confirmed/${plan.partCount} 片，待确认发布'
       : '已确认 $confirmed/${plan.partCount} 片';
   return '$progress · 任务 ${plan.taskId}';
 }
@@ -199,6 +204,19 @@ Future<void> saveMultipartPart(
   'lengthBytes': receipt.sizeBytes,
   'sha256': receipt.sha256,
   'etag': receipt.etag,
+});
+
+Future<void> saveMultipartOutcome(
+  AccountOwner owner,
+  String id,
+  String taskId,
+  MultipartTask task,
+) => _taskCall<void>('saveMultipartOutcome', owner, {
+  'id': id,
+  'remoteId': taskId,
+  'state': task.state,
+  'entryId': ?task.entryId,
+  if (task.state != 'COMPLETED') 'errorCode': ?task.errorCode,
 });
 
 Future<void> saveSingleCheckpoint(

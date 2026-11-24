@@ -4,6 +4,7 @@ import 'package:cloudnest/cloud_drive_page.dart';
 import 'package:cloudnest/mobile_account.dart';
 import 'package:cloudnest/native_directory.dart';
 import 'package:cloudnest/native_login.dart';
+import 'package:cloudnest/native_multipart_upload.dart';
 import 'package:cloudnest/native_upload_creation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -93,6 +94,41 @@ void main() {
     expect(find.text('已保存「notes (1).txt」。'), findsOneWidget);
     expect(tester.widget<IconButton>(action).onPressed, isNotNull);
   });
+
+  testWidgets('saved parts and a checksum failure never publish the file', (
+    tester,
+  ) async {
+    final account = _MultipartAccount();
+    final source = (
+      name: _source.name,
+      sizeBytes: maxSingleUploadBytes + 1,
+      sha256: _source.sha256,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CloudDrivePage(account: account, source: source),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('目标目录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('上传到此目录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('上传'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 230));
+    expect(find.textContaining('等待校验和发布'), findsOneWidget);
+    expect(find.text('上传成功。'), findsNothing);
+    expect(find.text(source.name), findsNothing);
+
+    account.published.completeError(
+      const AccountFailure('整文件 SHA-256 校验失败。文件未发布。'),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('SHA-256 校验失败'), findsOneWidget);
+    expect(find.text('上传成功。'), findsNothing);
+    expect(find.text(source.name), findsNothing);
+  });
 }
 
 class _DownloadAccount extends _DirectoryAccount {
@@ -147,6 +183,25 @@ class _UploadAccount extends _DirectoryAccount {
     ],
     nextCursor: null,
   );
+}
+
+class _MultipartAccount extends _UploadAccount {
+  @override
+  Future<String> uploadMultipart(
+    PreparedUploadFile source,
+    String parentId, {
+    required void Function(MultipartCreation plan, int confirmed) onProgress,
+  }) {
+    final plan = MultipartCreation.checked(
+      taskId: '9',
+      sizeBytes: source.sizeBytes,
+      partSizeBytes: maxSingleUploadBytes,
+      partCount: 2,
+      expiresAt: '2030-01-01T00:00:00Z',
+    )!;
+    onProgress(plan, 2);
+    return published.future;
+  }
 }
 
 const _rootId = '18446744073709551614';

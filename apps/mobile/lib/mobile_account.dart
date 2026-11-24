@@ -8,6 +8,7 @@ import 'mobile_tasks.dart';
 import 'native_directory.dart';
 import 'native_download.dart';
 import 'native_login.dart';
+import 'native_multipart_completion.dart';
 import 'native_multipart_upload.dart';
 import 'native_single_upload.dart';
 import 'native_upload_creation.dart';
@@ -230,7 +231,7 @@ class MobileAccount {
     ));
   }
 
-  Future<void> uploadMultipart(
+  Future<String> uploadMultipart(
     PreparedUploadFile source,
     String parentId, {
     required void Function(MultipartCreation plan, int confirmed) onProgress,
@@ -265,7 +266,15 @@ class MobileAccount {
       final saved = await readMultipartReceipts(currentOwner, intent.id, plan);
       _checkSession(epoch);
       onProgress(plan, saved.length);
-      if (saved.length == plan.partCount) return;
+      Future<String> finish() => _finishMultipart(
+        currentOwner,
+        intent.id,
+        parentId,
+        plan,
+        saved,
+        epoch,
+      );
+      if (saved.length == plan.partCount) return await finish();
 
       final scope = documentScopeFor(currentOwner);
       final digests = await inspectMultipartSource(scope, source, plan);
@@ -311,6 +320,7 @@ class MobileAccount {
             receipt,
           );
           _checkSession(epoch);
+          saved[number] = receipt;
           onProgress(plan, ++confirmed);
         } on ReauthenticationRequired {
           rethrow;
@@ -320,8 +330,77 @@ class MobileAccount {
           );
         }
       }
+      return await finish();
     } on TaskStoreFailure {
       throw const AccountFailure('无法读写本机上传记录，请重试。');
+    }
+  }
+
+  Future<String> _finishMultipart(
+    AccountOwner owner,
+    String localId,
+    String parentId,
+    MultipartCreation plan,
+    Map<int, MultipartReceipt> receipts,
+    int epoch,
+  ) async {
+    Future<MultipartTask> readTask() {
+      _checkSession(epoch);
+      return _readForAccount(
+        (session) => readMultipartTask(session, plan, parentId),
+      );
+    }
+
+    // 1. 查询原任务，按片号核对已保存的完整回执。
+    var task = await readTask();
+    if (task.state == 'UPLOADING') {
+      if (!task.expiresAt.isAfter(DateTime.now())) {
+        throw const AccountFailure('原分片任务的有效期已结束。');
+      }
+      try {
+        // 2. 提交合并请求，结果未确认时查回同一任务。
+        task = await _readForAccount(
+          (session) =>
+              requestMultipartCompletion(session, plan, parentId, receipts),
+        );
+      } on ReauthenticationRequired {
+        rethrow;
+      } on AccountFailure {
+        task = await readTask();
+        if (task.state == 'UPLOADING') rethrow;
+      }
+    }
+
+    // 3. 保存发布条目或失败原因，再更新页面。
+    final waiting = Stopwatch()..start();
+    while (true) {
+      _checkSession(epoch);
+      if (task.entryId case final String entryId) {
+        await saveMultipartOutcome(owner, localId, plan.taskId, task);
+        _checkSession(epoch);
+        return entryId;
+      }
+      if (const {'FAILED', 'EXPIRED', 'CANCELLED'}.contains(task.state)) {
+        await saveMultipartOutcome(owner, localId, plan.taskId, task);
+        _checkSession(epoch);
+        final label = switch (task.state) {
+          'EXPIRED' => '原分片任务已过期',
+          'CANCELLED' => '原分片任务已取消',
+          _ => multipartFailureLabel(task.errorCode),
+        };
+        throw AccountFailure('$label。文件未发布。');
+      }
+      if (!const {
+            'COMPLETING',
+            'VERIFYING',
+            'CANCELLING',
+            'EXPIRING',
+          }.contains(task.state) ||
+          waiting.elapsed >= const Duration(seconds: 30)) {
+        throw const AccountFailure('发布结果尚未确认。重试时会查询原任务。');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      task = await readTask();
     }
   }
 

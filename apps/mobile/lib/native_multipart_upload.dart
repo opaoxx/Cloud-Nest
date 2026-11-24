@@ -127,44 +127,6 @@ Future<MultipartCreation> createMultipartUpload(
   throw const AccountFailure('分片创建回执与本机声明不一致，可以重试同一文件和目录。');
 }
 
-Future<bool> multipartReady(
-  NativeSession session,
-  MultipartCreation plan,
-  String parentId,
-) async {
-  final response = await requestAuthorizedJson(
-    session.address,
-    session.accessToken,
-    '/api/v1/uploads/${plan.taskId}',
-  );
-  if (response
-      case (
-        status: HttpStatus.ok,
-        body: {
-          'data': {
-            'id': final String id,
-            'parent_id': final String actualParent,
-            'size_bytes': final int size,
-            'upload_mode': 'MULTIPART',
-            'status': final String state,
-            'expires_at': final String expiry,
-          },
-        },
-      )
-      when id == plan.taskId &&
-          actualParent == parentId &&
-          size == plan.sizeBytes) {
-    final expiresAt = DateTime.tryParse(expiry);
-    if (expiresAt != null && expiresAt.isAfter(DateTime.now())) {
-      if (state == 'UPLOADING') return true;
-      if (state == 'CREATING') return false;
-      throw const AccountFailure('原任务当前无法接收分片。');
-    }
-    throw const AccountFailure('原分片任务的有效期已结束或无效。');
-  }
-  throw const AccountFailure('无法核对原分片任务，请重试。');
-}
-
 Future<List<String>> inspectMultipartSource(
   String scope,
   PreparedUploadFile source,

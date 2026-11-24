@@ -13,6 +13,7 @@ private const val OWNER_FILTER = "server_origin = ? AND user_id = ?"
 private const val TEST_KIND = "TEST"
 private const val UPLOAD_KIND = "UPLOAD"
 private const val MAX_UPLOAD_PROTOCOL_BYTES = 9007199254740991L
+private val taskErrorCodePattern = Regex("[A-Z][A-Z_0-9]{0,63}")
 
 internal data class TaskOwner(val server: String, val userId: String) {
     init {
@@ -71,7 +72,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
     context,
     File(context.noBackupFilesDir, "mobile_tasks.sqlite3").absolutePath,
     null,
-    4,
+    5,
     // 损坏时报告错误并保留原始文件，避免自动删除任务记录。
     { _ -> },
 ) {
@@ -98,15 +99,17 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         addSingleUploadFields(database)
         addMultipartUploadFields(database)
         createPartReceipts(database)
+        addUploadOutcomeFields(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion !in 1..3 || newVersion != 4) {
+        if (oldVersion !in 1..4 || newVersion != 5) {
             throw SQLiteException("Unsupported task database migration: $oldVersion to $newVersion")
         }
         if (oldVersion == 1) addSingleUploadFields(database)
         if (oldVersion <= 2) addMultipartUploadFields(database)
-        createPartReceipts(database)
+        if (oldVersion <= 3) createPartReceipts(database)
+        addUploadOutcomeFields(database)
     }
 
     private fun addSingleUploadFields(database: SQLiteDatabase) {
@@ -143,6 +146,10 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             )
             """.trimIndent(),
         )
+    }
+
+    private fun addUploadOutcomeFields(database: SQLiteDatabase) {
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN error_code TEXT")
     }
 
     override fun onConfigure(database: SQLiteDatabase) {
@@ -246,6 +253,35 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             ),
         )
         if (updated != 1) throw SQLiteException("Multipart checkpoint did not match its upload intent")
+    }
+
+    fun saveMultipartOutcome(
+        owner: TaskOwner, id: String, remoteId: String, state: String, entryId: String?, errorCode: String?,
+    ) {
+        require(isStageId(id) && validTaskNumber(remoteId))
+        require(state in setOf("COMPLETED", "FAILED", "EXPIRED", "CANCELLED"))
+        if (state == "COMPLETED") {
+            require(entryId != null && validTaskNumber(entryId) && errorCode == null)
+        } else {
+            require(entryId == null && (errorCode == null || taskErrorCodePattern.matches(errorCode)))
+        }
+        // 终态和结果在同一次更新写入。按账号和任务 ID 限定到分片上传记录。
+        val values = ContentValues().apply {
+            put("state", state)
+            put("result_entry_id", entryId)
+            put("error_code", errorCode)
+        }
+        val updated = writableDatabase.update(
+            TASKS,
+            values,
+            """
+            $OWNER_FILTER AND local_task_id = ? AND remote_task_id = ? AND kind = 'UPLOAD'
+            AND part_count IS NOT NULL AND (state = 'PENDING' OR
+                (state = ? AND COALESCE(result_entry_id, '') = ? AND COALESCE(error_code, '') = ?))
+            """.trimIndent(),
+            owner.selectionArgs() + arrayOf(id, remoteId, state, entryId.orEmpty(), errorCode.orEmpty()),
+        )
+        if (updated != 1) throw SQLiteException("Upload outcome did not match its multipart task")
     }
 
     fun readMultipartParts(owner: TaskOwner, id: String, remoteId: String): List<Map<String, Any>> {
@@ -371,7 +407,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             TASKS,
             arrayOf(
                 "local_task_id", "name", "kind", "state", "created_at_ms",
-                "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at",
+                "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at", "error_code",
                 "(SELECT count(*) FROM multipart_part_receipts p WHERE p.local_task_id = transfer_tasks.local_task_id) AS confirmed_parts",
             ),
             OWNER_FILTER,
@@ -391,6 +427,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             val partCount = cursor.getColumnIndexOrThrow("part_count")
             val expiresAt = cursor.getColumnIndexOrThrow("expires_at")
             val confirmedParts = cursor.getColumnIndexOrThrow("confirmed_parts")
+            val errorCode = cursor.getColumnIndexOrThrow("error_code")
             buildList {
                 while (cursor.moveToNext()) {
                     add(
@@ -406,6 +443,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                             "partCount" to if (cursor.isNull(partCount)) null else cursor.getInt(partCount),
                             "expiresAt" to cursor.getString(expiresAt),
                             "confirmedParts" to cursor.getInt(confirmedParts),
+                            "errorCode" to cursor.getString(errorCode),
                         ),
                     )
                 }

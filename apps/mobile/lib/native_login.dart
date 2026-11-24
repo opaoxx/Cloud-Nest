@@ -223,6 +223,7 @@ Future<({int status, Object? body})> requestAuthorizedJson(
   String? creationKey,
   NativeFileBody? fileBody,
   int successStatus = HttpStatus.ok,
+  Set<int> additionalJsonStatuses = const {},
   int maxResponseBytes = 64 * 1024,
 }) async {
   final result = await _request(
@@ -234,6 +235,7 @@ Future<({int status, Object? body})> requestAuthorizedJson(
     creationKey: creationKey,
     fileBody: fileBody,
     successStatus: successStatus,
+    additionalJsonStatuses: additionalJsonStatuses,
     maxResponseBytes: maxResponseBytes,
   );
   _checkAuthorization(result);
@@ -273,6 +275,7 @@ Future<({int status, Object? body})> _request(
   String? creationKey,
   NativeFileBody? fileBody,
   int successStatus = HttpStatus.ok,
+  Set<int> additionalJsonStatuses = const {},
   int maxResponseBytes = 64 * 1024,
 }) async {
   final client = HttpClient()..connectionTimeout = _deadline;
@@ -285,6 +288,7 @@ Future<({int status, Object? body})> _request(
       creationKey: creationKey,
       fileBody: fileBody,
       successStatus: successStatus,
+      additionalJsonStatuses: additionalJsonStatuses,
       maxResponseBytes: maxResponseBytes,
     ).timeout(fileBody == null ? _deadline : const Duration(seconds: 310));
   } on TimeoutException {
@@ -306,6 +310,7 @@ Future<({int status, Object? body})> _send(
   String? creationKey,
   NativeFileBody? fileBody,
   required int successStatus,
+  required Set<int> additionalJsonStatuses,
   required int maxResponseBytes,
 }) async {
   final method = fileBody != null ? 'PUT' : (payload == null ? 'GET' : 'POST');
@@ -332,6 +337,7 @@ Future<({int status, Object? body})> _send(
   final response = await request.close();
   final status = response.statusCode;
   if (status != successStatus &&
+      !additionalJsonStatuses.contains(status) &&
       (token == null || status != HttpStatus.unauthorized) &&
       (creationKey == null || status != HttpStatus.conflict)) {
     return (status: status, body: null);
