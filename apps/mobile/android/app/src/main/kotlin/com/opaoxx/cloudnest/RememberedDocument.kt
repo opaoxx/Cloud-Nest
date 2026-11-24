@@ -9,17 +9,49 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.util.UUID
 
 internal class DocumentAccessLost : IOException()
 
 private const val GUEST_SCOPE = "guest"
 private val rememberedDocumentLock = Any()
 private val sha256Pattern = Regex("[0-9a-f]{64}")
+private val singleBodyPrefix = "cloudnest-single-${UUID.randomUUID()}-"
+private val singleBodyPattern = Regex("cloudnest-single-[0-9a-f-]{36}-[0-9]+\\.body")
 
 internal class RememberedDocument(context: Context) {
     private val resolver = context.contentResolver
     private val savedDocument = AtomicFile(File(context.noBackupFilesDir, "remembered_document"))
     private val sources = PreparedUploadSources(resolver, File(context.noBackupFilesDir, "upload_sources"))
+    private val cache = context.cacheDir
+
+    fun snapshotForSingle(scope: String, expected: SourceSummary): Map<String, Any> =
+        synchronized(rememberedDocumentLock) {
+            // 1. 仅使用当前账号选择且仍与界面声明一致的来源。
+            val reference = storedDocuments()[scope] ?: throw DocumentAccessLost()
+            if (reference.summary != expected) throw UploadSourceChanged()
+            if (reference.uri != null && !hasReadGrant(reference.uri)) throw DocumentAccessLost()
+
+            // 2. 返回应用私有的临时正文路径。验证失败时回收这次副本。
+            pruneSingleBodies()
+            checkStagingCapacity(expected.sizeBytes, MAX_SINGLE_UPLOAD_BYTES, cache.usableSpace)
+            val target = File.createTempFile(singleBodyPrefix, ".body", cache)
+            try {
+                sources.copySingleBody(reference, target)
+                mapOf("path" to target.absolutePath)
+            } catch (failure: Exception) {
+                target.delete()
+                throw failure
+            }
+        }
+
+    private fun pruneSingleBodies() {
+        cache.listFiles()?.forEach { file ->
+            if (file.isFile && singleBodyPattern.matches(file.name) && !file.name.startsWith(singleBodyPrefix)) {
+                file.delete()
+            }
+        }
+    }
 
     fun readSelection(scope: String, uri: Uri, intentFlags: Int): Map<String, Any> = synchronized(rememberedDocumentLock) {
         val documents = storedDocuments()
@@ -39,6 +71,7 @@ internal class RememberedDocument(context: Context) {
     }
 
     fun restore(scope: String): Map<String, Any>? = synchronized(rememberedDocumentLock) {
+        pruneSingleBodies()
         // 1. 先清理未提交的副本，再按账号恢复它自己的来源。
         val documents = storedDocuments()
         pruneStages(documents)

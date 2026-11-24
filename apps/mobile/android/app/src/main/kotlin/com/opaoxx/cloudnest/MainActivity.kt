@@ -82,7 +82,7 @@ class MainActivity : FlutterFragmentActivity() {
             messenger.makeBackgroundTaskQueue(),
         ).apply {
             setMethodCallHandler { call, result ->
-                if (call.method != "list" && call.method != "createTest") {
+                if (call.method !in setOf("list", "createTest", "reserveSingle", "checkpointSingle")) {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
@@ -93,7 +93,29 @@ class MainActivity : FlutterFragmentActivity() {
                     )
                     val store = MobileTaskStore(applicationContext)
                     val rows = try {
-                        if (call.method == "createTest") store.createTest(owner) else store.list(owner)
+                        when (call.method) {
+                            "createTest" -> store.createTest(owner)
+                            "reserveSingle" -> store.reserveSingle(
+                                owner,
+                                SingleUploadDeclaration(
+                                    requireNotNull(call.argument<String>("parentId")),
+                                    requireNotNull(call.argument<String>("name")),
+                                    requireNotNull(call.argument<Number>("sizeBytes")).toLong(),
+                                    requireNotNull(call.argument<String>("sha256")),
+                                ),
+                            )
+                            "checkpointSingle" -> {
+                                store.checkpointSingle(
+                                    owner,
+                                    requireNotNull(call.argument<String>("id")),
+                                    call.argument<String>("remoteId"),
+                                    requireNotNull(call.argument<String>("state")),
+                                    call.argument<String>("entryId"),
+                                )
+                                null
+                            }
+                            else -> store.list(owner)
+                        }
                     } finally {
                         store.close()
                     }
@@ -108,7 +130,8 @@ class MainActivity : FlutterFragmentActivity() {
             "cloudnest/android_document",
         ).apply {
             setMethodCallHandler { call, result ->
-                val scope = call.arguments as? String
+                val scope = if (call.method == "snapshotForSingle") call.argument<String>("scope")
+                    else call.arguments as? String
                 if (scope.isNullOrEmpty()) {
                     result.error("document_scope_required", null, null)
                     return@setMethodCallHandler
@@ -116,6 +139,19 @@ class MainActivity : FlutterFragmentActivity() {
                 when (call.method) {
                     "pickAndSummarize" -> selectDocument(DocumentRequest(scope, result))
                     "restoreDocument" -> restoreDocument(DocumentRequest(scope, result))
+                    "snapshotForSingle" -> {
+                        val name = call.argument<String>("name")
+                        val size = call.argument<Number>("sizeBytes")?.toLong()
+                        val sha = call.argument<String>("sha256")
+                        if (name == null || size == null || size !in 0L..MAX_SINGLE_UPLOAD_BYTES || sha == null) {
+                            result.error("document_source_changed", null, null)
+                            return@setMethodCallHandler
+                        }
+                        val request = DocumentRequest(scope, result)
+                        if (beginRequest(request)) readOnWorker(request, "document_read_failed") {
+                            rememberedDocument.snapshotForSingle(scope, SourceSummary(name, size, sha))
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }

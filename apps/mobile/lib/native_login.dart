@@ -12,6 +12,7 @@ final _usernamePattern = RegExp(r'^[a-z0-9_]{1,64}$');
 final _serverIdPattern = RegExp(r'^[1-9][0-9]{0,19}$');
 final _maxServerId = BigInt.parse('18446744073709551615');
 typedef NativeTokens = ({String accessToken, String refreshToken});
+typedef NativeFileBody = ({File file, int sizeBytes});
 typedef CurrentProfile = ({String username, String userId, String rootEntryId});
 
 class NativeSession {
@@ -187,7 +188,11 @@ Future<CurrentProfile> readCurrentProfile(
   Uri address,
   String accessToken,
 ) async {
-  final result = await readAuthorizedJson(address, accessToken, '/api/v1/me');
+  final result = await requestAuthorizedJson(
+    address,
+    accessToken,
+    '/api/v1/me',
+  );
   if (result
       case (
         status: HttpStatus.ok,
@@ -209,11 +214,15 @@ Future<CurrentProfile> readCurrentProfile(
   throw const AccountFailure('无法核对账号资料，请检查服务后重试。');
 }
 
-Future<({int status, Object? body})> readAuthorizedJson(
+Future<({int status, Object? body})> requestAuthorizedJson(
   Uri address,
   String accessToken,
   String path, {
   Map<String, String>? query,
+  Map<String, Object>? payload,
+  String? creationKey,
+  NativeFileBody? fileBody,
+  int successStatus = HttpStatus.ok,
   int maxResponseBytes = 64 * 1024,
 }) async {
   final result = await _request(
@@ -221,6 +230,10 @@ Future<({int status, Object? body})> readAuthorizedJson(
     path,
     token: accessToken,
     query: query,
+    payload: payload,
+    creationKey: creationKey,
+    fileBody: fileBody,
+    successStatus: successStatus,
     maxResponseBytes: maxResponseBytes,
   );
   _checkAuthorization(result);
@@ -254,9 +267,12 @@ NativeTokens _readTokens(Object? body) {
 Future<({int status, Object? body})> _request(
   Uri base,
   String path, {
-  Map<String, String>? payload,
+  Map<String, Object>? payload,
   String? token,
   Map<String, String>? query,
+  String? creationKey,
+  NativeFileBody? fileBody,
+  int successStatus = HttpStatus.ok,
   int maxResponseBytes = 64 * 1024,
 }) async {
   final client = HttpClient()..connectionTimeout = _deadline;
@@ -264,10 +280,13 @@ Future<({int status, Object? body})> _request(
     return await _send(
       client,
       base.replace(path: path, queryParameters: query),
-      payload,
-      token,
-      maxResponseBytes,
-    ).timeout(_deadline);
+      payload: payload,
+      token: token,
+      creationKey: creationKey,
+      fileBody: fileBody,
+      successStatus: successStatus,
+      maxResponseBytes: maxResponseBytes,
+    ).timeout(fileBody == null ? _deadline : const Duration(seconds: 310));
   } on TimeoutException {
     throw const AccountFailure('请求超时，请检查网络后重试。');
   } on IOException {
@@ -281,25 +300,40 @@ Future<({int status, Object? body})> _request(
 
 Future<({int status, Object? body})> _send(
   HttpClient client,
-  Uri uri,
-  Map<String, String>? payload,
+  Uri uri, {
+  Map<String, Object>? payload,
   String? token,
-  int maxResponseBytes,
-) async {
-  final request = await client.openUrl(payload == null ? 'GET' : 'POST', uri);
+  String? creationKey,
+  NativeFileBody? fileBody,
+  required int successStatus,
+  required int maxResponseBytes,
+}) async {
+  final method = fileBody != null ? 'PUT' : (payload == null ? 'GET' : 'POST');
+  final request = await client.openUrl(method, uri);
   request.followRedirects = false;
   if (token != null) {
     request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
   }
+  if (creationKey != null) request.headers.set('Idempotency-Key', creationKey);
   if (payload != null) {
     request.headers.contentType = ContentType.json;
-    request.headers.set('X-CloudNest-Client', 'native');
+    if (uri.path.startsWith('/api/v1/auth/')) {
+      request.headers.set('X-CloudNest-Client', 'native');
+    }
     request.add(utf8.encode(jsonEncode(payload)));
+  }
+  if (fileBody != null) {
+    request.headers.contentType = ContentType.binary;
+    request.contentLength = fileBody.sizeBytes;
+    if (fileBody.sizeBytes > 0) {
+      await request.addStream(fileBody.file.openRead());
+    }
   }
   final response = await request.close();
   final status = response.statusCode;
-  if (status != HttpStatus.ok &&
-      (token == null || status != HttpStatus.unauthorized)) {
+  if (status != successStatus &&
+      (token == null || status != HttpStatus.unauthorized) &&
+      (creationKey == null || status != HttpStatus.conflict)) {
     return (status: status, body: null);
   }
 

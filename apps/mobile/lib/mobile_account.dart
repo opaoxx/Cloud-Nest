@@ -1,12 +1,18 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import 'account_owner.dart';
+import 'mobile_tasks.dart';
 import 'native_directory.dart';
 import 'native_login.dart';
+import 'native_single_upload.dart';
+
+export 'account_owner.dart' show AccountOwner, documentScopeFor;
 
 const _credentials = MethodChannel('cloudnest/android_session');
-typedef AccountOwner = ({String server, String userId});
+const _documents = MethodChannel('cloudnest/android_document');
 typedef _SavedSession = ({
   Uri address,
   String username,
@@ -194,6 +200,130 @@ class MobileAccount {
       userId: current.userId,
       refreshToken: current.refreshToken,
     ));
+  }
+
+  Future<String> uploadSingle(
+    PreparedUploadFile source,
+    String parentId,
+  ) async {
+    final currentOwner = owner;
+    if (currentOwner == null || _signingOut) {
+      throw const ReauthenticationRequired();
+    }
+    final epoch = _sessionEpoch;
+    if (source.sizeBytes < 0 || source.sizeBytes > maxSingleUploadBytes) {
+      throw const AccountFailure('小文件上传上限为 16 MiB。');
+    }
+
+    File? body;
+    Future<File> openBody() async {
+      _checkSession(epoch);
+      return body ??= await _snapshot(currentOwner, source);
+    }
+
+    Future<T> remote<T>(Future<T> Function(NativeSession) call) {
+      _checkSession(epoch);
+      return _readForAccount(call);
+    }
+
+    try {
+      // 1. 保存或恢复同一声明。首次创建前先复核正文。
+      final intent = await reserveSingleIntent(currentOwner, parentId, source);
+      final String taskId;
+      if (intent.remoteId case final String existing) {
+        taskId = existing;
+      } else {
+        await openBody();
+        taskId = await remote(
+          (session) => createSingleUpload(session, intent.id, parentId, source),
+        );
+        await saveSingleCheckpoint(currentOwner, intent.id, taskId, 'PENDING');
+      }
+
+      Future<SingleUploadTask> readTask() => remote(
+        (session) =>
+            readSingleUploadTask(session, taskId, parentId, source.sizeBytes),
+      );
+
+      // 2. 先对账再决定是否发送，避免重发已经收到的正文。
+      var task = await readTask();
+      if (task.state == 'UPLOADING') {
+        final file = await openBody();
+        try {
+          await remote(
+            (session) =>
+                sendSingleUploadBody(session, taskId, file, source.sizeBytes),
+          );
+        } on AccountFailure {
+          task = await readTask();
+          if (task.state == 'UPLOADING') rethrow;
+        }
+      }
+
+      // 3. 返回已发布的条目。未确认的进度保留原任务和原创建键。
+      final waited = Stopwatch()..start();
+      while (true) {
+        if (task.entryId case final String entryId) {
+          await saveSingleCheckpoint(
+            currentOwner,
+            intent.id,
+            taskId,
+            'COMPLETED',
+            entryId: entryId,
+          );
+          return entryId;
+        }
+        if (const {'FAILED', 'EXPIRED', 'CANCELLED'}.contains(task.state)) {
+          await saveSingleCheckpoint(currentOwner, intent.id, taskId, 'FAILED');
+          throw AccountFailure(switch (task.errorCode) {
+            'CHECKSUM_MISMATCH' ||
+            'BODY_SIZE_MISMATCH' => '服务端校验发现正文与原文件不一致，请重新选择文件。',
+            _ => '上传任务已结束，文件未发布。请重试。',
+          });
+        }
+        if (waited.elapsed >= const Duration(seconds: 30)) {
+          throw const AccountFailure('服务端仍在处理，重试会先查询原任务。');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 450));
+        task = await readTask();
+      }
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法保存本机上传记录，请重试。');
+    } finally {
+      final snapshot = body;
+      if (snapshot != null) {
+        try {
+          await snapshot.delete();
+        } on FileSystemException {
+          // 下次启动会回收上一进程留下的临时正文。
+        }
+      }
+    }
+  }
+
+  Future<File> _snapshot(AccountOwner owner, PreparedUploadFile source) async {
+    try {
+      final result = await _documents.invokeMapMethod<String, Object?>(
+        'snapshotForSingle',
+        {
+          'scope': documentScopeFor(owner),
+          'name': source.name,
+          'sizeBytes': source.sizeBytes,
+          'sha256': source.sha256,
+        },
+      );
+      if (result case {'path': final String path} when path.startsWith('/')) {
+        return File(path);
+      }
+    } on PlatformException catch (error) {
+      throw AccountFailure(switch (error.code) {
+        'document_staging_space' => '手机可用空间不足，释放空间后请重试上传。',
+        _ => '无法按原摘要读取文件，请返回首页重新选择。',
+      });
+    } on MissingPluginException {
+      throw const AccountFailure('当前设备无法打开已准备的文件。');
+    }
+    throw const AccountFailure('无法打开已准备的文件，请重新选择。');
   }
 
   Future<NativeSession> _rotateOnce(_SavedSession saved) {

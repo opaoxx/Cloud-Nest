@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
@@ -54,9 +53,19 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   });
 
   Future<void> _openCloudDrive() => _runAccount(() async {
+    final document = _document;
     final notice = await Navigator.of(context).push<String>(
       MaterialPageRoute(
-        builder: (context) => CloudDrivePage(account: _account),
+        builder: (context) => CloudDrivePage(
+          account: _account,
+          source: document == null
+              ? null
+              : (
+                  name: document.name,
+                  sizeBytes: document.sizeBytes,
+                  sha256: document.sha256,
+                ),
+        ),
       ),
     );
     if (mounted) _accountNotice = notice;
@@ -84,9 +93,7 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
       if (mounted) {
         // 会话确定后再启用当前文件记录，访客与各账号有各自的范围。
         final owner = _account.owner;
-        final scope = owner == null
-            ? 'guest'
-            : jsonEncode([owner.server, owner.userId]);
+        final scope = documentScopeFor(owner);
         setState(() {
           _accountBusy = false;
           if (_documentScope != scope) {

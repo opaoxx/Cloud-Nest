@@ -80,7 +80,7 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
           key: ValueKey(task.id),
           leading: const Icon(Icons.assignment_outlined),
           title: Text(task.name),
-          subtitle: Text('未执行 · $date $time'),
+          subtitle: Text('${task.statusLabel} · $date $time'),
         );
       },
     );

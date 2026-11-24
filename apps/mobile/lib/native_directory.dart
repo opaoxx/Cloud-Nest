@@ -32,7 +32,7 @@ Future<DirectoryListing> readDirectoryListing(
   if (cursor != null && !_validCursor(cursor)) {
     throw const AccountFailure('续页游标已失效，请刷新目录。');
   }
-  final reply = await readAuthorizedJson(
+  final reply = await requestAuthorizedJson(
     session.address,
     session.accessToken,
     '/api/v1/entries',

@@ -15,6 +15,7 @@ import java.util.UUID
 
 private const val STAGING_BUDGET_BYTES = 512L * 1024 * 1024
 private const val FREE_RESERVE_BYTES = 128L * 1024 * 1024
+internal const val MAX_SINGLE_UPLOAD_BYTES = 16L * 1024 * 1024
 private val stageFilePattern = Regex("([0-9a-f-]{36})\\.(source|partial)")
 
 internal class UploadSourceChanged : IOException()
@@ -85,6 +86,40 @@ internal class PreparedUploadSources(
         val actual = file.inputStream().use { summarizeSource(it, expected.name) }
         if (!expected.matches(actual)) throw UploadSourceChanged()
     }
+
+    fun copySingleBody(reference: UploadSourceReference, target: File) {
+        val expected = checkNotNull(reference.summary)
+        checkStagingCapacity(expected.sizeBytes, MAX_SINGLE_UPLOAD_BYTES, target.usableSpace)
+
+        // 1. 固定本次发送的正文副本，证实它与准备时的字节数及摘要相同。
+        val actual = if (reference.stageId != null) {
+            val ready = readyFile(reference.stageId)
+            if (!ready.isFile || ready.length() != expected.sizeBytes) throw UploadSourceChanged()
+            ready.inputStream().use { copyVerifiedBody(it, expected, target) }
+        } else {
+            val uri = checkNotNull(reference.uri)
+            val descriptor = resolver.openAssetFileDescriptor(uri, "r")
+                ?: throw DocumentAccessLost()
+            descriptor.use {
+                it.createInputStream().use { input ->
+                    val summary = copyVerifiedBody(input, expected, target)
+                    val fd = it.parcelFileDescriptor
+                    if (fd.canDetectErrors()) fd.checkError()
+                    summary
+                }
+            }
+        }
+        if (!expected.matches(actual)) throw UploadSourceChanged()
+    }
+
+    private fun copyVerifiedBody(input: InputStream, expected: SourceSummary, target: File): SourceSummary =
+        FileOutputStream(target).use { output ->
+            summarizeSource(input, expected.name) { buffer, count, before ->
+                if (count.toLong() > expected.sizeBytes - before) throw UploadSourceChanged()
+                checkStagingCapacity(count.toLong(), expected.sizeBytes - before, target.usableSpace)
+                output.write(buffer, 0, count)
+            }
+        }
 
     // 只回收本功能命名的半成品及未被任何账号引用的完整副本。
     fun prune(usedIds: Set<String>) {

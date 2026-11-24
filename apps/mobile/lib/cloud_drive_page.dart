@@ -5,11 +5,13 @@ import 'package:material_ui/material_ui.dart';
 import 'mobile_account.dart';
 import 'native_directory.dart';
 import 'native_login.dart';
+import 'native_single_upload.dart';
 
 class CloudDrivePage extends StatefulWidget {
-  const CloudDrivePage({super.key, required this.account});
+  const CloudDrivePage({super.key, required this.account, this.source});
 
   final MobileAccount account;
+  final PreparedUploadFile? source;
 
   @override
   State<CloudDrivePage> createState() => _CloudDrivePageState();
@@ -21,6 +23,8 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   List<DirectoryEntry> _entries = [];
   String? _nextCursor;
   bool _loading = false;
+  bool _uploading = false;
+  String? _uploadNotice;
   ({String message, String? parentId, String? cursor})? _failure;
 
   String? get _currentDirectory =>
@@ -33,10 +37,11 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   }
 
   Future<void> _load(String? parentId, {String? cursor}) async {
-    if (_loading) return;
+    if (_loading || _uploading) return;
     setState(() {
       _loading = true;
       _failure = null;
+      if (cursor == null && parentId != _currentDirectory) _uploadNotice = null;
     });
 
     try {
@@ -82,6 +87,75 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     }
   }
 
+  Future<void> _confirmUpload() async {
+    final source = widget.source;
+    final target = _currentDirectory;
+    if (source == null ||
+        target == null ||
+        _loading ||
+        _uploading ||
+        source.sizeBytes > maxSingleUploadBytes) {
+      return;
+    }
+    final path = _breadcrumbs
+        .map((crumb) => crumb.name.isEmpty ? '根目录' : crumb.name)
+        .join(' / ');
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('上传到当前目录'),
+        scrollable: true,
+        content: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(source.name),
+            Text('${source.sizeBytes} B'),
+            Text(path),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('上传'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted ||
+        accepted != true ||
+        _currentDirectory != target ||
+        _loading) {
+      return;
+    }
+
+    // 只在服务端确认目录项已发布后展示上传成功。
+    setState(() {
+      _uploading = true;
+      _uploadNotice = '正在上传并等待服务端校验…';
+    });
+    var published = false;
+    try {
+      await widget.account.uploadSingle(source, target);
+      published = true;
+      if (mounted) setState(() => _uploadNotice = '上传成功。');
+    } on AccountFailure catch (error) {
+      if (!mounted) return;
+      if (widget.account.owner == null) {
+        Navigator.of(context).pop(error.message);
+      } else {
+        setState(() => _uploadNotice = error.message);
+      }
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+    if (published && mounted) await _load(target);
+  }
+
   Widget _pathBar() {
     final path = Row(
       children: [
@@ -94,7 +168,9 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
             )
           else
             TextButton(
-              onPressed: _loading ? null : () => _load(_breadcrumbs[index].id),
+              onPressed: _loading || _uploading
+                  ? null
+                  : () => _load(_breadcrumbs[index].id),
               child: Text(index == 0 ? '根目录' : _breadcrumbs[index].name),
             ),
         ],
@@ -133,7 +209,9 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           title: Text(entry.name, maxLines: 2, overflow: TextOverflow.ellipsis),
           subtitle: entry.isFolder ? null : Text('${entry.sizeBytes} B'),
           trailing: entry.isFolder ? const Icon(Icons.chevron_right) : null,
-          onTap: entry.isFolder && !_loading ? () => _load(entry.id) : null,
+          onTap: entry.isFolder && !_loading && !_uploading
+              ? () => _load(entry.id)
+              : null,
         );
       },
     );
@@ -143,54 +221,82 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   Widget build(BuildContext context) {
     final failure = _failure;
     final cursor = _nextCursor;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('云盘'),
-        actions: [
-          IconButton(
-            tooltip: '刷新目录',
-            onPressed: _loading ? null : () => _load(_currentDirectory),
-            icon: const Icon(Icons.refresh),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_breadcrumbs.isNotEmpty) _pathBar(),
-            if (_loading) const LinearProgressIndicator(),
-            if (failure != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Semantics(
-                        liveRegion: true,
-                        child: Text(failure.message),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () =>
-                          _load(failure.parentId, cursor: failure.cursor),
-                      child: const Text('重试'),
-                    ),
-                  ],
-                ),
-              ),
-            Expanded(child: _entryList()),
-            if (cursor != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                child: OutlinedButton(
-                  onPressed: _loading
-                      ? null
-                      : () => _load(_currentDirectory, cursor: cursor),
-                  child: const Text('加载更多'),
-                ),
-              ),
+    final source = widget.source;
+    final notice = _uploadNotice;
+    return PopScope(
+      canPop: !_uploading,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('云盘'),
+          automaticallyImplyLeading: !_uploading,
+          actions: [
+            IconButton(
+              tooltip: '刷新目录',
+              onPressed: _loading || _uploading
+                  ? null
+                  : () => _load(_currentDirectory),
+              icon: const Icon(Icons.refresh),
+            ),
           ],
+        ),
+        body: SafeArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (_breadcrumbs.isNotEmpty) _pathBar(),
+              if (_loading || _uploading) const LinearProgressIndicator(),
+              if (notice != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  child: Semantics(liveRegion: true, child: Text(notice)),
+                ),
+              if (failure != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Semantics(
+                          liveRegion: true,
+                          child: Text(failure.message),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () =>
+                            _load(failure.parentId, cursor: failure.cursor),
+                        child: const Text('重试'),
+                      ),
+                    ],
+                  ),
+                ),
+              Expanded(child: _entryList()),
+              if (cursor != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                  child: OutlinedButton(
+                    onPressed: _loading || _uploading
+                        ? null
+                        : () => _load(_currentDirectory, cursor: cursor),
+                    child: const Text('加载更多'),
+                  ),
+                ),
+              if (source != null && _currentDirectory != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                  child: source.sizeBytes > maxSingleUploadBytes
+                      ? const Text('小文件上传上限为 16 MiB。')
+                      : FilledButton(
+                          onPressed: _loading || _uploading
+                              ? null
+                              : _confirmUpload,
+                          child: const Text('上传到此目录'),
+                        ),
+                ),
+            ],
+          ),
         ),
       ),
     );
