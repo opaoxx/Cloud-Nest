@@ -9,17 +9,22 @@ import 'package:flutter/services.dart';
 const _installation = MethodChannel('cloudnest/android_installation');
 const _deadline = Duration(seconds: 10);
 final _usernamePattern = RegExp(r'^[a-z0-9_]{1,64}$');
+final _userIdPattern = RegExp(r'^[1-9][0-9]{0,19}$');
+typedef NativeTokens = ({String accessToken, String refreshToken});
+typedef CurrentProfile = ({String username, String userId});
 
 class NativeSession {
   const NativeSession({
     required this.address,
     required this.username,
+    required this.userId,
     required this.accessToken,
     required this.refreshToken,
   });
 
   final Uri address;
   final String username;
+  final String userId;
   final String accessToken;
   final String refreshToken;
 }
@@ -94,11 +99,25 @@ Future<NativeSession> loginAndroid({
       throw AccountFailure('CloudNest 登录失败（HTTP ${response.status}）。');
   }
 
-  // 3. 确认响应账号和本次登录一致，并读取两种原生凭证。
+  // 3. 取得服务端的用户 ID，用它归属本机文件记录和后续任务。
   if (response.body
-      case {'data': {'user': {'username': final String returnedUsername}}}
-      when returnedUsername == username) {
-    return _readTokens(base, username, response.body);
+      case {
+        'data': {
+          'user': {
+            'username': final String returnedUsername,
+            'id': final String userId,
+          },
+        },
+      }
+      when returnedUsername == username && isUserId(userId)) {
+    final tokens = _readTokens(response.body);
+    return NativeSession(
+      address: base,
+      username: returnedUsername,
+      userId: userId,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    );
   }
   throw const AccountFailure('收到的登录响应与当前账号不一致。');
 }
@@ -121,11 +140,9 @@ Uri parseServiceAddress(String address) {
   return base;
 }
 
-Future<NativeSession> refreshAndroid(
-  Uri address,
-  String username,
-  String refreshToken,
-) async {
+bool isUserId(String value) => _userIdPattern.hasMatch(value);
+
+Future<NativeTokens> refreshAndroid(Uri address, String refreshToken) async {
   // 1. 原生刷新请求通过 JSON 提交当前凭证，不发送访问令牌。
   final result = await _request(
     address,
@@ -141,17 +158,54 @@ Future<NativeSession> refreshAndroid(
   }
 
   // 2. 新响应必须交付新刷新凭证，旧凭证不能再次写回本机。
-  final next = _readTokens(address, username, result.body);
+  final next = _readTokens(result.body);
   if (next.refreshToken == refreshToken) throw const SessionRejected();
   return next;
 }
 
-Future<String> readCurrentUsername(NativeSession session) async {
+Future<void> logoutAndroid(Uri address, String accessToken) async {
   final result = await _request(
-    session.address,
-    '/api/v1/me',
-    token: session.accessToken,
+    address,
+    '/api/v1/auth/logout',
+    payload: {'client_type': 'native'},
+    token: accessToken,
   );
+  if (result case (status: HttpStatus.ok, body: {'data': {'revoked': true}})) {
+    return;
+  }
+  try {
+    _checkAuthorization(result);
+  } on SessionRejected {
+    return;
+  }
+  throw const AccountFailure('服务端未确认撤销会话。');
+}
+
+Future<CurrentProfile> readCurrentProfile(
+  Uri address,
+  String accessToken,
+) async {
+  final result = await _request(address, '/api/v1/me', token: accessToken);
+  _checkAuthorization(result);
+  if (result
+      case (
+        status: HttpStatus.ok,
+        body: {
+          'data': {
+            'user': {
+              'username': final String username,
+              'id': final String userId,
+            },
+          },
+        },
+      )
+      when username.isNotEmpty && isUserId(userId)) {
+    return (username: username, userId: userId);
+  }
+  throw const AccountFailure('无法核对账号资料，请检查服务后重试。');
+}
+
+void _checkAuthorization(({int status, Object? body}) result) {
   if (result case (
     status: HttpStatus.unauthorized,
     body: {'error': {'code': final String code}},
@@ -159,18 +213,9 @@ Future<String> readCurrentUsername(NativeSession session) async {
     if (code == 'TOKEN_EXPIRED') throw const AccessTokenExpired();
     if (code == 'SESSION_REVOKED') throw const SessionRejected();
   }
-  if (result
-      case (
-        status: HttpStatus.ok,
-        body: {'data': {'user': {'username': final String username}}},
-      )
-      when username == session.username) {
-    return username;
-  }
-  throw const AccountFailure('无法核对账号资料，请检查服务后重试。');
 }
 
-NativeSession _readTokens(Uri address, String username, Object? body) {
+NativeTokens _readTokens(Object? body) {
   if (body
       case {
         'data': {
@@ -179,12 +224,7 @@ NativeSession _readTokens(Uri address, String username, Object? body) {
         },
       }
       when accessToken.isNotEmpty && refreshToken.isNotEmpty) {
-    return NativeSession(
-      address: address,
-      username: username,
-      accessToken: accessToken,
-      refreshToken: refreshToken,
-    );
+    return (accessToken: accessToken, refreshToken: refreshToken);
   }
   throw const AccountFailure('收到的会话凭证不完整。');
 }
@@ -222,13 +262,13 @@ Future<({int status, Object? body})> _send(
 ) async {
   final request = await client.openUrl(payload == null ? 'GET' : 'POST', uri);
   request.followRedirects = false;
+  if (token != null) {
+    request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+  }
   if (payload != null) {
     request.headers.contentType = ContentType.json;
     request.headers.set('X-CloudNest-Client', 'native');
     request.add(utf8.encode(jsonEncode(payload)));
-  }
-  if (token != null) {
-    request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
   }
   final response = await request.close();
   final status = response.statusCode;

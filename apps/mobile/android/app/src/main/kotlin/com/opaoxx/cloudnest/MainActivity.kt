@@ -17,7 +17,8 @@ class MainActivity : FlutterFragmentActivity() {
     private var installationChannel: MethodChannel? = null
     private var sessionChannel: MethodChannel? = null
     private var documentChannel: MethodChannel? = null
-    private var pendingDocumentRequest: MethodChannel.Result? = null
+    private data class DocumentRequest(val scope: String, val result: MethodChannel.Result)
+    private var pendingDocumentRequest: DocumentRequest? = null
     private val openDocument = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
         ::onDocumentSelected,
@@ -78,18 +79,23 @@ class MainActivity : FlutterFragmentActivity() {
             "cloudnest/android_document",
         ).apply {
             setMethodCallHandler { call, result ->
+                val scope = call.arguments as? String
+                if (scope.isNullOrEmpty()) {
+                    result.error("document_scope_required", null, null)
+                    return@setMethodCallHandler
+                }
                 when (call.method) {
-                    "pickAndSummarize" -> selectDocument(result)
-                    "restoreDocument" -> restoreDocument(result)
+                    "pickAndSummarize" -> selectDocument(DocumentRequest(scope, result))
+                    "restoreDocument" -> restoreDocument(DocumentRequest(scope, result))
                     else -> result.notImplemented()
                 }
             }
         }
     }
 
-    private fun selectDocument(result: MethodChannel.Result) {
+    private fun selectDocument(request: DocumentRequest) {
         // 1. 让系统只展示可作为文件流打开的文档。
-        if (!beginRequest(result)) return
+        if (!beginRequest(request)) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -98,47 +104,47 @@ class MainActivity : FlutterFragmentActivity() {
         try {
             openDocument.launch(intent)
         } catch (_: RuntimeException) {
-            finishRequest(result) { error("picker_unavailable", null, null) }
+            finishRequest(request) { error("picker_unavailable", null, null) }
         }
     }
 
     private fun onDocumentSelected(selection: ActivityResult) {
-        val result = pendingDocumentRequest ?: return
+        val request = pendingDocumentRequest ?: return
 
         // 2. 取消直接返回。选中后通过 Android 授权的内容 URI 读取。
         if (selection.resultCode != Activity.RESULT_OK) {
-            finishRequest(result) { success(null) }
+            finishRequest(request) { success(null) }
             return
         }
         val selectedIntent = selection.data
         val uri = selectedIntent?.data
         if (uri == null || uri.scheme != ContentResolver.SCHEME_CONTENT) {
-            finishRequest(result) { error("invalid_document", null, null) }
+            finishRequest(request) { error("invalid_document", null, null) }
             return
         }
         val intentFlags = selectedIntent?.flags ?: 0
 
-        readOnWorker(result, "document_read_failed") {
-            rememberedDocument.readSelection(uri, intentFlags)
+        readOnWorker(request, "document_read_failed") {
+            rememberedDocument.readSelection(request.scope, uri, intentFlags)
         }
     }
 
-    private fun restoreDocument(result: MethodChannel.Result) {
-        if (!beginRequest(result)) return
-        readOnWorker(result, "document_restore_failed") { rememberedDocument.restore() }
+    private fun restoreDocument(request: DocumentRequest) {
+        if (!beginRequest(request)) return
+        readOnWorker(request, "document_restore_failed") { rememberedDocument.restore(request.scope) }
     }
 
-    private fun beginRequest(result: MethodChannel.Result): Boolean {
+    private fun beginRequest(request: DocumentRequest): Boolean {
         if (pendingDocumentRequest != null) {
-            result.error("selection_in_progress", null, null)
+            request.result.error("selection_in_progress", null, null)
             return false
         }
-        pendingDocumentRequest = result
+        pendingDocumentRequest = request
         return true
     }
 
     private fun readOnWorker(
-        result: MethodChannel.Result,
+        request: DocumentRequest,
         defaultErrorCode: String,
         read: () -> Map<String, Any>?,
     ) {
@@ -154,7 +160,7 @@ class MainActivity : FlutterFragmentActivity() {
                 defaultErrorCode
             }
             runOnUiThread {
-                finishRequest(result) {
+                finishRequest(request) {
                     if (errorCode == null) success(summary)
                     else error(errorCode, null, null)
                 }
@@ -163,12 +169,12 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     private fun finishRequest(
-        result: MethodChannel.Result,
+        request: DocumentRequest,
         reply: MethodChannel.Result.() -> Unit,
     ) {
-        if (pendingDocumentRequest !== result) return
+        if (pendingDocumentRequest !== request) return
         pendingDocumentRequest = null
-        result.reply()
+        request.result.reply()
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
@@ -178,7 +184,7 @@ class MainActivity : FlutterFragmentActivity() {
         sessionChannel = null
         documentChannel?.setMethodCallHandler(null)
         documentChannel = null
-        pendingDocumentRequest?.error("document_picker_closed", null, null)
+        pendingDocumentRequest?.result?.error("document_picker_closed", null, null)
         pendingDocumentRequest = null
         super.cleanUpFlutterEngine(flutterEngine)
     }

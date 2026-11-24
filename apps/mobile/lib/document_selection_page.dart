@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
@@ -20,6 +21,9 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   final _account = MobileAccount();
   bool _accountBusy = false;
   String? _accountNotice;
+  String? _documentScope;
+  int _documentEpoch = 0;
+  bool _restorePending = false;
   String? _activity;
   bool _needsReselection = false;
   _DocumentSummary? _document;
@@ -29,7 +33,6 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
   void initState() {
     super.initState();
     unawaited(_runAccount(_account.restore));
-    unawaited(_readDocument(restore: true));
   }
 
   Future<void> _openLogin() => _runAccount(() async {
@@ -44,6 +47,10 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
     _accountNotice = '已核对账号 $username';
   });
 
+  Future<void> _logout() => _runAccount(() async {
+    _accountNotice = await _account.logout();
+  });
+
   Future<void> _runAccount(Future<void> Function() action) async {
     if (_accountBusy) return;
     setState(() {
@@ -55,15 +62,42 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
     } on AccountFailure catch (error) {
       _accountNotice = error.message;
     } finally {
-      if (mounted) setState(() => _accountBusy = false);
+      if (mounted) {
+        // 会话确定后再启用当前文件记录，访客与各账号有各自的范围。
+        final owner = _account.owner;
+        final scope = owner == null
+            ? 'guest'
+            : jsonEncode([owner.server, owner.userId]);
+        setState(() {
+          _accountBusy = false;
+          if (_documentScope != scope) {
+            _documentScope = scope;
+            _documentEpoch++;
+            _document = null;
+            _notice = null;
+            _needsReselection = false;
+            _restorePending = true;
+          }
+        });
+        _restoreCurrentDocument();
+      }
+    }
+  }
+
+  void _restoreCurrentDocument() {
+    if (_restorePending && !_accountBusy && _activity == null) {
+      unawaited(_readDocument(restore: true));
     }
   }
 
   Future<void> _readDocument({required bool restore}) async {
-    if (_activity != null) return;
+    final scope = _documentScope;
+    if (_accountBusy || _activity != null || scope == null) return;
+    final epoch = _documentEpoch;
 
     // 1. 启动时查找上次授权，主动点击时打开系统选择器。
     setState(() {
+      _restorePending = false;
       _activity = restore ? '正在检查上次文件授权…' : '正在选择或读取文件…';
       _document = null;
       _notice = null;
@@ -75,6 +109,7 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
     try {
       final result = await _documentPicker.invokeMapMethod<String, Object?>(
         restore ? 'restoreDocument' : 'pickAndSummarize',
+        scope,
       );
 
       // 2. 只展示 Android 刚读取到的内容，并提示授权能否跨重启。
@@ -102,14 +137,17 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
       notice = '文件读取结果无效，请重新选择。';
     }
 
-    // 3. 授权失效时恢复选择入口。取消继续回到空闲。
+    // 3. 只向仍在该范围的界面交付结果。切换后继续恢复新范围。
     if (!mounted) return;
     setState(() {
       _activity = null;
-      _needsReselection = needsReselection;
-      _document = document;
-      _notice = notice;
+      if (epoch == _documentEpoch) {
+        _needsReselection = needsReselection;
+        _document = document;
+        _notice = notice;
+      }
     });
+    _restoreCurrentDocument();
   }
 
   @override
@@ -128,11 +166,16 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
               onPressed: _accountBusy ? null : _openLogin,
               child: const Text('登录'),
             )
-          else
+          else ...[
             TextButton(
               onPressed: _accountBusy ? null : _checkSession,
               child: const Text('核对会话'),
             ),
+            TextButton(
+              onPressed: _accountBusy ? null : _logout,
+              child: const Text('退出登录'),
+            ),
+          ],
         ],
       ),
       body: SafeArea(
@@ -150,22 +193,24 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
                 padding: const EdgeInsets.only(bottom: 16),
                 child: Semantics(liveRegion: true, child: Text(accountNotice)),
               ),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: FilledButton(
-                onPressed: activity == null
-                    ? () => _readDocument(restore: false)
-                    : null,
-                child: Text(_needsReselection ? '重新选择文件' : '选择文件'),
+            if (!_accountBusy && _documentScope != null) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton(
+                  onPressed: activity == null
+                      ? () => _readDocument(restore: false)
+                      : null,
+                  child: Text(_needsReselection ? '重新选择文件' : '选择文件'),
+                ),
               ),
-            ),
-            if (activity != null) Text(activity),
-            if (notice != null) Text(notice),
-            if (document != null) ...[
-              const SizedBox(height: 20),
-              Text(document.name),
-              Text('大小 ${document.sizeBytes} B'),
-              Text('SHA-256 ${document.sha256}'),
+              if (activity != null) Text(activity),
+              if (notice != null) Text(notice),
+              if (document != null) ...[
+                const SizedBox(height: 20),
+                Text(document.name),
+                Text('大小 ${document.sizeBytes} B'),
+                Text('SHA-256 ${document.sha256}'),
+              ],
             ],
           ],
         ),

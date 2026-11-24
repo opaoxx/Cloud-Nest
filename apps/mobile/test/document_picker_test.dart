@@ -8,6 +8,7 @@ import 'package:material_ui/material_ui.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('cloudnest/android_document');
+  const credentials = MethodChannel('cloudnest/android_session');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   final pickButton = find.widgetWithText(FilledButton, '选择文件');
@@ -20,7 +21,16 @@ void main() {
     'persisted': true,
   };
 
-  tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+  setUp(() {
+    messenger.setMockMethodCallHandler(credentials, (call) async {
+      expect(call.method, 'read');
+      return null;
+    });
+  });
+  tearDown(() {
+    messenger.setMockMethodCallHandler(channel, null);
+    messenger.setMockMethodCallHandler(credentials, null);
+  });
 
   testWidgets('shows the document summary and returns to idle on cancel', (
     tester,
@@ -28,6 +38,7 @@ void main() {
     var calls = 0;
     final cancelled = Completer<Object?>();
     messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.arguments, 'guest');
       if (call.method == 'restoreDocument') return null;
       expect(call.method, 'pickAndSummarize');
       calls++;
