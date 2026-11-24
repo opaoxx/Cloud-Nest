@@ -185,6 +185,10 @@ class MainActivity : FlutterFragmentActivity() {
                 null
             } catch (_: DocumentAccessLost) {
                 "document_access_lost"
+            } catch (_: UploadSourceChanged) {
+                "document_source_changed"
+            } catch (paused: UploadSourcePaused) {
+                paused.reason
             } catch (_: Exception) {
                 defaultErrorCode
             }

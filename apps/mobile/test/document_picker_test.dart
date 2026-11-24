@@ -18,7 +18,7 @@ void main() {
     'name': '空文档.txt',
     'sizeBytes': 0,
     'sha256': emptyDigest,
-    'persisted': true,
+    'sourceMode': 'direct',
   };
 
   setUp(() {
@@ -102,7 +102,7 @@ void main() {
         throw PlatformException(code: 'document_access_lost');
       }
       expect(call.method, 'pickAndSummarize');
-      return {...emptyDocument, 'persisted': false};
+      return {...emptyDocument, 'sourceMode': 'staged'};
     });
 
     await tester.pumpWidget(const CloudNestApp());
@@ -112,7 +112,22 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, '重新选择文件'));
     await tester.pumpAndSettle();
     expect(find.text('空文档.txt'), findsOneWidget);
-    expect(find.text('已读取文件。本次授权无法在重启后恢复。'), findsOneWidget);
+    expect(find.text('已暂存到本机，可在重开应用后继续使用。'), findsOneWidget);
+    expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
+  });
+
+  testWidgets('storage pause gives a reason and allows another file', (
+    tester,
+  ) async {
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'restoreDocument') return null;
+      throw PlatformException(code: 'document_staging_space');
+    });
+    await tester.pumpWidget(const CloudNestApp());
+    await tester.pumpAndSettle();
+    await tester.tap(pickButton);
+    await tester.pumpAndSettle();
+    expect(find.text('手机可用空间不足，已暂停准备。释放空间后请重新选择文件。'), findsOneWidget);
     expect(tester.widget<FilledButton>(pickButton).onPressed, isNotNull);
   });
 }

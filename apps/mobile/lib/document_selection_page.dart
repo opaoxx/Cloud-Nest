@@ -131,23 +131,28 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
         scope,
       );
 
-      // 2. 只展示 Android 刚读取到的内容，并提示授权能否跨重启。
+      // 2. 显示已计算的摘要和实际恢复方式。
       if (result != null) {
         document = _DocumentSummary.fromResult(result);
-        if (restore) {
-          notice = '已重新读取上次授权的文件。';
-        } else if (!document.persisted) {
-          notice = '已读取文件。本次授权无法在重启后恢复。';
-        }
+        notice = switch ((document.mode, restore)) {
+          ('staged', true) => '已恢复本机暂存，可继续使用。',
+          ('staged', false) => '已暂存到本机，可在重开应用后继续使用。',
+          ('direct', true) => '已重新读取上次授权的文件。',
+          _ => '上传源已准备，可直接读取。',
+        };
       }
     } on PlatformException catch (error) {
       needsReselection =
           error.code == 'document_access_lost' ||
-          error.code == 'document_restore_failed';
+          error.code == 'document_restore_failed' ||
+          error.code == 'document_source_changed';
       notice = switch (error.code) {
         'picker_unavailable' => '无法打开系统文件选择器。',
         'document_access_lost' => '上次文件的授权已失效，请重新选择。',
         'document_restore_failed' => '上次文件无法读取，请重新选择。',
+        'document_source_changed' => '文件内容已变化或暂存已失效，请重新选择。',
+        'document_staging_budget' => '暂存达到容量上限，已暂停准备。请选择更小或可直接读取的文件。',
+        'document_staging_space' => '手机可用空间不足，已暂停准备。释放空间后请重新选择文件。',
         _ => '无法读取所选文件，请重新选择。',
       };
     } on MissingPluginException {
@@ -254,12 +259,7 @@ class _DocumentSelectionPageState extends State<DocumentSelectionPage> {
 }
 
 class _DocumentSummary {
-  const _DocumentSummary(
-    this.name,
-    this.sizeBytes,
-    this.sha256,
-    this.persisted,
-  );
+  const _DocumentSummary(this.name, this.sizeBytes, this.sha256, this.mode);
 
   factory _DocumentSummary.fromResult(Map<String, Object?> result) {
     if (result
@@ -267,10 +267,10 @@ class _DocumentSummary {
           'name': final String name,
           'sizeBytes': final int sizeBytes,
           'sha256': final String sha256,
-          'persisted': final bool persisted,
+          'sourceMode': final String mode,
         }
-        when sizeBytes >= 0) {
-      return _DocumentSummary(name, sizeBytes, sha256, persisted);
+        when sizeBytes >= 0 && (mode == 'direct' || mode == 'staged')) {
+      return _DocumentSummary(name, sizeBytes, sha256, mode);
     }
     throw const FormatException('Invalid Android document summary');
   }
@@ -278,5 +278,5 @@ class _DocumentSummary {
   final String name;
   final int sizeBytes;
   final String sha256;
-  final bool persisted;
+  final String mode;
 }

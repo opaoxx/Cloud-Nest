@@ -14,75 +14,135 @@ internal class DocumentAccessLost : IOException()
 
 private const val GUEST_SCOPE = "guest"
 private val rememberedDocumentLock = Any()
+private val sha256Pattern = Regex("[0-9a-f]{64}")
 
 internal class RememberedDocument(context: Context) {
     private val resolver = context.contentResolver
     private val savedDocument = AtomicFile(File(context.noBackupFilesDir, "remembered_document"))
+    private val sources = PreparedUploadSources(resolver, File(context.noBackupFilesDir, "upload_sources"))
 
-    fun readSelection(scope: String, uri: Uri, intentFlags: Int): Map<String, Any> {
-        val summary = readSelectedDocument(resolver, uri)
-        return summary + ("persisted" to remember(scope, uri, intentFlags))
+    fun readSelection(scope: String, uri: Uri, intentFlags: Int): Map<String, Any> = synchronized(rememberedDocumentLock) {
+        val documents = storedDocuments()
+        pruneStages(documents)
+        var tookReadGrant = false
+        try {
+            val prepared = sources.prepare(uri) {
+                hasReadGrant(uri) || takeReadGrant(uri, intentFlags).also { tookReadGrant = it }
+            }
+            save(scope, documents, prepared)
+            prepared.view()
+        } finally {
+            // 文件与元数据分开落盘。按实际保存成功的引用回收孤立副本和新申请的授权。
+            val saved = cleanupUnreferenced()
+            if (tookReadGrant && saved != null && saved.values.none { it.uri == uri }) releaseReadGrant(uri)
+        }
     }
 
-    fun restore(scope: String): Map<String, Any>? {
-        // 1. 按本次打开的账号范围查找文档，只有有效授权才能读正文。
-        val uri = synchronized(rememberedDocumentLock) { storedDocuments()[scope] } ?: return null
+    fun restore(scope: String): Map<String, Any>? = synchronized(rememberedDocumentLock) {
+        // 1. 先清理未提交的副本，再按账号恢复它自己的来源。
+        val documents = storedDocuments()
+        pruneStages(documents)
+        val previous = documents[scope] ?: return@synchronized null
+        if (previous.stageId != null) {
+            sources.verifyStage(previous)
+            return@synchronized previous.view()
+        }
+        val uri = checkNotNull(previous.uri)
         if (uri.scheme != ContentResolver.SCHEME_CONTENT || !hasReadGrant(uri)) {
             throw DocumentAccessLost()
         }
-        return try {
-            readSelectedDocument(resolver, uri) + ("persisted" to true)
+        try {
+            // 2. 重新读取直接来源，比较上次确认的字节数和摘要。
+            val prepared = sources.prepare(uri) { true }
+            if (previous.summary?.matches(checkNotNull(prepared.summary)) == false) throw UploadSourceChanged()
+            save(scope, documents, prepared)
+            prepared.view()
         } catch (_: SecurityException) {
             throw DocumentAccessLost()
+        } finally {
+            cleanupUnreferenced()
         }
     }
 
-    private fun remember(scope: String, uri: Uri, intentFlags: Int): Boolean = synchronized(rememberedDocumentLock) {
-        // 1. 使用选择结果提供的授权，只延长读取权限。
-        val documents = storedDocuments()
+    private fun save(
+        scope: String,
+        documents: MutableMap<String, UploadSourceReference>,
+        replacement: UploadSourceReference,
+    ) {
         val previous = documents[scope]
-        val alreadyGranted = hasReadGrant(uri)
-        val persistent = alreadyGranted || takeReadGrant(uri, intentFlags)
-        val replacement = uri.takeIf { persistent }
-        if (previous == replacement) return@synchronized persistent
+        if (previous == replacement) return
 
-        // 2. 各范围分别保留一条引用，原子更新当前范围的记录。
-        if (replacement == null) documents.remove(scope) else documents[scope] = replacement
+        // 3. 各账号分别保存来源。原子记录写入后才释放旧引用。
+        documents[scope] = replacement
         val serialized = JSONObject()
-        documents.forEach { (owner, reference) -> serialized.put(owner, reference.toString()) }
+        documents.forEach { (owner, reference) -> serialized.put(owner, encodeReference(reference)) }
+        val output = savedDocument.startWrite()
         try {
-            val output = savedDocument.startWrite()
-            try {
-                output.write(serialized.toString().toByteArray(Charsets.UTF_8))
-                savedDocument.finishWrite(output)
-            } catch (failure: IOException) {
-                savedDocument.failWrite(output)
-                throw failure
-            }
-            if (storedDocuments() != documents) throw IOException("Could not save the document reference")
-        } catch (failure: Exception) {
-            if (persistent && !alreadyGranted) releaseReadGrant(uri)
+            output.write(serialized.toString().toByteArray(Charsets.UTF_8))
+            savedDocument.finishWrite(output)
+        } catch (failure: IOException) {
+            savedDocument.failWrite(output)
             throw failure
         }
-        // 3. URI 授权属于应用。若其他范围仍引用旧 URI，就保留授权。
-        if (previous != null && previous !in documents.values) releaseReadGrant(previous)
-        persistent
+        if (storedDocuments() != documents) throw IOException("Could not save the document reference")
+        val oldUri = previous?.uri
+        if (oldUri != null && documents.values.none { it.uri == oldUri }) releaseReadGrant(oldUri)
     }
 
-    private fun storedDocuments(): MutableMap<String, Uri> {
+    private fun cleanupUnreferenced(): Map<String, UploadSourceReference>? {
+        val documents = runCatching { storedDocuments() }.getOrNull() ?: return null
+        pruneStages(documents)
+        return documents
+    }
+
+    private fun pruneStages(documents: Map<String, UploadSourceReference>) {
+        sources.prune(documents.values.mapNotNull { it.stageId }.toSet())
+    }
+
+    private fun storedDocuments(): MutableMap<String, UploadSourceReference> {
         val data = try {
             String(savedDocument.readFully(), Charsets.UTF_8)
-        } catch (_: FileNotFoundException) {
+        } catch (missing: FileNotFoundException) {
+            if (savedDocument.baseFile.exists()) throw missing
             return mutableMapOf()
         }
         if (data.isEmpty()) return mutableMapOf()
         // 旧版的单一引用缺少账号信息，只允许在访客范围读取。
-        if (!data.startsWith('{')) return mutableMapOf(GUEST_SCOPE to Uri.parse(data))
+        if (!data.startsWith('{')) return mutableMapOf(GUEST_SCOPE to UploadSourceReference(uri = Uri.parse(data)))
         val stored = JSONObject(data)
         return stored.keys().asSequence().associateWithTo(mutableMapOf()) { key ->
-            val value = stored.get(key) as? String ?: throw IOException("Invalid document reference")
-            Uri.parse(value)
+            when (val value = stored.get(key)) {
+                is String -> UploadSourceReference(uri = Uri.parse(value))
+                is JSONObject -> decodeReference(value)
+                else -> throw IOException("Invalid document reference")
+            }
         }
+    }
+
+    private fun encodeReference(reference: UploadSourceReference): Any {
+        val summary = reference.summary ?: return checkNotNull(reference.uri).toString()
+        return JSONObject().apply {
+            put("name", summary.name)
+            put("sizeBytes", summary.sizeBytes)
+            put("sha256", summary.sha256)
+            if (reference.stageId != null) put("stageId", reference.stageId)
+            else put("uri", checkNotNull(reference.uri).toString())
+        }
+    }
+
+    private fun decodeReference(value: JSONObject): UploadSourceReference {
+        val name = value.getString("name")
+        val size = value.getLong("sizeBytes")
+        val digest = value.getString("sha256")
+        val uri = (value.opt("uri") as? String)?.let(Uri::parse)
+        val stageId = value.opt("stageId") as? String
+        if (name.isBlank() || size < 0 || !sha256Pattern.matches(digest) ||
+            (uri == null) == (stageId == null) ||
+            (stageId != null && !isStageId(stageId))
+        ) {
+            throw IOException("Invalid prepared source reference")
+        }
+        return UploadSourceReference(uri, stageId, SourceSummary(name, size, digest))
     }
 
     private fun hasReadGrant(uri: Uri): Boolean =
