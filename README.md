@@ -1,171 +1,47 @@
 # CloudNest
 
-CloudNest 是一套以个人电脑为数据中心的私有云盘。文件集中保存在运行服务的电脑上，可通过浏览器、Windows 客户端或 Android 客户端访问。项目提供独立的 Web 演示、连接真实存储的文件管理界面，以及供客户端接入的传输与同步 API。
+CloudNest 把文件保存在你的 Windows 电脑上，供 Windows 客户端、Android 手机和平板或本机浏览器访问。
 
-后端使用 Go、Gin 和 GORM，Web 使用 React、TypeScript、Vite 和 Ant Design。MySQL 保存目录、权限和任务状态，MinIO 保存文件正文。
+**连接前请先确认：运行后端的电脑与手机、平板必须处于同一个可互通的局域网。** 电脑可用网线连接路由器，手机和平板连接同一路由器的 Wi-Fi。使用期间保持电脑开机、后端运行；访客 Wi-Fi 若开启设备隔离，即使连上同一个 Wi-Fi 也可能无法访问电脑。
 
-[客户端登录与后端启停](#客户端登录与后端启停) · [第二版客户端](#第二版客户端) · [首版功能](#首版功能) · [数据存储位置](#数据存储位置) · [快速开始](#快速开始) · [局域网访问](#局域网访问) · [API 概览](#api-概览) · [仓库结构](#仓库结构)
+## 先选数据盘
 
-## 首版功能
+首次启动前，在 Docker Desktop 的 **Settings → Resources → Advanced** 将 WSL 2 数据磁盘位置设到空间充足的非系统盘。上传的文件会持续占用这块盘的空间。开发机上的实际磁盘映像为 `F:\Docker\wsl\DockerDesktopWSL\disk\docker_data.vhdx`，你的电脑以自己的 Docker 设置为准。[Docker Desktop 存储说明](https://docs.docker.com/desktop/features/wsl/)
 
-| 使用入口 | 可以使用的功能 |
+| 数据 | 保存位置 |
 | --- | --- |
-| Web 演示 | 使用内置样例浏览和整理文件，体验搜索、收藏、预览、回收站以及模拟上传进度。页面状态保存在内存中，刷新会恢复样例。 |
-| Web 文件管理 | 登录后浏览真实目录，新建文件夹、改名、移动和回收文件。支持 **16 MiB 以内**的单文件上传、任务状态查询与取消、签名下载，以及支持格式的图片和文本预览。 |
-| Web 回收站 | 分页查看已回收的文件和目录，恢复条目并查看实际恢复位置。永久清理提供范围预检、二次确认和进度查询。 |
-| 传输 API | 提供小文件上传和 S3 Multipart 分片上传。客户端可查询已上传分片、补传缺失部分，并在同一账号内复用已经验证的内容。大文件初始上限为 50 GiB，受服务配置和存储能力约束。 |
-| 同步和历史 API | 支持分页快照、设备基线确认、增量变更拉取与确认。内容替换按预期修订号执行，被替换的正文通过历史版本引用继续保留。 |
+| 上传的文件正文 | MinIO 命名卷 `cloudnest_minio_data`，挂载在容器的 `/data` |
+| 文件目录、账号、配额和任务记录 | MySQL 命名卷 `cloudnest_mysql_data`，挂载在容器的 `/var/lib/mysql` |
+| 上传临时文件 | 局域网启动脚本使用仓库下的 `output/lan-trial/uploads-temp`。建议把仓库也放在非系统盘。 |
 
-首版交付 Web 手动文件管理和后端传输、同步协议。第二版客户端复用这套协议完成手动传输。
+备份网盘时应同时保留 MinIO 和 MySQL 数据。日常停止后端请使用下方停止脚本，`docker compose down -v` 会删除项目命名卷。
 
-## 第二版客户端
+## 首次构建和初始化
 
-第二版试用版本为 `2.0.0-preview.2`，于 2026-11-25 归档。电脑运行后端并集中保存文件。Android 手机或平板上传文件后，在 Windows 客户端打开同一目录，点击「刷新目录」即可看到已发布的文件。
-
-| 操作 | Windows 桌面端 | Android 手机与平板 |
-| --- | --- | --- |
-| 浏览与整理 | 浏览目录、刷新列表，对文件改名、移动或移入回收站 | 登录后进入云盘，从文件菜单改名、选择目标目录移动或移入回收站 |
-| 手动传输 | 选择本机文件上传，查看分片上传进度，暂停后可继续。下载完成后可选择「另存为」 | 在当前目录选择本地文件并确认上传名称，通过任务记录查看状态、继续暂停的分片上传，下载时通过系统文件选择器保存 |
-| 界面与偏好 | 在工作区切换浅色、深色或跟随系统，重开应用时恢复偏好 | 从云盘菜单进入「界面主题」，选择浅色、深色或跟随系统 |
-
-| 交付文件 | 大小（B） | SHA-256 |
-| --- | ---: | --- |
-| `CloudNest-2.0.0-preview.2-windows-x64-setup.exe` | 13,687,652 | `ea40f1dc0572e188353baa1c5511dbaa0f229c9aae23c60b2ce9c5693fabd442` |
-| `CloudNest-android-debug.apk` | 182,544,227 | `c7f7d6e3e72e8d5a22015a8e934e8eef476ec207db3d92a534d17dd2b5bf22ea` |
-
-安装包和 `SHA256SUMS.txt` 位于本机 `output/second-edition`。Windows x64 试用安装包未签名，安装给当前用户，需有 WebView2 Evergreen Runtime。已有旧试用安装时，先从托盘退出并卸载，再安装本版。Android APK 使用调试签名，包名为 `com.opaoxx.cloudnest`，最低 Android API 24，可覆盖同签名的旧试用包。登录字段和脚本示例见[客户端登录与后端启停](#客户端登录与后端启停)，构建入口见 [Windows 打包脚本](scripts/Build-WindowsPreview.ps1)和 [Android 构建说明](apps/mobile/README.md)。
-
-归档验收使用上表中的试用包。Windows 与两台实体 Android 设备在真实 WLAN 完成定版包往返，两个设备各自回传的文件大小和 SHA-256 均一致。Windows 定版包暂停、退出和重开后恢复了同一上传任务，只补传缺失分片；该场景在隔离环境验证。
-
-本版交付范围为手动传输与中断恢复。Web 上传上限为 16 MiB。Android 后台执行和另存位置受设备系统及文件提供方影响。桌面单向备份和浏览器大文件上传列在后续规划。
-
-## 文件怎么流转
-
-```mermaid
-flowchart LR
-    Web["React Web"] -->|"登录、目录、上传任务"| API["Go / Gin API"]
-    Client["API 客户端"] -->|"传输与同步请求"| API
-    API -->|"目录、会话、任务与配额"| DB[("MySQL")]
-    API -->|"小文件正文、校验与签名"| Store[("MinIO")]
-    Web -->|"签名下载与预览"| Store
-    Client -->|"签名分片上传与下载"| Store
-```
-
-- **小文件上传**。客户端先创建上传任务，再把正文发送给 Go API。服务端保存正文并核对大小和 SHA-256 摘要，校验通过后发布目录项、结算配额。
-- **分片上传**。客户端按服务端给定的分片计划申请短期签名 URL，直接向 MinIO 上传分片。中断后查询已保存分片，再补传缺失内容。合并与整文件校验通过后才发布。
-- **同步与冲突**。设备从一致性快照建立基线，随后拉取并确认增量位置。带预期修订号的内容替换会检查当前文件版本，旧修订号无法覆盖已提交的新内容。
-
-## 数据存储位置
-
-**用电脑长期保存文件时，请使用 Docker Desktop 的 Linux 容器和 WSL 2 后端，并在首次启动前把 Docker 数据磁盘设到有足够空间的非系统盘。** Compose 使用 Docker 管理的命名卷。仓库所在盘和 Docker Desktop 程序安装盘可以独立选择，镜像、容器和命名卷的数据由 Docker Desktop 的数据磁盘位置决定。
-
-| 存储内容 | Compose 命名卷 | 容器内挂载点 |
-| --- | --- | --- |
-| 上传完成后的文件正文 | `cloudnest_minio_data` | `/data` |
-| 目录、账号、配额和上传任务等元数据 | `cloudnest_mysql_data` | `/var/lib/mysql` |
-| Redis 数据 | `cloudnest_redis_data` | `/data` |
-
-在 Docker Desktop 打开 **Settings → Resources → Advanced**，将磁盘映像位置设在 D 盘、F 盘等非系统盘，再启动 CloudNest 的基础设施。WSL 2 后端默认会将数据放在用户目录下的系统盘，数据磁盘位置也可以通过 Docker Desktop 设置迁移。[Docker Desktop 的 WSL 2 存储说明](https://docs.docker.com/desktop/features/wsl/)
-
-本项目开发机将 Docker 数据放在 F 盘，实际磁盘映像如下。你的电脑使用自己配置的路径。
-
-```text
-F:\Docker\wsl\DockerDesktopWSL\disk\docker_data.vhdx
-```
-
-上传正文由 MinIO 写入上述命名卷，Windows 侧的磁盘空间因此由该映像所在盘承担。启动后可以用以下命令核对 MinIO 的卷，输出的挂载点是 Docker Linux 环境内的路径。
-
-```powershell
-docker volume inspect cloudnest_minio_data --format '{{.Name}} -> {{.Mountpoint}}'
-```
-
-Go 后端接收小文件时还会在 Windows 主机上暂存正文。默认目录是系统临时目录下的 `CloudNest\uploads`，要把这部分写入也放到非系统盘，在启动 API 前设置 `CLOUDNEST_TEMP_DIR`，见下方命令。长期保存的文件正文与目录元数据分别依赖 MinIO 和 MySQL 卷，执行 `docker compose down -v` 会删除这些项目卷及其中的数据。
-
-## 快速开始
-
-以下命令在仓库根目录使用 PowerShell 执行。前端使用 Node.js 24 和 pnpm 11.21.0。运行完整环境另需 Go 1.27.2、Python 3.11 或更新版本，以及已启动的 Docker 和 Docker Compose。
-
-### 只体验 Web 演示
-
-```powershell
-pnpm --dir apps/web install --frozen-lockfile
-$env:VITE_CLOUDNEST_DATA_MODE = 'demo'
-pnpm --dir apps/web dev
-```
-
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173) 即可操作样例文件。
-
-### 启动真实文件管理
-
-**1. 一键构建并启动 Docker 环境**
+在部署电脑上准备 Go 1.27.2、Python 3.11 或更新版本、PowerShell 和 Docker Desktop（WSL 2、Linux 容器）。打开 Docker Desktop，在仓库根目录执行以下命令。
 
 ```powershell
 ./scripts/Start-Infra.ps1
 python scripts/verify_infra.py --service minio
-```
-
-打开 Docker Desktop 并确认数据磁盘位置后，在仓库根目录运行 [一键启动脚本](scripts/Start-Infra.ps1)。脚本首次从 [示例配置](scripts/.env.example) 生成本地 `scripts/.env`，检查 Compose 配置、端口和子网，下载并校验固定版本的 MinIO 源码，构建镜像，再启动 MySQL、MinIO 和 Redis 并等待健康检查通过。第二条命令准备 `cloudnest` 私有桶并检查存储读写，API 和 Web 按后续步骤启动。
-
-**2. 初始化数据库和业务账号**
-
-```powershell
 go run ./cmd/database -database cloudnest -seed
 ```
 
-首次按默认设置执行 `-seed` 会创建业务账号 **`root`**，密码也是 **`root`**。需要自定义密码时，可在首次执行前设置 `CLOUDNEST_ADMIN_PASSWORD`。已有账号继续使用原密码。
+第一条命令构建 MinIO 镜像并启动 MySQL、MinIO 和 Redis，第二条准备私有存储桶并验证读写，第三条应用数据库迁移、创建业务账号和根目录。默认用户名和密码均为 `root`。如需自定义密码，在**首次**执行 `-seed` 前设置 `CLOUDNEST_ADMIN_PASSWORD`，已有账号沿用原密码。
 
-**使用 Windows 或 Android 客户端**，接下来直接运行局域网启动脚本，登录地址会显示在终端。[客户端登录与后端启停](#客户端登录与后端启停)
+已有第二版试用安装包的用户可直接安装。需要从源码构建时，按设备选择：
 
-**仅在本机使用 Web**，可在终端前台运行 API。将下面的暂存路径换成实际的非系统盘目录，另开终端执行健康检查。
+- **Windows x64**：安装 NSIS，将 `makensis.exe` 加入 PATH，在仓库根目录运行 `./scripts/Build-WindowsPreview.ps1 -PreviewRevision 2`。安装包输出到 `output/desktop-preview.2`，客户端运行需要 WebView2 Evergreen Runtime。
+- **Android 手机或平板**：使用 Flutter 3.50.1 构建调试 APK，将 APK 安装到设备上。工具链、构建命令和输出路径见 [Android 构建说明](apps/mobile/README.md)。
 
-```powershell
-$env:CLOUDNEST_TEMP_DIR = 'F:\CloudNestData\uploads-temp'
-go run ./cmd/server
-```
+## 客户端登录与后端启停
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:18081/health/ready
-```
-
-**3. 启动 Web 并登录**
-
-另开一个 PowerShell，回到仓库根目录。
-
-```powershell
-pnpm --dir apps/web install --frozen-lockfile
-$env:VITE_CLOUDNEST_DATA_MODE = 'api'
-pnpm --dir apps/web dev
-```
-
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，使用业务账号 `root` 和初始化时设置的密码登录。Web 开发服务器会将 `/api` 请求转发到本地 API。
-
-### 常用本地配置
-
-| 配置项 | 本地值或用途 |
-| --- | --- |
-| `CLOUDNEST_HTTP_ADDR` | API 监听地址，默认 `127.0.0.1:18081`。 |
-| `CLOUDNEST_WEB_API_TARGET` | Vite 在 API 模式下的代理目标，默认 `http://127.0.0.1:18081`。修改 API 地址后同步调整。 |
-| `CLOUDNEST_ALLOWED_ORIGINS` | 允许访问 API 的 Web 来源，默认 `http://127.0.0.1:5173`。 |
-| `CLOUDNEST_DB_ADDRESS`、`CLOUDNEST_DB_USER`、`CLOUDNEST_DB_PASSWORD` | Go 进程的 MySQL 连接配置，默认地址为 `127.0.0.1:13309`。修改 Compose 端口或数据库凭据后同步调整。 |
-| `CLOUDNEST_S3_ENDPOINT`、`CLOUDNEST_S3_PUBLIC_ENDPOINT` | Go 访问 MinIO 的地址和客户端访问签名 URL 的地址。默认使用 `127.0.0.1:19000`。 |
-| `CLOUDNEST_S3_ACCESS_KEY`、`CLOUDNEST_S3_SECRET_KEY` | Go 访问 MinIO 的凭据，需与本地存储配置匹配。 |
-| `CLOUDNEST_TEMP_DIR` | Go 接收小文件时使用的本地暂存目录，可设置为有写入权限的非系统盘路径。 |
-
-示例配置用于回环地址上的开发环境。Compose 从本地配置文件读取基础设施设置，`go run` 从当前终端环境读取应用设置。
-
-## 局域网访问
-
-### 客户端登录与后端启停
-
-Windows 客户端和 Android 调试 APK 可通过以下脚本连接本机后端。首次准备按上文完成 Docker 镜像、私有桶、数据库迁移及业务账号初始化。日常使用时先打开 Docker Desktop，在部署电脑上用**管理员 PowerShell** 进入仓库根目录，执行启动命令。如果此前在前台运行过 `go run ./cmd/server`，先在那个终端按 Ctrl+C 释放端口。
+**1. 在电脑上启动后端。** 打开 Docker Desktop，用**管理员 PowerShell** 进入仓库根目录，执行：
 
 ```powershell
 ./scripts/Start-LanTrial.ps1
 ```
 
-启动脚本选择具有 IPv4 网关的已连接物理网卡，读取实际地址和子网。存在多个候选地址时，按提示指定网卡名称，例如 `./scripts/Start-LanTrial.ps1 -InterfaceAlias 'WLAN'`。此入口面向当前 Compose 中的本机 MySQL 和 MinIO，读取其端口与凭据，启动并等待基础容器健康，再编译后台 API。
-
-**启动成功后，从 PowerShell 输出读取登录地址。** 下面以电脑的局域网 IP 为 `192.168.1.23` 举例，使用时以自己终端当次显示的 IP 和端口为准。
+脚本编译并在后台启动 API，设置当前子网使用的端口转发和防火墙规则。启动成功后，终端会打印以下三行。示例中的 `192.168.1.23` 请换成**你当次终端显示的 IP**。
 
 ```text
 Phone/tablet service address: http://192.168.1.23:18081
@@ -173,67 +49,31 @@ Windows service address: http://127.0.0.1:18081
 File endpoint: http://192.168.1.23:19000
 ```
 
-| 在哪里登录 | 「服务地址」怎么填 | 用户名 | 默认密码 |
-| --- | --- | --- | --- |
-| **运行后端的 Windows 电脑** | 在「服务连接」中核对 `Windows service address` 整行里的 URL，默认是 `http://127.0.0.1:18081`。可先点击「检查连接」，再登录。 | `root` | `root` |
-| **Android 手机或平板** | 连接与电脑互通的 Wi-Fi，对照 `Phone/tablet service address`。以上例为例，在四个地址框依次填 `192`、`168`、`1`、`23`，「服务端口」填 `18081`。调试 APK 会自动补上 `http://`。 | `root` | `root` |
+**2. 在客户端登录。** 首次默认填写**用户名 `root`、密码 `root`**。初始化时自定义过密码的，填写自定义密码。
 
-两个客户端使用同一个 CloudNest 业务账号。首次初始化时自定义过密码的用户，在密码框填当时设置的值。`File endpoint` 是文件正文传输地址，客户端会从服务端取得签名链接，登录时只需填写对应的服务地址。
+| 客户端 | 登录页如何填地址 |
+| --- | --- |
+| 运行后端的 Windows 电脑 | 在「服务连接」填 `Windows service address` 的完整 URL，默认是 `http://127.0.0.1:18081`。可先点「检查连接」。 |
+| 同一局域网内的 Android 手机或平板 | 按 `Phone/tablet service address` 将 IPv4 四段数字分别填入地址框。以上例为例，依次填 `192`、`168`、`1`、`23`，端口填 `18081`。调试 APK 自动补上协议。 |
 
-运行状态、后端程序和日志位于 `output/lan-trial`。API 临时上传目录也位于此处。关闭启动终端后，后台 API 和网络规则继续存在。**使用结束后，在仓库根目录用管理员 PowerShell 执行停止命令。**
+`File endpoint` 用于文件传输。登录成功后，可以从手机上传一个小文件，在 Windows 客户端打开同一目录，点击「刷新目录」后下载。
+
+**3. 使用结束后停止后端。** 关闭启动终端后，后台 API 仍会运行。在仓库根目录用管理员 PowerShell 执行：
 
 ```powershell
 ./scripts/Stop-LanTrial.ps1
 ```
 
-停止脚本关闭本入口创建的 API，删除本仓库记录的端口转发和防火墙规则。基础容器继续运行。Windows 规则具有持久性，因此退出试用应执行停止命令。异常退出或重启后，运行停止脚本也能清理遗留规则。运行期间请保留 `output/lan-trial/state.json`。
+停止脚本关闭后台 API 并清理本次端口转发和防火墙规则，Docker 基础容器继续运行。切换 Wi-Fi 后，让设备重新连接同一局域网，再运行启动脚本并按新的终端输出填写地址。
 
-停止期间，仍打开的客户端可能显示连接失败、登录超时或会话轮换结果无法确认。再次启动服务后，按客户端提示重新登录或刷新目录。
+## 可选：在部署电脑上运行 Web
 
-换 Wi-Fi 或 IP 变化后，重新执行启动命令。它先清理上次的服务及规则，再按新地址启动，手机和平板需填写新的服务地址。重新启动会中断当前连接，切换前先暂停传输。客户端本地任务按服务地址和账号隔离，换地址后的旧任务恢复仍受该约束。
-
-重复启动会替换本脚本管理的 API。其他入口占用 `18081` 时，脚本提示先停止原服务。启动中途失败会清理本次 API 和网络规则。清理失败时保留状态文件并提示重试，已有转发被外部修改时提示人工核对。回归检查可在普通终端执行 `./scripts/Test-LanTrial.ps1`。
-
-### 浏览器入口
-
-默认配置供部署电脑本机使用。手机、平板或另一台电脑访问时，部署电脑须保持开机，Web、API 和存储服务须在运行。
-
-- 让 Web 入口在局域网可访问，其他设备使用部署电脑的局域网 IP 或域名打开页面。通过同源 `/api` 代理访问 Go API，并在 `CLOUDNEST_ALLOWED_ORIGINS` 中配置浏览器实际访问的 Web 来源。
-- 浏览器从 MinIO 直接读取签名下载和预览链接。文件端点也须能从局域网访问，并将浏览器实际访问的文件端点填入 `CLOUDNEST_S3_PUBLIC_ENDPOINT`。Go 访问 MinIO 的内部地址由 `CLOUDNEST_S3_ENDPOINT` 控制。
-- MySQL、Redis 可以继续使用默认的本机回环绑定。其他设备日常访问的是 Web 入口，预览和下载时另外访问签名链接中的文件端点。
-
-## API 概览
-
-完整的请求字段、认证要求、响应和错误码见 [OpenAPI](api/openapi.yaml)。常用入口如下。
-
-| 用途 | 代表端点 |
-| --- | --- |
-| 账号与会话 | `POST /api/v1/auth/login` · `POST /api/v1/auth/refresh` · `GET /api/v1/me` |
-| 文件与目录 | `GET /api/v1/entries` · `POST /api/v1/directories` · `POST /api/v1/entries/{id}/download` |
-| 上传与续传 | `POST /api/v1/uploads` · `POST /api/v1/uploads/{id}/part-urls` · `GET /api/v1/uploads/{id}/parts` |
-| 回收与恢复 | `GET /api/v1/trash` · `POST /api/v1/trash/{id}/restore` · `GET /api/v1/trash/{id}/purge-preview` |
-| 替换与同步 | `POST /api/v1/entries/{id}/content-replacement` · `POST /api/v1/sync/snapshots` · `POST /api/v1/sync/changes/pull` |
-| 健康检查 | `GET /health/live` · `GET /health/ready` |
-
-## 仓库结构
-
-| 路径 | 职责 |
-| --- | --- |
-| [apps/web](apps/web) | Web 演示及 API 模式界面。 |
-| [apps/desktop](apps/desktop) · [pkg/client](pkg/client) | Windows 客户端界面、文件选择与传输，以及 Go 客户端的 API 调用。 |
-| [apps/mobile](apps/mobile) | Flutter 手机和平板界面，以及 Android 原生文件访问、会话和传输任务存储。 |
-| [cmd/server](cmd/server) | API 入口、依赖装配和后台任务。 |
-| [internal/server](internal/server) | HTTP、业务逻辑、数据库访问与对象存储适配。 |
-| [cmd/database](cmd/database) · [migrations](migrations) | 数据库初始化、业务账号初始化和版本化 SQL 迁移。 |
-| [cmd/restore-sync](cmd/restore-sync) | 备份恢复后，在目标服务停服期间检查并重置同步代次。 |
-| [scripts](scripts) | 本地基础设施的启动和验证脚本。 |
-
-## 构建
+启动后端后，在另一个 PowerShell 中执行以下命令。前端使用 Node.js 24 和 pnpm 11.21.0。
 
 ```powershell
-go build ./cmd/...
 pnpm --dir apps/web install --frozen-lockfile
-pnpm --dir apps/web build
+$env:VITE_CLOUDNEST_DATA_MODE = 'api'
+pnpm --dir apps/web dev
 ```
 
-Web 构建产物位于 `apps/web/dist`。构建真实 API 模式前设置 `VITE_CLOUDNEST_DATA_MODE=api`，部署时为 `/api` 配置同源代理。离线同步恢复工具的参数可通过 `go run ./cmd/restore-sync --help` 查看。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，使用同一个业务账号登录。需要生产构建时，在上述环境变量生效的终端运行 `pnpm --dir apps/web build`，产物位于 `apps/web/dist`，部署时将同源 `/api` 转发给 Go 后端。

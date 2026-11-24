@@ -1,8 +1,8 @@
 # CloudNest Android
 
-Android 手机与平板通过局域网连接运行 CloudNest 的电脑。首次准备好 Docker、存储桶和业务账号后，在电脑的仓库根目录用管理员 PowerShell 执行 `./scripts/Start-LanTrial.ps1`。
+**连接前，Android 手机或平板必须和运行 CloudNest 后端的电脑处于同一个可互通的局域网。**首次准备好 Docker、存储桶和业务账号后，在电脑的仓库根目录用管理员 PowerShell 执行 `./scripts/Start-LanTrial.ps1`。
 
-打开调试 APK，对照终端的 `Phone/tablet service address` 将电脑 IPv4 的四段数字和端口分别填入登录页。默认业务用户名和密码均为 `root`，首次初始化时自定义过密码则使用该密码。登录后可浏览目录、上传下载和管理文件。使用结束后在电脑上执行 `./scripts/Stop-LanTrial.ps1`。[完整启动步骤和填写示例](../../README.md#客户端登录与后端启停)
+打开调试 APK，对照终端的 `Phone/tablet service address` 将电脑 IPv4 的四段数字和端口分别填入登录页。默认业务用户名和密码均为 `root`，首次初始化时自定义过密码则使用该密码。使用结束后在电脑上执行 `./scripts/Stop-LanTrial.ps1`。[完整启动步骤和填写示例](../../README.md#客户端登录与后端启停)
 
 ## 构建调试 APK
 
