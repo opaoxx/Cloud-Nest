@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 
+import 'file_presentation.dart';
 import 'mobile_account.dart';
 import 'mobile_tasks.dart';
 import 'native_login.dart';
@@ -25,7 +26,7 @@ class MobileTasksPage extends StatefulWidget {
 class _MobileTasksPageState extends State<MobileTasksPage> {
   List<MobileTask> _tasks = [];
   bool _busy = false;
-  bool? _failedCreation;
+  bool _loadFailed = false;
   String? _activeId;
   TransferPause? _pause;
   String? _notice;
@@ -63,9 +64,7 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
                 if (mounted) {
                   setState(() {
                     _sourceRequired.remove(task.id);
-                    _notice = confirmed == plan.partCount
-                        ? '分片已确认，等待校验和发布…'
-                        : '已确认 $confirmed/${plan.partCount} 片';
+                    _notice = uploadProgressLabel(confirmed, plan.partCount);
                   });
                 }
               },
@@ -102,21 +101,19 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
     if (mounted) await _load();
   }
 
-  Future<void> _load({bool create = false}) async {
+  Future<void> _load() async {
     if (_busy) return;
     setState(() {
       _busy = true;
-      _failedCreation = null;
+      _loadFailed = false;
     });
     try {
-      // 1. 打开页面时读当前账号。用户点击后才执行创建。
-      final tasks = create
-          ? await createMobileTestTask(widget.owner)
-          : await readMobileTasks(widget.owner);
+      // 1. 打开或恢复任务后，读取当前账号的真实上传和下载记录。
+      final tasks = await readMobileTasks(widget.owner);
       if (mounted) setState(() => _tasks = tasks);
     } on TaskStoreFailure {
-      // 2. 保留操作类型，重试仍走原来的读或写。
-      if (mounted) setState(() => _failedCreation = create);
+      // 2. 本机存储暂时不可读时仍可重试。
+      if (mounted) setState(() => _loadFailed = true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -212,16 +209,11 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
 
   Widget _body(BuildContext context) {
     if (_busy) return const Center(child: CircularProgressIndicator());
-    final failedCreation = _failedCreation;
-    if (failedCreation != null) {
-      return _message(
-        failedCreation ? '无法创建测试任务。' : '无法读取任务记录。',
-        '重试',
-        () => _load(create: failedCreation),
-      );
+    if (_loadFailed) {
+      return _message('无法读取任务记录。', '重试', _load);
     }
     if (_tasks.isEmpty) {
-      return _message('暂无任务记录', '创建测试任务', () => _load(create: true));
+      return const Center(child: Text('暂无任务记录'));
     }
 
     final dates = MaterialLocalizations.of(context);
@@ -235,15 +227,24 @@ class _MobileTasksPageState extends State<MobileTasksPage> {
         );
         final sourceRequired =
             _sourceRequired.contains(task.id) || task.pauseReason == 'source';
+        final details = [
+          if (task.sizeBytes case final int size) fileSizeLabel(size),
+          if (_activeId == task.id)
+            '正在处理…'
+          else ...[
+            if (sourceRequired && task.canResume && task.pauseReason == null)
+              '已暂停',
+            task.statusLabel,
+          ],
+        ];
         return ListTile(
           key: ValueKey(task.id),
-          leading: const Icon(Icons.assignment_outlined),
-          title: Text(task.name),
-          subtitle: Text(
-            _activeId == task.id
-                ? '正在处理…'
-                : '${sourceRequired && task.canResume && task.pauseReason == null ? '已暂停 · ' : ''}${task.statusLabel} · $date $time',
+          leading: Icon(
+            task.isDownload ? Icons.download_outlined : Icons.upload_outlined,
           ),
+          title: Text(task.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+          subtitle: Text("${details.join(' · ')}\n$date $time"),
+          isThreeLine: true,
           trailing: _taskActions(task, sourceRequired),
         );
       },

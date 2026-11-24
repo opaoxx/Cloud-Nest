@@ -171,15 +171,13 @@ void main() {
     await tester.tap(find.text('上传'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 230));
-    expect(find.textContaining('等待校验和发布'), findsOneWidget);
+    expect(find.textContaining('正在校验文件'), findsOneWidget);
     expect(find.text('上传成功。'), findsNothing);
     expect(find.text(source.name), findsNothing);
 
-    account.published.completeError(
-      const AccountFailure('整文件 SHA-256 校验失败。文件未发布。'),
-    );
+    account.published.completeError(const AccountFailure('文件内容校验失败。文件未发布。'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('SHA-256 校验失败'), findsOneWidget);
+    expect(find.textContaining('文件内容校验失败'), findsOneWidget);
     expect(find.text('上传成功。'), findsNothing);
     expect(find.text(source.name), findsNothing);
   });
@@ -215,7 +213,7 @@ void main() {
     tester.view.physicalSize = const Size(400, 180);
     await tester.pump();
     expect(tester.takeException(), isNull);
-    final progress = find.textContaining('已确认 2/2 片');
+    final progress = find.textContaining('正在校验文件');
     await tester.ensureVisible(progress);
     await tester.pump();
     expect(progress.hitTestable(), findsOneWidget);

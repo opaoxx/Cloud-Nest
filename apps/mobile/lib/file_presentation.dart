@@ -11,3 +11,7 @@ String fileSizeLabel(int bytes) {
       : size.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
   return '$amount ${units[unit]}';
 }
+
+String uploadProgressLabel(int confirmed, int total) {
+  return confirmed == total ? '正在校验文件…' : '上传中 · ${confirmed * 100 ~/ total}%';
+}

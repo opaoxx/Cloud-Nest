@@ -189,11 +189,9 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           pause: pause,
           onProgress: (plan, confirmed) {
             if (!mounted) return;
-            final progress = '已确认 $confirmed/${plan.partCount} 片';
-            final status = confirmed == plan.partCount
-                ? '$progress，等待校验和发布…'
-                : progress;
-            setState(() => _transferNotice = '$status\n${plan.description}');
+            setState(() {
+              _transferNotice = uploadProgressLabel(confirmed, plan.partCount);
+            });
           },
         );
       } else {

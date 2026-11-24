@@ -712,11 +712,8 @@ class MobileAccount {
         rethrow;
       } on MultipartSourceUnavailable {
         rethrow;
-      } on AccountFailure catch (error) {
-        throw AccountFailure(
-          '第 $number 片未确认。已记录 $confirmed/${plan.partCount} 片。\n'
-          '${error.message}\n恢复网络后可再次点击上传继续。',
-        );
+      } on AccountFailure {
+        throw const AccountFailure('上传暂时中断，已保存确认的进度。网络恢复后可以继续。');
       }
     }
     return await _finishMultipart(

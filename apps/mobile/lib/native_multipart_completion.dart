@@ -5,11 +5,11 @@ import 'native_multipart_upload.dart';
 import 'native_upload_status.dart';
 
 String multipartFailureLabel(Object? code) => switch (code) {
-  'CHECKSUM_MISMATCH' => '整文件 SHA-256 校验失败',
-  'BODY_SIZE_MISMATCH' => '整文件大小校验失败',
+  'CHECKSUM_MISMATCH' => '文件内容校验失败',
+  'BODY_SIZE_MISMATCH' => '文件大小校验失败',
   'TARGET_UNAVAILABLE' => '目标目录不可用',
-  'UPLOAD_PARTS_MISMATCH' => '服务端核对分片回执不一致',
-  _ => '分片上传失败',
+  'UPLOAD_PARTS_MISMATCH' => '服务端未能确认收到的文件内容',
+  _ => '上传失败',
 };
 
 Future<UploadTaskSnapshot> readMultipartTask(
@@ -83,7 +83,7 @@ Future<UploadTaskSnapshot> requestMultipartCompletion(
     HttpStatus.conflict,
     {'error': {'code': 'UPLOAD_PARTS_MISMATCH'}},
   )) {
-    throw const AccountFailure('服务端核对分片回执不一致，文件未发布。');
+    throw const AccountFailure('服务端未能确认收到的文件内容，文件未发布。');
   }
   throw const AccountFailure('完成请求结果未确认。重试时会查询原任务。');
 }

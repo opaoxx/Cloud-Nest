@@ -56,69 +56,58 @@ void main() {
     },
   );
 
-  testWidgets('creates the scoped record on retry and reads it on reopening', (
+  testWidgets('reads only transfer records and retries a local read failure', (
     tester,
   ) async {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     addTearDown(() => messenger.setMockMethodCallHandler(_channel, null));
-    final operations = <String>[];
-    var saved = false;
-    var failCreate = true;
+    var reads = 0;
     messenger.setMockMethodCallHandler(_channel, (call) async {
+      expect(call.method, 'list');
       expect(call.arguments, {
         'server': _owner.server,
         'userId': _owner.userId,
       });
-      operations.add(call.method);
-      if (call.method == 'createTest') {
-        if (failCreate) {
-          failCreate = false;
-          throw PlatformException(code: 'task_store_unavailable');
-        }
-        saved = true;
-      } else {
-        expect(call.method, 'list');
-      }
+      if (++reads == 1) throw PlatformException(code: 'task_store_unavailable');
       return [
-        if (saved)
-          {
-            'id': _taskId,
-            'name': '本地测试任务',
-            'kind': 'TEST',
-            'state': 'TEST_RECORD',
-            'createdAtMs': 1795478400000,
-          },
+        {
+          'id': 'legacy',
+          'name': '本地测试任务',
+          'kind': 'TEST',
+          'state': 'TEST_RECORD',
+          'createdAtMs': 1795478400000,
+        },
+        {
+          'id': _taskId,
+          'name': '课程视频.mp4',
+          'kind': 'UPLOAD',
+          'state': 'PENDING',
+          'createdAtMs': 1795478400000,
+          'remoteId': '19',
+          'sizeBytes': 16777217,
+          'partSizeBytes': 16777216,
+          'partCount': 2,
+          'confirmedParts': 1,
+          'expiresAt': '2030-01-01T00:00:00Z',
+        },
       ];
     });
-
     await tester.pumpWidget(
       MaterialApp(
         home: MobileTasksPage(owner: _owner, account: MobileAccount()),
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('暂无任务记录'), findsOneWidget);
-    expect(operations, ['list']);
-
-    await tester.tap(find.text('创建测试任务'));
-    await tester.pumpAndSettle();
-    expect(find.text('无法创建测试任务。'), findsOneWidget);
+    expect(find.text('无法读取任务记录。'), findsOneWidget);
     await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey(_taskId)), findsOneWidget);
-    expect(find.textContaining('未执行'), findsOneWidget);
+    expect(find.text('课程视频.mp4'), findsOneWidget);
+    expect(find.textContaining('16 MB · 已上传 50%'), findsOneWidget);
+    expect(find.textContaining('任务 19'), findsNothing);
+    expect(find.text('本地测试任务'), findsNothing);
     expect(find.text('创建测试任务'), findsNothing);
-
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pumpWidget(
-      MaterialApp(
-        home: MobileTasksPage(owner: _owner, account: MobileAccount()),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey(_taskId)), findsOneWidget);
-    expect(operations, ['list', 'createTest', 'createTest', 'list']);
+    expect(reads, 2);
   });
 
   testWidgets('reselects the source for the same paused task', (tester) async {

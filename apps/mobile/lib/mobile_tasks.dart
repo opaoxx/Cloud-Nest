@@ -27,6 +27,7 @@ class MobileTask {
     this.pauseReason,
     this.state,
     this.canCancel,
+    this.sizeBytes,
   );
 
   factory MobileTask.fromAndroid(Object? row) {
@@ -45,14 +46,10 @@ class MobileTask {
             createdAtMs <= 8640000000000000) {
       final label = switch ((kind, state)) {
         ('TEST', 'TEST_RECORD') => '未执行',
-        ('UPLOAD', 'PENDING') when row['submissionStage'] == 'REUSE_PENDING' =>
-          '复用待确认',
         ('UPLOAD', 'PENDING') when row['partCount'] != null => _multipartStatus(
           row,
         ),
-        ('UPLOAD', 'PENDING') => '待确认',
-        ('UPLOAD', 'COMPLETED') when row['submissionStage'] == 'REUSED' =>
-          '已复用',
+        ('UPLOAD', 'PENDING') => '待继续',
         ('UPLOAD', 'COMPLETED') => '已上传',
         ('UPLOAD', 'FAILED') when row['partCount'] != null =>
           multipartFailureLabel(row['errorCode']),
@@ -78,6 +75,10 @@ class MobileTask {
         reason,
         state,
         state == 'PENDING' && (kind == 'UPLOAD' || kind == 'DOWNLOAD'),
+        switch (row['sizeBytes']) {
+          final int bytes when bytes >= 0 => bytes,
+          _ => null,
+        },
       );
     }
     throw const TaskStoreFailure();
@@ -92,6 +93,7 @@ class MobileTask {
   final String? pauseReason;
   final String state;
   final bool canCancel;
+  final int? sizeBytes;
 }
 
 void _requirePending(Object? state) {
@@ -245,10 +247,9 @@ String _multipartStatus(Map<Object?, Object?> row) {
   if (confirmed is! int || confirmed < 0 || confirmed > plan.partCount) {
     throw const TaskStoreFailure();
   }
-  final progress = confirmed == plan.partCount
-      ? '已确认 $confirmed/${plan.partCount} 片，待确认发布'
-      : '已确认 $confirmed/${plan.partCount} 片';
-  return '$progress · 任务 ${plan.taskId}';
+  return confirmed == plan.partCount
+      ? '校验结果待确认'
+      : '已上传 ${confirmed * 100 ~/ plan.partCount}%';
 }
 
 Future<Object?> _reserveUpload(
@@ -568,20 +569,11 @@ Future<T?> _taskCall<T>(
   }
 }
 
-Future<List<MobileTask>> readMobileTasks(AccountOwner owner) =>
-    _loadTasks('list', owner);
-
-Future<List<MobileTask>> createMobileTestTask(AccountOwner owner) =>
-    _loadTasks('createTest', owner);
-
-Future<List<MobileTask>> _loadTasks(
-  String operation,
-  AccountOwner owner,
-) async {
-  // 1. 服务和用户来自当前会话。Android 按这两个字段读写 SQLite。
+Future<List<MobileTask>> readMobileTasks(AccountOwner owner) async {
+  // 1. 服务和用户来自当前会话，Android 按原账号范围读取。
   final List<Object?>? rows;
   try {
-    rows = await _tasks.invokeListMethod<Object?>(operation, {
+    rows = await _tasks.invokeListMethod<Object?>('list', {
       'server': owner.server,
       'userId': owner.userId,
     });
@@ -593,5 +585,8 @@ Future<List<MobileTask>> _loadTasks(
 
   // 2. 空数组是有效结果。完整解析后再交付界面。
   if (rows == null) throw const TaskStoreFailure();
-  return rows.map(MobileTask.fromAndroid).toList();
+  return rows
+      .map(MobileTask.fromAndroid)
+      .where((task) => task.state != 'TEST_RECORD')
+      .toList();
 }
