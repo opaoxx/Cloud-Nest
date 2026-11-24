@@ -54,34 +54,38 @@ Future<DirectoryEntry> changeDirectoryFile(
     additionalJsonStatuses: const {HttpStatus.badRequest},
   );
   // 2. 只接受同一文件与目录的成功快照。
-  if (reply
-      case (
-        status: HttpStatus.ok,
-        body: {
-          'data': {
-            'entry': {
-              'id': final String id,
-              'entry_type': 'FILE',
-              'parent_id': final String actualParent,
-              'name': final String actualName,
-              'revision': final String revision,
-              'status': final String status,
-            },
-          },
-        },
-      )
-      when id == entry.id &&
-          actualParent == parentId &&
-          actualName.isNotEmpty &&
-          isCloudNestId(revision) &&
-          status == (name == null ? 'TRASHED' : 'ACTIVE')) {
-    return (
-      id: id,
-      name: actualName,
-      isFolder: false,
-      sizeBytes: entry.sizeBytes,
-      revision: revision,
-    );
+  if (reply case (
+    status: HttpStatus.ok,
+    body: {'data': {'entry': final Map<String, Object?> snapshot}},
+  )) {
+    // 重命名返回文件详情，回收返回带删除时间的简要快照。
+    final matchesAction = name == null
+        ? snapshot['entry_type'] == 'FILE' && snapshot['deleted_at'] is String
+        : snapshot['kind'] is String &&
+              snapshot['kind'] != 'folder' &&
+              snapshot['size_bytes'] == entry.sizeBytes;
+    if (snapshot
+        case {
+          'id': final String id,
+          'parent_id': final String actualParent,
+          'name': final String actualName,
+          'revision': final String revision,
+          'status': final String status,
+        }
+        when matchesAction &&
+            id == entry.id &&
+            actualParent == parentId &&
+            actualName.isNotEmpty &&
+            isCloudNestId(revision) &&
+            status == (name == null ? 'TRASHED' : 'ACTIVE')) {
+      return (
+        id: id,
+        name: actualName,
+        isFolder: false,
+        sizeBytes: entry.sizeBytes,
+        revision: revision,
+      );
+    }
   }
 
   // 3. 显示明确的冲突原因，保留目录项供用户刷新或修正。
