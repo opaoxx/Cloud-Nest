@@ -8,6 +8,16 @@ const maxUploadProtocolBytes = 9007199254740991;
 
 typedef PreparedUploadFile = ({String name, int sizeBytes, String sha256});
 
+Map<String, Object> uploadDeclarationPayload(
+  String parentId,
+  PreparedUploadFile source,
+) => {
+  'parent_id': parentId,
+  'name': source.name,
+  'size_bytes': source.sizeBytes,
+  'sha256': source.sha256,
+};
+
 Future<Object?> requestUploadCreation(
   NativeSession session,
   String key,
@@ -19,12 +29,7 @@ Future<Object?> requestUploadCreation(
     session.address,
     session.accessToken,
     '/api/v1/uploads',
-    payload: {
-      'parent_id': parentId,
-      'name': source.name,
-      'size_bytes': source.sizeBytes,
-      'sha256': source.sha256,
-    },
+    payload: uploadDeclarationPayload(parentId, source),
     creationKey: key,
     successStatus: HttpStatus.created,
   );

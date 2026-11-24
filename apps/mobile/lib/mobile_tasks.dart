@@ -7,6 +7,7 @@ import 'native_login.dart';
 import 'native_multipart_completion.dart';
 import 'native_multipart_upload.dart';
 import 'native_upload_creation.dart';
+import 'native_upload_reuse.dart';
 import 'native_upload_status.dart';
 
 const _tasks = MethodChannel('cloudnest/android_tasks');
@@ -44,10 +45,14 @@ class MobileTask {
             createdAtMs <= 8640000000000000) {
       final label = switch ((kind, state)) {
         ('TEST', 'TEST_RECORD') => '未执行',
+        ('UPLOAD', 'PENDING') when row['submissionStage'] == 'REUSE_PENDING' =>
+          '复用待确认',
         ('UPLOAD', 'PENDING') when row['partCount'] != null => _multipartStatus(
           row,
         ),
         ('UPLOAD', 'PENDING') => '待确认',
+        ('UPLOAD', 'COMPLETED') when row['submissionStage'] == 'REUSED' =>
+          '已复用',
         ('UPLOAD', 'COMPLETED') => '已上传',
         ('UPLOAD', 'FAILED') when row['partCount'] != null =>
           multipartFailureLabel(row['errorCode']),
@@ -117,7 +122,24 @@ typedef PendingMultipartUpload = ({
   String parentId,
   PreparedUploadFile source,
   MultipartCreation? creation,
+  UploadSubmissionStage stage,
 });
+
+enum UploadSubmissionStage {
+  reuseReady('REUSE_READY'),
+  reusePending('REUSE_PENDING'),
+  create('CREATE');
+
+  const UploadSubmissionStage(this.storageValue);
+  final String storageValue;
+}
+
+UploadSubmissionStage _submissionStage(Object? row) => switch (row) {
+  {'submissionStage': 'REUSE_READY'} => UploadSubmissionStage.reuseReady,
+  {'submissionStage': 'REUSE_PENDING'} => UploadSubmissionStage.reusePending,
+  {'submissionStage': 'CREATE'} => UploadSubmissionStage.create,
+  _ => throw const TaskStoreFailure(),
+};
 
 Future<PendingMultipartUpload?> readPendingMultipartUpload(
   AccountOwner owner,
@@ -147,12 +169,17 @@ Future<PendingMultipartUpload?> readPendingMultipartUpload(
       parentId: parentId,
       source: (name: name, sizeBytes: size, sha256: sha256),
       creation: remoteId == null ? null : _savedMultipart(value, size),
+      stage: _submissionStage(value),
     );
   }
   throw const TaskStoreFailure();
 }
 
-typedef LocalSingleIntent = ({String id, String? remoteId});
+typedef LocalSingleIntent = ({
+  String id,
+  String? remoteId,
+  UploadSubmissionStage stage,
+});
 
 Future<LocalSingleIntent> reserveSingleIntent(
   AccountOwner owner,
@@ -163,12 +190,12 @@ Future<LocalSingleIntent> reserveSingleIntent(
   if (value case {'state': final Object? state}) _requirePending(state);
   if (value case {'id': final String id, 'remoteId': final String? remoteId}
       when id.isNotEmpty && (remoteId == null || isCloudNestId(remoteId))) {
-    return (id: id, remoteId: remoteId);
+    return (id: id, remoteId: remoteId, stage: _submissionStage(value));
   }
   throw const TaskStoreFailure();
 }
 
-Future<({String id, MultipartCreation? creation})> reserveMultipartIntent(
+Future<PendingMultipartUpload> reserveMultipartIntent(
   AccountOwner owner,
   String parentId,
   PreparedUploadFile source,
@@ -179,9 +206,12 @@ Future<({String id, MultipartCreation? creation})> reserveMultipartIntent(
       when id.isNotEmpty) {
     return (
       id: id,
+      parentId: parentId,
+      source: source,
       creation: remoteId == null
           ? null
           : _savedMultipart(value, source.sizeBytes),
+      stage: _submissionStage(value),
     );
   }
   throw const TaskStoreFailure();
@@ -231,6 +261,28 @@ Future<Object?> _reserveUpload(
   'sizeBytes': source.sizeBytes,
   'sha256': source.sha256,
 });
+
+Future<void> setUploadSubmissionStage(
+  AccountOwner owner,
+  String id,
+  UploadSubmissionStage stage,
+) => _taskCall<void>('setUploadSubmissionStage', owner, {
+  'id': id,
+  'stage': stage.storageValue,
+});
+
+Future<void> saveUploadReuse(
+  AccountOwner owner,
+  String id,
+  UploadReuseReceipt receipt,
+) => _taskCall<void>('saveUploadReuse', owner, {
+  'id': id,
+  'entryId': receipt.entryId,
+  'name': receipt.name,
+});
+
+Future<void> cancelUncreatedUpload(AccountOwner owner, String id) =>
+    _taskCall<void>('cancelUncreatedUpload', owner, {'id': id});
 
 Future<void> saveMultipartCheckpoint(
   AccountOwner owner,
@@ -421,10 +473,12 @@ class UploadCancellation extends CancellationTask {
     this.parentId,
     this.source,
     this.remoteId,
+    this.stage,
   );
   final String parentId;
   final PreparedUploadFile source;
   final String? remoteId;
+  final UploadSubmissionStage stage;
 }
 
 class DownloadCancellation extends CancellationTask {
@@ -464,11 +518,13 @@ Future<CancellationTask?> readCancellationTask(
           size <= maxUploadProtocolBytes &&
           isMultipartSha256(digest) &&
           (remoteId == null || isCloudNestId(remoteId))) {
-    return UploadCancellation(state, parentId, (
-      name: name,
-      sizeBytes: size,
-      sha256: digest,
-    ), remoteId);
+    return UploadCancellation(
+      state,
+      parentId,
+      (name: name, sizeBytes: size, sha256: digest),
+      remoteId,
+      _submissionStage(row),
+    );
   }
   throw const TaskStoreFailure();
 }

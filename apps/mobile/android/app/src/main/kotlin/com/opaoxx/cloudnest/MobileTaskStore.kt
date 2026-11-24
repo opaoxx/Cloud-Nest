@@ -75,7 +75,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
     context,
     File(context.noBackupFilesDir, "mobile_tasks.sqlite3").absolutePath,
     null,
-    7,
+    8,
     // 损坏时报告错误并保留原始文件，避免自动删除任务记录。
     { _ -> },
 ) {
@@ -105,10 +105,11 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         addUploadOutcomeFields(database)
         addPauseFields(database)
         extendOpenTaskIndexes(database)
+        addSubmissionStage(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion !in 1..6 || newVersion != 7) {
+        if (oldVersion !in 1..7 || newVersion != 8) {
             throw SQLiteException("Unsupported task database migration: $oldVersion to $newVersion")
         }
         if (oldVersion == 1) addSingleUploadFields(database)
@@ -116,7 +117,8 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         if (oldVersion <= 3) createPartReceipts(database)
         if (oldVersion <= 4) addUploadOutcomeFields(database)
         if (oldVersion <= 5) addPauseFields(database)
-        extendOpenTaskIndexes(database)
+        if (oldVersion <= 6) extendOpenTaskIndexes(database)
+        addSubmissionStage(database)
     }
 
     private fun addSingleUploadFields(database: SQLiteDatabase) {
@@ -192,6 +194,11 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         )
     }
 
+    private fun addSubmissionStage(database: SQLiteDatabase) {
+        // 旧待确认意图可能已普通创建，升级后沿用原路径和创建键。
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN submission_stage TEXT NOT NULL DEFAULT 'CREATE'")
+    }
+
     override fun onConfigure(database: SQLiteDatabase) {
         database.setForeignKeyConstraintsEnabled(true)
     }
@@ -203,7 +210,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             // 1. 同一账号、目标和文件指纹只能有一条待确认意图。
             val previous = database.query(
                 TASKS,
-                arrayOf("local_task_id", "remote_task_id", "part_size_bytes", "part_count", "expires_at", "state"),
+                arrayOf("local_task_id", "remote_task_id", "part_size_bytes", "part_count", "expires_at", "state", "submission_stage"),
                 "$OWNER_FILTER AND kind = 'UPLOAD' AND $OPEN_STATES AND parent_id = ? AND name = ? AND size_bytes = ? AND sha256 = ?",
                 owner.selectionArgs() + arrayOf(declaration.parentId, declaration.name, declaration.sizeBytes.toString(), declaration.sha256),
                 null,
@@ -218,6 +225,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                         "partCount" to if (cursor.isNull(3)) null else cursor.getInt(3),
                         "expiresAt" to cursor.getString(4),
                         "state" to cursor.getString(5),
+                        "submissionStage" to cursor.getString(6),
                     )
                 } else null
             }
@@ -235,15 +243,61 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                     put("parent_id", declaration.parentId)
                     put("size_bytes", declaration.sizeBytes)
                     put("sha256", declaration.sha256)
+                    put("submission_stage", "REUSE_READY")
                 }
                 database.insertOrThrow(TASKS, null, values)
-                mapOf("id" to id, "remoteId" to null, "state" to "PENDING")
+                mapOf("id" to id, "remoteId" to null, "state" to "PENDING", "submissionStage" to "REUSE_READY")
             }
             database.setTransactionSuccessful()
             return intent
         } finally {
             database.endTransaction()
         }
+    }
+
+    fun setUploadSubmissionStage(owner: TaskOwner, id: String, stage: String) {
+        require(isStageId(id))
+        val previous = when (stage) {
+            "REUSE_PENDING" -> "REUSE_READY"
+            "CREATE" -> "REUSE_PENDING"
+            else -> throw IllegalArgumentException("Invalid upload submission stage")
+        }
+        val values = ContentValues().apply { put("submission_stage", stage) }
+        val updated = writableDatabase.update(
+            TASKS, values,
+            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND remote_task_id IS NULL AND submission_stage = ?",
+            owner.selectionArgs() + arrayOf(id, previous),
+        )
+        if (updated != 1) throw SQLiteException("Upload submission stage changed")
+    }
+
+    fun saveUploadReuse(owner: TaskOwner, id: String, entryId: String, actualName: String) {
+        require(isStageId(id) && validTaskNumber(entryId) && actualName.isNotBlank())
+        // 同一次更新保存真实条目、实际名称和终态。
+        val values = ContentValues().apply {
+            put("submission_stage", "REUSED")
+            put("state", "COMPLETED")
+            put("result_entry_id", entryId)
+            put("name", actualName)
+            putNull("pause_reason")
+        }
+        val updated = writableDatabase.update(
+            TASKS, values,
+            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state IN ('PENDING', 'CANCEL_PENDING') AND remote_task_id IS NULL AND submission_stage = 'REUSE_PENDING'",
+            owner.selectionArgs() + id,
+        )
+        if (updated != 1) throw SQLiteException("Reuse receipt did not match its upload")
+    }
+
+    fun cancelUncreatedUpload(owner: TaskOwner, id: String) {
+        require(isStageId(id))
+        val values = ContentValues().apply { put("state", "CANCELLED") }
+        val updated = writableDatabase.update(
+            TASKS, values,
+            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'CANCEL_PENDING' AND remote_task_id IS NULL AND submission_stage IN ('REUSE_READY', 'REUSE_PENDING')",
+            owner.selectionArgs() + id,
+        )
+        if (updated != 1) throw SQLiteException("Reuse cancellation did not match its upload")
     }
 
     fun checkpointSingle(owner: TaskOwner, id: String, remoteId: String?, state: String, entryId: String?) {
@@ -265,7 +319,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         val updated = writableDatabase.update(
             TASKS,
             values,
-            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND $OPEN_STATES AND $remoteFilter AND size_bytes <= ?",
+            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND $OPEN_STATES AND $remoteFilter AND size_bytes <= ? AND submission_stage = 'CREATE'",
             arguments + MAX_SINGLE_UPLOAD_BYTES.toString(),
         )
         if (updated != 1) throw SQLiteException("Upload checkpoint did not match a pending intent")
@@ -284,7 +338,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             TASKS,
             values,
             """
-            $OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND $OPEN_STATES AND size_bytes = ?
+            $OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND $OPEN_STATES AND size_bytes = ? AND submission_stage = 'CREATE'
             AND (remote_task_id IS NULL OR
                 (remote_task_id = ? AND part_size_bytes = ? AND part_count = ? AND expires_at = ?))
             """.trimIndent(),
@@ -622,6 +676,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                 "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at", "error_code",
                 "parent_id", "sha256",
                 "pause_reason", "download_entry_id", "download_revision", "download_object_id",
+                "submission_stage",
                 "(SELECT count(*) FROM multipart_part_receipts p WHERE p.local_task_id = transfer_tasks.local_task_id) AS confirmed_parts",
             ),
             if (filter == null) OWNER_FILTER else "$OWNER_FILTER AND $filter",
@@ -648,6 +703,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             val entry = cursor.getColumnIndexOrThrow("download_entry_id")
             val revision = cursor.getColumnIndexOrThrow("download_revision")
             val objectId = cursor.getColumnIndexOrThrow("download_object_id")
+            val submissionStage = cursor.getColumnIndexOrThrow("submission_stage")
             buildList {
                 while (cursor.moveToNext()) {
                     add(
@@ -670,6 +726,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                             "entryId" to cursor.getString(entry),
                             "revision" to cursor.getString(revision),
                             "objectId" to cursor.getString(objectId),
+                            "submissionStage" to cursor.getString(submissionStage),
                         ),
                     )
                 }

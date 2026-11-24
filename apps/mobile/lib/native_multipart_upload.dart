@@ -164,6 +164,13 @@ Future<void> bindMultipartSource(
   });
 }
 
+Future<void> verifyUploadReuseSource(
+  String scope,
+  PreparedUploadFile source,
+) async {
+  await _sourceOperation('verifyReuseSource', scope, source, const {});
+}
+
 Future<bool> pickReplacementMultipartSource(
   String scope,
   PreparedUploadFile source,

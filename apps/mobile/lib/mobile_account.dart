@@ -13,6 +13,7 @@ import 'native_multipart_reconcile.dart';
 import 'native_multipart_upload.dart';
 import 'native_single_upload.dart';
 import 'native_upload_creation.dart';
+import 'native_upload_reuse.dart';
 import 'native_upload_status.dart';
 import 'transfer_pause.dart';
 
@@ -294,6 +295,27 @@ class MobileAccount {
     final source = upload.source;
     final parentId = upload.parentId;
     final multipart = source.sizeBytes > maxSingleUploadBytes;
+    if (upload.stage != UploadSubmissionStage.create) {
+      if (!submit) return '文件复用结果待确认，可重试取消。';
+      // 复用回执可能已经发布。用原操作和原键核对，不进入普通创建。
+      final receipt = upload.stage == UploadSubmissionStage.reusePending
+          ? await _readForAccount(
+              (session) =>
+                  reuseUploadContent(session, localId, parentId, source),
+            )
+          : null;
+      _checkSession(epoch);
+      if (receipt == null) {
+        await cancelUncreatedUpload(owner, localId);
+      } else {
+        await saveUploadReuse(owner, localId, receipt);
+      }
+      if (multipart) {
+        await releaseMultipartSource(taskDocumentScope(owner, localId));
+      }
+      _checkSession(epoch);
+      return receipt == null ? '上传已取消。' : '上传已发布，可在原目录查看。';
+    }
     var remoteId = upload.remoteId;
     if (remoteId == null) {
       if (!submit) return '原上传创建结果待确认，请重试取消。';
@@ -481,12 +503,7 @@ class MobileAccount {
         intent.id,
         () => _runMultipart(
           currentOwner,
-          (
-            id: intent.id,
-            parentId: parentId,
-            source: source,
-            creation: intent.creation,
-          ),
+          intent,
           epoch,
           onProgress,
           pause,
@@ -553,8 +570,31 @@ class MobileAccount {
     final scope = taskDocumentScope(currentOwner, intent.id);
     pause?.check();
 
-    Future<void> bindSource() =>
-        bindMultipartSource(scope, documentScopeFor(currentOwner), source);
+    Future<void>? binding;
+    Future<void> bindSource() => binding ??= bindMultipartSource(
+      scope,
+      documentScopeFor(currentOwner),
+      source,
+    );
+    final reused = await _tryUploadReuse(
+      currentOwner,
+      intent.id,
+      intent.stage,
+      parentId,
+      source,
+      epoch,
+      pause: pause,
+      verifySource: () async {
+        await bindSource();
+        await verifyUploadReuseSource(scope, source);
+      },
+    );
+    if (reused != null) {
+      await releaseMultipartSource(scope);
+      _checkSession(epoch);
+      return reused;
+    }
+    pause?.check();
     if (intent.creation == null) {
       await bindSource();
       _checkSession(epoch);
@@ -675,6 +715,48 @@ class MobileAccount {
       epoch,
       pause: pause,
     );
+  }
+
+  Future<String?> _tryUploadReuse(
+    AccountOwner owner,
+    String id,
+    UploadSubmissionStage stage,
+    String parentId,
+    PreparedUploadFile source,
+    int epoch, {
+    required Future<void> Function() verifySource,
+    TransferPause? pause,
+  }) async {
+    if (stage == UploadSubmissionStage.create) return null;
+
+    // 1. 首次复核文件并保存阶段。回执待确认时直接沿用原声明和键。
+    if (stage == UploadSubmissionStage.reuseReady) {
+      await verifySource();
+      _checkSession(epoch);
+      pause?.check();
+      await setUploadSubmissionStage(
+        owner,
+        id,
+        UploadSubmissionStage.reusePending,
+      );
+    }
+
+    // 2. 请求内容复用，命中时记录服务端返回的目录项。
+    _checkSession(epoch);
+    pause?.check();
+    final receipt = await _readForAccount(
+      (session) => reuseUploadContent(session, id, parentId, source),
+    );
+    if (receipt != null) {
+      await saveUploadReuse(owner, id, receipt);
+      _checkSession(epoch);
+      return receipt.entryId;
+    }
+
+    // 3. 明确未命中时先记录回退。恢复普通创建时仍走原创建接口。
+    await setUploadSubmissionStage(owner, id, UploadSubmissionStage.create);
+    _checkSession(epoch);
+    return null;
   }
 
   Future<void> _verifyUploadTarget(String parentId, int epoch) async {
@@ -817,6 +899,18 @@ class MobileAccount {
     try {
       // 1. 保存或恢复同一声明。首次创建前先复核正文。
       final intent = await reserveSingleIntent(currentOwner, parentId, source);
+      _checkSession(epoch);
+      final reused = await _tryUploadReuse(
+        currentOwner,
+        intent.id,
+        intent.stage,
+        parentId,
+        source,
+        epoch,
+        verifySource: () =>
+            verifyUploadReuseSource(documentScopeFor(currentOwner), source),
+      );
+      if (reused != null) return reused;
       final String taskId;
       if (intent.remoteId case final String existing) {
         taskId = existing;

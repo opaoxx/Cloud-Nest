@@ -98,7 +98,7 @@ class MainActivity : FlutterFragmentActivity() {
                         "readMultipartParts", "recordMultipartPart", "reconcileMultipartParts",
                         "saveUploadOutcome", "pendingMultipart", "reserveDownload", "pendingDownload",
                         "finishDownload", "setPauseReason", "cancellationTask", "recordUploadCancelling",
-                        "finishDownloadCancellation",
+                        "finishDownloadCancellation", "setUploadSubmissionStage", "saveUploadReuse", "cancelUncreatedUpload",
                     )
                 ) {
                     result.notImplemented()
@@ -145,6 +145,20 @@ class MainActivity : FlutterFragmentActivity() {
                                     requireNotNull(call.argument<String>("sha256")),
                                 ),
                             )
+                            "setUploadSubmissionStage" -> {
+                                store.setUploadSubmissionStage(owner, requireNotNull(call.argument<String>("id")),
+                                    requireNotNull(call.argument<String>("stage")))
+                                null
+                            }
+                            "saveUploadReuse" -> {
+                                store.saveUploadReuse(owner, requireNotNull(call.argument<String>("id")),
+                                    requireNotNull(call.argument<String>("entryId")), requireNotNull(call.argument<String>("name")))
+                                null
+                            }
+                            "cancelUncreatedUpload" -> {
+                                store.cancelUncreatedUpload(owner, requireNotNull(call.argument<String>("id")))
+                                null
+                            }
                             "checkpointSingle" -> {
                                 store.checkpointSingle(
                                     owner,
@@ -247,7 +261,7 @@ class MainActivity : FlutterFragmentActivity() {
                             null
                         }
                     }
-                    "pickTaskSource", "bindTaskSource", "snapshotForSingle", "inspectMultipart", "putMultipartPart" -> {
+                    "pickTaskSource", "bindTaskSource", "snapshotForSingle", "verifyReuseSource", "inspectMultipart", "putMultipartPart" -> {
                         val name = call.argument<String>("name")
                         val size = call.argument<Number>("sizeBytes")?.toLong()
                         val sha = call.argument<String>("sha256")
@@ -284,6 +298,10 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun readUploadSource(call: MethodCall, scope: String, source: SourceSummary): Map<String, Any> =
         when (call.method) {
+            "verifyReuseSource" -> rememberedDocument.openMultipartBody(scope, source).use { input ->
+                if (!source.matches(summarizeSource(input, source.name))) throw UploadSourceChanged()
+                emptyMap()
+            }
             "bindTaskSource" -> {
                 rememberedDocument.bindTaskSource(scope, requireNotNull(call.argument<String>("selectedScope")), source)
                 emptyMap()
