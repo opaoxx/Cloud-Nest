@@ -8,7 +8,9 @@ import 'mobile_tasks.dart';
 import 'native_directory.dart';
 import 'native_download.dart';
 import 'native_login.dart';
+import 'native_multipart_upload.dart';
 import 'native_single_upload.dart';
+import 'native_upload_creation.dart';
 
 export 'account_owner.dart' show AccountOwner, documentScopeFor;
 
@@ -226,6 +228,45 @@ class MobileAccount {
       userId: current.userId,
       refreshToken: current.refreshToken,
     ));
+  }
+
+  Future<MultipartCreation> prepareMultipartUpload(
+    PreparedUploadFile source,
+    String parentId,
+  ) async {
+    final currentOwner = owner;
+    if (currentOwner == null || _signingOut) {
+      throw const ReauthenticationRequired();
+    }
+    final epoch = _sessionEpoch;
+    if (source.sizeBytes <= maxSingleUploadBytes ||
+        source.sizeBytes > maxUploadProtocolBytes) {
+      throw const AccountFailure('文件大小超出分片创建支持的范围。');
+    }
+
+    try {
+      // 1. 将文件声明、目标目录和创建键写入 SQLite。
+      final intent = await reserveMultipartIntent(
+        currentOwner,
+        parentId,
+        source,
+      );
+      _checkSession(epoch);
+      if (intent.creation case final MultipartCreation saved) return saved;
+
+      // 2. 用原创建键请求服务端，核对回执的任务和分片计划。
+      final creation = await _readForAccount(
+        (session) =>
+            createMultipartUpload(session, intent.id, parentId, source),
+      );
+
+      // 3. 保存回执，重试时沿用同一条记录。
+      await saveMultipartCheckpoint(currentOwner, intent.id, creation);
+      _checkSession(epoch);
+      return creation;
+    } on TaskStoreFailure {
+      throw const AccountFailure('无法保存本机上传记录，请重试。');
+    }
   }
 
   Future<String> uploadSingle(

@@ -11,7 +11,8 @@ import java.util.UUID
 private const val TASKS = "transfer_tasks"
 private const val OWNER_FILTER = "server_origin = ? AND user_id = ?"
 private const val TEST_KIND = "TEST"
-private const val SINGLE_KIND = "UPLOAD"
+private const val UPLOAD_KIND = "UPLOAD"
+private const val MAX_UPLOAD_PROTOCOL_BYTES = 9007199254740991L
 
 internal data class TaskOwner(val server: String, val userId: String) {
     init {
@@ -22,7 +23,7 @@ internal data class TaskOwner(val server: String, val userId: String) {
     fun selectionArgs() = arrayOf(server, userId)
 }
 
-internal data class SingleUploadDeclaration(
+internal data class UploadDeclaration(
     val parentId: String,
     val name: String,
     val sizeBytes: Long,
@@ -30,8 +31,24 @@ internal data class SingleUploadDeclaration(
 ) {
     init {
         require(validTaskNumber(parentId) && name.isNotBlank())
-        require(sizeBytes in 0L..MAX_SINGLE_UPLOAD_BYTES)
+        require(sizeBytes in 0L..MAX_UPLOAD_PROTOCOL_BYTES)
         require(Regex("[0-9a-f]{64}").matches(sha256))
+    }
+}
+
+internal data class MultipartUploadCheckpoint(
+    val remoteId: String,
+    val sizeBytes: Long,
+    val partSizeBytes: Long,
+    val partCount: Int,
+    val expiresAt: String,
+) {
+    init {
+        require(validTaskNumber(remoteId) && expiresAt.isNotBlank())
+        require(sizeBytes in (MAX_SINGLE_UPLOAD_BYTES + 1)..MAX_UPLOAD_PROTOCOL_BYTES)
+        require(partSizeBytes in MAX_SINGLE_UPLOAD_BYTES..MAX_UPLOAD_PROTOCOL_BYTES)
+        require(partSizeBytes % (1024 * 1024) == 0L)
+        require(partCount in 1..10000 && (sizeBytes - 1) / partSizeBytes + 1 == partCount.toLong())
     }
 }
 
@@ -42,7 +59,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
     context,
     File(context.noBackupFilesDir, "mobile_tasks.sqlite3").absolutePath,
     null,
-    2,
+    3,
     // 损坏时报告错误并保留原始文件，避免自动删除任务记录。
     { _ -> },
 ) {
@@ -67,14 +84,15 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             "CREATE UNIQUE INDEX transfer_tasks_one_test ON transfer_tasks(server_origin, user_id) WHERE kind = 'TEST'",
         )
         addSingleUploadFields(database)
+        addMultipartUploadFields(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion == 1 && newVersion == 2) {
-            addSingleUploadFields(database)
-            return
+        if (oldVersion !in 1..2 || newVersion != 3) {
+            throw SQLiteException("Unsupported task database migration: $oldVersion to $newVersion")
         }
-        throw SQLiteException("Unsupported task database migration: $oldVersion to $newVersion")
+        if (oldVersion == 1) addSingleUploadFields(database)
+        addMultipartUploadFields(database)
     }
 
     private fun addSingleUploadFields(database: SQLiteDatabase) {
@@ -92,14 +110,20 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         )
     }
 
-    fun reserveSingle(owner: TaskOwner, declaration: SingleUploadDeclaration): Map<String, Any?> {
+    private fun addMultipartUploadFields(database: SQLiteDatabase) {
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN part_size_bytes INTEGER")
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN part_count INTEGER")
+        database.execSQL("ALTER TABLE transfer_tasks ADD COLUMN expires_at TEXT")
+    }
+
+    fun reserveUpload(owner: TaskOwner, declaration: UploadDeclaration): Map<String, Any?> {
         val database = writableDatabase
         database.beginTransaction()
         try {
             // 1. 同一账号、目标和文件指纹只能有一条待确认意图。
             val previous = database.query(
                 TASKS,
-                arrayOf("local_task_id", "remote_task_id"),
+                arrayOf("local_task_id", "remote_task_id", "part_size_bytes", "part_count", "expires_at"),
                 "$OWNER_FILTER AND kind = 'UPLOAD' AND state = 'PENDING' AND parent_id = ? AND name = ? AND size_bytes = ? AND sha256 = ?",
                 owner.selectionArgs() + arrayOf(declaration.parentId, declaration.name, declaration.sizeBytes.toString(), declaration.sha256),
                 null,
@@ -107,7 +131,13 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                 null,
             ).use { cursor ->
                 if (cursor.moveToFirst()) {
-                    mapOf("id" to cursor.getString(0), "remoteId" to cursor.getString(1))
+                    mapOf(
+                        "id" to cursor.getString(0),
+                        "remoteId" to cursor.getString(1),
+                        "partSizeBytes" to if (cursor.isNull(2)) null else cursor.getLong(2),
+                        "partCount" to if (cursor.isNull(3)) null else cursor.getInt(3),
+                        "expiresAt" to cursor.getString(4),
+                    )
                 } else null
             }
             // 2. 本地 UUID 同时用作创建键。事务提交后，调用方才可以访问服务端。
@@ -117,7 +147,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                     put("local_task_id", id)
                     put("server_origin", owner.server)
                     put("user_id", owner.userId)
-                    put("kind", SINGLE_KIND)
+                    put("kind", UPLOAD_KIND)
                     put("name", declaration.name)
                     put("state", "PENDING")
                     put("created_at_ms", System.currentTimeMillis())
@@ -154,13 +184,38 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         val updated = writableDatabase.update(
             TASKS,
             values,
-            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND $remoteFilter",
-            arguments,
+            "$OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND $remoteFilter AND size_bytes <= ?",
+            arguments + MAX_SINGLE_UPLOAD_BYTES.toString(),
         )
         if (updated != 1) throw SQLiteException("Upload checkpoint did not match a pending intent")
     }
 
-    fun list(owner: TaskOwner): List<Map<String, Any>> = readTasks(readableDatabase, owner)
+    fun checkpointMultipart(owner: TaskOwner, id: String, checkpoint: MultipartUploadCheckpoint) {
+        require(isStageId(id))
+        val values = ContentValues().apply {
+            put("remote_task_id", checkpoint.remoteId)
+            put("part_size_bytes", checkpoint.partSizeBytes)
+            put("part_count", checkpoint.partCount)
+            put("expires_at", checkpoint.expiresAt)
+        }
+        // 一次写入整个回执。同一意图可以确认原回执，不能换成另一份计划。
+        val updated = writableDatabase.update(
+            TASKS,
+            values,
+            """
+            $OWNER_FILTER AND local_task_id = ? AND kind = 'UPLOAD' AND state = 'PENDING' AND size_bytes = ?
+            AND (remote_task_id IS NULL OR
+                (remote_task_id = ? AND part_size_bytes = ? AND part_count = ? AND expires_at = ?))
+            """.trimIndent(),
+            owner.selectionArgs() + arrayOf(
+                id, checkpoint.sizeBytes.toString(), checkpoint.remoteId,
+                checkpoint.partSizeBytes.toString(), checkpoint.partCount.toString(), checkpoint.expiresAt,
+            ),
+        )
+        if (updated != 1) throw SQLiteException("Multipart checkpoint did not match its upload intent")
+    }
+
+    fun list(owner: TaskOwner): List<Map<String, Any?>> = readTasks(readableDatabase, owner)
 
     fun recordDownload(owner: TaskOwner, actualName: String, sizeBytes: Long, sha256: String) {
         require(actualName.isNotBlank() && sizeBytes >= 0 && Regex("[0-9a-f]{64}").matches(sha256))
@@ -179,7 +234,7 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         writableDatabase.insertOrThrow(TASKS, null, values)
     }
 
-    fun createTest(owner: TaskOwner): List<Map<String, Any>> {
+    fun createTest(owner: TaskOwner): List<Map<String, Any?>> {
         val database = writableDatabase
         database.beginTransaction()
         try {
@@ -217,10 +272,13 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun readTasks(database: SQLiteDatabase, owner: TaskOwner): List<Map<String, Any>> =
+    private fun readTasks(database: SQLiteDatabase, owner: TaskOwner): List<Map<String, Any?>> =
         database.query(
             TASKS,
-            arrayOf("local_task_id", "name", "kind", "state", "created_at_ms"),
+            arrayOf(
+                "local_task_id", "name", "kind", "state", "created_at_ms",
+                "size_bytes", "remote_task_id", "part_size_bytes", "part_count", "expires_at",
+            ),
             OWNER_FILTER,
             owner.selectionArgs(),
             null,
@@ -232,6 +290,11 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
             val kind = cursor.getColumnIndexOrThrow("kind")
             val state = cursor.getColumnIndexOrThrow("state")
             val createdAt = cursor.getColumnIndexOrThrow("created_at_ms")
+            val size = cursor.getColumnIndexOrThrow("size_bytes")
+            val remoteId = cursor.getColumnIndexOrThrow("remote_task_id")
+            val partSize = cursor.getColumnIndexOrThrow("part_size_bytes")
+            val partCount = cursor.getColumnIndexOrThrow("part_count")
+            val expiresAt = cursor.getColumnIndexOrThrow("expires_at")
             buildList {
                 while (cursor.moveToNext()) {
                     add(
@@ -241,6 +304,11 @@ internal class MobileTaskStore(context: Context) : SQLiteOpenHelper(
                             "kind" to cursor.getString(kind),
                             "state" to cursor.getString(state),
                             "createdAtMs" to cursor.getLong(createdAt),
+                            "sizeBytes" to if (cursor.isNull(size)) null else cursor.getLong(size),
+                            "remoteId" to cursor.getString(remoteId),
+                            "partSizeBytes" to if (cursor.isNull(partSize)) null else cursor.getLong(partSize),
+                            "partCount" to if (cursor.isNull(partCount)) null else cursor.getInt(partCount),
+                            "expiresAt" to cursor.getString(expiresAt),
                         ),
                     )
                 }

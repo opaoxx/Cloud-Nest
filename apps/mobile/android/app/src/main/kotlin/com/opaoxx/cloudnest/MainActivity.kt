@@ -88,7 +88,10 @@ class MainActivity : FlutterFragmentActivity() {
             messenger.makeBackgroundTaskQueue(),
         ).apply {
             setMethodCallHandler { call, result ->
-                if (call.method !in setOf("list", "createTest", "reserveSingle", "checkpointSingle", "recordDownload")) {
+                if (call.method !in setOf(
+                        "list", "createTest", "reserveUpload", "checkpointSingle", "checkpointMultipart", "recordDownload",
+                    )
+                ) {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
@@ -101,9 +104,9 @@ class MainActivity : FlutterFragmentActivity() {
                     val rows = try {
                         when (call.method) {
                             "createTest" -> store.createTest(owner)
-                            "reserveSingle" -> store.reserveSingle(
+                            "reserveUpload" -> store.reserveUpload(
                                 owner,
-                                SingleUploadDeclaration(
+                                UploadDeclaration(
                                     requireNotNull(call.argument<String>("parentId")),
                                     requireNotNull(call.argument<String>("name")),
                                     requireNotNull(call.argument<Number>("sizeBytes")).toLong(),
@@ -117,6 +120,20 @@ class MainActivity : FlutterFragmentActivity() {
                                     call.argument<String>("remoteId"),
                                     requireNotNull(call.argument<String>("state")),
                                     call.argument<String>("entryId"),
+                                )
+                                null
+                            }
+                            "checkpointMultipart" -> {
+                                store.checkpointMultipart(
+                                    owner,
+                                    requireNotNull(call.argument<String>("id")),
+                                    MultipartUploadCheckpoint(
+                                        requireNotNull(call.argument<String>("remoteId")),
+                                        requireNotNull(call.argument<Number>("sizeBytes")).toLong(),
+                                        requireNotNull(call.argument<Number>("partSizeBytes")).toLong(),
+                                        requireNotNull(call.argument<Int>("partCount")),
+                                        requireNotNull(call.argument<String>("expiresAt")),
+                                    ),
                                 )
                                 null
                             }

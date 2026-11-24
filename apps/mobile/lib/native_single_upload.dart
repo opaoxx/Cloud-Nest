@@ -1,10 +1,8 @@
 import 'dart:io';
 
 import 'native_login.dart';
+import 'native_upload_creation.dart';
 
-const maxSingleUploadBytes = 16 * 1024 * 1024;
-
-typedef PreparedUploadFile = ({String name, int sizeBytes, String sha256});
 typedef SingleUploadTask = ({String state, String? entryId, String? errorCode});
 
 Future<String> createSingleUpload(
@@ -14,30 +12,9 @@ Future<String> createSingleUpload(
   PreparedUploadFile source,
 ) async {
   // 1. 严格复用已经落盘的声明和创建键。
-  final reply = await requestAuthorizedJson(
-    session.address,
-    session.accessToken,
-    '/api/v1/uploads',
-    payload: {
-      'parent_id': parentId,
-      'name': source.name,
-      'size_bytes': source.sizeBytes,
-      'sha256': source.sha256,
-    },
-    creationKey: key,
-    successStatus: HttpStatus.created,
-  );
-  if (reply.status == HttpStatus.notFound) {
-    throw const AccountFailure('目标目录不存在或已不可访问。');
-  }
-  if (reply.body case {'error': {'code': 'IDEMPOTENCY_EXPIRED'}}) {
-    throw const AccountFailure('原创建回执已过期，请先核对目标目录。');
-  }
-  if (reply.status != HttpStatus.created) {
-    throw const AccountFailure('服务端未确认创建上传任务，可以重试同一文件和目录。');
-  }
+  final body = await requestUploadCreation(session, key, parentId, source);
   // 2. 回执必须属于本次目标和 SINGLE 模式，正文只发给当前服务的任务路径。
-  if (reply.body
+  if (body
       case {
         'data': {
           'upload_mode': 'SINGLE',

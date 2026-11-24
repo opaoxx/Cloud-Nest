@@ -5,7 +5,7 @@ import 'package:material_ui/material_ui.dart';
 import 'mobile_account.dart';
 import 'native_directory.dart';
 import 'native_login.dart';
-import 'native_single_upload.dart';
+import 'native_upload_creation.dart';
 
 class CloudDrivePage extends StatefulWidget {
   const CloudDrivePage({super.key, required this.account, this.source});
@@ -92,20 +92,17 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
   Future<void> _confirmUpload() async {
     final source = widget.source;
     final target = _currentDirectory;
-    if (source == null ||
-        target == null ||
-        _loading ||
-        _transferBusy ||
-        source.sizeBytes > maxSingleUploadBytes) {
+    if (source == null || target == null || _loading || _transferBusy) {
       return;
     }
+    final multipart = source.sizeBytes > maxSingleUploadBytes;
     final path = _breadcrumbs
         .map((crumb) => crumb.name.isEmpty ? '根目录' : crumb.name)
         .join(' / ');
     final accepted = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('上传到当前目录'),
+        title: Text(multipart ? '在当前目录创建分片任务' : '上传到当前目录'),
         scrollable: true,
         content: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -123,7 +120,7 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('上传'),
+            child: Text(multipart ? '创建任务' : '上传'),
           ),
         ],
       ),
@@ -131,20 +128,31 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
     if (!mounted ||
         accepted != true ||
         _currentDirectory != target ||
-        _loading) {
+        _loading ||
+        _transferBusy) {
       return;
     }
 
-    // 只在服务端确认目录项已发布后展示上传成功。
+    // 分片创建确认后显示任务计划，小文件发布成功后刷新目录。
     setState(() {
       _transferBusy = true;
-      _transferNotice = '正在上传并等待服务端校验…';
+      _transferNotice = multipart ? '正在创建分片任务…' : '正在上传并等待服务端校验…';
     });
     var published = false;
     try {
-      await widget.account.uploadSingle(source, target);
-      published = true;
-      if (mounted) setState(() => _transferNotice = '上传成功。');
+      if (multipart) {
+        final creation = await widget.account.prepareMultipartUpload(
+          source,
+          target,
+        );
+        if (mounted) {
+          setState(() => _transferNotice = '已创建分片任务。\n${creation.description}');
+        }
+      } else {
+        await widget.account.uploadSingle(source, target);
+        published = true;
+        if (mounted) setState(() => _transferNotice = '上传成功。');
+      }
     } on AccountFailure catch (error) {
       if (!mounted) return;
       if (widget.account.owner == null) {
@@ -318,14 +326,16 @@ class _CloudDrivePageState extends State<CloudDrivePage> {
               if (source != null && _currentDirectory != null)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                  child: source.sizeBytes > maxSingleUploadBytes
-                      ? const Text('小文件上传上限为 16 MiB。')
-                      : FilledButton(
-                          onPressed: _loading || _transferBusy
-                              ? null
-                              : _confirmUpload,
-                          child: const Text('上传到此目录'),
-                        ),
+                  child: FilledButton(
+                    onPressed: _loading || _transferBusy
+                        ? null
+                        : _confirmUpload,
+                    child: Text(
+                      source.sizeBytes > maxSingleUploadBytes
+                          ? '在此目录创建分片任务'
+                          : '上传到此目录',
+                    ),
+                  ),
                 ),
             ],
           ),

@@ -1,9 +1,10 @@
 import 'package:flutter/services.dart';
 
 import 'account_owner.dart';
-import 'native_login.dart';
 import 'native_download.dart';
-import 'native_single_upload.dart';
+import 'native_login.dart';
+import 'native_multipart_upload.dart';
+import 'native_upload_creation.dart';
 
 const _tasks = MethodChannel('cloudnest/android_tasks');
 
@@ -15,6 +16,7 @@ class MobileTask {
   const MobileTask(this.id, this.name, this.createdAt, this.statusLabel);
 
   factory MobileTask.fromAndroid(Object? row) {
+    if (row is! Map<Object?, Object?>) throw const TaskStoreFailure();
     if (row
         case {
           'id': final String id,
@@ -29,6 +31,8 @@ class MobileTask {
             createdAtMs <= 8640000000000000) {
       final label = switch ((kind, state)) {
         ('TEST', 'TEST_RECORD') => '未执行',
+        ('UPLOAD', 'PENDING') when row['partCount'] != null =>
+          '已创建分片任务 · ${_savedMultipart(row, row['sizeBytes']).description}',
         ('UPLOAD', 'PENDING') => '待确认',
         ('UPLOAD', 'COMPLETED') => '已上传',
         ('UPLOAD', 'FAILED') => '失败',
@@ -58,18 +62,77 @@ Future<LocalSingleIntent> reserveSingleIntent(
   String parentId,
   PreparedUploadFile source,
 ) async {
-  final value = await _taskCall<Object?>('reserveSingle', owner, {
-    'parentId': parentId,
-    'name': source.name,
-    'sizeBytes': source.sizeBytes,
-    'sha256': source.sha256,
-  });
+  final value = await _reserveUpload(owner, parentId, source);
   if (value case {'id': final String id, 'remoteId': final String? remoteId}
       when id.isNotEmpty && (remoteId == null || isCloudNestId(remoteId))) {
     return (id: id, remoteId: remoteId);
   }
   throw const TaskStoreFailure();
 }
+
+Future<({String id, MultipartCreation? creation})> reserveMultipartIntent(
+  AccountOwner owner,
+  String parentId,
+  PreparedUploadFile source,
+) async {
+  final value = await _reserveUpload(owner, parentId, source);
+  if (value case {'id': final String id, 'remoteId': final String? remoteId}
+      when id.isNotEmpty) {
+    return (
+      id: id,
+      creation: remoteId == null
+          ? null
+          : _savedMultipart(value, source.sizeBytes),
+    );
+  }
+  throw const TaskStoreFailure();
+}
+
+MultipartCreation _savedMultipart(Object? row, Object? sizeBytes) {
+  if ((sizeBytes, row) case (
+    final int size,
+    {
+      'remoteId': final String taskId,
+      'partSizeBytes': final int partSizeBytes,
+      'partCount': final int partCount,
+      'expiresAt': final String expiresAt,
+    },
+  )) {
+    final creation = MultipartCreation.checked(
+      taskId: taskId,
+      sizeBytes: size,
+      partSizeBytes: partSizeBytes,
+      partCount: partCount,
+      expiresAt: expiresAt,
+    );
+    if (creation != null) return creation;
+  }
+  throw const TaskStoreFailure();
+}
+
+Future<Object?> _reserveUpload(
+  AccountOwner owner,
+  String parentId,
+  PreparedUploadFile source,
+) => _taskCall<Object?>('reserveUpload', owner, {
+  'parentId': parentId,
+  'name': source.name,
+  'sizeBytes': source.sizeBytes,
+  'sha256': source.sha256,
+});
+
+Future<void> saveMultipartCheckpoint(
+  AccountOwner owner,
+  String id,
+  MultipartCreation creation,
+) => _taskCall<void>('checkpointMultipart', owner, {
+  'id': id,
+  'remoteId': creation.taskId,
+  'sizeBytes': creation.sizeBytes,
+  'partSizeBytes': creation.partSizeBytes,
+  'partCount': creation.partCount,
+  'expiresAt': creation.expiresAt,
+});
 
 Future<void> saveSingleCheckpoint(
   AccountOwner owner,
