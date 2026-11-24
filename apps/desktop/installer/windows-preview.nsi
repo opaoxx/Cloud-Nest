@@ -8,17 +8,22 @@ CRCCheck force
 !include "x64.nsh"
 
 !define PRODUCT_NAME "CloudNest Preview"
-!define PRODUCT_VERSION "2.0.0-preview.1"
+!ifndef PRODUCT_VERSION
+  !define PRODUCT_VERSION "2.0.0-preview.1"
+!endif
+!ifndef PRODUCT_FILE_VERSION
+  !define PRODUCT_FILE_VERSION "2.0.0.0"
+!endif
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\CloudNestPreview"
 !define WEBVIEW2_KEY "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 Name "${PRODUCT_NAME}"
 OutFile "${INSTALLER_PATH}"
 InstallDir "$LOCALAPPDATA\Programs\CloudNest Preview"
-VIProductVersion "2.0.0.0"
+VIProductVersion "${PRODUCT_FILE_VERSION}"
 VIAddVersionKey /LANG=2052 "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey /LANG=2052 "ProductVersion" "${PRODUCT_VERSION}"
-VIAddVersionKey /LANG=2052 "FileVersion" "2.0.0.0"
+VIAddVersionKey /LANG=2052 "FileVersion" "${PRODUCT_FILE_VERSION}"
 VIAddVersionKey /LANG=2052 "FileDescription" "CloudNest Windows 试用版安装程序"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "CloudNest"
 
@@ -37,6 +42,18 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "CloudNest"
     SetErrorLevel 2
     Abort
   ${EndIf}
+!macroend
+
+!macro NormalizeInstallPath failure
+  # Use Windows path normalization before the destination directory exists.
+  StrCmp $INSTDIR "" ${failure}
+  StrCpy $0 "$INSTDIR"
+  System::Call 'kernel32::GetFullPathNameW(w r0, i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r2'
+  ${If} $2 = 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    Goto ${failure}
+  ${EndIf}
+  StrCpy $INSTDIR "$1"
 !macroend
 
 Function .onInit
@@ -71,7 +88,7 @@ FunctionEnd
 
 Section "CloudNest Preview"
   # 2. 只接受新的注册项与安装文件，避免误覆盖旧安装或同名用户文件。
-  GetFullPathName $INSTDIR "$INSTDIR"
+  !insertmacro NormalizeInstallPath invalid_install_path
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
   ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "DisplayName"
   StrCmp $0 "" +2
@@ -116,12 +133,16 @@ install_conflict:
   MessageBox MB_OK|MB_ICONSTOP "试用版已安装或目标有同名文件。请先卸载旧试用版，或选择其他安装目录。" /SD IDOK
   SetErrorLevel 3
   Abort
+invalid_install_path:
+  MessageBox MB_OK|MB_ICONSTOP "安装目录无效，请选择其他目录。" /SD IDOK
+  SetErrorLevel 3
+  Abort
 install_done:
 SectionEnd
 
 Section "Uninstall"
   # 3. 校验卸载器所在目录，按文件名移除程序资产。账号数据和用户文件留在原处。
-  GetFullPathName $INSTDIR "$INSTDIR"
+  !insertmacro NormalizeInstallPath uninstall_failed
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
   StrCmp $0 "$INSTDIR" 0 uninstall_failed
   SetOutPath "$TEMP"
